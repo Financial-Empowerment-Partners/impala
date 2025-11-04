@@ -1,6 +1,6 @@
 # Payala and Stellar Integration
 
-The Imapala project integrates Payala payments with the Stellar ecosystem.
+The Impala project integrates Payala payments with the Stellar ecosystem.
 
 
 ## Impala-bridge
@@ -16,6 +16,8 @@ The implementation is in [Rust](https://doc.rust-lang.org/cargo/getting-started/
 
 The impala card is a JavaCard application facilitating on-line transfer capabilities in Payala
 and Stellar. Robust authentication is also supported for various uses.
+
+Refer to [OpenSC](https://github.com/OpenSC/OpenSC) and [GlobalPlatform](https://github.com/kaoh/globalplatform) tool installation instructions.
 
 ---
 
