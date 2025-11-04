@@ -1,19 +1,23 @@
 # Payala and Stellar Integration
 
-The Imapala project provides components to integrate Payala payments with the Stellar ecosystem.
+The Imapala project integrates Payala payments with the Stellar ecosystem.
 
 
 ## Impala-bridge
 
-The impala bridge provides an interface between the Stellar blockchain and smartcontracts
+The impala bridge provides an interface between the Stellar network, smart contracts,
 and the Payala payment system.
 
+The implementation is in [Rust](https://doc.rust-lang.org/cargo/getting-started/installation.html) using the [Axum framework](https://github.com/tokio-rs/axum/).
+
+---
 
 ## Impala-card
 
-The impala card is a JavaCard application support on-line transfer capabilities in Payala
-and Stellar.
+The impala card is a JavaCard application facilitating on-line transfer capabilities in Payala
+and Stellar. Robust authentication is also supported for various uses.
 
+---
 
 ## Impala-soroban
 
@@ -26,10 +30,17 @@ signatures are supported for mint authorizations into the Payala system.
 
 ### soroban-anchor-dist
 
+For typical bulk payments the [Stellar Disbursement Platform](https://github.com/stellar/stellar-disbursement-platform-backend) could be used. For simple
+bulk payments via the impala bridge a [direct smart contract for disbursement is utilized](https://github.com/stellar/soroban-examples) with proper authorization.
+
+---
 
 ## Impala-android
 
 The Payala android application is modified to support online transfers to Stellar
 recipients and supported Stellar anchor banking rails.
 
+A public Android Library for integrating authentication and online transactions
+via Payala and Stellar is also provided.
 
+---
