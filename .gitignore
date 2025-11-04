@@ -19,3 +19,23 @@ target
 #  and can be added to the global gitignore or merged into this file.  For a more nuclear
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
+
+.idea
+.gradle
+*.iml
+out
+build
+
+bin
+*.class
+*.cap
+*~
+.kotlin/
+# virtual machine crash logs, see http://www.java.com/en/download/help/error_hotspot.xml
+hs_err_pid*
+local.properties
+.project
+.settings
+.classpath
+
+.DS_Store

@@ -1,0 +1,13 @@
+[package]
+name = "impala-bridge"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+axum = { version = "0.4", features = ["headers"] }
+tokio = { version = "1.0", features = ["full"] }
+bcrypt = "0.10"
+headers = "0.3"
+jsonwebtoken = "7.2"
+uuid = { version = "0.8", features = ["serde", "v4"] }
