@@ -14,7 +14,7 @@ The implementation is in [Rust](https://doc.rust-lang.org/cargo/getting-started/
 
 ## Impala-card
 
-The impala card is a JavaCard application facilitating on-line transfer capabilities in Payala
+The impala card is a JavaCard application facilitating online transfer capabilities in Payala
 and Stellar. Robust authentication is also supported for various uses.
 
 Refer to [OpenSC](https://github.com/OpenSC/OpenSC) and [GlobalPlatform](https://github.com/kaoh/globalplatform) tool installation instructions.
