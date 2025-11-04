@@ -1,4 +1,4 @@
-# Imapala bridge
+# Impala bridge
 
 The Payala impala bridge uses the Rust SDK to exercise the Horizon API or RPC API for
 [accounts](https://developers.stellar.org/docs/data/apis/horizon/api-reference/resources/accounts), 
