@@ -1,6 +1,9 @@
 # Payala and Stellar Integration
 
-The Impala project integrates Payala payments with the Stellar ecosystem.
+**Impala implements a bridge between offline Payala payments and the Stellar network
+ utilizing Soroban smart contracts for inflows and redemptions, while rooted in
+ hardware protected cryptographic primitives (smartcard and HSM)
+ supporting Android bindings for easy third party integration.**
 
 
 ## Impala-bridge
