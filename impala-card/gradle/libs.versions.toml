@@ -1,0 +1,28 @@
+[versions]
+android-compileSdk = "34"
+android-minSdk = "30"
+android-targetSdk = "34"
+agp = "8.12.0-alpha06"
+kotlin = "2.2.10"
+okio = "3.16.1"
+bignum = "0.3.10"
+datatypes = "3.6.0"
+kotlinxDatetime = "0.7.1-0.6.x-compat"
+uuid = "0.8.4"
+
+[libraries]
+kotlin-test = { module = "org.jetbrains.kotlin:kotlin-test", version.ref = "kotlin" }
+javacard-simulator = { module = "com.klinec:jcardsim", version = "3.0.6.0" }
+okio = { module = "com.squareup.okio:okio", version.ref = "okio" }
+kotlinx-datetime = { module = "org.jetbrains.kotlinx:kotlinx-datetime", version.ref = "kotlinxDatetime" }
+uuid = { module = "com.benasher44:uuid", version.ref = "uuid" }
+datatypes = { module = "at.asitplus.crypto:datatypes", version.ref = "datatypes" }
+bignum = { module = "com.ionspin.kotlin:bignum", version.ref = "bignum" }
+
+[plugins]
+androidLibrary = { id = "com.android.library", version.ref = "agp" }
+kotlinAndroid = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
+kotlinMultiplatform = { id = "org.jetbrains.kotlin.multiplatform", version.ref = "kotlin" }
+kotlinCocoapods = { id = "org.jetbrains.kotlin.native.cocoapods", version.ref = "kotlin" }
+compose-compiler = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
+mavenPublish = { id = "com.vanniktech.maven.publish", version = "0.34.0" }

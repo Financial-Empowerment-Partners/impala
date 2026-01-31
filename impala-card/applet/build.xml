@@ -1,0 +1,121 @@
+<project name="ImpalaApplet" default="dist" basedir="." xmlns:if="ant:if" xmlns:unless="ant:unless">
+    <description>Builds ImpalaApplet.</description>
+
+    <property name="debug" value="false"/>
+
+    <property name="applet.version" value="0.3"/>
+    <property name="applet.aid" value="0102030405060708"/>
+    <property name="applet.aid.app" value="01020304050607080102"/>
+    <property name="applet.issuerkey" value="02:0C:04:72:D8:84:78:B9:02:F3:D7:2A:FC:67:1D:95"/>
+    <property name="applet.issuerkey.default" value="40:41:42:43:44:45:46:47:48:49:4A:4B:4C:4D:4E:4F"/>
+    <property name="applet.package" value="com.impala.applet"/>
+    <property name="applet.class" value="ImpalaApplet"/>
+    <property name="applet.sources" value="src/jvmMain/java/com/impala/applet"/>
+
+    <property name="build.capfile" value="ImpalaApplet.cap"/>
+    <property name="build.dir" value="./build"/>
+
+    <property name="sdk.build" value="libs/sdks/jc310b43_kit"/>
+    <property name="sdk.target" value="libs/sdks/jc305u4_kit"/>
+
+    <property name="deps.gp.jar" value="libs/gp-master.jar"/>
+    <property name="deps.ant.jar" value="libs/ant-javacard-v24.04.08.jar"/>
+
+    <property name="docs.output" value="docs"/>
+    <property name="docs.classpath" value="${sdk.target}/lib/api_classic.jar;${deps.gp.jar}"/>
+
+    <target name="cleanJavacard" description="clean up">
+        <delete dir="${build.dir}"/>
+    </target>
+
+    <target name="buildJavacard" description="build applet">
+        <tstamp/>
+        <taskdef name="javacard" classname="pro.javacard.ant.JavaCard" classpath="${deps.ant.jar}"/>
+        <mkdir dir="${build.dir}"/>
+        <javacard jckit="${sdk.build}">
+            <cap targetsdk="3.0.5" sources="${applet.sources}" aid="${applet.aid}" package="${applet.package}" version="${applet.version}"
+                output="${build.dir}/${build.capfile}" export="${build.dir}" verify="true" strip="true" debug="${debug}">
+                <applet class="${applet.class}" aid="${applet.aid.app}"/>
+            </cap>
+        </javacard>
+    </target>
+
+    <target name="buildJavacardLegacy" description="build applet for Javacard 3.0.1">
+        <tstamp/>
+        <taskdef name="javacard" classname="pro.javacard.ant.JavaCard" classpath="${deps.ant.jar}"/>
+        <mkdir dir="${build.dir}"/>
+        <javacard jckit="libs/sdks/jc305u4_kit">
+            <cap targetsdk="libs/sdks/jc303_kit" sources="${applet.sources}" aid="${applet.aid}" package="${applet.package}" version="${applet.version}"
+                output="${build.dir}/${build.capfile}" export="${build.dir}" verify="true" strip="true" debug="${debug}">
+                <applet class="${applet.class}" aid="${applet.aid.app}"/>
+            </cap>
+        </javacard>
+    </target>
+
+    <target name="docs" depends="buildJavacard" description="build the api-docs">
+        <mkdir dir="${build.dir}/${docs.output}" />
+        <javadoc access="private" packagenames="src" sourcepath="${applet.sources}" destdir="${build.dir}/${docs.output}" classpath="${docs.classpath}"
+            linksource="yes">
+            <fileset dir="${applet.sources}">
+                <include name="**" />
+            </fileset>
+        </javadoc>
+    </target>
+
+    <target name="dist" depends="cleanJavacard,buildJavacard,docs" description="build the dist version of the applet and api-docs"/>
+
+    <target name="delete-applet" description="delete applet from card">
+        <exec executable="java" failonerror="true">
+            <arg value="-jar"/>
+            <arg value="${deps.gp.jar}"/>
+            <arg value="--debug" if:true="${debug}"/>
+            <arg value="--verbose"/>
+            <arg value="--key" if:set="applet.issuerkey"/>
+            <arg value="${applet.issuerkey}" if:set="applet.issuerkey"/>
+            <arg value="--delete"/>
+            <arg value="${applet.aid}"/>
+            <arg value="--force"/>
+        </exec>
+    </target>
+
+    <target name="install" description="install applet to card">
+        <exec executable="java" failonerror="true">
+            <arg value="-jar"/>
+            <arg value="${deps.gp.jar}"/>
+            <arg value="--debug" if:true="${debug}"/>
+            <arg value="--verbose"/>
+            <arg value="--key" if:set="applet.issuerkey"/>
+            <arg value="${applet.issuerkey}" if:set="applet.issuerkey"/>
+            <arg value="--install"/>
+            <arg value="${build.dir}/${build.capfile}"/>
+            <arg value="--default"/>
+        </exec>
+    </target>
+
+    <target name="list" description="list applets on the card">
+        <exec executable="java" failonerror="true">
+            <arg value="-jar"/>
+            <arg value="${deps.gp.jar}"/>
+            <arg value="--debug" if:true="${debug}"/>
+            <arg value="--verbose"/>
+            <arg value="--key" if:set="applet.issuerkey"/>
+            <arg value="${applet.issuerkey}" if:set="applet.issuerkey"/>
+            <arg value="--list"/>
+        </exec>
+    </target>
+
+    <target name="info" description="get info about the inserted card">
+        <exec executable="java" failonerror="true">
+            <arg value="-jar"/>
+            <arg value="${deps.gp.jar}"/>
+            <arg value="--debug" if:true="${debug}"/>
+            <arg value="--verbose"/>
+            <arg value="--key" if:set="applet.issuerkey"/>
+            <arg value="${applet.issuerkey}" if:set="applet.issuerkey"/>
+            <arg value="--info"/>
+            <arg value="--list"/>
+        </exec>
+    </target>
+
+    <target name="reinstall" depends="delete-applet,install,list" description="delete and reinstall the applet on the inserted card"/>
+</project>

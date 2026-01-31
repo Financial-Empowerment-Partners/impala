@@ -160,36 +160,6 @@ This command returns the RSA public key used for LUK encryption when loading car
 
 ---
 
-### Get Master Pubkey  (11)
-
-This command returns the master public key.
-
-**Input:** *[ NO Input CDATA Payload ]*
-
-**Output:** 
-
-| **Field Name** | **Byte Length** | **CDATA Offset** |
-| --- | --- | --- |
-| Public Key | 65 | +0 |
-
----
-
-### Set Master Pubkey  (10)
-
-This command sets the program master public key. All LUKs and Transfers must be signed by this key.
-
-**NOTE: This can only be invoked once. If there is a master public key set, then this command fails. Used during card provisioning process at manufacturer.**
-
-**Input:** 
-
-| **Field Name** | **Byte Length** | **CDATA Offset** |
-| --- | --- | --- |
-| Master Public Key | 65 | +0 |
-
-**Output:** Boolean Success/Failure.
-
----
-
 ### Get Full Name  (32)
 
 This command returns the name associated with a card.
