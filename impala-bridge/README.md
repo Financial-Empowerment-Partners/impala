@@ -82,6 +82,16 @@ cargo run
 
 The server will start on `http://0.0.0.0:8080`
 
+
+### Docker configuration
+
+```bash
+cd impala-bridge                                                                                                                                                                                                
+docker compose up --build                                                                                                                                                                                       
+```                                                                                                                                                                                                                  
+The bridge will be available at http://localhost:8080. Note that if your app reads REDIS_URL with a different env var name, you may need to adjust that in the environment section.                             
+                                                                                                                                   
+
 ## API Endpoints
 
 ### GET /
