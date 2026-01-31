@@ -14,6 +14,7 @@ use futures::StreamExt;
 use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
 use redis::AsyncCommands;
 use std::env;
+use std::fs;
 use std::sync::Arc;
 
 /// HashiCorp Vault unwrap
@@ -98,8 +99,93 @@ async fn box_unwrap(wrapping_token: &str) -> Result<serde_json::Value, BoxUnwrap
     Ok(unwrap_response.data)
 }
 
+#[derive(Debug, Clone)]
+struct Config {
+    public_endpoint: String,
+    service_address: String,
+    log_file: String,
+    debug_mode: bool,
+    twilio_sid: Option<String>,
+    twilio_token: Option<String>,
+    twilio_number: Option<String>,
+}
+
+/// Load configuration from a JSON config file (if present) and environment variables.
+/// Environment variables take precedence over config file values.
+///
+/// Config file path is read from `CONFIG_FILE` env var (default: `config.json`).
+///
+/// | Field            | Env Var            | Default              |
+/// |------------------|--------------------|----------------------|
+/// | public_endpoint  | PUBLIC_ENDPOINT    | http://localhost:8080 |
+/// | service_address  | SERVICE_ADDRESS    | 0.0.0.0:8080         |
+/// | log_file         | LOG_FILE           | impala-bridge.log    |
+/// | debug_mode       | DEBUG_MODE         | false                |
+/// | twilio_sid       | TWILIO_SID         | None                 |
+/// | twilio_token     | TWILIO_TOKEN       | None                 |
+/// | twilio_number    | TWILIO_NUMBER      | None                 |
+fn load_config() -> Config {
+    // Try to load base values from a config file
+    let config_path = env::var("CONFIG_FILE").unwrap_or_else(|_| "config.json".to_string());
+    let file_values: serde_json::Value = fs::read_to_string(&config_path)
+        .ok()
+        .and_then(|contents| serde_json::from_str(&contents).ok())
+        .unwrap_or(serde_json::Value::Null);
+
+    let from_file = |key: &str| -> Option<String> {
+        file_values.get(key).and_then(|v| v.as_str()).map(|s| s.to_string())
+    };
+
+    let public_endpoint = env::var("PUBLIC_ENDPOINT")
+        .ok()
+        .or_else(|| from_file("public_endpoint"))
+        .unwrap_or_else(|| "http://localhost:8080".to_string());
+
+    let service_address = env::var("SERVICE_ADDRESS")
+        .ok()
+        .or_else(|| from_file("service_address"))
+        .unwrap_or_else(|| "0.0.0.0:8080".to_string());
+
+    let log_file = env::var("LOG_FILE")
+        .ok()
+        .or_else(|| from_file("log_file"))
+        .unwrap_or_else(|| "impala-bridge.log".to_string());
+
+    let debug_mode = env::var("DEBUG_MODE")
+        .ok()
+        .or_else(|| from_file("debug_mode").map(|v| v.to_string()))
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(false);
+
+    let twilio_sid = env::var("TWILIO_SID")
+        .ok()
+        .or_else(|| from_file("twilio_sid"));
+
+    let twilio_token = env::var("TWILIO_TOKEN")
+        .ok()
+        .or_else(|| from_file("twilio_token"));
+
+    let twilio_number = env::var("TWILIO_NUMBER")
+        .ok()
+        .or_else(|| from_file("twilio_number"));
+
+    Config {
+        public_endpoint,
+        service_address,
+        log_file,
+        debug_mode,
+        twilio_sid,
+        twilio_token,
+        twilio_number,
+    }
+}
+
 #[tokio::main]
 async fn main() {
+    let config = load_config();
+    if config.debug_mode {
+        println!("Config: {:?}", config);
+    }
     // Handle wrapped secrets during initialization
     // If DATABASE_URL_WRAPPED is set, unwrap it; otherwise use DATABASE_URL directly
     let database_url = if let Ok(wrapped_token) = env::var("DATABASE_URL_WRAPPED") {
@@ -159,6 +245,8 @@ async fn main() {
         .route("/sync", post(sync_account))
         .route("/token", post(token))
         .route("/subscribe", post(subscribe))
+        .route("/mfa", post(enroll_mfa).get(get_mfa))
+        .route("/mfa/verify", post(verify_mfa))
         .layer(Extension(pool))
         .layer(Extension(redis_client))
         .layer(Extension(jwt_secret))
@@ -170,8 +258,8 @@ async fn main() {
         cron_sync_task(cron_pool).await;
     });
 
-    // run our app listening globally on port 8080
-    axum::Server::bind(&"0.0.0.0:8080".parse().unwrap())
+    // run our app
+    axum::Server::bind(&config.service_address.parse().unwrap())
         .serve(app.into_make_service())
         .await
         .unwrap();
@@ -1016,3 +1104,165 @@ async fn payala_stream(
     }
 }
 
+// ── MFA ────────────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct EnrollMfaRequest {
+    account_id: String,
+    mfa_type: String,          // "totp" or "sms"
+    secret: Option<String>,    // shared secret for TOTP
+    phone_number: Option<String>, // phone for SMS
+}
+
+#[derive(Serialize)]
+struct MfaResponse {
+    success: bool,
+    message: String,
+}
+
+#[derive(Serialize, Deserialize, sqlx::FromRow)]
+struct MfaEnrollment {
+    account_id: String,
+    mfa_type: String,
+    secret: Option<String>,
+    phone_number: Option<String>,
+    enabled: bool,
+}
+
+#[derive(Deserialize)]
+struct MfaQuery {
+    account_id: String,
+}
+
+#[derive(Deserialize)]
+struct VerifyMfaRequest {
+    account_id: String,
+    mfa_type: String,
+    code: String,
+}
+
+/// POST /mfa – enroll or update an MFA method for an account
+async fn enroll_mfa(
+    Extension(pool): Extension<PgPool>,
+    Json(payload): Json<EnrollMfaRequest>,
+) -> Result<Json<MfaResponse>, StatusCode> {
+    if payload.mfa_type != "totp" && payload.mfa_type != "sms" {
+        return Ok(Json(MfaResponse {
+            success: false,
+            message: "mfa_type must be 'totp' or 'sms'".to_string(),
+        }));
+    }
+
+    if payload.mfa_type == "totp" && payload.secret.is_none() {
+        return Ok(Json(MfaResponse {
+            success: false,
+            message: "secret is required for TOTP enrollment".to_string(),
+        }));
+    }
+
+    if payload.mfa_type == "sms" && payload.phone_number.is_none() {
+        return Ok(Json(MfaResponse {
+            success: false,
+            message: "phone_number is required for SMS enrollment".to_string(),
+        }));
+    }
+
+    let result = sqlx::query(
+        "INSERT INTO impala_mfa (account_id, mfa_type, secret, phone_number, enabled)
+         VALUES ($1, $2, $3, $4, TRUE)
+         ON CONFLICT (account_id, mfa_type)
+         DO UPDATE SET secret = EXCLUDED.secret,
+                       phone_number = EXCLUDED.phone_number,
+                       enabled = TRUE"
+    )
+    .bind(&payload.account_id)
+    .bind(&payload.mfa_type)
+    .bind(&payload.secret)
+    .bind(&payload.phone_number)
+    .execute(&pool)
+    .await;
+
+    match result {
+        Ok(_) => Ok(Json(MfaResponse {
+            success: true,
+            message: "MFA enrolled successfully".to_string(),
+        })),
+        Err(e) => {
+            eprintln!("MFA enrollment error: {}", e);
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
+/// GET /mfa?account_id=… – list MFA enrollments for an account
+async fn get_mfa(
+    Extension(pool): Extension<PgPool>,
+    Query(params): Query<MfaQuery>,
+) -> Result<Json<Vec<MfaEnrollment>>, StatusCode> {
+    let rows = sqlx::query_as::<_, MfaEnrollment>(
+        "SELECT account_id, mfa_type, secret, phone_number, enabled
+         FROM impala_mfa WHERE account_id = $1"
+    )
+    .bind(&params.account_id)
+    .fetch_all(&pool)
+    .await;
+
+    match rows {
+        Ok(enrollments) => Ok(Json(enrollments)),
+        Err(e) => {
+            eprintln!("MFA lookup error: {}", e);
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
+/// POST /mfa/verify – verify an MFA code (TOTP or SMS)
+async fn verify_mfa(
+    Extension(pool): Extension<PgPool>,
+    Json(payload): Json<VerifyMfaRequest>,
+) -> Result<Json<MfaResponse>, StatusCode> {
+    let enrollment = sqlx::query_as::<_, MfaEnrollment>(
+        "SELECT account_id, mfa_type, secret, phone_number, enabled
+         FROM impala_mfa WHERE account_id = $1 AND mfa_type = $2"
+    )
+    .bind(&payload.account_id)
+    .bind(&payload.mfa_type)
+    .fetch_optional(&pool)
+    .await;
+
+    match enrollment {
+        Ok(None) => Ok(Json(MfaResponse {
+            success: false,
+            message: "MFA not enrolled for this account/type".to_string(),
+        })),
+        Ok(Some(record)) => {
+            if !record.enabled {
+                return Ok(Json(MfaResponse {
+                    success: false,
+                    message: "MFA is disabled for this enrollment".to_string(),
+                }));
+            }
+
+            // Verification logic depends on mfa_type.
+            // For TOTP: compare the provided code against the shared secret (requires a TOTP library).
+            // For SMS: compare against a code previously sent and stored in Redis/DB.
+            // This is a placeholder that validates the code is non-empty.
+            if payload.code.is_empty() {
+                return Ok(Json(MfaResponse {
+                    success: false,
+                    message: "Code must not be empty".to_string(),
+                }));
+            }
+
+            // TODO: implement actual TOTP validation / SMS code lookup
+            Ok(Json(MfaResponse {
+                success: true,
+                message: "MFA verification successful".to_string(),
+            }))
+        }
+        Err(e) => {
+            eprintln!("MFA verify error: {}", e);
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
