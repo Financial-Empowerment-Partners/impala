@@ -10,6 +10,7 @@ use password_auth::{generate_hash, verify_password};
 use serde::{Deserialize, Serialize};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
+use uuid::Uuid;
 use futures::StreamExt;
 use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
 use redis::AsyncCommands;
@@ -245,6 +246,7 @@ async fn main() {
         .route("/sync", post(sync_account))
         .route("/token", post(token))
         .route("/subscribe", post(subscribe))
+        .route("/transaction", post(create_transaction))
         .route("/mfa", post(enroll_mfa).get(get_mfa))
         .route("/mfa/verify", post(verify_mfa))
         .layer(Extension(pool))
@@ -1101,6 +1103,80 @@ async fn payala_stream(
                 }
             }
         });
+    }
+}
+
+// ── Transaction ────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct CreateTransactionRequest {
+    stellar_tx_id: Option<String>,
+    payala_tx_id: Option<String>,
+    stellar_hash: Option<String>,
+    source_account: Option<String>,
+    stellar_fee: Option<i64>,
+    stellar_max_fee: Option<i64>,
+    memo: Option<String>,
+    signatures: Option<String>,
+    preconditions: Option<String>,
+    payala_currency: Option<String>,
+    payala_digest: Option<String>,
+}
+
+#[derive(Serialize)]
+struct CreateTransactionResponse {
+    success: bool,
+    message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    btxid: Option<Uuid>,
+}
+
+async fn create_transaction(
+    Extension(pool): Extension<PgPool>,
+    Json(payload): Json<CreateTransactionRequest>,
+) -> Result<Json<CreateTransactionResponse>, StatusCode> {
+    if payload.stellar_tx_id.is_none() && payload.payala_tx_id.is_none() {
+        return Ok(Json(CreateTransactionResponse {
+            success: false,
+            message: "At least one of stellar_tx_id or payala_tx_id must be provided".to_string(),
+            btxid: None,
+        }));
+    }
+
+    let result = sqlx::query_scalar::<_, Uuid>(
+        r#"
+        INSERT INTO transaction
+            (stellar_tx_id, payala_tx_id, stellar_hash, source_account,
+             stellar_fee, stellar_max_fee, memo, signatures, preconditions,
+             payala_currency, payala_digest)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+        RETURNING btxid
+        "#,
+    )
+    .bind(&payload.stellar_tx_id)
+    .bind(&payload.payala_tx_id)
+    .bind(&payload.stellar_hash)
+    .bind(&payload.source_account)
+    .bind(&payload.stellar_fee)
+    .bind(&payload.stellar_max_fee)
+    .bind(&payload.memo)
+    .bind(&payload.signatures)
+    .bind(&payload.preconditions)
+    .bind(&payload.payala_currency)
+    .bind(&payload.payala_digest)
+    .fetch_one(&pool)
+    .await;
+
+    match result {
+        Ok(btxid) => Ok(Json(CreateTransactionResponse {
+            success: true,
+            message: "Transaction created successfully".to_string(),
+            btxid: Some(btxid),
+        })),
+        Err(e) => {
+            eprintln!("Database error: {}", e);
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
     }
 }
 
