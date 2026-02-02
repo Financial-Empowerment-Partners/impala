@@ -233,6 +233,12 @@ async fn main() {
             .unwrap_or_else(|_| "https://horizon.stellar.org".to_string()),
     );
 
+    // Stellar Soroban RPC URL
+    let stellar_rpc_url = Arc::new(
+        env::var("STELLAR_RPC_URL")
+            .unwrap_or_else(|_| "https://soroban-testnet.stellar.org".to_string()),
+    );
+
     // build our application with routes
     let app = Router::new()
         // `GET /` goes to `default_route`
@@ -252,7 +258,8 @@ async fn main() {
         .layer(Extension(pool))
         .layer(Extension(redis_client))
         .layer(Extension(jwt_secret))
-        .layer(Extension(horizon_url));
+        .layer(Extension(horizon_url))
+        .layer(Extension(stellar_rpc_url));
 
     // spawn background cron_sync task
     let cron_pool = pool.clone();
@@ -714,7 +721,9 @@ struct SyncResponse {
 }
 
 async fn sync_account(
+    Extension(pool): Extension<PgPool>,
     Extension(redis_client): Extension<Arc<redis::Client>>,
+    Extension(stellar_rpc_url): Extension<Arc<String>>,
     Json(payload): Json<SyncRequest>,
 ) -> Result<Json<SyncResponse>, StatusCode> {
     let mut conn = redis_client
@@ -733,6 +742,48 @@ async fn sync_account(
             eprintln!("Redis set error: {}", e);
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
+
+    // Call Stellar Soroban RPC getTransactions and check against local DB
+    let client = reqwest::Client::new();
+    let rpc_request = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "getTransactions",
+        "params": {}
+    });
+
+    match client
+        .post(stellar_rpc_url.as_str())
+        .json(&rpc_request)
+        .send()
+        .await
+    {
+        Ok(response) => {
+            if let Ok(body) = response.json::<serde_json::Value>().await {
+                if let Some(transactions) = body["result"]["transactions"].as_array() {
+                    for tx in transactions {
+                        if let Some(tx_id) = tx["id"].as_str() {
+                            let exists = sqlx::query_scalar::<_, i64>(
+                                "SELECT COUNT(*) FROM transaction WHERE stellar_tx_id = $1",
+                            )
+                            .bind(tx_id)
+                            .fetch_one(&pool)
+                            .await;
+
+                            if let Ok(count) = exists {
+                                if count > 0 {
+                                    println!("Updating tx {}", tx_id);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("Stellar RPC getTransactions error: {}", e);
+        }
+    }
 
     Ok(Json(SyncResponse {
         success: true,
