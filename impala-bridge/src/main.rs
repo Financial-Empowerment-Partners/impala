@@ -256,6 +256,7 @@ async fn main() {
         .route("/card", post(create_card).delete(delete_card))
         .route("/mfa", post(enroll_mfa).get(get_mfa))
         .route("/mfa/verify", post(verify_mfa))
+        .route("/notify", post(create_notify))
         .layer(Extension(pool))
         .layer(Extension(redis_client))
         .layer(Extension(jwt_secret))
@@ -1421,6 +1422,59 @@ async fn get_mfa(
         Ok(enrollments) => Ok(Json(enrollments)),
         Err(e) => {
             eprintln!("MFA lookup error: {}", e);
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
+// ── Notify ─────────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct CreateNotifyRequest {
+    account_id: String,
+    medium: String, // "webhook", "sms", "mobile_push", "to_app"
+}
+
+#[derive(Serialize)]
+struct CreateNotifyResponse {
+    success: bool,
+    message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    id: Option<i32>,
+}
+
+async fn create_notify(
+    Extension(pool): Extension<PgPool>,
+    Json(payload): Json<CreateNotifyRequest>,
+) -> Result<Json<CreateNotifyResponse>, StatusCode> {
+    let valid_mediums = ["webhook", "sms", "mobile_push", "to_app"];
+    if !valid_mediums.contains(&payload.medium.as_str()) {
+        return Ok(Json(CreateNotifyResponse {
+            success: false,
+            message: format!(
+                "Invalid medium '{}'. Must be one of: webhook, sms, mobile_push, to_app",
+                payload.medium
+            ),
+            id: None,
+        }));
+    }
+
+    let result = sqlx::query_scalar::<_, i32>(
+        "INSERT INTO notify (account_id, medium) VALUES ($1, $2::notify_medium) RETURNING id",
+    )
+    .bind(&payload.account_id)
+    .bind(&payload.medium)
+    .fetch_one(&pool)
+    .await;
+
+    match result {
+        Ok(id) => Ok(Json(CreateNotifyResponse {
+            success: true,
+            message: "Notification record created successfully".to_string(),
+            id: Some(id),
+        })),
+        Err(e) => {
+            eprintln!("Database error: {}", e);
             Err(StatusCode::INTERNAL_SERVER_ERROR)
         }
     }
