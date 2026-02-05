@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Impala - Login</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/foundation-sites@6.8.1/dist/css/foundation.min.css">
+    <link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+    <div class="login-wrapper">
+        <div class="login-card">
+            <h2>Impala</h2>
+            <div id="login-error" class="callout alert hidden"></div>
+            <form id="login-form">
+                <label>Account ID
+                    <input type="text" id="account-id" placeholder="Enter account ID" required>
+                </label>
+                <label>Password
+                    <input type="password" id="password" placeholder="Enter password" required>
+                </label>
+                <button type="submit" class="button expanded" id="login-btn">Login</button>
+            </form>
+            <p class="text-center" style="margin-top:1rem;font-size:0.85rem;color:#666;">
+                New accounts are registered automatically on first login.
+            </p>
+        </div>
+    </div>
+
+    <script src="js/api.js"></script>
+    <script src="js/roles.js"></script>
+    <script src="js/auth.js"></script>
+    <script>
+        (function () {
+            // Redirect if already logged in
+            if (Auth.isLoggedIn()) {
+                window.location.href = 'dashboard.html';
+                return;
+            }
+
+            var form = document.getElementById('login-form');
+            var errorDiv = document.getElementById('login-error');
+            var loginBtn = document.getElementById('login-btn');
+
+            form.addEventListener('submit', function (e) {
+                e.preventDefault();
+                errorDiv.classList.add('hidden');
+                loginBtn.disabled = true;
+                loginBtn.textContent = 'Logging in...';
+
+                var accountId = document.getElementById('account-id').value.trim();
+                var password = document.getElementById('password').value;
+
+                Auth.login(accountId, password)
+                    .then(function () {
+                        window.location.href = 'dashboard.html';
+                    })
+                    .catch(function (err) {
+                        errorDiv.textContent = err.message || 'Login failed';
+                        errorDiv.classList.remove('hidden');
+                        loginBtn.disabled = false;
+                        loginBtn.textContent = 'Login';
+                    });
+            });
+        })();
+    </script>
+</body>
+</html>

@@ -19,7 +19,7 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  * THE SOFTWARE.
  */
-package com.imapala.sdk.apdu4j
+package com.impala.sdk.apdu4j
 
 class ResponseAPDU (private val apdu: ByteArray){
 

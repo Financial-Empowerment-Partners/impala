@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Impala - Accounts</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/foundation-sites@6.8.1/dist/css/foundation.min.css">
+    <link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+    <div class="top-bar" id="main-nav"></div>
+    <div id="toast-container" class="toast-container"></div>
+
+    <div class="grid-container">
+        <div class="page-header">
+            <h3>Accounts</h3>
+        </div>
+
+        <!-- Search -->
+        <div class="card">
+            <div class="card-section">
+                <h5>Search Account</h5>
+                <div class="grid-x grid-margin-x">
+                    <div class="cell medium-8">
+                        <input type="text" id="search-account-id" placeholder="Enter stellar_account_id">
+                    </div>
+                    <div class="cell medium-4">
+                        <button class="button expanded" id="search-btn">Search</button>
+                    </div>
+                </div>
+                <div id="search-result"></div>
+            </div>
+        </div>
+
+        <!-- Create Account -->
+        <div class="card" data-permission="manage_accounts">
+            <div class="card-section">
+                <h5>Create Account</h5>
+                <form id="create-form">
+                    <div class="grid-x grid-margin-x">
+                        <div class="cell medium-6">
+                            <label>Stellar Account ID
+                                <input type="text" id="create-stellar-id" required>
+                            </label>
+                        </div>
+                        <div class="cell medium-6">
+                            <label>Payala Account ID
+                                <input type="text" id="create-payala-id">
+                            </label>
+                        </div>
+                        <div class="cell medium-6">
+                            <label>Display Name
+                                <input type="text" id="create-display-name">
+                            </label>
+                        </div>
+                        <div class="cell medium-6">
+                            <label>Phone
+                                <input type="text" id="create-phone">
+                            </label>
+                        </div>
+                    </div>
+                    <button type="submit" class="button">Create Account</button>
+                </form>
+            </div>
+        </div>
+
+        <!-- Update Account -->
+        <div class="card hidden" id="update-card" data-permission="manage_accounts">
+            <div class="card-section">
+                <h5>Update Account</h5>
+                <form id="update-form">
+                    <div class="grid-x grid-margin-x">
+                        <div class="cell medium-6">
+                            <label>Stellar Account ID
+                                <input type="text" id="update-stellar-id" readonly>
+                            </label>
+                        </div>
+                        <div class="cell medium-6">
+                            <label>Payala Account ID
+                                <input type="text" id="update-payala-id">
+                            </label>
+                        </div>
+                        <div class="cell medium-6">
+                            <label>Display Name
+                                <input type="text" id="update-display-name">
+                            </label>
+                        </div>
+                        <div class="cell medium-6">
+                            <label>Phone
+                                <input type="text" id="update-phone">
+                            </label>
+                        </div>
+                    </div>
+                    <button type="submit" class="button">Update Account</button>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <script src="js/api.js"></script>
+    <script src="js/roles.js"></script>
+    <script src="js/auth.js"></script>
+    <script src="js/router.js"></script>
+    <script src="js/accounts.js"></script>
+</body>
+</html>

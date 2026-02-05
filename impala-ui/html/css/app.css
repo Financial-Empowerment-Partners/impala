@@ -1,0 +1,209 @@
+:root {
+    --primary: #1779ba;
+    --success: #3adb76;
+    --warning: #ffae00;
+    --alert: #cc4b37;
+    --dark: #0a0a0a;
+    --medium-gray: #cacaca;
+    --light-gray: #e6e6e6;
+    --off-white: #f4f4f4;
+}
+
+body {
+    background: var(--off-white);
+    min-height: 100vh;
+}
+
+/* Top bar */
+.top-bar {
+    background: var(--dark);
+}
+
+.top-bar a {
+    color: #fefefe !important;
+}
+
+.top-bar .menu .active > a {
+    background: var(--primary);
+}
+
+.top-bar .top-bar-title strong {
+    color: #fefefe;
+    font-size: 1.1rem;
+}
+
+/* Login page */
+.login-wrapper {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    background: var(--off-white);
+}
+
+.login-card {
+    width: 100%;
+    max-width: 420px;
+    padding: 2rem;
+    background: #fff;
+    border: 1px solid var(--medium-gray);
+    border-radius: 4px;
+}
+
+.login-card h2 {
+    text-align: center;
+    margin-bottom: 1.5rem;
+    color: var(--dark);
+}
+
+/* Page content */
+.page-header {
+    margin: 1.5rem 0 1rem;
+    padding-bottom: 0.5rem;
+    border-bottom: 2px solid var(--primary);
+}
+
+.page-header h3 {
+    margin: 0;
+    color: var(--dark);
+}
+
+/* Cards */
+.card {
+    margin-bottom: 1rem;
+}
+
+.card .card-section h5 {
+    color: var(--primary);
+    margin-bottom: 0.75rem;
+}
+
+/* Tables */
+table {
+    width: 100%;
+}
+
+table thead {
+    background: var(--dark);
+}
+
+table thead th {
+    color: #fefefe;
+    font-weight: 600;
+}
+
+table tbody tr:nth-child(even) {
+    background: var(--light-gray);
+}
+
+/* Toast notifications */
+.toast-container {
+    position: fixed;
+    top: 1rem;
+    right: 1rem;
+    z-index: 9999;
+    max-width: 400px;
+}
+
+.toast {
+    padding: 0.75rem 1.25rem;
+    margin-bottom: 0.5rem;
+    border-radius: 4px;
+    color: #fff;
+    font-weight: 500;
+    animation: toast-in 0.3s ease-out;
+}
+
+.toast.success {
+    background: var(--success);
+}
+
+.toast.warning {
+    background: var(--warning);
+    color: var(--dark);
+}
+
+.toast.alert {
+    background: var(--alert);
+}
+
+.toast.info {
+    background: var(--primary);
+}
+
+@keyframes toast-in {
+    from { opacity: 0; transform: translateX(100%); }
+    to   { opacity: 1; transform: translateX(0); }
+}
+
+/* Status badges */
+.badge {
+    display: inline-block;
+    padding: 0.2rem 0.6rem;
+    border-radius: 3px;
+    font-size: 0.8rem;
+    font-weight: 600;
+    text-transform: uppercase;
+}
+
+.badge.ok {
+    background: var(--success);
+    color: #fff;
+}
+
+.badge.error {
+    background: var(--alert);
+    color: #fff;
+}
+
+.badge.pending {
+    background: var(--warning);
+    color: var(--dark);
+}
+
+/* Role badges */
+.role-badge {
+    display: inline-block;
+    padding: 0.15rem 0.5rem;
+    border-radius: 3px;
+    font-size: 0.75rem;
+    font-weight: 600;
+}
+
+.role-badge.admin    { background: #cc4b37; color: #fff; }
+.role-badge.token    { background: #1779ba; color: #fff; }
+.role-badge.device   { background: #3adb76; color: #fff; }
+.role-badge.view-only { background: #cacaca; color: #333; }
+
+/* Modal overlay */
+.reveal-overlay {
+    z-index: 1005;
+}
+
+/* Utility */
+.text-center { text-align: center; }
+.mt-1 { margin-top: 1rem; }
+.mb-1 { margin-bottom: 1rem; }
+.hidden { display: none !important; }
+
+/* Loading spinner */
+.spinner {
+    display: inline-block;
+    width: 1.5rem;
+    height: 1.5rem;
+    border: 3px solid var(--medium-gray);
+    border-top-color: var(--primary);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+    to { transform: rotate(360deg); }
+}
+
+/* Responsive tweaks */
+@media screen and (max-width: 640px) {
+    .login-card {
+        margin: 1rem;
+    }
+}

@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Impala - Admin</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/foundation-sites@6.8.1/dist/css/foundation.min.css">
+    <link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+    <div class="top-bar" id="main-nav"></div>
+    <div id="toast-container" class="toast-container"></div>
+
+    <div class="grid-container">
+        <div class="page-header">
+            <h3>Admin - Role Management</h3>
+        </div>
+
+        <!-- Role Definitions -->
+        <div class="card">
+            <div class="card-section">
+                <h5>Role Definitions</h5>
+                <div id="role-definitions"></div>
+            </div>
+        </div>
+
+        <!-- User-Role Assignments -->
+        <div class="card">
+            <div class="card-section">
+                <h5>User Role Assignments</h5>
+                <div id="role-assignments"></div>
+            </div>
+        </div>
+
+        <!-- Assign Role -->
+        <div class="card">
+            <div class="card-section">
+                <h5>Assign Role</h5>
+                <form id="assign-form">
+                    <div class="grid-x grid-margin-x">
+                        <div class="cell medium-5">
+                            <label>Account ID
+                                <input type="text" id="assign-account-id" required>
+                            </label>
+                        </div>
+                        <div class="cell medium-5">
+                            <label>Role
+                                <select id="assign-role">
+                                    <option value="view-only">View Only</option>
+                                    <option value="device">Device</option>
+                                    <option value="token">Token</option>
+                                    <option value="admin">Admin</option>
+                                </select>
+                            </label>
+                        </div>
+                        <div class="cell medium-2">
+                            <label>&nbsp;
+                                <button type="submit" class="button expanded">Assign</button>
+                            </label>
+                        </div>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <script src="js/api.js"></script>
+    <script src="js/roles.js"></script>
+    <script src="js/auth.js"></script>
+    <script src="js/router.js"></script>
+    <script src="js/admin.js"></script>
+</body>
+</html>

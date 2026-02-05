@@ -70,6 +70,8 @@ import static com.impala.applet.Constants.SIGNABLE_LENGTH;
 import static com.impala.applet.Constants.TAG_LENGTH_LENGTH;
 import static com.impala.applet.Constants.TWO;
 import static com.impala.applet.Constants.UUID_LENGTH;
+import static com.impala.applet.Constants.INS_SCP03_PROVISION_PIN;
+import static com.impala.applet.Constants.INS_SCP03_APPLET_UPDATE;
 import static com.impala.applet.Constants.ZERO;
 
 /**
@@ -191,6 +193,9 @@ public class ImpalaApplet extends Applet {
     private byte[] tempPlusOne;        // Temporary buffer for counter+1 comparison
     private ECPublicKey tempPubKey;    // Reusable EC public key for transfer verification
 
+    // --- SCP03 secure channel ---
+    private SCP03 scp03;
+
     // --- Transaction hash storage ---
     private byte[] hashBuffer;
     private Hashable hashable;         // Reusable hashable object for transaction records
@@ -254,6 +259,17 @@ public class ImpalaApplet extends Applet {
         hashable = new Hashable(JCSystem.makeTransientByteArray(HASH_LENGTH, JCSystem.CLEAR_ON_RESET),
                 JCSystem.makeTransientByteArray(HASHABLE_LENGTH, JCSystem.CLEAR_ON_RESET));
         repository = new Repository((short) 7, REPOSITORY_CAPACITY);
+
+        // SCP03 secure channel — default static keys (matches gp-master.jar defaults: 0x40..0x4F)
+        scp03 = new SCP03(randomData);
+        byte[] defaultKey = new byte[] {
+                (byte) 0x40, (byte) 0x41, (byte) 0x42, (byte) 0x43,
+                (byte) 0x44, (byte) 0x45, (byte) 0x46, (byte) 0x47,
+                (byte) 0x48, (byte) 0x49, (byte) 0x4A, (byte) 0x4B,
+                (byte) 0x4C, (byte) 0x4D, (byte) 0x4E, (byte) 0x4F
+        };
+        scp03.setStaticKeys(defaultKey, ZERO, defaultKey, ZERO, defaultKey, ZERO);
+
         register();
         // ! << WalletCardlet()
     }
@@ -295,6 +311,8 @@ public class ImpalaApplet extends Applet {
         userPIN.reset();
         // ! deselect() | masterPIN.reset
         masterPIN.reset();
+        // Tear down SCP03 secure channel
+        scp03.reset();
     }
 
     /**
@@ -318,6 +336,57 @@ public class ImpalaApplet extends Applet {
 
             byte[] buffer = apdu.getBuffer();
             short dataLength = (short) (buffer[ISO7816.OFFSET_LC] & 0xff);
+
+            // --- SCP03 dispatch (CLA 0x80 = GP plain, CLA 0x84 = GP secured) ---
+            byte cla = buffer[ISO7816.OFFSET_CLA];
+            byte ins = buffer[ISO7816.OFFSET_INS];
+
+            if (cla == (byte) 0x80) {
+                // GlobalPlatform commands (unsecured channel setup + SCP03-protected commands)
+                switch (ins) {
+                    case (byte) 0x50: { // INITIALIZE UPDATE
+                        apdu.setIncomingAndReceive();
+                        short respLen = scp03.processInitializeUpdate(buffer, ISO7816.OFFSET_CDATA, dataLength);
+                        sendBytes(apdu, buffer, ZERO, respLen);
+                        return;
+                    }
+                    case (byte) 0x82: { // EXTERNAL AUTHENTICATE
+                        apdu.setIncomingAndReceive();
+                        scp03.processExternalAuthenticate(buffer, ISO7816.OFFSET_CDATA, dataLength,
+                                buffer[ISO7816.OFFSET_P1]);
+                        return;
+                    }
+                    case INS_SCP03_PROVISION_PIN: {
+                        failIfCardIsTerminated();
+                        if (!scp03.isAuthenticated()) {
+                            ISOException.throwIt(ISO7816.SW_CONDITIONS_NOT_SATISFIED);
+                        }
+                        apdu.setIncomingAndReceive();
+                        processProvisionPIN(buffer, dataLength);
+                        return;
+                    }
+                    case INS_SCP03_APPLET_UPDATE: {
+                        failIfCardIsTerminated();
+                        if (!scp03.isAuthenticated()) {
+                            ISOException.throwIt(ISO7816.SW_CONDITIONS_NOT_SATISFIED);
+                        }
+                        apdu.setIncomingAndReceive();
+                        processAppletUpdate(buffer, dataLength);
+                        return;
+                    }
+                    default:
+                        ISOException.throwIt(ISO7816.SW_INS_NOT_SUPPORTED);
+                        return;
+                }
+            }
+
+            if (cla == (byte) 0x84) {
+                // Secured APDU — unwrap, then fall through to normal dispatch
+                apdu.setIncomingAndReceive();
+                dataLength = scp03.unwrapCommand(buffer, ISO7816.OFFSET_CDATA, dataLength);
+            }
+
+            // --- Standard INS dispatch (CLA 0x00 or unwrapped CLA 0x84) ---
             switch (buffer[ISO7816.OFFSET_INS]) {
                 case INS_INITIALIZE: {
                     failIfCardIsTerminated();
@@ -487,6 +556,73 @@ public class ImpalaApplet extends Applet {
         if (terminated) {
             ISOException.throwIt(SW_ERROR_CARD_TERMINATED);
         }
+    }
+
+    /**
+     * Processes a PIN provisioning command received over the SCP03 secure channel.
+     * Payload: [PIN_TYPE (1B)] [PIN_LENGTH (1B)] [PIN_DATA (var)].
+     * PIN_TYPE 0x81 = master PIN (8 digits), 0x82 = user PIN (4 digits).
+     */
+    private void processProvisionPIN(byte[] buffer, short dataLength) {
+        if (dataLength < 3) {
+            ISOException.throwIt(ISO7816.SW_WRONG_LENGTH);
+        }
+        byte pinType = buffer[ISO7816.OFFSET_CDATA];
+        byte pinLength = buffer[(short) (ISO7816.OFFSET_CDATA + 1)];
+        short pinDataOffset = (short) (ISO7816.OFFSET_CDATA + 2);
+
+        if ((short) (2 + pinLength) > dataLength) {
+            ISOException.throwIt(ISO7816.SW_WRONG_LENGTH);
+        }
+
+        switch (pinType) {
+            case P2_MASTER_PIN: // 0x81
+                if (pinLength != 8) {
+                    ISOException.throwIt(ISO7816.SW_WRONG_LENGTH);
+                }
+                masterPIN.update(buffer, pinDataOffset, pinLength);
+                break;
+            case P2_USER_PIN: // 0x82
+                if (pinLength != 4) {
+                    ISOException.throwIt(ISO7816.SW_WRONG_LENGTH);
+                }
+                if (Util.arrayCompare(buffer, pinDataOffset, FOUR_ZERO_PIN, ZERO, pinLength) == 0) {
+                    ISOException.throwIt(SW_ERROR_PIN_REJECTED);
+                }
+                userPIN.update(buffer, pinDataOffset, pinLength);
+                break;
+            default:
+                ISOException.throwIt(ISO7816.SW_INCORRECT_P1P2);
+        }
+    }
+
+    /**
+     * Processes an applet data update command received over the SCP03 secure channel.
+     * Payload: [SEQ (2B)] [LEN (2B)] [DATA (var)].
+     * Used for key rotation and applet reconfiguration — not CAP-file replacement.
+     */
+    private void processAppletUpdate(byte[] buffer, short dataLength) {
+        if (dataLength < 4) {
+            ISOException.throwIt(ISO7816.SW_WRONG_LENGTH);
+        }
+
+        short seq = Util.getShort(buffer, ISO7816.OFFSET_CDATA);
+        short len = Util.getShort(buffer, (short) (ISO7816.OFFSET_CDATA + 2));
+        short updateDataOffset = (short) (ISO7816.OFFSET_CDATA + 4);
+
+        if ((short) (4 + len) > dataLength) {
+            ISOException.throwIt(ISO7816.SW_WRONG_LENGTH);
+        }
+
+        // Sequence 0x0001: SCP03 key rotation
+        if (seq == (short) 0x0001 && len == (short) 48) {
+            // Data = newENC(16) + newMAC(16) + newDEK(16)
+            scp03.setStaticKeys(
+                    buffer, updateDataOffset,
+                    buffer, (short) (updateDataOffset + 16),
+                    buffer, (short) (updateDataOffset + 32));
+        }
+        // Other sequences can be added for future applet reconfiguration
     }
 
     /**

@@ -12,6 +12,8 @@ import com.impala.sdk.models.ImpalaCardUser
 import com.impala.sdk.models.ImpalaException
 import com.impala.sdk.models.ImpalaUser
 import com.impala.sdk.models.ImpalaVersion
+import com.impala.sdk.scp03.SCP03Channel
+import com.impala.sdk.scp03.SCP03Constants
 import okio.ByteString
 import okio.ByteString.Companion.toByteString
 import okio.internal.commonAsUtf8ToByteArray
@@ -23,8 +25,12 @@ import kotlin.math.pow
  * @version 1.0
  * @since 02.06.2026
  */
-class ImpalaSDK(apduChannel: BIBO) {
+class ImpalaSDK(
+    apduChannel: BIBO,
+    private val scp03Keys: Triple<ByteArray, ByteArray, ByteArray>? = null
+) {
     private val apduChannel: APDUBIBO = APDUBIBO(apduChannel)
+    private var scp03Channel: SCP03Channel? = null
 
     /**
      * Sends prepared APDU.
@@ -254,5 +260,113 @@ class ImpalaSDK(apduChannel: BIBO) {
 
     fun mapStringToByteArray(str: String): ByteArray {
         return str.commonAsUtf8ToByteArray()
+    }
+
+    // --- SCP03 Secure Channel API ---
+
+    /**
+     * Opens an SCP03 secure channel to the card.
+     * Requires scp03Keys to be provided in the constructor.
+     *
+     * @param securityLevel desired security level (default 0x33 = C-MAC | C-DEC | R-MAC | R-ENC)
+     * @return true if the channel was successfully opened
+     * @throws ImpalaException if keys are not configured or authentication fails
+     */
+    @Throws(ImpalaException::class)
+    fun openSecureChannel(securityLevel: Byte = 0x33): Boolean {
+        val keys = scp03Keys ?: throw ImpalaException("SCP03 keys not configured")
+        val channel = SCP03Channel(apduChannel, keys.first, keys.second, keys.third)
+        val result = channel.openSecureChannel(securityLevel)
+        scp03Channel = channel
+        return result
+    }
+
+    /**
+     * Closes the SCP03 secure channel.
+     */
+    fun closeSecureChannel() {
+        scp03Channel?.closeSecureChannel()
+        scp03Channel = null
+    }
+
+    /**
+     * Transmits an APDU through the SCP03 secure channel.
+     * The command is wrapped (MAC'd and optionally encrypted) before sending,
+     * and the response is unwrapped (MAC verified and optionally decrypted).
+     *
+     * @param cmd the plaintext command APDU
+     * @return the unwrapped response APDU
+     * @throws ImpalaException if the secure channel is not open
+     */
+    @Throws(ImpalaException::class)
+    fun secureTx(cmd: CommandAPDU): ResponseAPDU {
+        val channel = scp03Channel ?: throw ImpalaException("Secure channel is not open")
+        val resp = channel.secureTransmit(cmd)
+        if (!isResponseOk(resp)) {
+            throw ImpalaException("Secure operation unsuccessful: " + resp.sw)
+        }
+        return resp
+    }
+
+    /**
+     * Provisions the master PIN (8 digits) over the SCP03 secure channel.
+     *
+     * @param pin the new master PIN as a digit string (e.g., "14117298")
+     * @throws ImpalaException if the secure channel is not open or the operation fails
+     */
+    @Throws(ImpalaException::class)
+    fun provisionMasterPIN(pin: String) {
+        val pinBytes = mapDigitsToByteArray(pin)
+        require(pinBytes.size == 8) { "Master PIN must be 8 digits" }
+        val payload = byteArrayOf(Constants.P2_MASTER_PIN, pinBytes.size.toByte()) + pinBytes
+        val cmd = CommandAPDU(
+            SCP03Constants.CLA_GP.toInt(),
+            SCP03Constants.INS_PROVISION_PIN.toInt(),
+            0x00, 0x00, payload
+        )
+        secureTx(cmd)
+    }
+
+    /**
+     * Provisions the user PIN (4 digits) over the SCP03 secure channel.
+     *
+     * @param pin the new user PIN as a digit string (e.g., "1234")
+     * @throws ImpalaException if the secure channel is not open or the operation fails
+     */
+    @Throws(ImpalaException::class)
+    fun provisionUserPIN(pin: String) {
+        val pinBytes = mapDigitsToByteArray(pin)
+        require(pinBytes.size == 4) { "User PIN must be 4 digits" }
+        val payload = byteArrayOf(Constants.P2_USER_PIN, pinBytes.size.toByte()) + pinBytes
+        val cmd = CommandAPDU(
+            SCP03Constants.CLA_GP.toInt(),
+            SCP03Constants.INS_PROVISION_PIN.toInt(),
+            0x00, 0x00, payload
+        )
+        secureTx(cmd)
+    }
+
+    /**
+     * Sends an applet update data chunk over the SCP03 secure channel.
+     *
+     * @param seq  sequence number for ordering update chunks
+     * @param data the update data payload
+     * @throws ImpalaException if the secure channel is not open or the operation fails
+     */
+    @Throws(ImpalaException::class)
+    fun sendAppletUpdate(seq: Int, data: ByteArray) {
+        val header = byteArrayOf(
+            ((seq shr 8) and 0xFF).toByte(),
+            (seq and 0xFF).toByte(),
+            ((data.size shr 8) and 0xFF).toByte(),
+            (data.size and 0xFF).toByte()
+        )
+        val payload = header + data
+        val cmd = CommandAPDU(
+            SCP03Constants.CLA_GP.toInt(),
+            SCP03Constants.INS_APPLET_UPDATE.toInt(),
+            0x00, 0x00, payload
+        )
+        secureTx(cmd)
     }
 }

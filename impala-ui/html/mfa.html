@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Impala - MFA</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/foundation-sites@6.8.1/dist/css/foundation.min.css">
+    <link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+    <div class="top-bar" id="main-nav"></div>
+    <div id="toast-container" class="toast-container"></div>
+
+    <div class="grid-container">
+        <div class="page-header">
+            <h3>MFA Management</h3>
+        </div>
+
+        <!-- Lookup enrollments -->
+        <div class="card">
+            <div class="card-section">
+                <h5>MFA Enrollments</h5>
+                <div class="grid-x grid-margin-x">
+                    <div class="cell medium-8">
+                        <input type="text" id="mfa-lookup-id" placeholder="Enter account_id to lookup enrollments">
+                    </div>
+                    <div class="cell medium-4">
+                        <button class="button expanded" id="mfa-lookup-btn">Lookup</button>
+                    </div>
+                </div>
+                <div id="mfa-enrollments"></div>
+            </div>
+        </div>
+
+        <!-- Enroll MFA -->
+        <div class="card" data-permission="manage_mfa">
+            <div class="card-section">
+                <h5>Enroll MFA</h5>
+                <form id="enroll-form">
+                    <div class="grid-x grid-margin-x">
+                        <div class="cell medium-4">
+                            <label>Account ID
+                                <input type="text" id="enroll-account-id" required>
+                            </label>
+                        </div>
+                        <div class="cell medium-4">
+                            <label>MFA Type
+                                <select id="enroll-mfa-type">
+                                    <option value="totp">TOTP</option>
+                                    <option value="sms">SMS</option>
+                                </select>
+                            </label>
+                        </div>
+                        <div class="cell medium-4" id="totp-field">
+                            <label>TOTP Secret
+                                <input type="text" id="enroll-secret">
+                            </label>
+                        </div>
+                        <div class="cell medium-4 hidden" id="sms-field">
+                            <label>Phone Number
+                                <input type="text" id="enroll-phone">
+                            </label>
+                        </div>
+                    </div>
+                    <button type="submit" class="button">Enroll</button>
+                </form>
+            </div>
+        </div>
+
+        <!-- Verify MFA -->
+        <div class="card" data-permission="manage_mfa">
+            <div class="card-section">
+                <h5>Verify MFA</h5>
+                <form id="verify-form">
+                    <div class="grid-x grid-margin-x">
+                        <div class="cell medium-4">
+                            <label>Account ID
+                                <input type="text" id="verify-account-id" required>
+                            </label>
+                        </div>
+                        <div class="cell medium-4">
+                            <label>MFA Type
+                                <select id="verify-mfa-type">
+                                    <option value="totp">TOTP</option>
+                                    <option value="sms">SMS</option>
+                                </select>
+                            </label>
+                        </div>
+                        <div class="cell medium-4">
+                            <label>Code
+                                <input type="text" id="verify-code" required>
+                            </label>
+                        </div>
+                    </div>
+                    <button type="submit" class="button">Verify</button>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <script src="js/api.js"></script>
+    <script src="js/roles.js"></script>
+    <script src="js/auth.js"></script>
+    <script src="js/router.js"></script>
+    <script src="js/mfa.js"></script>
+</body>
+</html>
