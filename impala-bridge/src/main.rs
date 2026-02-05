@@ -1,7 +1,7 @@
 use axum::{
     extract::{Extension, Query},
     http::StatusCode,
-    routing::{get, post, put},
+    routing::{delete, get, post, put},
     Json,
     Router,
 };
@@ -253,6 +253,7 @@ async fn main() {
         .route("/token", post(token))
         .route("/subscribe", post(subscribe))
         .route("/transaction", post(create_transaction))
+        .route("/card", post(create_card).delete(delete_card))
         .route("/mfa", post(enroll_mfa).get(get_mfa))
         .route("/mfa/verify", post(verify_mfa))
         .layer(Extension(pool))
@@ -1224,6 +1225,88 @@ async fn create_transaction(
             message: "Transaction created successfully".to_string(),
             btxid: Some(btxid),
         })),
+        Err(e) => {
+            eprintln!("Database error: {}", e);
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
+// ── Card ───────────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct CreateCardRequest {
+    account_id: String,
+    card_id: String,
+    ec_pubkey: String,
+    rsa_pubkey: String,
+}
+
+#[derive(Serialize)]
+struct CardResponse {
+    success: bool,
+    message: String,
+}
+
+#[derive(Deserialize)]
+struct DeleteCardRequest {
+    card_id: String,
+}
+
+async fn create_card(
+    Extension(pool): Extension<PgPool>,
+    Json(payload): Json<CreateCardRequest>,
+) -> Result<Json<CardResponse>, StatusCode> {
+    let result = sqlx::query(
+        r#"
+        INSERT INTO card (account_id, card_id, ec_pubkey, rsa_pubkey)
+        VALUES ($1, $2, $3, $4)
+        "#,
+    )
+    .bind(&payload.account_id)
+    .bind(&payload.card_id)
+    .bind(&payload.ec_pubkey)
+    .bind(&payload.rsa_pubkey)
+    .execute(&pool)
+    .await;
+
+    match result {
+        Ok(_) => Ok(Json(CardResponse {
+            success: true,
+            message: "Card created successfully".to_string(),
+        })),
+        Err(e) => {
+            eprintln!("Database error: {}", e);
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
+async fn delete_card(
+    Extension(pool): Extension<PgPool>,
+    Json(payload): Json<DeleteCardRequest>,
+) -> Result<Json<CardResponse>, StatusCode> {
+    let result = sqlx::query(
+        "UPDATE card SET is_delete = TRUE, updated_at = CURRENT_TIMESTAMP WHERE card_id = $1 AND is_delete = FALSE"
+    )
+    .bind(&payload.card_id)
+    .execute(&pool)
+    .await;
+
+    match result {
+        Ok(res) => {
+            if res.rows_affected() == 0 {
+                Ok(Json(CardResponse {
+                    success: false,
+                    message: "Card not found or already deleted".to_string(),
+                }))
+            } else {
+                Ok(Json(CardResponse {
+                    success: true,
+                    message: "Card deleted successfully".to_string(),
+                }))
+            }
+        }
         Err(e) => {
             eprintln!("Database error: {}", e);
             Err(StatusCode::INTERNAL_SERVER_ERROR)
