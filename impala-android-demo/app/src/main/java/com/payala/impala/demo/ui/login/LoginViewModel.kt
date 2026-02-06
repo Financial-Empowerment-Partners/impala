@@ -5,9 +5,11 @@ import androidx.lifecycle.MutableLiveData
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.payala.impala.demo.api.BridgeApiService
+import com.payala.impala.demo.auth.NfcCardResult
 import com.payala.impala.demo.auth.TokenManager
 import com.payala.impala.demo.model.AuthenticateRequest
 import com.payala.impala.demo.model.CreateAccountRequest
+import com.payala.impala.demo.model.CreateCardRequest
 import com.payala.impala.demo.model.TokenRequest
 import kotlinx.coroutines.launch
 import java.security.MessageDigest
@@ -124,6 +126,54 @@ class LoginViewModel : ViewModel() {
                 completeTokenFlow(api, tokenManager, login, derivedPassword, "github")
             } catch (e: Exception) {
                 _loginState.value = LoginState.Error(e.message ?: "GitHub login failed")
+            }
+        }
+    }
+
+    /**
+     * Authenticate via NFC smartcard. Derives a deterministic password from
+     * the card's UUID and registers the card's public keys with the bridge.
+     */
+    fun loginWithCard(
+        api: BridgeApiService,
+        tokenManager: TokenManager,
+        cardResult: NfcCardResult.Success
+    ) {
+        viewModelScope.launch {
+            _loginState.value = LoginState.Loading
+            try {
+                val user = cardResult.user
+                val derivedPassword = derivePassword(user.cardId)
+
+                ensureAccountExists(api, user.accountId, user.fullName)
+
+                val authResponse = api.authenticate(
+                    AuthenticateRequest(user.accountId, derivedPassword)
+                )
+                if (!authResponse.success) {
+                    _loginState.value = LoginState.Error(authResponse.message)
+                    return@launch
+                }
+
+                tokenManager.saveDisplayName(user.fullName)
+
+                // Register card public keys with bridge (best-effort)
+                try {
+                    val ecHex = cardResult.ecPubKey.joinToString("") { "%02x".format(it) }
+                    val rsaHex = cardResult.rsaPubKey.joinToString("") { "%02x".format(it) }
+                    api.createCard(
+                        CreateCardRequest(
+                            account_id = user.accountId,
+                            card_id = user.cardId,
+                            ec_pubkey = ecHex,
+                            rsa_pubkey = rsaHex
+                        )
+                    )
+                } catch (_: Exception) { /* card may already be registered */ }
+
+                completeTokenFlow(api, tokenManager, user.accountId, derivedPassword, "card")
+            } catch (e: Exception) {
+                _loginState.value = LoginState.Error(e.message ?: "Card login failed")
             }
         }
     }

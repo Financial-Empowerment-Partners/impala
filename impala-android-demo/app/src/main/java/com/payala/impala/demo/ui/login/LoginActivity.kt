@@ -6,6 +6,7 @@ import android.view.View
 import androidx.activity.viewModels
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
+import com.google.android.material.snackbar.Snackbar
 import com.payala.impala.demo.BuildConfig
 import com.payala.impala.demo.ImpalaApp
 import com.payala.impala.demo.R
@@ -14,12 +15,14 @@ import com.payala.impala.demo.auth.GitHubAuthHelper
 import com.payala.impala.demo.auth.GitHubSignInResult
 import com.payala.impala.demo.auth.GoogleAuthHelper
 import com.payala.impala.demo.auth.GoogleSignInResult
+import com.payala.impala.demo.auth.NfcCardAuthHelper
+import com.payala.impala.demo.auth.NfcCardResult
 import com.payala.impala.demo.databinding.ActivityLoginBinding
 import com.payala.impala.demo.ui.main.MainActivity
 import kotlinx.coroutines.launch
 
 /**
- * Launcher activity presenting three authentication methods.
+ * Launcher activity presenting four authentication methods.
  *
  * On startup, checks [TokenManager.hasValidSession]. If a valid refresh token
  * exists, the user is sent directly to [MainActivity] without seeing the login
@@ -27,9 +30,15 @@ import kotlinx.coroutines.launch
  * - Username/password form
  * - "Continue with Google" button (Credential Manager)
  * - "Continue with GitHub" button (Custom Chrome Tab OAuth)
+ * - "Sign in with Card" button (NFC smartcard via impala-lib patterns)
  *
  * All auth logic is delegated to [LoginViewModel]; this activity only observes
  * [LoginViewModel.loginState] and updates the UI accordingly.
+ *
+ * NFC foreground dispatch is enabled in [onResume] so that tapping an Impala
+ * card while this activity is visible triggers [onNewIntent] instead of the
+ * system's tag dispatch. The `android:launchMode="singleTop"` attribute in
+ * the manifest ensures `onNewIntent` is called on the existing instance.
  */
 class LoginActivity : AppCompatActivity() {
 
@@ -37,6 +46,10 @@ class LoginActivity : AppCompatActivity() {
     private val viewModel: LoginViewModel by viewModels()
     private lateinit var googleAuthHelper: GoogleAuthHelper
     private lateinit var gitHubAuthHelper: GitHubAuthHelper
+    private lateinit var nfcHelper: NfcCardAuthHelper
+
+    /** True when the user has tapped "Sign in with Card" and is waiting for a tap. */
+    private var awaitingCardTap = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -53,9 +66,52 @@ class LoginActivity : AppCompatActivity() {
 
         googleAuthHelper = GoogleAuthHelper(this)
         gitHubAuthHelper = GitHubAuthHelper(this)
+        nfcHelper = NfcCardAuthHelper(this)
+
+        // Hide NFC button if device lacks NFC hardware
+        if (!nfcHelper.isNfcAvailable) {
+            binding.btnCard.visibility = View.GONE
+        }
 
         setupObservers()
         setupClickListeners()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (::nfcHelper.isInitialized) {
+            nfcHelper.enableForegroundDispatch()
+        }
+    }
+
+    override fun onPause() {
+        super.onPause()
+        if (::nfcHelper.isInitialized) {
+            nfcHelper.disableForegroundDispatch()
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        if (!awaitingCardTap) return
+        awaitingCardTap = false
+
+        val tokenManager = (application as ImpalaApp).tokenManager
+        val api = ApiClient.getService(BuildConfig.BRIDGE_BASE_URL, tokenManager)
+
+        when (val result = nfcHelper.processTag(intent)) {
+            is NfcCardResult.Success -> {
+                viewModel.loginWithCard(api, tokenManager, result)
+            }
+            is NfcCardResult.Error -> {
+                binding.tvError.text = result.message
+                binding.tvError.visibility = View.VISIBLE
+            }
+            is NfcCardResult.NfcNotAvailable -> {
+                binding.tvError.text = getString(R.string.nfc_not_available)
+                binding.tvError.visibility = View.VISIBLE
+            }
+        }
     }
 
     private fun setupObservers() {
@@ -66,6 +122,7 @@ class LoginActivity : AppCompatActivity() {
                     binding.btnSignIn.isEnabled = false
                     binding.btnGoogle.isEnabled = false
                     binding.btnGithub.isEnabled = false
+                    binding.btnCard.isEnabled = false
                     binding.tvError.visibility = View.GONE
                 }
                 is LoginViewModel.LoginState.Success -> {
@@ -77,6 +134,7 @@ class LoginActivity : AppCompatActivity() {
                     binding.btnSignIn.isEnabled = true
                     binding.btnGoogle.isEnabled = true
                     binding.btnGithub.isEnabled = true
+                    binding.btnCard.isEnabled = true
                     binding.tvError.text = state.message
                     binding.tvError.visibility = View.VISIBLE
                 }
@@ -85,6 +143,7 @@ class LoginActivity : AppCompatActivity() {
                     binding.btnSignIn.isEnabled = true
                     binding.btnGoogle.isEnabled = true
                     binding.btnGithub.isEnabled = true
+                    binding.btnCard.isEnabled = true
                 }
             }
         }
@@ -156,6 +215,16 @@ class LoginActivity : AppCompatActivity() {
                     }
                 }
             }
+        }
+
+        binding.btnCard.setOnClickListener {
+            if (!nfcHelper.isNfcEnabled) {
+                binding.tvError.text = getString(R.string.nfc_disabled)
+                binding.tvError.visibility = View.VISIBLE
+                return@setOnClickListener
+            }
+            awaitingCardTap = true
+            Snackbar.make(binding.root, R.string.nfc_tap_prompt, Snackbar.LENGTH_LONG).show()
         }
     }
 

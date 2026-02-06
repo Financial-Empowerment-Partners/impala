@@ -53,3 +53,11 @@ data class MfaResponse(
     val success: Boolean,
     val message: String
 )
+
+/** Request body for `POST /mfa`. Enrolls a TOTP or SMS multi-factor method. */
+data class EnrollMfaRequest(
+    val account_id: String,
+    val mfa_type: String,
+    val secret: String? = null,
+    val phone_number: String? = null
+)

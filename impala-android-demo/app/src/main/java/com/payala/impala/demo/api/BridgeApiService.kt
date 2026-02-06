@@ -67,6 +67,22 @@ interface BridgeApiService {
     @POST("mfa/verify")
     suspend fun verifyMfa(@Body request: Map<String, String>): MfaResponse
 
+    // ── MFA Enrollment ─────────────────────────────────────────────────
+
+    /** Enroll in MFA (TOTP or SMS). Uses UPSERT on (account_id, mfa_type). */
+    @POST("mfa")
+    suspend fun enrollMfa(@Body request: EnrollMfaRequest): MfaResponse
+
+    // ── Notify ────────────────────────────────────────────────────────
+
+    /** Create a notification preference record. */
+    @POST("notify")
+    suspend fun createNotify(@Body request: CreateNotifyRequest): NotifyResponse
+
+    /** Update an existing notification preference record. */
+    @PUT("notify")
+    suspend fun updateNotify(@Body request: UpdateNotifyRequest): NotifyResponse
+
     // ── Sync ────────────────────────────────────────────────────────────
 
     /** Record a sync timestamp in Redis for the given account. */

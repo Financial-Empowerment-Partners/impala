@@ -4,21 +4,32 @@ import android.os.Bundle
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
+import android.widget.EditText
 import android.widget.TextView
 import androidx.fragment.app.Fragment
+import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.google.android.material.chip.Chip
+import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.snackbar.Snackbar
+import com.payala.impala.demo.BuildConfig
+import com.payala.impala.demo.ImpalaApp
 import com.payala.impala.demo.R
+import com.payala.impala.demo.api.ApiClient
 import com.payala.impala.demo.databinding.FragmentTransfersBinding
+import com.payala.impala.demo.model.CreateTransactionRequest
+import kotlinx.coroutines.launch
+import java.time.LocalDateTime
+import java.time.format.DateTimeFormatter
 
 /**
  * Displays recent Stellar/Payala transfers in a [RecyclerView].
  *
  * Each item shows the transaction ID, source account, amount, timestamp, and a
- * status chip (Confirmed / Pending). The FAB stubs out the "new transfer" flow.
- * Currently uses placeholder data.
+ * status chip (Confirmed / Pending). The FAB opens a dialog to create a new
+ * transaction via the bridge's `POST /transaction` endpoint. Transactions are
+ * maintained locally (the bridge has no GET /transaction list endpoint).
  */
 class TransfersFragment : Fragment(R.layout.fragment_transfers) {
 
@@ -34,49 +45,109 @@ class TransfersFragment : Fragment(R.layout.fragment_transfers) {
         val status: String
     )
 
-    // Placeholder data for the demo
-    private val transfers = listOf(
-        TransferItem(
-            "a3f1b2c4-...-d8e9",
-            "GBXYZ...MNOP",
-            "100.00 XLM",
-            "2025-06-15 14:30",
-            "Confirmed"
-        ),
-        TransferItem(
-            "f7e2d1a3-...-c6b5",
-            "GABCD...EFGH",
-            "50.00 XLM",
-            "2025-06-14 09:15",
-            "Pending"
-        ),
-        TransferItem(
-            "b8c3a4f5-...-e1d2",
-            "GKLMN...PQRS",
-            "250.00 XLM",
-            "2025-06-13 18:45",
-            "Confirmed"
-        )
-    )
+    private val transfers = mutableListOf<TransferItem>()
+    private lateinit var adapter: TransfersAdapter
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
         _binding = FragmentTransfersBinding.bind(view)
 
+        adapter = TransfersAdapter(transfers)
+        binding.recyclerView.layoutManager = LinearLayoutManager(requireContext())
+        binding.recyclerView.adapter = adapter
+        updateEmptyState()
+
+        binding.fabNewTransfer.setOnClickListener {
+            showNewTransferDialog()
+        }
+    }
+
+    private fun showNewTransferDialog() {
+        val dialogView = LayoutInflater.from(requireContext())
+            .inflate(R.layout.dialog_new_transfer, null)
+
+        val etSourceAccount = dialogView.findViewById<EditText>(R.id.etSourceAccount)
+        val etAmount = dialogView.findViewById<EditText>(R.id.etAmount)
+        val etMemo = dialogView.findViewById<EditText>(R.id.etMemo)
+        val etCurrency = dialogView.findViewById<EditText>(R.id.etCurrency)
+
+        // Pre-fill source account from token manager
+        val app = requireActivity().application as ImpalaApp
+        val accountId = app.tokenManager.getAccountId()
+        if (accountId != null) {
+            etSourceAccount.setText(accountId)
+        }
+
+        MaterialAlertDialogBuilder(requireContext())
+            .setTitle(R.string.dialog_new_transfer_title)
+            .setView(dialogView)
+            .setPositiveButton(R.string.dialog_submit) { _, _ ->
+                val sourceAccount = etSourceAccount.text.toString().trim()
+                val amount = etAmount.text.toString().trim()
+                val memo = etMemo.text.toString().trim()
+                val currency = etCurrency.text.toString().trim().ifEmpty { "XLM" }
+
+                if (sourceAccount.isEmpty() || amount.isEmpty()) {
+                    Snackbar.make(requireView(), R.string.error_fields_required, Snackbar.LENGTH_SHORT).show()
+                    return@setPositiveButton
+                }
+
+                createTransaction(sourceAccount, amount, memo, currency)
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    private fun createTransaction(sourceAccount: String, amount: String, memo: String, currency: String) {
+        val app = requireActivity().application as ImpalaApp
+        val api = ApiClient.getService(BuildConfig.BRIDGE_BASE_URL, app.tokenManager)
+
+        viewLifecycleOwner.lifecycleScope.launch {
+            try {
+                val response = api.createTransaction(
+                    CreateTransactionRequest(
+                        source_account = sourceAccount,
+                        memo = memo.ifEmpty { null },
+                        payala_currency = currency
+                    )
+                )
+                if (response.success) {
+                    val timestamp = LocalDateTime.now()
+                        .format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm"))
+                    transfers.add(
+                        0,
+                        TransferItem(
+                            txId = response.btxid ?: "pending",
+                            sourceAccount = sourceAccount,
+                            amount = "$amount $currency",
+                            timestamp = timestamp,
+                            status = "Pending"
+                        )
+                    )
+                    adapter.notifyItemInserted(0)
+                    binding.recyclerView.scrollToPosition(0)
+                    updateEmptyState()
+                    Snackbar.make(requireView(), R.string.transfer_created, Snackbar.LENGTH_SHORT).show()
+                } else {
+                    Snackbar.make(requireView(), response.message, Snackbar.LENGTH_SHORT).show()
+                }
+            } catch (e: Exception) {
+                Snackbar.make(
+                    requireView(),
+                    "${getString(R.string.transfer_failed)}: ${e.message}",
+                    Snackbar.LENGTH_SHORT
+                ).show()
+            }
+        }
+    }
+
+    private fun updateEmptyState() {
         if (transfers.isEmpty()) {
             binding.emptyState.visibility = View.VISIBLE
             binding.recyclerView.visibility = View.GONE
         } else {
             binding.emptyState.visibility = View.GONE
             binding.recyclerView.visibility = View.VISIBLE
-        }
-
-        val adapter = TransfersAdapter(transfers)
-        binding.recyclerView.layoutManager = LinearLayoutManager(requireContext())
-        binding.recyclerView.adapter = adapter
-
-        binding.fabNewTransfer.setOnClickListener {
-            Snackbar.make(view, "New transfer flow (demo)", Snackbar.LENGTH_SHORT).show()
         }
     }
 

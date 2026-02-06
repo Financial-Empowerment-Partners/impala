@@ -10,6 +10,7 @@
     <string name="btn_sign_in">Sign In</string>
     <string name="btn_google">Continue with Google</string>
     <string name="btn_github">Continue with GitHub</string>
+    <string name="btn_card">Sign in with Card</string>
     <string name="divider_or">OR</string>
     <string name="error_fields_required">Account ID and password are required</string>
     <string name="error_password_short">Password must be at least 8 characters</string>
@@ -28,6 +29,14 @@
     <!-- Transfers -->
     <string name="btn_new_transfer">New Transfer</string>
     <string name="empty_transfers">No transfers yet</string>
+    <string name="dialog_new_transfer_title">New Transfer</string>
+    <string name="dialog_submit">Submit</string>
+    <string name="hint_source_account">Source Account</string>
+    <string name="hint_amount">Amount</string>
+    <string name="hint_currency">Currency</string>
+    <string name="hint_memo">Memo (optional)</string>
+    <string name="transfer_created">Transfer created successfully</string>
+    <string name="transfer_failed">Transfer failed</string>
 
     <!-- Settings -->
     <string name="section_account">Account</string>
@@ -43,5 +52,20 @@
     <string name="btn_manage_mfa">Manage MFA</string>
     <string name="btn_logout">Log Out</string>
     <string name="mfa_not_enrolled">Not enrolled</string>
+    <string name="dialog_mfa_title">Choose MFA Method</string>
+    <string name="dialog_sms_title">SMS Enrollment</string>
+    <string name="dialog_enroll">Enroll</string>
+    <string name="hint_phone_number">Phone Number</string>
+    <string name="error_phone_required">Phone number is required</string>
+    <string name="mfa_enrolled_totp">TOTP enrollment successful</string>
+    <string name="mfa_enrolled_sms">SMS enrollment successful</string>
+    <string name="mfa_enrollment_failed">MFA enrollment failed</string>
     <string name="not_available">N/A</string>
+
+    <!-- NFC Card -->
+    <string name="nfc_tap_prompt">Hold your Impala card to the back of the device</string>
+    <string name="nfc_not_available">NFC is not available on this device</string>
+    <string name="nfc_disabled">Please enable NFC in device settings</string>
+    <string name="card_registered">Card registered successfully</string>
+    <string name="card_registration_failed">Card registration failed</string>
 </resources>
