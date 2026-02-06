@@ -256,7 +256,7 @@ async fn main() {
         .route("/card", post(create_card).delete(delete_card))
         .route("/mfa", post(enroll_mfa).get(get_mfa))
         .route("/mfa/verify", post(verify_mfa))
-        .route("/notify", post(create_notify))
+        .route("/notify", post(create_notify).put(update_notify))
         .layer(Extension(pool))
         .layer(Extension(redis_client))
         .layer(Extension(jwt_secret))
@@ -1432,24 +1432,32 @@ async fn get_mfa(
 #[derive(Deserialize)]
 struct CreateNotifyRequest {
     account_id: String,
-    medium: String, // "webhook", "sms", "mobile_push", "to_app"
+    medium: String,              // "webhook", "sms", "mobile_push", "to_app"
+    mobile: Option<String>,      // mobile phone number
+    wa: Option<String>,          // WhatsApp number/ID
+    signal: Option<String>,      // Signal number/ID
+    tel: Option<String>,         // landline / alternative telephone
+    email: Option<String>,       // email address
+    url: Option<String>,         // webhook callback URL
+    app: Option<String>,         // application identifier for push
 }
 
 #[derive(Serialize)]
-struct CreateNotifyResponse {
+struct NotifyResponse {
     success: bool,
     message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     id: Option<i32>,
 }
 
+/// POST /notify – create a new notification record
 async fn create_notify(
     Extension(pool): Extension<PgPool>,
     Json(payload): Json<CreateNotifyRequest>,
-) -> Result<Json<CreateNotifyResponse>, StatusCode> {
+) -> Result<Json<NotifyResponse>, StatusCode> {
     let valid_mediums = ["webhook", "sms", "mobile_push", "to_app"];
     if !valid_mediums.contains(&payload.medium.as_str()) {
-        return Ok(Json(CreateNotifyResponse {
+        return Ok(Json(NotifyResponse {
             success: false,
             message: format!(
                 "Invalid medium '{}'. Must be one of: webhook, sms, mobile_push, to_app",
@@ -1460,19 +1468,165 @@ async fn create_notify(
     }
 
     let result = sqlx::query_scalar::<_, i32>(
-        "INSERT INTO notify (account_id, medium) VALUES ($1, $2::notify_medium) RETURNING id",
+        r#"
+        INSERT INTO notify (account_id, medium, mobile, wa, signal, tel, email, url, app)
+        VALUES ($1, $2::notify_medium, $3, $4, $5, $6, $7, $8, $9)
+        RETURNING id
+        "#,
     )
     .bind(&payload.account_id)
     .bind(&payload.medium)
+    .bind(&payload.mobile)
+    .bind(&payload.wa)
+    .bind(&payload.signal)
+    .bind(&payload.tel)
+    .bind(&payload.email)
+    .bind(&payload.url)
+    .bind(&payload.app)
     .fetch_one(&pool)
     .await;
 
     match result {
-        Ok(id) => Ok(Json(CreateNotifyResponse {
+        Ok(id) => Ok(Json(NotifyResponse {
             success: true,
             message: "Notification record created successfully".to_string(),
             id: Some(id),
         })),
+        Err(e) => {
+            eprintln!("Database error: {}", e);
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct UpdateNotifyRequest {
+    id: i32,
+    medium: Option<String>,
+    mobile: Option<String>,
+    wa: Option<String>,
+    signal: Option<String>,
+    tel: Option<String>,
+    email: Option<String>,
+    url: Option<String>,
+    app: Option<String>,
+}
+
+/// PUT /notify – update an existing notification record
+async fn update_notify(
+    Extension(pool): Extension<PgPool>,
+    Json(payload): Json<UpdateNotifyRequest>,
+) -> Result<Json<NotifyResponse>, StatusCode> {
+    if let Some(ref medium) = payload.medium {
+        let valid_mediums = ["webhook", "sms", "mobile_push", "to_app"];
+        if !valid_mediums.contains(&medium.as_str()) {
+            return Ok(Json(NotifyResponse {
+                success: false,
+                message: format!(
+                    "Invalid medium '{}'. Must be one of: webhook, sms, mobile_push, to_app",
+                    medium
+                ),
+                id: None,
+            }));
+        }
+    }
+
+    // Build dynamic SET clause
+    let mut set_parts = Vec::new();
+    let mut param_index = 2u32; // $1 is the id in the WHERE clause
+
+    if payload.medium.is_some() {
+        set_parts.push(format!("medium = ${}::notify_medium", param_index));
+        param_index += 1;
+    }
+    if payload.mobile.is_some() {
+        set_parts.push(format!("mobile = ${}", param_index));
+        param_index += 1;
+    }
+    if payload.wa.is_some() {
+        set_parts.push(format!("wa = ${}", param_index));
+        param_index += 1;
+    }
+    if payload.signal.is_some() {
+        set_parts.push(format!("signal = ${}", param_index));
+        param_index += 1;
+    }
+    if payload.tel.is_some() {
+        set_parts.push(format!("tel = ${}", param_index));
+        param_index += 1;
+    }
+    if payload.email.is_some() {
+        set_parts.push(format!("email = ${}", param_index));
+        param_index += 1;
+    }
+    if payload.url.is_some() {
+        set_parts.push(format!("url = ${}", param_index));
+        param_index += 1;
+    }
+    if payload.app.is_some() {
+        set_parts.push(format!("app = ${}", param_index));
+        param_index += 1;
+    }
+
+    if set_parts.is_empty() {
+        return Ok(Json(NotifyResponse {
+            success: false,
+            message: "No fields provided to update".to_string(),
+            id: None,
+        }));
+    }
+
+    let sql = format!(
+        "UPDATE notify SET {} WHERE id = $1",
+        set_parts.join(", ")
+    );
+
+    let mut query = sqlx::query(&sql);
+    query = query.bind(payload.id);
+
+    if let Some(ref val) = payload.medium {
+        query = query.bind(val);
+    }
+    if let Some(ref val) = payload.mobile {
+        query = query.bind(val);
+    }
+    if let Some(ref val) = payload.wa {
+        query = query.bind(val);
+    }
+    if let Some(ref val) = payload.signal {
+        query = query.bind(val);
+    }
+    if let Some(ref val) = payload.tel {
+        query = query.bind(val);
+    }
+    if let Some(ref val) = payload.email {
+        query = query.bind(val);
+    }
+    if let Some(ref val) = payload.url {
+        query = query.bind(val);
+    }
+    if let Some(ref val) = payload.app {
+        query = query.bind(val);
+    }
+
+    let result = query.execute(&pool).await;
+
+    match result {
+        Ok(res) => {
+            if res.rows_affected() == 0 {
+                Ok(Json(NotifyResponse {
+                    success: false,
+                    message: "No notification record found with the provided id".to_string(),
+                    id: None,
+                }))
+            } else {
+                Ok(Json(NotifyResponse {
+                    success: true,
+                    message: "Notification record updated successfully".to_string(),
+                    id: Some(payload.id),
+                }))
+            }
+        }
         Err(e) => {
             eprintln!("Database error: {}", e);
             Err(StatusCode::INTERNAL_SERVER_ERROR)
