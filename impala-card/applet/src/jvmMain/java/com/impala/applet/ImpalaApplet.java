@@ -6,69 +6,47 @@ import javacard.framework.ISOException;
 import javacard.framework.JCSystem;
 import javacard.framework.OwnerPIN;
 import javacard.framework.Util;
-import javacard.security.AESKey;
-import javacard.security.CryptoException;
 import javacard.security.ECPrivateKey;
 import javacard.security.ECPublicKey;
-import javacard.security.KeyBuilder;
 import javacard.security.KeyPair;
 import javacard.security.MessageDigest;
 import javacard.security.PublicKey;
-import javacard.security.RSAPrivateKey;
-import javacard.security.RSAPublicKey;
 import javacard.security.RandomData;
 import javacard.security.Signature;
-import javacardx.crypto.Cipher;
 import javacard.framework.APDU;
 
 import static com.impala.applet.ArrayUtil.isNegative;
-import static com.impala.applet.ArrayUtil.isPositive;
-import static com.impala.applet.ArrayUtil.isSmallerOrEqual;
-import static com.impala.applet.ArrayUtil.isZero;
 import static com.impala.applet.BuildConfig.GIT_HASH_SHORT;
 import static com.impala.applet.BuildConfig.GIT_REV_LIST;
 import static com.impala.applet.BuildConfig.MAJOR_VERSION;
 import static com.impala.applet.BuildConfig.MINOR_VERSION;
 import static com.impala.applet.Constants.HASHABLE_LENGTH;
 import static com.impala.applet.Constants.HASH_LENGTH;
-import static com.impala.applet.Constants.INIT_LENGTH;
-import static com.impala.applet.Constants.INS_DELETE_LUKS;
-import static com.impala.applet.Constants.INS_DELETE_TRANSFER;
 import static com.impala.applet.Constants.INS_GET_ACCOUNT_ID;
 import static com.impala.applet.Constants.INS_GET_BALANCE;
-import static com.impala.applet.Constants.INS_GET_CARD_NONCE;
 import static com.impala.applet.Constants.INS_GET_EC_PUB_KEY;
 import static com.impala.applet.Constants.INS_GET_FULL_NAME;
 import static com.impala.applet.Constants.INS_GET_GENDER;
-import static com.impala.applet.Constants.INS_GET_HASH_BATCH;
-import static com.impala.applet.Constants.INS_GET_OFFLINE_COUNTER;
-import static com.impala.applet.Constants.INS_GET_RSA_PUB_KEY;
-import static com.impala.applet.Constants.INS_GET_TRANSFER;
 import static com.impala.applet.Constants.INS_GET_USER_DATA;
 import static com.impala.applet.Constants.INS_GET_VERSION;
 import static com.impala.applet.Constants.INS_INITIALIZE;
 import static com.impala.applet.Constants.INS_IS_CARD_ALIVE;
 import static com.impala.applet.Constants.INS_NOP;
-import static com.impala.applet.Constants.INS_SET_CARD_DATA;
 import static com.impala.applet.Constants.INS_SET_FULL_NAME;
 import static com.impala.applet.Constants.INS_SET_GENDER;
 import static com.impala.applet.Constants.INS_SIGN_AUTH;
 import static com.impala.applet.Constants.INS_SIGN_TRANSFER;
-import static com.impala.applet.Constants.INS_SUICIDE;
-import static com.impala.applet.Constants.INS_UPDATE_MASTER_PIN;
 import static com.impala.applet.Constants.INS_UPDATE_USER_PIN;
 import static com.impala.applet.Constants.INS_VERIFY_PIN;
 import static com.impala.applet.Constants.INS_VERIFY_TRANSFER;
 import static com.impala.applet.Constants.INT32_LENGTH;
 import static com.impala.applet.Constants.INT64_LENGTH;
 import static com.impala.applet.Constants.MAX_SIG_LENGTH;
-import static com.impala.applet.Constants.ONE;
 import static com.impala.applet.Constants.P2_MASTER_PIN;
 import static com.impala.applet.Constants.P2_USER_PIN;
 import static com.impala.applet.Constants.PUB_KEY_LENGTH;
 import static com.impala.applet.Constants.SIGNABLE_LENGTH;
 import static com.impala.applet.Constants.TAG_LENGTH_LENGTH;
-import static com.impala.applet.Constants.TWO;
 import static com.impala.applet.Constants.UUID_LENGTH;
 import static com.impala.applet.Constants.INS_SCP03_PROVISION_PIN;
 import static com.impala.applet.Constants.INS_SCP03_APPLET_UPDATE;
@@ -79,19 +57,14 @@ import static com.impala.applet.Constants.ZERO;
  *
  * Handles APDU commands for account management, PIN verification, transaction
  * signing/verification, cryptographic key operations, and card lifecycle management.
- * Supports both online (server-signed) and offline (LUK-signed) payment transfers
- * with balance tracking stored on-card.
+ * Supports both online Stellar and Payala payments
  */
 public class ImpalaApplet extends Applet {
     // --- Status word constants for APDU error responses ---
-    public static final short SW_ERROR_KEY_VERIFICATION_FAILED = 0x0022;
     public static final short SW_ERROR_SIGNATURE_VERIFICATION_FAILED = 0x0023;
     public static final short SW_INSUFFICIENT_FUNDS = 0x6224;
-    public static final short SW_INSUFFICIENT_LUK_LIMIT = 0x6225;
     public static final short SW_ERROR_WRONG_SIGNABLE_LENGTH = 0x6226;
     public static final short SW_ERROR_INIT_SIGNER = 0x6227;
-    public static final short SW_ERROR_LUK_MISSING = 0x6228;
-    public static final short SW_ERROR_WRONG_KEY_LENGTH = 0x6229;
     public static final short SW_ERROR_EC_CARD_KEY_MISSING = 0x6230;
     public static final short SW_ERROR_WRONG_SENDER = 0x6231;
     public static final short SW_ERROR_WRONG_RECIPIENT = 0x6232;
@@ -102,27 +75,12 @@ public class ImpalaApplet extends Applet {
     public static final short SW_SET_FULL_NAME_FAILED = 0x6C03;
     public static final short SW_SET_GENDER_FAILED = 0x6C04;
     public static final short SW_PIN_FAILED = 0x69C0; // SW bytes for PIN Failed condition
-    public static final short SW_ERROR_CARD_DATA_SIGNATURE_INVALID = 0x6677;
-    public static final short SW_ERROR_CARD_DATA_NONCE_INVALID = 0x6678;
-    public static final short SW_ERROR_WRONG_CARD_ID = 0x6679;
-    public static final short SW_ERROR_CRYPTO_EXCEPTION = 0x6683;
-    public static final short SW_ERROR_INVALID_AES_KEY = 0x6684;
     public static final short SW_ERROR_ALREADY_INITIALIZED = 0x6686;
     public static final short SW_ERROR_CARD_TERMINATED = 0x6687;
     public static final short SW_ERROR_NULL_POINTER_EXCEPTION = 0x6688;
     public static final short SW_ERROR_ARRAY_INDEX_OUT_OF_BOUNDS_EXCEPTION = 0x6689;
     public static final short SW_ERROR_PIN_REQUIRED = 0x6690;
     public static final short SW_ERROR_PIN_REJECTED = 0x6691;
-
-    private static final short AES_IV_LENGTH = 16;
-    private static final short RSA_PUB_MOD_LENGTH = 128; // 1024-bit RSA modulus
-
-    // Field offsets within the SET_CARD_DATA APDU payload
-    private static final short OFFSET_ACCOUNT_ID = ISO7816.OFFSET_CDATA;
-    private static final short OFFSET_CARD_ID = OFFSET_ACCOUNT_ID + UUID_LENGTH;
-    private static final short OFFSET_CARD_NONCE = OFFSET_CARD_ID + UUID_LENGTH;
-    private static final short OFFSET_CURRENCY = OFFSET_CARD_NONCE + INT32_LENGTH;
-    private static final short OFFSET_MY_BALANCE = OFFSET_CURRENCY + 4;
 
     private static final byte USER_PIN_LENGTH = 4;
     // In SIGN_TRANSFER, the signable data starts after the 4-byte user PIN
@@ -150,8 +108,6 @@ public class ImpalaApplet extends Applet {
     };
 
     // --- Cryptographic engines ---
-    private Cipher cipherAES;          // AES-128-CBC decryption (session key transport)
-    private Cipher cipherRSA;          // RSA PKCS#1 decryption (master PIN update)
     private MessageDigest messageDigest; // SHA-256 for transaction hashing
     private RandomData randomData;     // Secure RNG for card ID and nonces
     private Signature signer;          // ECDSA-SHA256 signing with card key
@@ -159,7 +115,7 @@ public class ImpalaApplet extends Applet {
 
     // --- Card lifecycle state ---
     private boolean initialized;       // True after INS_INITIALIZE generates keys
-    private boolean terminated;        // True after INS_SUICIDE; card becomes inoperable
+    private boolean terminated;        // True after card termination; card becomes inoperable
 
     // --- Account and balance data (persisted in EEPROM) ---
     private byte[] accountId;          // 16-byte UUID linking to Payala account
@@ -170,10 +126,6 @@ public class ImpalaApplet extends Applet {
     // --- Cryptographic keys ---
     private ECPrivateKey cardECPrivateKey;   // Card's EC private key (secp256r1) for signing
     private ECPublicKey cardECPublicKey;     // Card's EC public key (secp256r1)
-    private RSAPrivateKey cardRSAPrivateKey; // Card's RSA-1024 private key for decryption
-    private RSAPublicKey cardRSAPublicKey;   // Card's RSA-1024 public key
-    private byte[] sessionIV;               // AES initialization vector for session encryption
-    private AESKey sessionKey;              // AES-256 session key
 
     // --- Cardholder data ---
     private byte[] fullName;
@@ -199,7 +151,6 @@ public class ImpalaApplet extends Applet {
     // --- Transaction hash storage ---
     private byte[] hashBuffer;
     private Hashable hashable;         // Reusable hashable object for transaction records
-    public Repository repository;      // On-card store of transaction hashes
 
     /**
      * Private constructor called during applet installation.
@@ -207,9 +158,6 @@ public class ImpalaApplet extends Applet {
      * sets default PINs, and generates a random card ID.
      */
     private ImpalaApplet(byte[] bArray, short bOffset, byte bLength) {
-        // ! >> WalletCardlet()
-        cipherAES = Cipher.getInstance(Cipher.ALG_AES_BLOCK_128_CBC_NOPAD, false);
-        cipherRSA = Cipher.getInstance(Cipher.ALG_RSA_PKCS1, false);
         messageDigest = MessageDigest.getInstance(MessageDigest.ALG_SHA_256, false);
         randomData = RandomData.getInstance(RandomData.ALG_SECURE_RANDOM);
 
@@ -229,13 +177,6 @@ public class ImpalaApplet extends Applet {
 
         cardECPrivateKey = null;
         cardECPublicKey = null;
-        cardRSAPrivateKey = null;
-        cardRSAPublicKey = null;
-        sessionIV = new byte[] {
-                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01
-        };
-        sessionKey = null;
 
         fullName = new byte[MAX_FULL_NAME_LENGTH];
         fullNameLength = 0;
@@ -258,7 +199,6 @@ public class ImpalaApplet extends Applet {
         hashBuffer = JCSystem.makeTransientByteArray(HASH_LENGTH, JCSystem.CLEAR_ON_RESET);
         hashable = new Hashable(JCSystem.makeTransientByteArray(HASH_LENGTH, JCSystem.CLEAR_ON_RESET),
                 JCSystem.makeTransientByteArray(HASHABLE_LENGTH, JCSystem.CLEAR_ON_RESET));
-        repository = new Repository((short) 7, REPOSITORY_CAPACITY);
 
         // SCP03 secure channel — default static keys (matches gp-master.jar defaults: 0x40..0x4F)
         scp03 = new SCP03(randomData);
@@ -271,7 +211,6 @@ public class ImpalaApplet extends Applet {
         scp03.setStaticKeys(defaultKey, ZERO, defaultKey, ZERO, defaultKey, ZERO);
 
         register();
-        // ! << WalletCardlet()
     }
 
     /**
@@ -297,7 +236,6 @@ public class ImpalaApplet extends Applet {
      */
     @Override
     public boolean select() {
-        // ! select()
         return true;
     }
 
@@ -306,18 +244,14 @@ public class ImpalaApplet extends Applet {
      */
     @Override
     public void deselect() {
-        // ! deselect() | called.
-        // ! deselect() | userPIN.reset
         userPIN.reset();
-        // ! deselect() | masterPIN.reset
         masterPIN.reset();
         // Tear down SCP03 secure channel
         scp03.reset();
     }
 
     /**
-     * Processes an incoming APDU. Will always respond with the helloFidesmo string,
-     * regardless of what is received.
+     * Processes an incoming APDU.
      *
      * @param apdu the incoming APDU
      * @throws ISOException with the response bytes per ISO 7816-4
@@ -326,8 +260,6 @@ public class ImpalaApplet extends Applet {
     @Override
     public void process(APDU apdu) {
         try {
-            // ! process() | Start...
-            // ---------------=========+++++++++=========---------------
             if (apdu.isISOInterindustryCLA()) {
                 if (this.selectingApplet()) {
                     return;
@@ -392,15 +324,10 @@ public class ImpalaApplet extends Applet {
                     failIfCardIsTerminated();
                     if (!initialized) {
                         randomData.setSeed(buffer, ISO7816.OFFSET_CDATA, dataLength);
-                        // ! Overwrite cardId
 
                         randomData.generateData(cardId, ZERO, UUID_LENGTH);
 
-                        // ! Generate key pairs
                         createECKeypair();
-                        createRSAKeypair();
-                        sessionKey = (AESKey) KeyBuilder.buildKey(KeyBuilder.TYPE_AES,
-                                KeyBuilder.LENGTH_AES_256, false);
 
                         initialized = true;
                     } else {
@@ -410,9 +337,7 @@ public class ImpalaApplet extends Applet {
                 }
                 case INS_UPDATE_USER_PIN: {
                     failIfCardIsTerminated();
-                    // ! INS_UPDATE_USER_PIN
                     if (masterPIN.isValidated()) {
-                        // ! process() | Master PIN is validated
                         processUpdateUserPIN(apdu);
                         return;
                     } else {
@@ -422,14 +347,7 @@ public class ImpalaApplet extends Applet {
                 }
                 case INS_VERIFY_PIN: {
                     failIfCardIsTerminated();
-                    // ! INS_VERIFY_PIN
                     processVerifyPIN(apdu);
-                    break;
-                }
-                case INS_UPDATE_MASTER_PIN: {
-                    failIfCardIsTerminated();
-                    // ! INS_UPDATE_MASTER_PIN
-                    updateMasterPIN(buffer);
                     break;
                 }
                 case INS_NOP: {
@@ -472,14 +390,6 @@ public class ImpalaApplet extends Applet {
                         cardECPublicKey.getW(scratchpad, ZERO);
                     }
                     sendBytes(apdu, scratchpad, ZERO, PUB_KEY_LENGTH);
-                    break;
-                }
-                case INS_GET_RSA_PUB_KEY: {
-                    // check if null to prevent a NullPointerException
-                    if (cardRSAPublicKey != null) {
-                        cardRSAPublicKey.getModulus(scratchpad, ZERO);
-                    }
-                    sendBytes(apdu, scratchpad, ZERO, RSA_PUB_MOD_LENGTH);
                     break;
                 }
                 case INS_GET_FULL_NAME: {
@@ -527,15 +437,6 @@ public class ImpalaApplet extends Applet {
                             (short) (UUID_LENGTH + UUID_LENGTH + fullNameLength));
                     break;
                 }
-                case INS_SET_CARD_DATA: {
-                    failIfCardIsTerminated();
-                    setCardData(apdu, buffer);
-                    break;
-                }
-                case INS_SUICIDE: {
-                    suicide(buffer, dataLength);
-                    break;
-                }
                 case INS_IS_CARD_ALIVE: {
                     failIfCardIsTerminated();
                     break;
@@ -551,7 +452,7 @@ public class ImpalaApplet extends Applet {
         }
     }
 
-    /** Throws an exception if the card has been permanently terminated via INS_SUICIDE. */
+    /** Throws an exception if the card has been permanently terminated. */
     private void failIfCardIsTerminated() {
         if (terminated) {
             ISOException.throwIt(SW_ERROR_CARD_TERMINATED);
@@ -631,14 +532,10 @@ public class ImpalaApplet extends Applet {
      * and the number of consecutive PIN-less transfers hasn't been exceeded.
      */
     private boolean checkPINless(byte[] buffer) {
-        // ! checkPINless | 1. check pin is 0000
         if (Util.arrayCompare(buffer, ISO7816.OFFSET_CDATA, FOUR_ZERO_PIN, ZERO, USER_PIN_LENGTH) == 0) {
-            // ! checkPINless | 2. check amount is < 200
-            // ! checkPINless | 3. check howManyPINless < MAX_PINLESS_TRANSFERS
             TransactionParser.getAmount(buffer, OFFSET_SIGNABLE, tempAmount);
             if (ArrayUtil.unsignedByteArrayCompare(tempAmount, ZERO, PINLESS_LIMIT, ZERO, INT64_LENGTH) <= 0 &&
                     howManyPINless < MAX_PINLESS_TRANSFERS) {
-                // ! checkPINless | 4. increase howManyPINless
                 howManyPINless++;
                 return true;
             }
@@ -646,42 +543,6 @@ public class ImpalaApplet extends Applet {
             ISOException.throwIt(SW_ERROR_PIN_REQUIRED);
         }
         return false;
-    }
-
-    /**
-     * Updates the master PIN. The new PIN is RSA-encrypted in the APDU payload,
-     * accompanied by a nonce (for replay protection) and a server signature.
-     */
-    private void updateMasterPIN(byte[] buffer) {
-        // ! updateMasterPIN() | buffer: {buffer}
-        decryptWithRSA(buffer, ISO7816.OFFSET_CDATA, (short) 128);
-        byte[] nonce = new byte[4];
-        Util.arrayCopy(scratchpad, ZERO, nonce, ZERO, (short) 4);
-
-        boolean nonceOk = verifyNonce(nonce);
-        if (!nonceOk) {
-            ISOException.throwIt(SW_ERROR_CARD_DATA_NONCE_INVALID);
-        } else {
-            cardNonces.delete(new CardNonce(nonce));
-        }
-
-        short sigOffset = (short) (128 + ISO7816.OFFSET_CDATA);
-        short sigLength = (short) (buffer[(short) (sigOffset + ONE)] + TWO);
-
-        boolean verified = verifySig(buffer, ISO7816.OFFSET_CDATA, (short) 128,
-                buffer, sigOffset, sigLength, masterPublicKey);
-
-        if (verified) {
-            // ! updating master pin
-            masterPIN.update(scratchpad, (short) 4, (byte) 0x8);
-        } else {
-            ISOException.throwIt(SW_ERROR_SIGNATURE_VERIFICATION_FAILED);
-        }
-
-        // run garbage collector
-        if (JCSystem.isObjectDeletionSupported()) {
-            JCSystem.requestObjectDeletion();
-        }
     }
 
     /** Sends the applet version (major, minor, git rev count, git hash) as response bytes. */
@@ -700,80 +561,18 @@ public class ImpalaApplet extends Applet {
     }
 
     /**
-     * Sets card account data (account ID, currency, balance) from a server-signed payload.
-     * Verifies the server signature, card ID match, and nonce before updating persistent state
-     * within an atomic transaction.
-     */
-    private void setCardData(APDU apdu, byte[] buffer) {
-        short payloadLength = (short) (buffer[ISO7816.OFFSET_LC] & 0xff);
-        boolean success = verifySig(buffer, ISO7816.OFFSET_CDATA, INIT_LENGTH,
-                buffer, (short) (ISO7816.OFFSET_CDATA + INIT_LENGTH), (short) (payloadLength - INIT_LENGTH),
-                masterPublicKey);
-
-        if (!success) {
-            ISOException.throwIt(SW_ERROR_CARD_DATA_SIGNATURE_INVALID);
-        }
-
-        // Verify cardId (return error)
-        boolean cardIdOk = Util.arrayCompare(buffer, OFFSET_CARD_ID, cardId, ZERO, UUID_LENGTH) == 0;
-        if (!cardIdOk) {
-            ISOException.throwIt(SW_ERROR_WRONG_CARD_ID);
-        }
-
-        // Verify nonce (return error)
-        byte[] nonceBytes = new byte[4];
-        Util.arrayCopy(buffer, OFFSET_CARD_NONCE, nonceBytes, ZERO, INT32_LENGTH);
-        boolean nonceOk = verifyNonce(nonceBytes);
-        if (!nonceOk) {
-            ISOException.throwIt(SW_ERROR_CARD_DATA_NONCE_INVALID);
-        } else {
-            cardNonces.delete(new CardNonce(nonceBytes));
-        }
-
-        JCSystem.beginTransaction();
-
-        Util.arrayCopy(buffer, OFFSET_ACCOUNT_ID, accountId, ZERO, UUID_LENGTH);
-        Util.arrayCopy(buffer, OFFSET_CURRENCY, currency, ZERO, (short) 4);
-        Util.arrayCopy(buffer, OFFSET_MY_BALANCE, myBalance, ZERO, INT64_LENGTH);
-        // ! setCardData() | new myBalance: {myBalance}
-
-        JCSystem.commitTransaction();
-
-        // run garbage collector
-        if (JCSystem.isObjectDeletionSupported()) {
-            JCSystem.requestObjectDeletion();
-        }
-    }
-
-    /** Generates a random nonce and sends it to the terminal for replay protection. */
-    private void sendCardNonce(APDU apdu) {
-        // ! getCardNonce() |
-        CardNonce nonce = new CardNonce(randomData);
-        cardNonces.add(nonce);
-        // ! getCardNonce() | Nonce: {nonce.bytes, (short)0, (short)nonce.bytes.length}
-        sendBytes(apdu, nonce.bytes, ZERO, (short) nonce.bytes.length);
-    }
-
-    private boolean verifyNonce(byte[] bytes) {
-        return cardNonces.contains(new CardNonce(bytes));
-    }
-
-    /**
      * Validates the user PIN from the APDU buffer. On failure, throws an ISOException
      * encoding the number of remaining tries in the status word. On success, resets
      * the PIN-less transfer counter.
      */
     private boolean validatePIN(byte[] buffer, short offset, byte length) {
-        // ! >> validatePIN() entered PIN: {buffer, offset, length}
         if (!userPIN.check(buffer, offset, length)) {
-            // ! processVerifyPIN() | User PIN verification failed
             short triesRemaining = userPIN.getTriesRemaining();
             // The last nibble of return code is number of remaining tries
             ISOException.throwIt((short) (SW_PIN_FAILED + triesRemaining));
         }
         // reset howManyPINless
         howManyPINless = 0;
-        // ! << validatePIN()
         return true;
     }
 
@@ -787,21 +586,13 @@ public class ImpalaApplet extends Applet {
 
     /**
      * Signs an outgoing transfer transaction. Validates the sender is this card,
-     * the recipient is not this card, and sufficient funds exist. For offline transfers
-     * (positive counter), signs with a Limited Use Key (LUK). For online transfers
-     * (zero counter), signs with the card's permanent EC key. Deducts the amount
-     * from balance and stores the transaction hash in the repository.
+     * the recipient is not this card, and sufficient funds exist.
      *
      * Response format: [signature (72B) | pubKey (65B) | pubKeySig (72B)]
      */
     private void signTransfer(byte[] buffer, short dataLength) {
-        // ! >> signTransfer
         if (dataLength != (short) (USER_PIN_LENGTH + SIGNABLE_LENGTH)) {
             ISOException.throwIt(SW_ERROR_WRONG_SIGNABLE_LENGTH);
-        }
-
-        if (!repository.checkCapacity()) {
-            ISOException.throwIt(SW_ERROR_STORAGE_OUT_OF_CAPACITY);
         }
 
         boolean senderIsMe = Util.arrayCompare(buffer,
@@ -827,103 +618,50 @@ public class ImpalaApplet extends Applet {
 
         TransactionParser.getCounter(buffer, OFFSET_SIGNABLE, tempCounter);
         if (isNegative(tempCounter)) {
-            ISOException.throwIt(SW_ERROR_TRANSFER_COUNTER_INVALID);
+            ISOException.throwIt(ISO7816.SW_DATA_INVALID);
         }
 
-        if (isPositive(tempCounter)) {
-            if (!checkLUKLimit(tempAmount)) {
-                ISOException.throwIt(SW_INSUFFICIENT_LUK_LIMIT);// 0x6225
-            }
-            signWithLUK(buffer, OFFSET_SIGNABLE, SIGNABLE_LENGTH);
-            makeHashable(buffer, OFFSET_SIGNABLE,
-                    sigBuffer, ZERO,
-                    myLUKs[myLUKIndex].pubKeyBytes, ZERO,
-                    myLUKs[myLUKIndex].sig, ZERO);
+        signWithMyKey(buffer, OFFSET_SIGNABLE, SIGNABLE_LENGTH);
+        // copy pubKey to scratchpad
+        cardECPublicKey.getW(scratchpad, ZERO);
+        // makeHashable will use the pubKey in scratchpad
+        makeHashable(buffer, OFFSET_SIGNABLE,
+                sigBuffer, ZERO,
+                scratchpad, ZERO,
+                SIXTY_FOUR_ZEROES, ZERO);
 
-            JCSystem.beginTransaction();
+        JCSystem.beginTransaction();
 
-            // no need to check whether repository.store succeeded because
-            // repository.checkCapacity was called earlier
-            repository.store(hashable);
-            LUK currentLUK = myLUKs[myLUKIndex];
-            // ! Delete current LUK and increase myLUKIndex
-            myLUKs[myLUKIndex].valid = false;
-            if (myLUKIndex < MAX_NUMBER_OF_LUKS - 1) {
-                myLUKIndex++;
-            }
-            // ! Subtract myBalance after successful signing
-            subtractFromBalance(tempAmount);
+        subtractFromBalance(tempAmount);
 
-            JCSystem.commitTransaction();
+        JCSystem.commitTransaction();
 
-            // FROM THIS POINT ONWARD, THE SCRATCHPAD IS USED TO STORE THE RESPONSE
-            // copy to scratchpad
-            Util.arrayCopyNonAtomic(sigBuffer, ZERO, scratchpad, ZERO, MAX_SIG_LENGTH);
-            Util.arrayCopyNonAtomic(currentLUK.pubKeyBytes, ZERO,
-                    scratchpad, MAX_SIG_LENGTH, PUB_KEY_LENGTH);
-            Util.arrayCopyNonAtomic(currentLUK.sig, ZERO,
-                    scratchpad, (short) (MAX_SIG_LENGTH + PUB_KEY_LENGTH),
-                    MAX_SIG_LENGTH);
-        } else {
-            signWithMyKey(buffer, OFFSET_SIGNABLE, SIGNABLE_LENGTH);
-            // copy pubKey to scratchpad
-            cardECPublicKey.getW(scratchpad, ZERO);
-            // makeHashable will use the pubKey in scratchpad
-            makeHashable(buffer, OFFSET_SIGNABLE,
-                    sigBuffer, ZERO,
-                    scratchpad, ZERO,
-                    SIXTY_FOUR_ZEROES, ZERO);
-
-            JCSystem.beginTransaction();
-
-            // no need to check whether repository.store succeeded because
-            // repository.checkCapacity was called earlier
-            repository.store(hashable);
-            // ! Subtract myBalance after successful signing
-            subtractFromBalance(tempAmount);
-
-            JCSystem.commitTransaction();
-
-            // FROM THIS POINT ONWARD, THE SCRATCHPAD IS USED TO STORE THE RESPONSE
-            // copy to scratchpad
-            Util.arrayCopyNonAtomic(sigBuffer, ZERO, scratchpad, ZERO, MAX_SIG_LENGTH);
-            cardECPublicKey.getW(scratchpad, MAX_SIG_LENGTH);
-            Util.arrayCopyNonAtomic(SIXTY_FOUR_ZEROES, ZERO,
-                    scratchpad, (short) (MAX_SIG_LENGTH + PUB_KEY_LENGTH),
-                    (short) SIXTY_FOUR_ZEROES.length);
-        }
-        // ! << signTransfer
+        // FROM THIS POINT ONWARD, THE SCRATCHPAD IS USED TO STORE THE RESPONSE
+        Util.arrayCopyNonAtomic(sigBuffer, ZERO, scratchpad, ZERO, MAX_SIG_LENGTH);
+        cardECPublicKey.getW(scratchpad, MAX_SIG_LENGTH);
+        Util.arrayCopyNonAtomic(SIXTY_FOUR_ZEROES, ZERO,
+                scratchpad, (short) (MAX_SIG_LENGTH + PUB_KEY_LENGTH),
+                (short) SIXTY_FOUR_ZEROES.length);
     }
 
     /**
      * Verifies and accepts an incoming transfer in two phases:
      * - P1=0x00: Receives the signable transaction data (60 bytes)
      * - P1=0x01: Receives signature + pubKey + pubKeySig, verifies all cryptographic
-     *   proofs, checks the recipient is this card, validates the counter sequence,
-     *   and credits the amount to the on-card balance.
+     *   proofs, checks the recipient is this card, and credits the amount to the on-card balance.
      */
     private void verifyTransfer(byte[] buffer, short dataLength) {
-        // ! >> verifyTransfer() | dataLength: {dataLength}
         if (buffer[ISO7816.OFFSET_P1] == 0x00) {
             if (dataLength != SIGNABLE_LENGTH) {
                 ISOException.throwIt(SW_ERROR_WRONG_SIGNABLE_LENGTH);
             }
-            // ! verifyTransfer() | INS_VERIFY_TRANSFER save commit message: buffer:
-            // {buffer, (short)0, (short)buffer.length}
             Util.arrayCopyNonAtomic(buffer, ISO7816.OFFSET_CDATA, signableBuffer, ZERO, SIGNABLE_LENGTH);
-            // ! verifyTransfer() | INS_VERIFY_TRANSFER signableBuffer {signableBuffer}
         }
         if (buffer[ISO7816.OFFSET_P1] == 0x01) {
-            // ! verifyTransfer() | INS_VERIFY_TRANSFER save signature
             if (dataLength != (short) (MAX_SIG_LENGTH + PUB_KEY_LENGTH + MAX_SIG_LENGTH)) {
                 ISOException.throwIt(SW_ERROR_WRONG_TAIL_LENGTH);
             }
 
-            if (!repository.checkCapacity()) {
-                ISOException.throwIt(SW_ERROR_STORAGE_OUT_OF_CAPACITY);
-            }
-
-            // first check that the sig and pubKeySig are valid
             // set the tempPubKey to the public key in the transfer to be verified
             tempPubKey.setW(buffer, (short) (ISO7816.OFFSET_CDATA + MAX_SIG_LENGTH), PUB_KEY_LENGTH);
 
@@ -935,7 +673,7 @@ public class ImpalaApplet extends Applet {
                 ISOException.throwIt(SW_ERROR_SIGNATURE_VERIFICATION_FAILED);
             }
 
-            // then check that the signable transfer is valid
+            // check that the sender is NOT this card (receiving a transfer, not sending)
             boolean senderIsMe = Util.arrayCompare(signableBuffer,
                     TransactionParser.OFFSET_SENDER,
                     accountId, ZERO, UUID_LENGTH) == 0;
@@ -943,6 +681,7 @@ public class ImpalaApplet extends Applet {
                 ISOException.throwIt(SW_ERROR_WRONG_SENDER);
             }
 
+            // check that the recipient IS this card
             boolean recipientIsMe = Util.arrayCompare(signableBuffer,
                     TransactionParser.OFFSET_RECIPIENT,
                     accountId, ZERO, UUID_LENGTH) == 0;
@@ -950,75 +689,12 @@ public class ImpalaApplet extends Applet {
                 ISOException.throwIt(SW_ERROR_WRONG_RECIPIENT);
             }
 
+            // Credit the transfer amount to on-card balance
             TransactionParser.getAmount(signableBuffer, ZERO, tempAmount);
 
-            TransactionParser.getCounter(signableBuffer, ZERO, tempCounter);
-            if (!verifyTempCounter()) {
-                ISOException.throwIt(SW_ERROR_TRANSFER_COUNTER_INVALID);
-            }
-            if (isPositive(tempCounter)) {
-                if (!checkLUKLimit(tempAmount)) {
-                    ISOException.throwIt(SW_INSUFFICIENT_LUK_LIMIT);
-                }
-                // store transfer into repository
-                makeHashable(signableBuffer, ZERO,
-                        buffer, ISO7816.OFFSET_CDATA,
-                        buffer, (short) (ISO7816.OFFSET_CDATA + MAX_SIG_LENGTH),
-                        buffer, (short) (ISO7816.OFFSET_CDATA + MAX_SIG_LENGTH + PUB_KEY_LENGTH));
-
-                JCSystem.beginTransaction();
-
-                // no need to check whether repository.store succeeded because
-                // repository.checkCapacity was called earlier
-                repository.store(hashable);
-                // update balance and offline counter
-                addToBalance(tempAmount);
-                Util.arrayCopy(tempCounter, ZERO, seenOfflineCounter, ZERO, INT32_LENGTH);
-
-                JCSystem.commitTransaction();
-            } else if (isNegative(tempCounter)) {
-                JCSystem.beginTransaction();
-
-                // update balance and remote counter
-                addToBalance(tempAmount);
-                Util.arrayCopy(tempCounter, ZERO, remoteCounter, ZERO, INT32_LENGTH);
-
-                JCSystem.commitTransaction();
-            } else {
-                // counter may not be zero
-                ISOException.throwIt(SW_ERROR_TRANSFER_COUNTER_INVALID);
-            }
-        }
-        // ! << verifyTransfer()
-    }
-
-    /**
-     * Validates the transaction counter for incoming transfers.
-     * - Zero counters are rejected (invalid).
-     * - Negative counters represent online/remote transactions and must be sequential.
-     * - Positive counters represent offline transactions and must fall within the
-     *   expected range (sent but not yet seen).
-     */
-    private boolean verifyTempCounter() {
-        // ! verifyTempCounter() | counter: {counter}
-        // ! verifyTempCounter() | sentOfflineCounter: {sentOfflineCounter}
-        // ! verifyTempCounter() | seenOfflineCounter: {seenOfflineCounter}
-        // ! verifyTempCounter() | remoteCounter: {remoteCounter}
-        if (isZero(tempCounter)) {
-            // ! Counter may never be zero
-            return false;
-        }
-        if (isNegative(tempCounter)) {
-            // ! verifyTempCounter() | remote counter
-            // ! verifyTempCounter() | counter {counter}
-            // ! verifyTempCounter() | remoteCounter {remoteCounter}
-            Util.arrayCopyNonAtomic(tempCounter, ZERO, tempPlusOne, ZERO, INT32_LENGTH);
-            ArrayUtil.incNumber(tempPlusOne);
-            return Util.arrayCompare(tempPlusOne, ZERO, remoteCounter, ZERO, INT32_LENGTH) == 0;
-        } else {
-            // ! verifyTempCounter() | offline counter
-            return isSmallerOrEqual(tempCounter, sentOfflineCounter) &&
-                    !isSmallerOrEqual(tempCounter, seenOfflineCounter);
+            JCSystem.beginTransaction();
+            addToBalance(tempAmount);
+            JCSystem.commitTransaction();
         }
     }
 
@@ -1031,7 +707,6 @@ public class ImpalaApplet extends Applet {
             byte[] sig, short sigOffset,
             byte[] pubKey, short pubKeyOffset,
             byte[] pubKeySig, short pubKeySigOffset) {
-        // ! >> makeHashable()
         Util.arrayCopy(signable, signableOffset, hashable.contents, ZERO, SIGNABLE_LENGTH);
         CryptoPrimitivesConverter.convertSignatureToRawBytes(sig, sigOffset,
                 hashable.contents, SIGNABLE_LENGTH);
@@ -1066,7 +741,6 @@ public class ImpalaApplet extends Applet {
      * @param apdu APDU object
      */
     private void processVerifyPIN(APDU apdu) {
-        // ! processVerifyPIN() | start
         byte[] buffer = apdu.getBuffer();
         byte pinLength = buffer[ISO7816.OFFSET_LC];
         byte triesRemaining;
@@ -1079,32 +753,25 @@ public class ImpalaApplet extends Applet {
         switch (pinType) {
             case P2_MASTER_PIN:
                 if (!masterPIN.check(buffer, ISO7816.OFFSET_CDATA, pinLength)) {
-                    // ! processVerifyPIN() | Master PIN verification failed
                     triesRemaining = masterPIN.getTriesRemaining();
                     // The last nibble of return code is number of remaining tries
                     ISOException.throwIt((short) (SW_PIN_FAILED + triesRemaining));
                 }
-                // ! process() | Master PIN verified
                 break;
             case P2_USER_PIN:
                 if (!userPIN.check(buffer, ISO7816.OFFSET_CDATA, pinLength)) {
-                    // ! processVerifyPIN() | User PIN verification failed
                     triesRemaining = userPIN.getTriesRemaining();
                     // The last nibble of return code is number of remaining tries
                     ISOException.throwIt((short) (SW_PIN_FAILED + triesRemaining));
                 }
-                // ! processVerifyPIN() | User PIN verified
                 break;
             default:
-                // ! process() | Unknown kind of PIN {pinType}
                 ISOException.throwIt(ISO7816.SW_INCORRECT_P1P2);
         }
     }
 
     /** Returns true if the given amount is less than or equal to the current balance. */
     private boolean checkAmount(byte[] amount) {
-        // ! checkAmount()
-        // ! checkAmount() | amount <= myBalance ?
         return ArrayUtil.unsignedByteArrayCompare(amount, ZERO, myBalance, ZERO, INT64_LENGTH) <= ZERO;
     }
 
@@ -1113,14 +780,13 @@ public class ImpalaApplet extends Applet {
         short carry = 0;
         for (short i = INT64_LENGTH - 1; i >= 0; i--) {
             short x = (short) (this.myBalance[i] & 0xFF);
-            // ! addToBalance | x: {x}
             short y = (short) (amount[i] & 0xFF);
-            // ! addToBalance | y: {y}
             short result = (short) (x + y + carry);
-            // ! addToBalance | result: {result}
             this.myBalance[i] = (byte) result;
             carry = (short) ((result >> 8) & 1);
-            // ! addToBalance | carry: {carry}
+        }
+        if (carry != 0) {
+            ISOException.throwIt(ISO7816.SW_DATA_INVALID); // balance overflow
         }
     }
 
@@ -1134,101 +800,44 @@ public class ImpalaApplet extends Applet {
             this.myBalance[i] = (byte) result;
             borrow = (short) ((result >> 8) & 1);
         }
+        if (borrow != 0) {
+            ISOException.throwIt(SW_INSUFFICIENT_FUNDS); // balance underflow
+        }
     }
 
     /** Generates a new secp256r1 EC key pair and stores it as the card's signing key. */
     private void createECKeypair() {
-        // ! createECKeypair()
         KeyPair keyPair = SecP256r1.newKeyPair();
         keyPair.genKeyPair();
-        // ! createECKeypair() | genKeyPair() done
 
         cardECPrivateKey = (ECPrivateKey) keyPair.getPrivate();
         cardECPublicKey = (ECPublicKey) keyPair.getPublic();
-        // ! createECKeypair() | done.
-    }
-
-    /** Generates a new RSA-1024 key pair used for encrypted data transport (e.g., master PIN update). */
-    private void createRSAKeypair() {
-        // ! createRSAKeypair()
-        KeyPair rsaKeyPair = new KeyPair(KeyPair.ALG_RSA, KeyBuilder.LENGTH_RSA_1024);
-        rsaKeyPair.genKeyPair();
-        // ! createRSAKeypair() | genKeyPair() done
-
-        cardRSAPrivateKey = (RSAPrivateKey) rsaKeyPair.getPrivate();
-        cardRSAPublicKey = (RSAPublicKey) rsaKeyPair.getPublic();
-        // ! createRSAKeypair() | done.
-
-    }
-
-    /** Decrypts data using the card's RSA private key (PKCS#1 padding). Result goes to scratchpad. */
-    private void decryptWithRSA(byte[] inBuff, short inOffset, short inLength) {
-        try {
-            cipherRSA.init(cardRSAPrivateKey, Cipher.MODE_DECRYPT);
-            cipherRSA.doFinal(inBuff, inOffset, inLength, scratchpad, ZERO);
-        } catch (CryptoException e) {
-            ISOException.throwIt(SW_ERROR_CRYPTO_EXCEPTION);
-        }
-    }
-
-    /** Decrypts data using the AES-256 session key in CBC mode. Result goes to scratchpad. */
-    private void decryptWithAES(byte[] inBuff, short inOffset, short inLength) {
-        try {
-            cipherAES.init(sessionKey, Cipher.MODE_DECRYPT, sessionIV, ZERO, AES_IV_LENGTH);
-            cipherAES.doFinal(inBuff, inOffset, inLength, scratchpad, ZERO);
-        } catch (CryptoException e) {
-            ISOException.throwIt(SW_ERROR_CRYPTO_EXCEPTION);
-        }
-    }
-
-    /**
-     * Permanently terminates the card. Requires a valid server signature over the card ID
-     * to prevent unauthorized termination. Deletes all LUKs and sets the terminated flag.
-     */
-    private void suicide(byte[] buffer, short dataLength) {
-        boolean sigVerified = verifySig(cardId, ZERO, UUID_LENGTH,
-                buffer, ISO7816.OFFSET_CDATA, dataLength, masterPublicKey);
-        if (sigVerified) {
-            terminated = true;
-        } else {
-            ISOException.throwIt(SW_ERROR_SIGNATURE_VERIFICATION_FAILED);
-        }
     }
 
     /** Signs data with the card's EC private key (ECDSA-SHA256). Returns signature length. */
     private short signWithMyKey(byte[] buffer, short offset, short length) {
-        // ! signWithMyKey() | length: {length}
-        // ! signWithMyKey() | {buffer, offset, length}
-        if (!cardECPrivateKey.isInitialized()) {
+        if (cardECPrivateKey == null || !cardECPrivateKey.isInitialized()) {
             ISOException.throwIt(SW_ERROR_EC_CARD_KEY_MISSING);
         }
         try {
             signer.init(cardECPrivateKey, Signature.MODE_SIGN);
-
-            // ! signWithMyKey() | Signature.init() done
         } catch (Exception e) {
-            // ! signWithMyKey() | Exception thrown during signer.init
             ISOException.throwIt(SW_ERROR_INIT_SIGNER);
         }
-        // ! signWithMyKey() | sigBuffer
         return signer.sign(buffer, offset, length, sigBuffer, ZERO);
     }
 
     /** Verifies an ECDSA-SHA256 signature against the given public key. */
     private boolean verifySig(byte[] inBuff, short inOffset, short inLength,
             byte[] sig, short sigOffset, short sigLength, PublicKey pubKey) {
-        // ! verifySig() | Message: {inBuff, inOffset, inLength}
-        // ! verifySig() | Signature: {sig, sigOffset, sigLength}
         verifier.init(pubKey, Signature.MODE_VERIFY);
         return verifier.verify(inBuff, inOffset, inLength, sig, sigOffset, sigLength);
     }
 
     /** Sends a byte array as the APDU response. */
     private void sendBytes(APDU apdu, byte[] outData, short bOff, short len) {
-        // ! >> sendBytes
         apdu.setOutgoing();
         apdu.setOutgoingLength(len);
         apdu.sendBytesLong(outData, bOff, len);
-        // ! << sendBytes
     }
 }

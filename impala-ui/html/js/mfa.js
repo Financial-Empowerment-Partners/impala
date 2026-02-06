@@ -1,3 +1,13 @@
+/**
+ * MFA page module — lookup, enroll, and verify multi-factor authentication.
+ *
+ * Supports two MFA types:
+ *  - TOTP: requires a shared secret for enrollment
+ *  - SMS: requires a phone number for enrollment
+ *
+ * Enrollment uses POST /mfa with UPSERT semantics (re-enrollment replaces
+ * existing method). Verification uses POST /mfa/verify.
+ */
 (function () {
     Router.init();
 
@@ -90,6 +100,9 @@
     // Verify
     verifyForm.addEventListener('submit', function (e) {
         e.preventDefault();
+        var submitBtn = verifyForm.querySelector('button[type="submit"]');
+        if (submitBtn) submitBtn.disabled = true;
+
         var body = {
             account_id: document.getElementById('verify-account-id').value.trim(),
             mfa_type: document.getElementById('verify-mfa-type').value,
@@ -103,6 +116,9 @@
             })
             .catch(function (err) {
                 Router.showToast('Verification failed: ' + err.message, 'alert');
+            })
+            .then(function () {
+                if (submitBtn) submitBtn.disabled = false;
             });
     });
 

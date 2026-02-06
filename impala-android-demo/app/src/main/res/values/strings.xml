@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Impala Demo</string>
+
+    <!-- Login -->
+    <string name="login_header">Impala</string>
+    <string name="login_subtitle">Secure digital payments</string>
+    <string name="hint_account_id">Account ID</string>
+    <string name="hint_password">Password</string>
+    <string name="btn_sign_in">Sign In</string>
+    <string name="btn_google">Continue with Google</string>
+    <string name="btn_github">Continue with GitHub</string>
+    <string name="divider_or">OR</string>
+    <string name="error_fields_required">Account ID and password are required</string>
+    <string name="error_password_short">Password must be at least 8 characters</string>
+
+    <!-- Navigation -->
+    <string name="nav_cards">Cards</string>
+    <string name="nav_transfers">Transfers</string>
+    <string name="nav_settings">Settings</string>
+
+    <!-- Cards -->
+    <string name="btn_register_card">Register Card</string>
+    <string name="empty_cards">No cards registered yet</string>
+    <string name="dialog_delete_card_title">Delete Card</string>
+    <string name="dialog_delete_card_message">Remove card %s?</string>
+
+    <!-- Transfers -->
+    <string name="btn_new_transfer">New Transfer</string>
+    <string name="empty_transfers">No transfers yet</string>
+
+    <!-- Settings -->
+    <string name="section_account">Account</string>
+    <string name="section_mfa">Multi-Factor Authentication</string>
+    <string name="section_server">Server</string>
+    <string name="section_about">About</string>
+    <string name="hint_server_url">Bridge API URL</string>
+    <string name="label_name">Name</string>
+    <string name="label_stellar_id">Stellar ID</string>
+    <string name="label_payala_id">Payala ID</string>
+    <string name="label_mfa_status">MFA Status</string>
+    <string name="label_version">Version</string>
+    <string name="btn_manage_mfa">Manage MFA</string>
+    <string name="btn_logout">Log Out</string>
+    <string name="mfa_not_enrolled">Not enrolled</string>
+    <string name="not_available">N/A</string>
+</resources>

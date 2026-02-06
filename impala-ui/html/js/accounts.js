@@ -1,3 +1,10 @@
+/**
+ * Accounts page module — search, create, and update Stellar/Payala accounts.
+ *
+ * Search by stellar_account_id, create new linked accounts, or edit existing
+ * ones. The Edit button and create/update forms respect the manage_accounts
+ * permission.
+ */
 (function () {
     Router.init();
 

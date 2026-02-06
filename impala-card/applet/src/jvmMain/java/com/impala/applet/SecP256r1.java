@@ -26,7 +26,6 @@ import javacard.security.ECPublicKey;
 import javacard.security.KeyBuilder;
 import javacard.security.KeyPair;
 
-import static com.impala.applet.Constants.PRIV_KEY_LENGTH;
 import static com.impala.applet.Constants.PUB_KEY_LENGTH;
 
 /**
@@ -91,13 +90,6 @@ public class SecP256r1 {
         return privKey;
     }
 
-    /** Creates an EC private key from a 32-byte scalar value (e.g., for LUK import). */
-    public static ECPrivateKey newPrivKeyFromBytes(byte[] inBuff, short inOffset) {
-        ECPrivateKey privKey = newPrivKey();
-        privKey.setS(inBuff, inOffset, PRIV_KEY_LENGTH);
-        return privKey;
-    }
-
     /** Creates a new EC public key initialized with the secp256r1 curve parameters. */
     public static ECPublicKey newPubKey() {
         ECPublicKey pubKey = (ECPublicKey) KeyBuilder.buildKey(KeyBuilder.TYPE_EC_FP_PUBLIC,
@@ -107,13 +99,6 @@ public class SecP256r1 {
         pubKey.setB(b_secp256r1, (short) 0, (short) b_secp256r1.length); // second coefficient
         pubKey.setG(P_secp256r1, (short) 0, (short) P_secp256r1.length); // base point G
         pubKey.setR(m_secp256r1, (short) 0, (short) m_secp256r1.length); // order of base point
-        return pubKey;
-    }
-
-    /** Creates an EC public key from a 65-byte uncompressed point (0x04 || X || Y). */
-    public static ECPublicKey newPubKeyFromBytes(byte[] inBuff, short inOffset) {
-        ECPublicKey pubKey = newPubKey();
-        pubKey.setW(inBuff, inOffset, PUB_KEY_LENGTH);
         return pubKey;
     }
 

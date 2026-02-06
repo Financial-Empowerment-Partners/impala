@@ -276,6 +276,9 @@ async fn main() {
         .unwrap();
 }
 
+/// Background task that periodically fetches callback URIs from the
+/// `cron_sync` table, invokes each one, and stores the JSON response back
+/// into the `callback_result` column. Runs every 60 seconds.
 async fn cron_sync_task(pool: PgPool) {
     let client = reqwest::Client::new();
     loop {
@@ -323,7 +326,7 @@ async fn cron_sync_task(pool: PgPool) {
     }
 }
 
-// simple handler that responds with a hello message
+/// Health check endpoint (`GET /`). Returns a static greeting.
 async fn default_route() -> &'static str {
     "Hello, World!"
 }
@@ -337,6 +340,10 @@ struct VersionResponse {
     schema_version: Option<String>,
 }
 
+/// Return build info and database schema version (`GET /version`).
+///
+/// Build date and rustc version are injected at compile time by `build.rs`.
+/// Schema version is read from the `impala_schema` table.
 async fn get_version(
     Extension(pool): Extension<PgPool>,
 ) -> Json<VersionResponse> {
@@ -389,10 +396,37 @@ struct AuthenticateResponse {
     action: String, // "registered" or "authenticated"
 }
 
+/// Create a new linked Stellar/Payala account (`POST /account`).
+///
+/// Validates that stellar_account_id is a valid Stellar public key format
+/// (56 chars, starts with 'G') and that required name fields are non-empty.
 async fn create_account(
     Extension(pool): Extension<PgPool>,
     Json(payload): Json<CreateAccountRequest>,
 ) -> Result<Json<CreateAccountResponse>, StatusCode> {
+    // Validate stellar_account_id format (Stellar public keys are 56 chars starting with 'G')
+    if payload.stellar_account_id.len() != 56 || !payload.stellar_account_id.starts_with('G') {
+        return Ok(Json(CreateAccountResponse {
+            success: false,
+            message: "stellar_account_id must be 56 characters starting with 'G'".to_string(),
+        }));
+    }
+
+    // Validate required name fields are non-empty and within bounds
+    if payload.first_name.trim().is_empty() || payload.last_name.trim().is_empty() {
+        return Ok(Json(CreateAccountResponse {
+            success: false,
+            message: "first_name and last_name must not be empty".to_string(),
+        }));
+    }
+
+    if payload.first_name.len() > 64 || payload.last_name.len() > 64 {
+        return Ok(Json(CreateAccountResponse {
+            success: false,
+            message: "Name fields must not exceed 64 characters".to_string(),
+        }));
+    }
+
     let result = sqlx::query(
         r#"
         INSERT INTO impala_account
@@ -418,6 +452,13 @@ async fn create_account(
             message: "Account created successfully".to_string(),
         })),
         Err(e) => {
+            let err_str = e.to_string();
+            if err_str.contains("duplicate key") || err_str.contains("unique constraint") {
+                return Ok(Json(CreateAccountResponse {
+                    success: false,
+                    message: "An account with this identifier already exists".to_string(),
+                }));
+            }
             eprintln!("Database error: {}", e);
             Err(StatusCode::INTERNAL_SERVER_ERROR)
         }
@@ -440,6 +481,7 @@ struct GetAccountResponse {
     gender: Option<String>,
 }
 
+/// Look up an account by Stellar account ID (`GET /account?stellar_account_id=...`).
 async fn get_account(
     Extension(pool): Extension<PgPool>,
     Query(params): Query<GetAccountQuery>,
@@ -495,6 +537,11 @@ struct UpdateAccountResponse {
     rows_affected: u64,
 }
 
+/// Update account fields (`PUT /account`).
+///
+/// Accepts partial updates — only provided fields are modified.
+/// Identifies the account by either `stellar_account_id` or `payala_account_id`.
+/// Builds a dynamic SQL UPDATE with positional parameters.
 async fn update_account(
     Extension(pool): Extension<PgPool>,
     Json(payload): Json<UpdateAccountRequest>,
@@ -619,6 +666,14 @@ async fn update_account(
     }
 }
 
+/// Register or authenticate a user (`POST /authenticate`).
+///
+/// If no credentials exist for the account, registers a new user by hashing
+/// the password with Argon2 and storing it in `impala_auth`. If credentials
+/// exist, verifies the password against the stored hash.
+///
+/// Requires the account to already exist in `impala_account`.
+/// Enforces a minimum password length of 8 characters.
 async fn authenticate(
     Extension(pool): Extension<PgPool>,
     Json(payload): Json<AuthenticateRequest>,
@@ -722,6 +777,11 @@ struct SyncResponse {
     timestamp: String,
 }
 
+/// Record a sync timestamp in Redis and reconcile with Stellar RPC (`POST /sync`).
+///
+/// Stores the current UTC timestamp in Redis keyed by `account_id`, then
+/// queries the Soroban RPC `getTransactions` endpoint to check for
+/// transactions that match records in the local database.
 async fn sync_account(
     Extension(pool): Extension<PgPool>,
     Extension(redis_client): Extension<Arc<redis::Client>>,
@@ -819,6 +879,13 @@ struct TokenResponse {
     temporal_token: Option<String>,
 }
 
+/// Issue JWT tokens (`POST /token`).
+///
+/// Two flows:
+/// - **Refresh token → temporal token**: provide `refresh_token` to get a
+///   1-hour temporal token for API access.
+/// - **Username + password → refresh token**: authenticate and receive a
+///   30-day refresh token.
 async fn token(
     Extension(pool): Extension<PgPool>,
     Extension(jwt_secret): Extension<Arc<String>>,
@@ -957,6 +1024,13 @@ struct SubscribeResponse {
     message: String,
 }
 
+/// Subscribe to network event streams (`POST /subscribe`).
+///
+/// Spawns a background task for the requested network:
+/// - `"stellar"`: connects to Horizon SSE `/ledgers` endpoint,
+///   stores ledger sequences and timestamps in Redis.
+/// - `"payala"`: binds a TCP listener on `listen_endpoint`,
+///   stores incoming JSON events in Redis.
 async fn subscribe(
     Extension(horizon_url): Extension<Arc<String>>,
     Extension(redis_client): Extension<Arc<redis::Client>>,
@@ -1015,6 +1089,9 @@ async fn subscribe(
     }
 }
 
+/// Long-running SSE consumer for Stellar Horizon ledger events.
+/// Parses the Server-Sent Events stream, extracts ledger sequence numbers,
+/// and stores each event's timestamp in Redis.
 async fn stellar_stream(
     url: &str,
     redis_client: &redis::Client,
@@ -1033,10 +1110,19 @@ async fn stellar_stream(
     let mut stream = response.bytes_stream();
     let mut buffer = String::new();
     let mut event_data = String::new();
+    const MAX_BUFFER_SIZE: usize = 1_048_576; // 1 MB
 
     while let Some(chunk) = stream.next().await {
         let chunk = chunk?;
         buffer.push_str(&String::from_utf8_lossy(&chunk));
+
+        // Prevent unbounded memory growth from malformed streams
+        if buffer.len() > MAX_BUFFER_SIZE {
+            eprintln!("SSE buffer exceeded {} bytes, resetting", MAX_BUFFER_SIZE);
+            buffer.clear();
+            event_data.clear();
+            continue;
+        }
 
         while let Some(newline_pos) = buffer.find('\n') {
             let line = buffer[..newline_pos].trim_end_matches('\r').to_string();
@@ -1082,6 +1168,9 @@ async fn stellar_stream(
     Ok(())
 }
 
+/// Long-running TCP listener for Payala network events.
+/// Accepts connections, parses incoming JSON messages, and stores each
+/// event in Redis keyed by timestamp.
 async fn payala_stream(
     listen_endpoint: &str,
     redis_client: &redis::Client,
@@ -1137,7 +1226,7 @@ async fn payala_stream(
                     if let Ok(mut conn) = redis.get_async_connection().await {
                         let timestamp =
                             chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.6fZ").to_string();
-                        let event_key = format!("payala:event:{}", timestamp);
+                        let event_key = format!("payala:event:{}:{}", timestamp, uuid::Uuid::new_v4());
                         let _: Result<(), _> = redis::AsyncCommands::set(
                             &mut conn,
                             &event_key,
@@ -1160,6 +1249,8 @@ async fn payala_stream(
 }
 
 // ── Transaction ────────────────────────────────────────────────────────
+// Records dual-chain transactions (Stellar and/or Payala) with a
+// database CHECK constraint requiring at least one tx ID.
 
 #[derive(Deserialize)]
 struct CreateTransactionRequest {
@@ -1184,6 +1275,11 @@ struct CreateTransactionResponse {
     btxid: Option<Uuid>,
 }
 
+/// Create a dual-chain transaction record (`POST /transaction`).
+///
+/// At least one of `stellar_tx_id` or `payala_tx_id` must be provided
+/// (enforced both in application code and by a database CHECK constraint).
+/// Returns the generated bridge transaction ID (`btxid`).
 async fn create_transaction(
     Extension(pool): Extension<PgPool>,
     Json(payload): Json<CreateTransactionRequest>,
@@ -1234,6 +1330,7 @@ async fn create_transaction(
 }
 
 // ── Card ───────────────────────────────────────────────────────────────
+// Hardware smartcard registration and soft-deletion.
 
 #[derive(Deserialize)]
 struct CreateCardRequest {
@@ -1254,6 +1351,8 @@ struct DeleteCardRequest {
     card_id: String,
 }
 
+/// Register a hardware smartcard (`POST /card`).
+/// Stores the card's EC and RSA public keys linked to an account.
 async fn create_card(
     Extension(pool): Extension<PgPool>,
     Json(payload): Json<CreateCardRequest>,
@@ -1283,6 +1382,8 @@ async fn create_card(
     }
 }
 
+/// Soft-delete a card (`DELETE /card`).
+/// Sets `is_delete = TRUE` rather than removing the row.
 async fn delete_card(
     Extension(pool): Extension<PgPool>,
     Json(payload): Json<DeleteCardRequest>,
@@ -1316,6 +1417,9 @@ async fn delete_card(
 }
 
 // ── MFA ────────────────────────────────────────────────────────────────
+// Multi-factor authentication enrollment and verification.
+// Supports TOTP (shared secret) and SMS (phone number) methods.
+// Uses composite PK (account_id, mfa_type) with UPSERT for re-enrollment.
 
 #[derive(Deserialize)]
 struct EnrollMfaRequest {
@@ -1352,7 +1456,10 @@ struct VerifyMfaRequest {
     code: String,
 }
 
-/// POST /mfa – enroll or update an MFA method for an account
+/// Enroll or re-enroll an MFA method (`POST /mfa`).
+///
+/// Supports `"totp"` (requires `secret`) and `"sms"` (requires `phone_number`).
+/// Uses UPSERT on `(account_id, mfa_type)` so re-enrollment updates the existing row.
 async fn enroll_mfa(
     Extension(pool): Extension<PgPool>,
     Json(payload): Json<EnrollMfaRequest>,
@@ -1405,7 +1512,10 @@ async fn enroll_mfa(
     }
 }
 
-/// GET /mfa?account_id=… – list MFA enrollments for an account
+/// List all MFA enrollments for an account (`GET /mfa?account_id=…`).
+///
+/// Returns an array of [MfaEnrollment] rows, each containing the type,
+/// shared secret (TOTP), phone number (SMS), and enabled status.
 async fn get_mfa(
     Extension(pool): Extension<PgPool>,
     Query(params): Query<MfaQuery>,
@@ -1428,6 +1538,8 @@ async fn get_mfa(
 }
 
 // ── Notify ─────────────────────────────────────────────────────────────
+// Notification preference records supporting webhook, SMS, mobile push,
+// and in-app delivery channels with contact details per medium.
 
 #[derive(Deserialize)]
 struct CreateNotifyRequest {
@@ -1450,7 +1562,11 @@ struct NotifyResponse {
     id: Option<i32>,
 }
 
-/// POST /notify – create a new notification record
+/// Create a notification preference record (`POST /notify`).
+///
+/// Validates the delivery medium (`webhook`, `sms`, `mobile_push`, `to_app`),
+/// basic email format, and webhook URL scheme before inserting. Returns the
+/// generated row ID on success.
 async fn create_notify(
     Extension(pool): Extension<PgPool>,
     Json(payload): Json<CreateNotifyRequest>,
@@ -1465,6 +1581,28 @@ async fn create_notify(
             ),
             id: None,
         }));
+    }
+
+    // Validate email format if provided
+    if let Some(ref email) = payload.email {
+        if !email.contains('@') || email.len() > 254 {
+            return Ok(Json(NotifyResponse {
+                success: false,
+                message: "Invalid email address".to_string(),
+                id: None,
+            }));
+        }
+    }
+
+    // Validate webhook URL if provided
+    if let Some(ref url) = payload.url {
+        if !url.starts_with("http://") && !url.starts_with("https://") {
+            return Ok(Json(NotifyResponse {
+                success: false,
+                message: "URL must start with http:// or https://".to_string(),
+                id: None,
+            }));
+        }
     }
 
     let result = sqlx::query_scalar::<_, i32>(
@@ -1512,7 +1650,10 @@ struct UpdateNotifyRequest {
     app: Option<String>,
 }
 
-/// PUT /notify – update an existing notification record
+/// Update an existing notification record by ID (`PUT /notify`).
+///
+/// Accepts partial updates — only provided fields are modified. Builds a
+/// dynamic SQL UPDATE with positional parameters.
 async fn update_notify(
     Extension(pool): Extension<PgPool>,
     Json(payload): Json<UpdateNotifyRequest>,
@@ -1634,7 +1775,11 @@ async fn update_notify(
     }
 }
 
-/// POST /mfa/verify – verify an MFA code (TOTP or SMS)
+/// Verify an MFA code (`POST /mfa/verify`).
+///
+/// Looks up the enrollment for the given `(account_id, mfa_type)`, checks
+/// that it is enabled, and validates the code. Currently a placeholder —
+/// real TOTP validation (RFC 6238) and SMS code lookup are not yet implemented.
 async fn verify_mfa(
     Extension(pool): Extension<PgPool>,
     Json(payload): Json<VerifyMfaRequest>,

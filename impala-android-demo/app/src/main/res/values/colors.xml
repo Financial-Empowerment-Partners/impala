@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="md_theme_primary">#FF6200EE</color>
+    <color name="md_theme_onPrimary">#FFFFFFFF</color>
+    <color name="md_theme_primaryContainer">#FFBB86FC</color>
+    <color name="md_theme_onPrimaryContainer">#FF21005E</color>
+    <color name="md_theme_secondary">#FF03DAC5</color>
+    <color name="md_theme_onSecondary">#FF000000</color>
+    <color name="md_theme_secondaryContainer">#FFCEFAF6</color>
+    <color name="md_theme_background">#FFFFFFFF</color>
+    <color name="md_theme_onBackground">#FF1C1B1F</color>
+    <color name="md_theme_surface">#FFFFFFFF</color>
+    <color name="md_theme_onSurface">#FF1C1B1F</color>
+    <color name="md_theme_error">#FFB00020</color>
+    <color name="md_theme_onError">#FFFFFFFF</color>
+    <color name="md_theme_outline">#FF79747E</color>
+
+    <!-- Dark theme -->
+    <color name="md_theme_dark_primary">#FFBB86FC</color>
+    <color name="md_theme_dark_onPrimary">#FF380065</color>
+    <color name="md_theme_dark_background">#FF1C1B1F</color>
+    <color name="md_theme_dark_onBackground">#FFE6E1E5</color>
+    <color name="md_theme_dark_surface">#FF1C1B1F</color>
+    <color name="md_theme_dark_onSurface">#FFE6E1E5</color>
+    <color name="md_theme_dark_error">#FFCF6679</color>
+
+    <!-- OAuth brand colors -->
+    <color name="github_black">#FF24292E</color>
+    <color name="google_blue">#FF4285F4</color>
+
+    <!-- Login gradient -->
+    <color name="gradient_start">#FF6200EE</color>
+    <color name="gradient_end">#FF3700B3</color>
+</resources>

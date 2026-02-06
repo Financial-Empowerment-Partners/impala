@@ -26,8 +26,16 @@ public class ArrayUtil {
         }
     }
 
-    /*
-     * compares unsigned byte values
+    /**
+     * Lexicographic comparison of two unsigned byte arrays.
+     *
+     * @param src     first array
+     * @param srcOff  offset in first array
+     * @param dest    second array
+     * @param destOff offset in second array
+     * @param length  number of bytes to compare
+     * @return 1 if src &gt; dest, -1 if src &lt; dest, 0 if equal
+     * @throws ArrayIndexOutOfBoundsException if length is negative
      */
     public static byte unsignedByteArrayCompare(byte[] src, short srcOff,
             byte[] dest, short destOff,
@@ -51,7 +59,7 @@ public class ArrayUtil {
     public static boolean isNegative(byte[] counter) {
         // ! verifyTransfer().isNegative() | counter: {counter}
         // True if first bit of the first byte is 1
-        return (counter[0] & 1 << 8) != 0;
+        return (counter[0] & 0x80) != 0;
     }
 
     /** Returns true if all 4 bytes of the counter are zero. */

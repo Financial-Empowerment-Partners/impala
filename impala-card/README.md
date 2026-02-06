@@ -148,7 +148,7 @@ This command returns the EC public key stored on the card.
 
 ### Get RSA Pubkey  (7)
 
-This command returns the RSA public key used for LUK encryption when loading card.
+This command returns the RSA public key used for encryption via card.
 
 **Input:** *[ NO Input CDATA Payload ]*
 

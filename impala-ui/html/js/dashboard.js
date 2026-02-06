@@ -1,3 +1,9 @@
+/**
+ * Dashboard page module — displays system version, health status, and session info.
+ *
+ * Fetches build info from GET /api/version (build_date, rustc_version, schema_version),
+ * performs a health check, and shows the current user's role, permissions, and token expiry.
+ */
 (function () {
     Router.init();
 

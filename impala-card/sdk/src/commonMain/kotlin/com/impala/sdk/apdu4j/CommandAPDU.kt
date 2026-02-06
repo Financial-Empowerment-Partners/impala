@@ -419,7 +419,7 @@ class CommandAPDU {
                     apdu[4] = dataLength.toByte()
                     this.dataOffset = 5
 //                    java.lang.System.arraycopy(data, dataOffset, apdu, 5, dataLength)
-                    data?.copyInto(apdu, this.dataOffset, dataOffset, dataLength)
+                    data?.copyInto(apdu, this.dataOffset, dataOffset, dataOffset + dataLength)
                 } else {
                     // case 3e
                     apdu = ByteArray(4 + 3 + dataLength)
@@ -429,7 +429,7 @@ class CommandAPDU {
                     apdu[6] = dataLength.toByte()
                     this.dataOffset = 7
 //                    java.lang.System.arraycopy(data, dataOffset, apdu, 7, dataLength)
-                    data?.copyInto(apdu, dataOffset, this.dataOffset, this.dataOffset + dataLength)
+                    data?.copyInto(apdu, this.dataOffset, dataOffset, dataOffset + dataLength)
                 }
             } else {
                 // case 4s or 4e
@@ -442,7 +442,7 @@ class CommandAPDU {
                     // arraycopy(src, srcOffset, dt, dstOffet, dstLen)
 //                    java.lang.System.arraycopy(data, dataOffset, apdu, 5, dataLength)
 //                    copyInto( dst,dstOffset: Int = 0, startIndex, endIndex)
-                    data?.copyInto(apdu, dataOffset, this.dataOffset, this.dataOffset + dataLength)
+                    data?.copyInto(apdu, this.dataOffset, dataOffset, dataOffset + dataLength)
                     apdu[apdu.size - 1] = if ((ne != 256)) ne.toByte() else 0
                 } else {
                     // case 4e
@@ -453,7 +453,7 @@ class CommandAPDU {
                     apdu[6] = dataLength.toByte()
                     this.dataOffset = 7
 //                    java.lang.System.arraycopy(data, dataOffset, apdu, 7, dataLength)
-                    data?.copyInto(apdu, dataOffset, this.dataOffset, this.dataOffset + dataLength)
+                    data?.copyInto(apdu, this.dataOffset, dataOffset, dataOffset + dataLength)
                     if (ne != 65536) {
                         val leOfs = apdu.size - 2
                         apdu[leOfs] = (ne shr 8).toByte()
@@ -513,7 +513,7 @@ class CommandAPDU {
          */
         get() {
             val data = ByteArray(nc)
-            apdu.copyInto(data, dataOffset, 0,  nc)
+            apdu.copyInto(data, 0, dataOffset, dataOffset + nc)
             return data
         }
 

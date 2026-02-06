@@ -1,11 +1,22 @@
 package com.impala.sdk
 
+/**
+ * Protocol constants for APDU communication with the Impala JavaCard applet.
+ *
+ * Contains ISO/IEC 7816-4 instruction bytes (INS), PIN type selectors (P2),
+ * cryptographic length constants, and status word (SW) response codes.
+ *
+ * INS codes identify the applet command to execute. Status words in the
+ * response indicate success ([SW_OK] = 0x9000) or a specific error condition.
+ */
 object Constants {
+    // ---- Numeric helpers ----
     const val INIT_SEED_LENGTH: Short = 4
     const val ZERO: Short = 0
     const val ONE: Short = 1
     const val TWO: Short = 2
 
+    // ---- APDU instruction (INS) bytes ----
     const val INS_NOP: Byte = 2
     const val INS_GET_BALANCE: Byte = 4
     const val INS_SIGN_TRANSFER: Byte = 6
@@ -33,6 +44,7 @@ object Constants {
     const val P2_MASTER_PIN: Byte = 129.toByte() // P2 byte for Master PIN in Verify 0x81
     const val P2_USER_PIN: Byte = 130.toByte() // P2 byte for User PIN in Verify 0x82
 
+    // ---- Data field lengths (bytes) ----
     const val INT32_LENGTH: Short = 4
     const val INT64_LENGTH: Short = 8
     const val UUID_LENGTH: Short = 16
@@ -45,6 +57,7 @@ object Constants {
     const val PUB_KEY_LENGTH: Short = 65
     const val SIGNABLE_LENGTH: Short = 60
     const val TAG_LENGTH_LENGTH: Short = 2
+    // ---- Status words (SW1-SW2) ----
     const val SW_OK: Short = 0x9000.toShort()
     const val SW_INS_NOT_SUPPORTED: Short = 0x6d00
     const val SW_ERROR_KEY_VERIFICATION_FAILED: Short = 0x0022

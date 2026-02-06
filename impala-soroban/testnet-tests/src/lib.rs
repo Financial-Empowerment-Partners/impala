@@ -1,3 +1,10 @@
+//! Test utilities for Stellar testnet integration tests.
+//!
+//! Provides helpers that wrap the `stellar` CLI to manage test identities,
+//! fund accounts via friendbot, deploy contracts, and invoke contract functions.
+//! All functions shell out to the CLI rather than using the Soroban SDK directly,
+//! exercising the full end-to-end deployment and invocation path.
+
 use std::path::PathBuf;
 use std::process::{Command, Output};
 

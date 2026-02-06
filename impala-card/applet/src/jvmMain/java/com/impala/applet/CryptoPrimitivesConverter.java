@@ -26,6 +26,11 @@ public class CryptoPrimitivesConverter {
     public static void convertSignatureToRawBytes(byte[] inBuff, short inOffset, byte[] outBuff, short outOffset) {
         // ! convertSignatureToRawBytes | {inBuff}
 
+        // Validate minimum DER structure: 30 LEN 02 rLen r 02 sLen s (at least 8 bytes)
+        if ((short)(inOffset + 7) >= (short) inBuff.length) {
+            ISOException.throwIt(ISO7816.SW_DATA_INVALID);
+        }
+
         // the output buffer may have garbage in it and must be zeroed out
         Util.arrayFillNonAtomic(outBuff, outOffset, (short) 64, (byte) 0);
 
@@ -33,9 +38,25 @@ public class CryptoPrimitivesConverter {
         short rOffset = (short) (rLengthOffset + 1);
         byte rLength = inBuff[rLengthOffset];
 
+        // Validate rLength is within secp256r1 bounds (32 or 33, rarely 31)
+        if (rLength < 0 || rLength > 33) {
+            ISOException.throwIt(ISO7816.SW_DATA_INVALID);
+        }
+
         short sLengthOffset = (short) (rOffset + rLength + 1);
         short sOffset = (short) (sLengthOffset + 1);
+
+        // Bounds check before reading sLength
+        if (sLengthOffset >= (short) inBuff.length) {
+            ISOException.throwIt(ISO7816.SW_DATA_INVALID);
+        }
         byte sLength = inBuff[sLengthOffset];
+
+        // Validate sLength and total structure fits in buffer
+        if (sLength < 0 || sLength > 33 ||
+            (short)(sOffset + sLength) > (short) inBuff.length) {
+            ISOException.throwIt(ISO7816.SW_DATA_INVALID);
+        }
 
         short rDiff = (short) (32 - rLength);
         short sDiff = (short) (32 - sLength);

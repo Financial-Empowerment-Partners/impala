@@ -12,8 +12,20 @@ import com.impala.sdk.ImpalaSDK;
 import com.impala.sdk.apdu4j.CommandAPDU;
 
 /**
- * Handles NFC IsoDep (contact/contactless smartcard) tag discovery.
- * Reads the APDU payload from the tag and passes it to the ImpalaSDK tx method.
+ * Transient activity that handles NFC IsoDep (ISO 14443-4) tag discovery.
+ *
+ * <p>When Android detects an IsoDep-compatible smartcard (e.g. an Impala JavaCard),
+ * this activity:
+ * <ol>
+ *   <li>Connects to the card via {@link IsoDep}</li>
+ *   <li>Wraps the connection in an {@link IsoDepBibo} adapter</li>
+ *   <li>Creates an {@link ImpalaSDK} instance</li>
+ *   <li>Transmits the tag ID as a {@link CommandAPDU}</li>
+ * </ol>
+ *
+ * <p>Declared in AndroidManifest.xml with {@code ACTION_TECH_DISCOVERED} and
+ * a tech filter for {@code android.nfc.tech.IsoDep}. Uses {@code Theme.NoDisplay}
+ * so no UI is shown. The activity finishes immediately after processing.
  */
 public class NfcContactActivity extends Activity {
 
@@ -33,6 +45,10 @@ public class NfcContactActivity extends Activity {
         finish();
     }
 
+    /**
+     * Connect to the IsoDep tag, instantiate the SDK, and transmit the tag ID.
+     * Ensures the IsoDep connection is closed in the finally block.
+     */
     private void handleIntent(Intent intent) {
         String action = intent.getAction();
         if (!NfcAdapter.ACTION_TECH_DISCOVERED.equals(action)) {
@@ -57,9 +73,14 @@ public class NfcContactActivity extends Activity {
             IsoDepBibo bibo = new IsoDepBibo(isoDep);
             ImpalaSDK sdk = new ImpalaSDK(bibo);
 
+            // Use the tag ID from the intent, falling back to tag.getId()
             byte[] tagId = intent.getByteArrayExtra(NfcAdapter.EXTRA_ID);
             if (tagId == null) {
                 tagId = tag.getId();
+            }
+            if (tagId == null || tagId.length == 0) {
+                Log.w(TAG, "No tag ID available");
+                return;
             }
 
             CommandAPDU cmd = new CommandAPDU(tagId);

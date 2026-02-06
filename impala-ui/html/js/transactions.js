@@ -1,3 +1,10 @@
+/**
+ * Transactions page module — submit transactions and maintain a session log.
+ *
+ * Transactions are submitted via POST /subscribe. A session-scoped log
+ * (stored in sessionStorage) tracks all submissions with their status.
+ * The log is cleared when the browser tab closes.
+ */
 (function () {
     Router.init();
 

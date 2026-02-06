@@ -1,3 +1,10 @@
+/**
+ * Cards page module — register and deactivate hardware smartcards.
+ *
+ * Registration stores the card's EC public key (and optional RSA public key)
+ * linked to an account. Deactivation uses a confirmation modal (Foundation JS
+ * if available, CSS fallback otherwise) before sending a PUT with card_active: false.
+ */
 (function () {
     Router.init();
 
@@ -74,12 +81,10 @@
             .then(function () {
                 Router.showToast('Card deactivated', 'success');
                 document.getElementById('deactivate-form').reset();
+                closeModal();
             })
             .catch(function (err) {
                 Router.showToast('Error: ' + err.message, 'alert');
-            })
-            .then(function () {
-                closeModal();
             });
     });
 

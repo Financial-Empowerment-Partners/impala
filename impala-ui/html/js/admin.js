@@ -1,3 +1,10 @@
+/**
+ * Admin page module — manage role assignments (admin-only).
+ *
+ * Displays role definitions with their permission sets, lists all current
+ * role assignments, and allows assigning/removing roles. The current user
+ * cannot modify their own role (self-demotion prevention).
+ */
 (function () {
     Router.init();
     if (!Router.requireAdmin()) return;

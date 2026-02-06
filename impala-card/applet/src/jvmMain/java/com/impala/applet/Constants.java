@@ -1,6 +1,5 @@
 package com.impala.applet;
 
-import javacardx.framework.util.intx.JCint;
 
 /**
  * Constants shared across the applet: APDU instruction codes, PIN type identifiers,
