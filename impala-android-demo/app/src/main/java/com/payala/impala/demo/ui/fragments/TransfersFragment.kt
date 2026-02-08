@@ -18,6 +18,7 @@ import com.payala.impala.demo.ImpalaApp
 import com.payala.impala.demo.R
 import com.payala.impala.demo.api.ApiClient
 import com.payala.impala.demo.databinding.FragmentTransfersBinding
+import com.payala.impala.demo.log.AppLogger
 import com.payala.impala.demo.model.CreateTransactionRequest
 import kotlinx.coroutines.launch
 import java.time.LocalDateTime
@@ -112,6 +113,7 @@ class TransfersFragment : Fragment(R.layout.fragment_transfers) {
                     )
                 )
                 if (response.success) {
+                    AppLogger.i("Transfer", "Transaction created: ${response.btxid} ($amount $currency)")
                     val timestamp = LocalDateTime.now()
                         .format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm"))
                     transfers.add(
@@ -129,9 +131,11 @@ class TransfersFragment : Fragment(R.layout.fragment_transfers) {
                     updateEmptyState()
                     Snackbar.make(requireView(), R.string.transfer_created, Snackbar.LENGTH_SHORT).show()
                 } else {
+                    AppLogger.w("Transfer", "Transaction rejected: ${response.message}")
                     Snackbar.make(requireView(), response.message, Snackbar.LENGTH_SHORT).show()
                 }
             } catch (e: Exception) {
+                AppLogger.e("Transfer", "Transaction failed: ${e.message}")
                 Snackbar.make(
                     requireView(),
                     "${getString(R.string.transfer_failed)}: ${e.message}",

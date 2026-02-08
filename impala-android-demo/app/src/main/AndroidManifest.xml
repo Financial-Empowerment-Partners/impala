@@ -35,6 +35,11 @@
             android:theme="@style/Theme.ImpalaDemo.NoActionBar" />
 
         <activity
+            android:name=".ui.log.LogViewerActivity"
+            android:exported="false"
+            android:theme="@style/Theme.ImpalaDemo.NoActionBar" />
+
+        <activity
             android:name=".auth.GitHubRedirectActivity"
             android:exported="true"
             android:launchMode="singleTask">

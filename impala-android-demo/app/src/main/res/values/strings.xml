@@ -62,6 +62,23 @@
     <string name="mfa_enrollment_failed">MFA enrollment failed</string>
     <string name="not_available">N/A</string>
 
+    <!-- Options Menu -->
+    <string name="menu_build_info">Build Info</string>
+    <string name="menu_activity_log">Activity Log</string>
+    <string name="dialog_build_info_title">Build Information</string>
+
+    <!-- Log Viewer -->
+    <string name="title_activity_log">Activity Log</string>
+    <string name="menu_copy_log">Copy to Clipboard</string>
+    <string name="menu_email_log">Send via Email</string>
+    <string name="menu_refresh_log">Refresh</string>
+    <string name="menu_clear_log">Clear Log</string>
+    <string name="log_copied">Log copied to clipboard</string>
+    <string name="log_cleared">Log cleared</string>
+    <string name="log_empty">No log entries yet</string>
+    <string name="log_entry_count">%d entries</string>
+    <string name="log_share_title">Share log via</string>
+
     <!-- NFC Card -->
     <string name="nfc_tap_prompt">Hold your Impala card to the back of the device</string>
     <string name="nfc_not_available">NFC is not available on this device</string>

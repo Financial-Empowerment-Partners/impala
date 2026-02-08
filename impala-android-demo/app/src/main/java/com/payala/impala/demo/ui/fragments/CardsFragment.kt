@@ -17,6 +17,7 @@ import com.payala.impala.demo.ImpalaApp
 import com.payala.impala.demo.R
 import com.payala.impala.demo.api.ApiClient
 import com.payala.impala.demo.auth.NfcCardResult
+import com.payala.impala.demo.log.AppLogger
 import com.payala.impala.demo.databinding.FragmentCardsBinding
 import com.payala.impala.demo.model.CreateCardRequest
 import com.payala.impala.demo.model.DeleteCardRequest
@@ -107,6 +108,7 @@ class CardsFragment : Fragment(R.layout.fragment_cards) {
                     )
                 )
                 if (response.success) {
+                    AppLogger.i("Cards", "Card registered: ${result.user.cardId}")
                     val fingerprint = ecHex.take(20).chunked(2).joinToString(":")
                     cards.add(
                         CardItem(
@@ -119,9 +121,11 @@ class CardsFragment : Fragment(R.layout.fragment_cards) {
                     updateEmptyState()
                     Snackbar.make(requireView(), R.string.card_registered, Snackbar.LENGTH_SHORT).show()
                 } else {
+                    AppLogger.w("Cards", "Card registration rejected: ${response.message}")
                     Snackbar.make(requireView(), response.message, Snackbar.LENGTH_SHORT).show()
                 }
             } catch (e: Exception) {
+                AppLogger.e("Cards", "Card registration failed: ${e.message}")
                 Snackbar.make(
                     requireView(),
                     "${getString(R.string.card_registration_failed)}: ${e.message}",
@@ -139,14 +143,17 @@ class CardsFragment : Fragment(R.layout.fragment_cards) {
             try {
                 val response = api.deleteCard(DeleteCardRequest(card.cardId))
                 if (response.success) {
+                    AppLogger.i("Cards", "Card deleted: ${card.cardId}")
                     cards.removeAt(position)
                     adapter.notifyItemRemoved(position)
                     updateEmptyState()
                     Snackbar.make(requireView(), "Card ${card.cardId} deleted", Snackbar.LENGTH_SHORT).show()
                 } else {
+                    AppLogger.w("Cards", "Card deletion rejected: ${response.message}")
                     Snackbar.make(requireView(), response.message, Snackbar.LENGTH_SHORT).show()
                 }
             } catch (e: Exception) {
+                AppLogger.e("Cards", "Card deletion failed: ${e.message}")
                 Snackbar.make(requireView(), "Delete failed: ${e.message}", Snackbar.LENGTH_SHORT).show()
             }
         }

@@ -7,6 +7,7 @@ import androidx.lifecycle.viewModelScope
 import com.payala.impala.demo.api.BridgeApiService
 import com.payala.impala.demo.auth.NfcCardResult
 import com.payala.impala.demo.auth.TokenManager
+import com.payala.impala.demo.log.AppLogger
 import com.payala.impala.demo.model.AuthenticateRequest
 import com.payala.impala.demo.model.CreateAccountRequest
 import com.payala.impala.demo.model.CreateCardRequest
@@ -52,14 +53,17 @@ class LoginViewModel : ViewModel() {
         viewModelScope.launch {
             _loginState.value = LoginState.Loading
             try {
+                AppLogger.i("Auth", "Password login attempt for: $accountId")
                 val authResponse = api.authenticate(AuthenticateRequest(accountId, password))
                 if (!authResponse.success) {
+                    AppLogger.w("Auth", "Password login failed: ${authResponse.message}")
                     _loginState.value = LoginState.Error(authResponse.message)
                     return@launch
                 }
 
                 completeTokenFlow(api, tokenManager, accountId, password, "password")
             } catch (e: Exception) {
+                AppLogger.e("Auth", "Password login error: ${e.message}")
                 _loginState.value = LoginState.Error(e.message ?: "Network error")
             }
         }
@@ -76,6 +80,7 @@ class LoginViewModel : ViewModel() {
         viewModelScope.launch {
             _loginState.value = LoginState.Loading
             try {
+                AppLogger.i("Auth", "Google login attempt for: $email")
                 val derivedPassword = derivePassword(idToken)
 
                 // Ensure account exists (create if needed)
@@ -83,6 +88,7 @@ class LoginViewModel : ViewModel() {
 
                 val authResponse = api.authenticate(AuthenticateRequest(email, derivedPassword))
                 if (!authResponse.success) {
+                    AppLogger.w("Auth", "Google login failed: ${authResponse.message}")
                     _loginState.value = LoginState.Error(authResponse.message)
                     return@launch
                 }
@@ -93,6 +99,7 @@ class LoginViewModel : ViewModel() {
 
                 completeTokenFlow(api, tokenManager, email, derivedPassword, "google")
             } catch (e: Exception) {
+                AppLogger.e("Auth", "Google login error: ${e.message}")
                 _loginState.value = LoginState.Error(e.message ?: "Google login failed")
             }
         }
@@ -109,12 +116,14 @@ class LoginViewModel : ViewModel() {
         viewModelScope.launch {
             _loginState.value = LoginState.Loading
             try {
+                AppLogger.i("Auth", "GitHub login attempt for: $login")
                 val derivedPassword = derivePassword(accessToken)
 
                 ensureAccountExists(api, login, displayName ?: login)
 
                 val authResponse = api.authenticate(AuthenticateRequest(login, derivedPassword))
                 if (!authResponse.success) {
+                    AppLogger.w("Auth", "GitHub login failed: ${authResponse.message}")
                     _loginState.value = LoginState.Error(authResponse.message)
                     return@launch
                 }
@@ -125,6 +134,7 @@ class LoginViewModel : ViewModel() {
 
                 completeTokenFlow(api, tokenManager, login, derivedPassword, "github")
             } catch (e: Exception) {
+                AppLogger.e("Auth", "GitHub login error: ${e.message}")
                 _loginState.value = LoginState.Error(e.message ?: "GitHub login failed")
             }
         }
@@ -143,6 +153,7 @@ class LoginViewModel : ViewModel() {
             _loginState.value = LoginState.Loading
             try {
                 val user = cardResult.user
+                AppLogger.i("Auth", "Card login attempt for: ${user.accountId} (card: ${user.cardId})")
                 val derivedPassword = derivePassword(user.cardId)
 
                 ensureAccountExists(api, user.accountId, user.fullName)
@@ -151,6 +162,7 @@ class LoginViewModel : ViewModel() {
                     AuthenticateRequest(user.accountId, derivedPassword)
                 )
                 if (!authResponse.success) {
+                    AppLogger.w("Auth", "Card login failed: ${authResponse.message}")
                     _loginState.value = LoginState.Error(authResponse.message)
                     return@launch
                 }
@@ -169,10 +181,12 @@ class LoginViewModel : ViewModel() {
                             rsa_pubkey = rsaHex
                         )
                     )
+                    AppLogger.i("Auth", "Card registered with bridge")
                 } catch (_: Exception) { /* card may already be registered */ }
 
                 completeTokenFlow(api, tokenManager, user.accountId, derivedPassword, "card")
             } catch (e: Exception) {
+                AppLogger.e("Auth", "Card login error: ${e.message}")
                 _loginState.value = LoginState.Error(e.message ?: "Card login failed")
             }
         }
@@ -191,8 +205,10 @@ class LoginViewModel : ViewModel() {
         provider: String
     ) {
         // Get refresh token
+        AppLogger.d("Auth", "Requesting refresh token for: $accountId")
         val tokenResponse = api.token(TokenRequest(username = accountId, password = password))
         if (!tokenResponse.success || tokenResponse.refresh_token == null) {
+            AppLogger.w("Auth", "Token request failed: ${tokenResponse.message}")
             _loginState.value = LoginState.Error(tokenResponse.message)
             return
         }
@@ -200,13 +216,16 @@ class LoginViewModel : ViewModel() {
         tokenManager.saveRefreshToken(tokenResponse.refresh_token)
         tokenManager.saveAccountId(accountId)
         tokenManager.saveAuthProvider(provider)
+        AppLogger.i("Auth", "Refresh token acquired")
 
         // Get temporal token
         val temporalResponse = api.token(TokenRequest(refresh_token = tokenResponse.refresh_token))
         if (temporalResponse.success && temporalResponse.temporal_token != null) {
             tokenManager.saveTemporalToken(temporalResponse.temporal_token)
+            AppLogger.i("Auth", "Temporal token acquired")
         }
 
+        AppLogger.i("Auth", "Login successful via $provider for: $accountId")
         _loginState.value = LoginState.Success(accountId)
     }
 

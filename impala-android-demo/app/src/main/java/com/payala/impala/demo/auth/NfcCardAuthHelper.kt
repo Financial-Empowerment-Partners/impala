@@ -7,6 +7,7 @@ import android.content.IntentFilter
 import android.nfc.NfcAdapter
 import android.nfc.Tag
 import android.nfc.tech.IsoDep
+import com.payala.impala.demo.log.AppLogger
 import com.payala.impala.demo.nfc.CardUser
 import com.payala.impala.demo.nfc.ImpalaCardReader
 import com.payala.impala.demo.nfc.IsoDepBibo
@@ -106,6 +107,8 @@ class NfcCardAuthHelper(private val activity: Activity) {
         val isoDep = IsoDep.get(tag)
             ?: return NfcCardResult.Error("Card does not support IsoDep")
 
+        AppLogger.i("NFC", "Processing NFC tag")
+
         return try {
             isoDep.connect()
             isoDep.timeout = 5000
@@ -114,13 +117,17 @@ class NfcCardAuthHelper(private val activity: Activity) {
             val reader = ImpalaCardReader(bibo)
 
             val user = reader.getUserData()
+            AppLogger.d("NFC", "Card user: ${user.accountId} (${user.fullName})")
             val ecPubKey = reader.getECPubKey()
+            AppLogger.d("NFC", "EC pubkey read: ${ecPubKey.size} bytes")
             val rsaPubKey = try { reader.getRSAPubKey() } catch (_: Exception) { byteArrayOf() }
             val timestamp = System.currentTimeMillis() / 1000
             val signedTimestamp = reader.getSignedTimestamp(timestamp)
+            AppLogger.i("NFC", "Card read successful: ${user.cardId}")
 
             NfcCardResult.Success(user, ecPubKey, rsaPubKey, signedTimestamp, timestamp)
         } catch (e: Exception) {
+            AppLogger.e("NFC", "Card read failed: ${e.message}")
             NfcCardResult.Error(e.message ?: "Card read failed")
         } finally {
             try { isoDep.close() } catch (_: Exception) { }

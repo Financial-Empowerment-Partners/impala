@@ -14,6 +14,7 @@ import com.payala.impala.demo.ImpalaApp
 import com.payala.impala.demo.R
 import com.payala.impala.demo.api.ApiClient
 import com.payala.impala.demo.databinding.FragmentSettingsBinding
+import com.payala.impala.demo.log.AppLogger
 import com.payala.impala.demo.model.EnrollMfaRequest
 import com.payala.impala.demo.ui.login.LoginActivity
 import kotlinx.coroutines.launch
@@ -59,6 +60,7 @@ class SettingsFragment : Fragment(R.layout.fragment_settings) {
         }
 
         binding.btnLogout.setOnClickListener {
+            AppLogger.i("Settings", "User logged out")
             tokenManager.clearAll()
             ApiClient.reset()
             val intent = Intent(requireContext(), LoginActivity::class.java).apply {
@@ -95,12 +97,15 @@ class SettingsFragment : Fragment(R.layout.fragment_settings) {
                     )
                 )
                 if (response.success) {
+                    AppLogger.i("MFA", "TOTP enrollment successful for: $accountId")
                     Snackbar.make(requireView(), R.string.mfa_enrolled_totp, Snackbar.LENGTH_SHORT).show()
                     loadMfaStatus(accountId)
                 } else {
+                    AppLogger.w("MFA", "TOTP enrollment rejected: ${response.message}")
                     Snackbar.make(requireView(), response.message, Snackbar.LENGTH_SHORT).show()
                 }
             } catch (e: Exception) {
+                AppLogger.e("MFA", "TOTP enrollment failed: ${e.message}")
                 Snackbar.make(
                     requireView(),
                     "${getString(R.string.mfa_enrollment_failed)}: ${e.message}",
@@ -144,12 +149,15 @@ class SettingsFragment : Fragment(R.layout.fragment_settings) {
                     )
                 )
                 if (response.success) {
+                    AppLogger.i("MFA", "SMS enrollment successful for: $accountId")
                     Snackbar.make(requireView(), R.string.mfa_enrolled_sms, Snackbar.LENGTH_SHORT).show()
                     loadMfaStatus(accountId)
                 } else {
+                    AppLogger.w("MFA", "SMS enrollment rejected: ${response.message}")
                     Snackbar.make(requireView(), response.message, Snackbar.LENGTH_SHORT).show()
                 }
             } catch (e: Exception) {
+                AppLogger.e("MFA", "SMS enrollment failed: ${e.message}")
                 Snackbar.make(
                     requireView(),
                     "${getString(R.string.mfa_enrollment_failed)}: ${e.message}",

@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<menu xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto">
+
+    <item
+        android:id="@+id/action_copy_log"
+        android:icon="@android:drawable/ic_menu_edit"
+        android:title="@string/menu_copy_log"
+        app:showAsAction="ifRoom" />
+
+    <item
+        android:id="@+id/action_email_log"
+        android:icon="@android:drawable/ic_dialog_email"
+        android:title="@string/menu_email_log"
+        app:showAsAction="ifRoom" />
+
+    <item
+        android:id="@+id/action_refresh_log"
+        android:title="@string/menu_refresh_log"
+        app:showAsAction="never" />
+
+    <item
+        android:id="@+id/action_clear_log"
+        android:title="@string/menu_clear_log"
+        app:showAsAction="never" />
+
+</menu>

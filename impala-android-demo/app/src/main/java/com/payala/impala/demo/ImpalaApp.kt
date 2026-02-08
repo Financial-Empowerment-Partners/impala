@@ -2,6 +2,7 @@ package com.payala.impala.demo
 
 import android.app.Application
 import com.payala.impala.demo.auth.TokenManager
+import com.payala.impala.demo.log.AppLogger
 
 /**
  * Application subclass that initialises app-wide singletons.
@@ -18,5 +19,9 @@ class ImpalaApp : Application() {
     override fun onCreate() {
         super.onCreate()
         tokenManager = TokenManager(this)
+        AppLogger.i("App", "Impala Demo v${BuildConfig.VERSION_NAME} started")
+        if (tokenManager.hasValidSession()) {
+            AppLogger.i("App", "Existing session found (provider: ${tokenManager.getAuthProvider() ?: "unknown"})")
+        }
     }
 }
