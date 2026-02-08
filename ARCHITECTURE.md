@@ -332,7 +332,9 @@ erDiagram
     impala_account ||--o{ transaction : "initiates"
 ```
 
-## Soroban Contract Operations
+## Testing Only: Soroban Contract Operations
+
+Time limited smart contract payments for integration testing. Not for real world use.
 
 ```mermaid
 stateDiagram-v2
