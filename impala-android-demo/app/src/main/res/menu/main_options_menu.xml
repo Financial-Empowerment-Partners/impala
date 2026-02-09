@@ -12,4 +12,9 @@
         android:title="@string/menu_activity_log"
         app:showAsAction="never" />
 
+    <item
+        android:id="@+id/action_nfc_debug"
+        android:title="@string/menu_nfc_debug"
+        app:showAsAction="never" />
+
 </menu>

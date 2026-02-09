@@ -85,4 +85,30 @@
     <string name="nfc_disabled">Please enable NFC in device settings</string>
     <string name="card_registered">Card registered successfully</string>
     <string name="card_registration_failed">Card registration failed</string>
+
+    <!-- NFC Watcher Service -->
+    <string name="nfc_watcher_title">Impala NFC</string>
+
+    <!-- NFC Debug -->
+    <string name="menu_nfc_debug">NFC Debug</string>
+    <string name="title_nfc_debug">NFC Debug</string>
+    <string name="nfc_debug_section_capabilities">Device NFC Capabilities</string>
+    <string name="nfc_debug_section_test">Test NFC Tap</string>
+    <string name="nfc_debug_section_events">Live Event Log</string>
+    <string name="nfc_debug_section_developer">Enable NFC Debugging</string>
+    <string name="nfc_debug_refresh">Refresh</string>
+    <string name="nfc_debug_start_test">Start NFC Test</string>
+    <string name="nfc_debug_stop_test">Stop NFC Test</string>
+    <string name="nfc_debug_test_description">Activates foreground NFC dispatch to capture any tag type. Tap a card or tag to see raw technical details, APDU responses, and NDEF records.</string>
+    <string name="nfc_debug_waiting_for_tag">Waiting for NFC tag\u2026 Hold a card or tag to the device.</string>
+    <string name="nfc_debug_no_tag_data">No tag or NDEF data found in intent</string>
+    <string name="nfc_debug_no_events">No events captured yet. Start a test or tap a card while this screen is open.</string>
+    <string name="nfc_debug_event_count">%d events</string>
+    <string name="nfc_debug_clear_events">Clear</string>
+    <string name="nfc_debug_copy_events">Copy</string>
+    <string name="nfc_debug_events_copied">NFC event log copied to clipboard</string>
+    <string name="nfc_debug_open_nfc_settings">Open NFC Settings</string>
+    <string name="nfc_debug_open_dev_settings">Open Developer Options</string>
+    <string name="nfc_debug_dev_settings_unavailable">Developer options not available. Tap Build Number 7 times in Settings > About Phone to enable.</string>
+    <string name="nfc_debug_developer_instructions">To enable advanced NFC debugging:\n\n1. Enable Developer Options\n   Settings > About Phone > tap \"Build Number\" 7 times\n\n2. Enable NFC\n   Settings > Connected Devices > Connection Preferences > NFC\n\n3. Enable NFC Debug Logging (Developer Options)\n   Settings > Developer Options > enable \"Enable verbose vendor logging\"\n   This captures low-level NFC controller logs in logcat.\n\n4. View NFC Logs via ADB\n   adb logcat -s NfcService NfcAdaptation NxpNci NxpHal\n\n5. In-App Debug\n   Use the \"Start NFC Test\" button above to capture tag details\n   and APDU responses directly in this screen.\n\nNote: Some NFC debug options may vary by device manufacturer and Android version.</string>
 </resources>

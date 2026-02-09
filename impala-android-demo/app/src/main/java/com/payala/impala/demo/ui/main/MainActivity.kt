@@ -15,7 +15,9 @@ import com.payala.impala.demo.auth.NfcCardAuthHelper
 import com.payala.impala.demo.auth.NfcCardResult
 import com.payala.impala.demo.databinding.ActivityMainBinding
 import com.payala.impala.demo.log.AppLogger
+import com.payala.impala.demo.nfc.NfcWatcherService
 import com.payala.impala.demo.ui.log.LogViewerActivity
+import com.payala.impala.demo.ui.nfc.NfcDebugActivity
 
 /**
  * Main screen with a [BottomNavigationView] hosting three tabs:
@@ -72,9 +74,16 @@ class MainActivity : AppCompatActivity() {
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
-        val callback = nfcCallback ?: return
-        val result = nfcHelper.processTag(intent)
-        callback(result)
+        val callback = nfcCallback
+        if (callback != null) {
+            // A fragment is actively listening for card taps (e.g. card registration)
+            val result = nfcHelper.processTag(intent)
+            callback(result)
+        } else {
+            // No fragment callback — forward to the background watcher service
+            // so NFC events are still processed (mirroring impala-lib behaviour)
+            NfcWatcherService.processNfcIntent(this, intent)
+        }
     }
 
     override fun onCreateOptionsMenu(menu: Menu): Boolean {
@@ -90,6 +99,10 @@ class MainActivity : AppCompatActivity() {
             }
             R.id.action_activity_log -> {
                 startActivity(Intent(this, LogViewerActivity::class.java))
+                true
+            }
+            R.id.action_nfc_debug -> {
+                startActivity(Intent(this, NfcDebugActivity::class.java))
                 true
             }
             else -> super.onOptionsItemSelected(item)
