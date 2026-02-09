@@ -21,6 +21,7 @@ chrono = "0.4"
 futures = "0.3"
 log = "0.4"
 syslog = "6.1"
+ldap3 = "0.11"
 
 [build-dependencies]
 chrono = "0.4"

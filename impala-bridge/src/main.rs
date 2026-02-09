@@ -110,6 +110,11 @@ struct Config {
     twilio_sid: Option<String>,
     twilio_token: Option<String>,
     twilio_number: Option<String>,
+    ldap_url: Option<String>,
+    ldap_bind_dn: Option<String>,
+    ldap_bind_password: Option<String>,
+    ldap_base_dn: Option<String>,
+    ldap_search_filter: Option<String>,
 }
 
 /// Load configuration from a JSON config file (if present) and environment variables.
@@ -126,6 +131,11 @@ struct Config {
 /// | twilio_sid       | TWILIO_SID         | None                 |
 /// | twilio_token     | TWILIO_TOKEN       | None                 |
 /// | twilio_number    | TWILIO_NUMBER      | None                 |
+/// | ldap_url         | LDAP_URL           | None                 |
+/// | ldap_bind_dn     | LDAP_BIND_DN       | None                 |
+/// | ldap_bind_password | LDAP_BIND_PASSWORD | None               |
+/// | ldap_base_dn     | LDAP_BASE_DN       | None                 |
+/// | ldap_search_filter | LDAP_SEARCH_FILTER | (uid={})           |
 fn load_config() -> Config {
     // Try to load base values from a config file
     let config_path = env::var("CONFIG_FILE").unwrap_or_else(|_| "config.json".to_string());
@@ -171,6 +181,26 @@ fn load_config() -> Config {
         .ok()
         .or_else(|| from_file("twilio_number"));
 
+    let ldap_url = env::var("LDAP_URL")
+        .ok()
+        .or_else(|| from_file("ldap_url"));
+
+    let ldap_bind_dn = env::var("LDAP_BIND_DN")
+        .ok()
+        .or_else(|| from_file("ldap_bind_dn"));
+
+    let ldap_bind_password = env::var("LDAP_BIND_PASSWORD")
+        .ok()
+        .or_else(|| from_file("ldap_bind_password"));
+
+    let ldap_base_dn = env::var("LDAP_BASE_DN")
+        .ok()
+        .or_else(|| from_file("ldap_base_dn"));
+
+    let ldap_search_filter = env::var("LDAP_SEARCH_FILTER")
+        .ok()
+        .or_else(|| from_file("ldap_search_filter"));
+
     Config {
         public_endpoint,
         service_address,
@@ -179,6 +209,11 @@ fn load_config() -> Config {
         twilio_sid,
         twilio_token,
         twilio_number,
+        ldap_url,
+        ldap_bind_dn,
+        ldap_bind_password,
+        ldap_base_dn,
+        ldap_search_filter,
     }
 }
 
@@ -293,6 +328,9 @@ async fn main() {
         .layer(Extension(horizon_url))
         .layer(Extension(stellar_rpc_url));
 
+    // LDAP directory sync — reconcile local accounts against the directory
+    directory_sync(&pool, &config).await;
+
     // spawn background cron_sync task
     let cron_pool = pool.clone();
     tokio::spawn(async move {
@@ -358,6 +396,156 @@ async fn cron_sync_task(pool: PgPool) {
 
         tokio::time::sleep(std::time::Duration::from_secs(60)).await;
     }
+}
+
+/// Synchronize local accounts with an LDAP directory.
+///
+/// Connects to the configured LDAP server, iterates over every
+/// `payala_account_id` in the `impala_account` table, and performs an
+/// LDAP search for each one using the configured filter and base DN.
+///
+/// Logs whether each account was found in LDAP, along with any
+/// returned attributes. Accounts missing from the directory are
+/// logged as warnings for administrator review.
+///
+/// Called once during server startup if LDAP is configured. Errors
+/// are non-fatal — the server continues even if LDAP sync fails.
+async fn directory_sync(pool: &PgPool, config: &Config) {
+    let ldap_url = match config.ldap_url {
+        Some(ref url) => url.clone(),
+        None => {
+            debug!("directory_sync: LDAP_URL not configured, skipping");
+            return;
+        }
+    };
+
+    let base_dn = config.ldap_base_dn.clone().unwrap_or_default();
+    let filter_template = config
+        .ldap_search_filter
+        .clone()
+        .unwrap_or_else(|| "(uid={})".to_string());
+
+    info!(
+        "directory_sync: connecting to LDAP at {} (base_dn={})",
+        ldap_url, base_dn
+    );
+
+    // Connect to the LDAP server
+    let (mut ldap, mut _conn) = match ldap3::LdapConnAsync::new(&ldap_url).await {
+        Ok(pair) => pair,
+        Err(e) => {
+            error!("directory_sync: failed to connect to LDAP {}: {}", ldap_url, e);
+            return;
+        }
+    };
+
+    // Drive the connection in the background
+    tokio::spawn(async move {
+        if let Err(e) = _conn.drive().await {
+            error!("directory_sync: LDAP connection driver error: {}", e);
+        }
+    });
+
+    // Bind if credentials are configured
+    if let (Some(ref bind_dn), Some(ref bind_pw)) =
+        (&config.ldap_bind_dn, &config.ldap_bind_password)
+    {
+        match ldap.simple_bind(bind_dn, bind_pw).await {
+            Ok(result) => {
+                if result.rc != 0 {
+                    error!(
+                        "directory_sync: LDAP bind failed (rc={}, message={})",
+                        result.rc,
+                        result.text
+                    );
+                    let _ = ldap.unbind().await;
+                    return;
+                }
+                info!("directory_sync: LDAP bind successful as {}", bind_dn);
+            }
+            Err(e) => {
+                error!("directory_sync: LDAP bind error: {}", e);
+                return;
+            }
+        }
+    }
+
+    // Fetch all account IDs from the database
+    let accounts = sqlx::query_as::<_, (String,)>(
+        "SELECT payala_account_id FROM impala_account"
+    )
+    .fetch_all(pool)
+    .await;
+
+    let account_ids = match accounts {
+        Ok(rows) => rows,
+        Err(e) => {
+            error!("directory_sync: failed to query accounts: {}", e);
+            let _ = ldap.unbind().await;
+            return;
+        }
+    };
+
+    info!(
+        "directory_sync: checking {} account(s) against LDAP directory",
+        account_ids.len()
+    );
+
+    let mut found = 0u64;
+    let mut not_found = 0u64;
+    let mut errors = 0u64;
+
+    for (account_id,) in &account_ids {
+        // Build the search filter by replacing {} with the account_id
+        let filter = filter_template.replace("{}", account_id);
+
+        match ldap
+            .search(
+                &base_dn,
+                ldap3::Scope::Subtree,
+                &filter,
+                vec!["*"],
+            )
+            .await
+        {
+            Ok(result) => {
+                let (entries, _res) = result.success().unwrap_or_else(|_| (vec![], Default::default()));
+                if entries.is_empty() {
+                    warn!(
+                        "directory_sync: account_id={} NOT found in LDAP (filter={})",
+                        account_id, filter
+                    );
+                    not_found += 1;
+                } else {
+                    for entry in &entries {
+                        let se = ldap3::SearchEntry::construct(entry.clone());
+                        debug!(
+                            "directory_sync: account_id={} found: dn={} attrs={:?}",
+                            account_id, se.dn, se.attrs.keys().collect::<Vec<_>>()
+                        );
+                    }
+                    found += 1;
+                }
+            }
+            Err(e) => {
+                error!(
+                    "directory_sync: LDAP search error for account_id={}: {}",
+                    account_id, e
+                );
+                errors += 1;
+            }
+        }
+    }
+
+    info!(
+        "directory_sync: complete — {} found, {} not found, {} errors (out of {} accounts)",
+        found,
+        not_found,
+        errors,
+        account_ids.len()
+    );
+
+    let _ = ldap.unbind().await;
 }
 
 /// Health check endpoint (`GET /`). Returns a static greeting.
