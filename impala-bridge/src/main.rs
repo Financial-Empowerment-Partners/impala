@@ -14,6 +14,7 @@ use uuid::Uuid;
 use futures::StreamExt;
 use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
 use redis::AsyncCommands;
+use log::{debug, error, info, warn};
 use std::env;
 use std::fs;
 use std::sync::Arc;
@@ -184,15 +185,42 @@ fn load_config() -> Config {
 #[tokio::main]
 async fn main() {
     let config = load_config();
-    if config.debug_mode {
-        println!("Config: {:?}", config);
+
+    // Initialize syslog logger
+    let formatter = syslog::Formatter3164 {
+        facility: syslog::Facility::LOG_DAEMON,
+        hostname: None,
+        process: "impala-bridge".into(),
+        pid: std::process::id(),
+    };
+    match syslog::unix(formatter) {
+        Ok(logger) => {
+            log::set_boxed_logger(Box::new(syslog::BasicLogger::new(logger)))
+                .map(|()| {
+                    log::set_max_level(if config.debug_mode {
+                        log::LevelFilter::Debug
+                    } else {
+                        log::LevelFilter::Info
+                    })
+                })
+                .expect("Failed to set syslog logger");
+        }
+        Err(e) => {
+            eprintln!("Failed to connect to syslog: {}, falling back to stderr", e);
+            // Continue without syslog — log macros become no-ops
+        }
     }
+
+    info!("impala-bridge starting up");
+    debug!("Config: {:?}", config);
+
     // Handle wrapped secrets during initialization
     // If DATABASE_URL_WRAPPED is set, unwrap it; otherwise use DATABASE_URL directly
     let database_url = if let Ok(wrapped_token) = env::var("DATABASE_URL_WRAPPED") {
-        println!("Unwrapping DATABASE_URL from Vault...");
+        info!("Unwrapping DATABASE_URL from Vault");
         match box_unwrap(&wrapped_token).await {
             Ok(secret_data) => {
+                info!("Vault secret unwrapped successfully");
                 // Extract the database URL from the unwrapped secret
                 secret_data["database_url"]
                     .as_str()
@@ -200,7 +228,7 @@ async fn main() {
                     .to_string()
             }
             Err(e) => {
-                eprintln!("Failed to unwrap DATABASE_URL: {}", e);
+                error!("Failed to unwrap DATABASE_URL from Vault: {}", e);
                 panic!("Cannot proceed without database credentials");
             }
         }
@@ -216,11 +244,13 @@ async fn main() {
         .connect(&database_url)
         .await
         .expect("Failed to connect to database");
+    info!("Database connection pool established");
 
     // connect to Redis
     let redis_url = env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1/".to_string());
     let redis_client = redis::Client::open(redis_url).expect("Failed to create Redis client");
     let redis_client = Arc::new(redis_client);
+    info!("Redis client created");
 
     // JWT signing secret
     let jwt_secret = Arc::new(
@@ -270,6 +300,7 @@ async fn main() {
     });
 
     // run our app
+    info!("Server listening on {}", config.service_address);
     axum::Server::bind(&config.service_address.parse().unwrap())
         .serve(app.into_make_service())
         .await
@@ -290,6 +321,7 @@ async fn cron_sync_task(pool: PgPool) {
 
         match rows {
             Ok(rows) => {
+                debug!("cron_sync: processing {} callback(s)", rows.len());
                 for (id, callback_uri) in rows {
                     match client.get(&callback_uri).send().await {
                         Ok(response) => {
@@ -303,22 +335,24 @@ async fn cron_sync_task(pool: PgPool) {
                                     .execute(&pool)
                                     .await
                                     {
-                                        eprintln!("cron_sync update error for id {}: {}", id, e);
+                                        error!("cron_sync: failed to update result for id {}: {}", id, e);
+                                    } else {
+                                        debug!("cron_sync: updated result for id {}", id);
                                     }
                                 }
                                 Err(e) => {
-                                    eprintln!("cron_sync JSON parse error for id {} ({}): {}", id, callback_uri, e);
+                                    warn!("cron_sync: JSON parse error for id {} ({}): {}", id, callback_uri, e);
                                 }
                             }
                         }
                         Err(e) => {
-                            eprintln!("cron_sync request error for id {} ({}): {}", id, callback_uri, e);
+                            error!("cron_sync: request failed for id {} ({}): {}", id, callback_uri, e);
                         }
                     }
                 }
             }
             Err(e) => {
-                eprintln!("cron_sync query error: {}", e);
+                error!("cron_sync: query failed: {}", e);
             }
         }
 
@@ -404,8 +438,11 @@ async fn create_account(
     Extension(pool): Extension<PgPool>,
     Json(payload): Json<CreateAccountRequest>,
 ) -> Result<Json<CreateAccountResponse>, StatusCode> {
+    info!("POST /account: creating account for stellar_id={}", payload.stellar_account_id);
+
     // Validate stellar_account_id format (Stellar public keys are 56 chars starting with 'G')
     if payload.stellar_account_id.len() != 56 || !payload.stellar_account_id.starts_with('G') {
+        warn!("create_account: invalid stellar_account_id format");
         return Ok(Json(CreateAccountResponse {
             success: false,
             message: "stellar_account_id must be 56 characters starting with 'G'".to_string(),
@@ -414,6 +451,7 @@ async fn create_account(
 
     // Validate required name fields are non-empty and within bounds
     if payload.first_name.trim().is_empty() || payload.last_name.trim().is_empty() {
+        warn!("create_account: empty name fields");
         return Ok(Json(CreateAccountResponse {
             success: false,
             message: "first_name and last_name must not be empty".to_string(),
@@ -421,6 +459,7 @@ async fn create_account(
     }
 
     if payload.first_name.len() > 64 || payload.last_name.len() > 64 {
+        warn!("create_account: name fields exceed 64 characters");
         return Ok(Json(CreateAccountResponse {
             success: false,
             message: "Name fields must not exceed 64 characters".to_string(),
@@ -447,19 +486,23 @@ async fn create_account(
     .await;
 
     match result {
-        Ok(_) => Ok(Json(CreateAccountResponse {
-            success: true,
-            message: "Account created successfully".to_string(),
-        })),
+        Ok(_) => {
+            info!("create_account: account created for stellar_id={}", payload.stellar_account_id);
+            Ok(Json(CreateAccountResponse {
+                success: true,
+                message: "Account created successfully".to_string(),
+            }))
+        }
         Err(e) => {
             let err_str = e.to_string();
             if err_str.contains("duplicate key") || err_str.contains("unique constraint") {
+                warn!("create_account: duplicate account for stellar_id={}", payload.stellar_account_id);
                 return Ok(Json(CreateAccountResponse {
                     success: false,
                     message: "An account with this identifier already exists".to_string(),
                 }));
             }
-            eprintln!("Database error: {}", e);
+            error!("create_account: database error: {}", e);
             Err(StatusCode::INTERNAL_SERVER_ERROR)
         }
     }
@@ -486,6 +529,7 @@ async fn get_account(
     Extension(pool): Extension<PgPool>,
     Query(params): Query<GetAccountQuery>,
 ) -> Result<Json<GetAccountResponse>, StatusCode> {
+    debug!("GET /account: lookup stellar_id={}", params.stellar_account_id);
     let result = sqlx::query_as::<_, (String, String, Option<String>, String, Option<String>, Option<String>, Option<String>)>(
         r#"
         SELECT payala_account_id, first_name, middle_name, last_name,
@@ -510,9 +554,12 @@ async fn get_account(
                 gender,
             }))
         }
-        Ok(None) => Err(StatusCode::NOT_FOUND),
+        Ok(None) => {
+            debug!("get_account: not found for stellar_id={}", params.stellar_account_id);
+            Err(StatusCode::NOT_FOUND)
+        }
         Err(e) => {
-            eprintln!("Database error: {}", e);
+            error!("get_account: database error: {}", e);
             Err(StatusCode::INTERNAL_SERVER_ERROR)
         }
     }
@@ -546,12 +593,14 @@ async fn update_account(
     Extension(pool): Extension<PgPool>,
     Json(payload): Json<UpdateAccountRequest>,
 ) -> Result<Json<UpdateAccountResponse>, StatusCode> {
+    info!("PUT /account: updating account");
     // Determine which identifier to use for the WHERE clause
     let (where_clause, where_value) = if let Some(ref stellar_id) = payload.stellar_account_id {
         ("stellar_account_id = $1", stellar_id.clone())
     } else if let Some(ref payala_id) = payload.payala_account_id {
         ("payala_account_id = $1", payala_id.clone())
     } else {
+        warn!("update_account: no identifier provided");
         return Ok(Json(UpdateAccountResponse {
             success: false,
             message: "Either stellar_account_id or payala_account_id must be provided".to_string(),
@@ -597,6 +646,7 @@ async fn update_account(
     }
 
     if set_parts.is_empty() {
+        warn!("update_account: no fields provided to update");
         return Ok(Json(UpdateAccountResponse {
             success: false,
             message: "No fields provided to update".to_string(),
@@ -646,12 +696,14 @@ async fn update_account(
         Ok(res) => {
             let rows_affected = res.rows_affected();
             if rows_affected == 0 {
+                debug!("update_account: no matching account found");
                 Ok(Json(UpdateAccountResponse {
                     success: false,
                     message: "No account found with the provided identifier".to_string(),
                     rows_affected: 0,
                 }))
             } else {
+                info!("update_account: updated {} row(s)", rows_affected);
                 Ok(Json(UpdateAccountResponse {
                     success: true,
                     message: "Account updated successfully".to_string(),
@@ -660,7 +712,7 @@ async fn update_account(
             }
         }
         Err(e) => {
-            eprintln!("Database error: {}", e);
+            error!("update_account: database error: {}", e);
             Err(StatusCode::INTERNAL_SERVER_ERROR)
         }
     }
@@ -678,8 +730,11 @@ async fn authenticate(
     Extension(pool): Extension<PgPool>,
     Json(payload): Json<AuthenticateRequest>,
 ) -> Result<Json<AuthenticateResponse>, StatusCode> {
+    info!("POST /authenticate: account_id={}", payload.account_id);
+
     // Validate password strength (minimum 8 characters)
     if payload.password.len() < 8 {
+        warn!("authenticate: password too short for account_id={}", payload.account_id);
         return Ok(Json(AuthenticateResponse {
             success: false,
             message: "Password must be at least 8 characters".to_string(),
@@ -697,6 +752,7 @@ async fn authenticate(
 
     match account_exists {
         Ok(count) if count == 0 => {
+            warn!("authenticate: account not found for account_id={}", payload.account_id);
             return Ok(Json(AuthenticateResponse {
                 success: false,
                 message: "Account not found".to_string(),
@@ -704,7 +760,7 @@ async fn authenticate(
             }));
         }
         Err(e) => {
-            eprintln!("Database error: {}", e);
+            error!("authenticate: database error looking up account: {}", e);
             return Err(StatusCode::INTERNAL_SERVER_ERROR);
         }
         _ => {}
@@ -732,13 +788,16 @@ async fn authenticate(
             .await;
 
             match insert_result {
-                Ok(_) => Ok(Json(AuthenticateResponse {
-                    success: true,
-                    message: "Registration successful".to_string(),
-                    action: "registered".to_string(),
-                })),
+                Ok(_) => {
+                    info!("authenticate: registered new user account_id={}", payload.account_id);
+                    Ok(Json(AuthenticateResponse {
+                        success: true,
+                        message: "Registration successful".to_string(),
+                        action: "registered".to_string(),
+                    }))
+                }
                 Err(e) => {
-                    eprintln!("Database error: {}", e);
+                    error!("authenticate: failed to insert auth record: {}", e);
                     Err(StatusCode::INTERNAL_SERVER_ERROR)
                 }
             }
@@ -746,20 +805,26 @@ async fn authenticate(
         Ok(Some((stored_hash,))) => {
             // Credentials exist - verify password
             match verify_password(&payload.password, &stored_hash) {
-                Ok(_) => Ok(Json(AuthenticateResponse {
-                    success: true,
-                    message: "Authentication successful".to_string(),
-                    action: "authenticated".to_string(),
-                })),
-                Err(_) => Ok(Json(AuthenticateResponse {
-                    success: false,
-                    message: "Invalid password".to_string(),
-                    action: "authenticated".to_string(),
-                })),
+                Ok(_) => {
+                    info!("authenticate: successful login for account_id={}", payload.account_id);
+                    Ok(Json(AuthenticateResponse {
+                        success: true,
+                        message: "Authentication successful".to_string(),
+                        action: "authenticated".to_string(),
+                    }))
+                }
+                Err(_) => {
+                    warn!("authenticate: invalid password for account_id={}", payload.account_id);
+                    Ok(Json(AuthenticateResponse {
+                        success: false,
+                        message: "Invalid password".to_string(),
+                        action: "authenticated".to_string(),
+                    }))
+                }
             }
         }
         Err(e) => {
-            eprintln!("Database error: {}", e);
+            error!("authenticate: database error fetching auth record: {}", e);
             Err(StatusCode::INTERNAL_SERVER_ERROR)
         }
     }
@@ -788,11 +853,13 @@ async fn sync_account(
     Extension(stellar_rpc_url): Extension<Arc<String>>,
     Json(payload): Json<SyncRequest>,
 ) -> Result<Json<SyncResponse>, StatusCode> {
+    info!("POST /sync: account_id={}", payload.account_id);
+
     let mut conn = redis_client
         .get_async_connection()
         .await
         .map_err(|e| {
-            eprintln!("Redis connection error: {}", e);
+            error!("sync_account: Redis connection error: {}", e);
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
@@ -801,7 +868,7 @@ async fn sync_account(
     conn.set::<_, _, ()>(&payload.account_id, &timestamp)
         .await
         .map_err(|e| {
-            eprintln!("Redis set error: {}", e);
+            error!("sync_account: Redis set error: {}", e);
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
@@ -834,7 +901,7 @@ async fn sync_account(
 
                             if let Ok(count) = exists {
                                 if count > 0 {
-                                    println!("Updating tx {}", tx_id);
+                                    debug!("sync_account: matched local tx {}", tx_id);
                                 }
                             }
                         }
@@ -843,7 +910,7 @@ async fn sync_account(
             }
         }
         Err(e) => {
-            eprintln!("Stellar RPC getTransactions error: {}", e);
+            error!("sync_account: Stellar RPC getTransactions error: {}", e);
         }
     }
 
@@ -891,6 +958,7 @@ async fn token(
     Extension(jwt_secret): Extension<Arc<String>>,
     Json(payload): Json<TokenRequest>,
 ) -> Result<Json<TokenResponse>, StatusCode> {
+    debug!("POST /token: request received");
     let key = jwt_secret.as_bytes();
 
     // Flow 1: refresh_token provided -> return a short-lived temporal_token
@@ -901,11 +969,12 @@ async fn token(
             &Validation::default(),
         )
         .map_err(|e| {
-            eprintln!("Invalid refresh token: {}", e);
+            warn!("token: invalid refresh token presented: {}", e);
             StatusCode::UNAUTHORIZED
         })?;
 
         if token_data.claims.token_type != "refresh" {
+            warn!("token: wrong token type '{}' presented for refresh flow", token_data.claims.token_type);
             return Ok(Json(TokenResponse {
                 success: false,
                 message: "Invalid token type".to_string(),
@@ -928,10 +997,11 @@ async fn token(
             &EncodingKey::from_secret(key),
         )
         .map_err(|e| {
-            eprintln!("Failed to encode temporal token: {}", e);
+            error!("token: failed to encode temporal token: {}", e);
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
+        info!("token: temporal token issued for sub={}", temporal_claims.sub);
         return Ok(Json(TokenResponse {
             success: true,
             message: "Temporal token issued".to_string(),
@@ -945,6 +1015,7 @@ async fn token(
     let password = payload.password.as_deref().unwrap_or("");
 
     if username.is_empty() || password.is_empty() {
+        warn!("token: missing username or password");
         return Ok(Json(TokenResponse {
             success: false,
             message: "Either username/password or refresh_token must be provided".to_string(),
@@ -961,13 +1032,14 @@ async fn token(
     .fetch_optional(&pool)
     .await
     .map_err(|e| {
-        eprintln!("Database error: {}", e);
+        error!("token: database error looking up credentials: {}", e);
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
     let stored_hash = match stored_hash {
         Some((hash,)) => hash,
         None => {
+            warn!("token: no credentials found for username={}", username);
             return Ok(Json(TokenResponse {
                 success: false,
                 message: "Invalid credentials".to_string(),
@@ -978,6 +1050,7 @@ async fn token(
     };
 
     if verify_password(password, &stored_hash).is_err() {
+        warn!("token: invalid password for username={}", username);
         return Ok(Json(TokenResponse {
             success: false,
             message: "Invalid credentials".to_string(),
@@ -1000,10 +1073,11 @@ async fn token(
         &EncodingKey::from_secret(key),
     )
     .map_err(|e| {
-        eprintln!("Failed to encode refresh token: {}", e);
+        error!("token: failed to encode refresh token: {}", e);
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
+    info!("token: refresh token issued for username={}", username);
     Ok(Json(TokenResponse {
         success: true,
         message: "Refresh token issued".to_string(),
@@ -1036,6 +1110,7 @@ async fn subscribe(
     Extension(redis_client): Extension<Arc<redis::Client>>,
     Json(payload): Json<SubscribeRequest>,
 ) -> Result<Json<SubscribeResponse>, StatusCode> {
+    info!("POST /subscribe: network={}", payload.network);
     match payload.network.as_str() {
         "stellar" => {
             let url = format!(
@@ -1044,9 +1119,10 @@ async fn subscribe(
             );
             let redis = redis_client.clone();
 
+            info!("subscribe: starting Stellar Horizon SSE stream");
             tokio::spawn(async move {
                 if let Err(e) = stellar_stream(&url, &redis).await {
-                    eprintln!("Stellar stream error: {}", e);
+                    error!("subscribe: Stellar stream terminated with error: {}", e);
                 }
             });
 
@@ -1059,6 +1135,7 @@ async fn subscribe(
             let listen_endpoint = match payload.listen_endpoint {
                 Some(ref ep) if !ep.is_empty() => ep.clone(),
                 _ => {
+                    warn!("subscribe: missing listen_endpoint for payala network");
                     return Ok(Json(SubscribeResponse {
                         success: false,
                         message: "listen_endpoint is required for the payala network".to_string(),
@@ -1068,9 +1145,10 @@ async fn subscribe(
 
             let redis = redis_client.clone();
 
+            info!("subscribe: starting Payala TCP listener on {}", listen_endpoint);
             tokio::spawn(async move {
                 if let Err(e) = payala_stream(&listen_endpoint, &redis).await {
-                    eprintln!("Payala stream error: {}", e);
+                    error!("subscribe: Payala stream terminated with error: {}", e);
                 }
             });
 
@@ -1082,10 +1160,13 @@ async fn subscribe(
                 ),
             }))
         }
-        _ => Ok(Json(SubscribeResponse {
-            success: false,
-            message: format!("Unsupported network: {}", payload.network),
-        })),
+        _ => {
+            warn!("subscribe: unsupported network '{}'", payload.network);
+            Ok(Json(SubscribeResponse {
+                success: false,
+                message: format!("Unsupported network: {}", payload.network),
+            }))
+        }
     }
 }
 
@@ -1104,9 +1185,11 @@ async fn stellar_stream(
         .await?;
 
     if !response.status().is_success() {
+        error!("stellar_stream: Horizon returned HTTP {}", response.status());
         return Err(format!("Horizon returned HTTP {}", response.status()).into());
     }
 
+    info!("stellar_stream: connected to Horizon SSE");
     let mut stream = response.bytes_stream();
     let mut buffer = String::new();
     let mut event_data = String::new();
@@ -1118,7 +1201,7 @@ async fn stellar_stream(
 
         // Prevent unbounded memory growth from malformed streams
         if buffer.len() > MAX_BUFFER_SIZE {
-            eprintln!("SSE buffer exceeded {} bytes, resetting", MAX_BUFFER_SIZE);
+            warn!("stellar_stream: SSE buffer exceeded {} bytes, resetting", MAX_BUFFER_SIZE);
             buffer.clear();
             event_data.clear();
             continue;
@@ -1142,7 +1225,7 @@ async fn stellar_stream(
                         .map(|s| s.to_string())
                         .unwrap_or_else(|| "unknown".to_string());
 
-                    println!("Stellar ledger event: sequence={}", sequence);
+                    info!("stellar_stream: ledger event sequence={}", sequence);
 
                     // Store latest ledger sequence in Redis
                     if let Ok(mut conn) = redis_client.get_async_connection().await {
@@ -1176,14 +1259,16 @@ async fn payala_stream(
     redis_client: &redis::Client,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let addr: std::net::SocketAddr = listen_endpoint.parse().map_err(|e| {
+        error!("payala_stream: invalid listen_endpoint '{}': {}", listen_endpoint, e);
         format!("Invalid listen_endpoint '{}': {}", listen_endpoint, e)
     })?;
 
     let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| {
+        error!("payala_stream: failed to bind to {}: {}", addr, e);
         format!("Failed to bind to {}: {}", addr, e)
     })?;
 
-    println!("Payala listener started on {}", addr);
+    info!("payala_stream: TCP listener started on {}", addr);
 
     // Store the active listener endpoint in Redis
     if let Ok(mut conn) = redis_client.get_async_connection().await {
@@ -1200,7 +1285,7 @@ async fn payala_stream(
         let redis = redis_client.clone();
 
         tokio::spawn(async move {
-            println!("Payala connection from {}", peer_addr);
+            info!("payala_stream: connection accepted from {}", peer_addr);
 
             let mut buf = vec![0u8; 65536];
             loop {
@@ -1208,7 +1293,7 @@ async fn payala_stream(
                     Ok(0) => break,
                     Ok(n) => n,
                     Err(e) => {
-                        eprintln!("Payala read error from {}: {}", peer_addr, e);
+                        error!("payala_stream: read error from {}: {}", peer_addr, e);
                         break;
                     }
                 };
@@ -1221,7 +1306,7 @@ async fn payala_stream(
                         .unwrap_or("unknown")
                         .to_string();
 
-                    println!("Payala event from {}: type={}", peer_addr, event_type);
+                    info!("payala_stream: event from {}: type={}", peer_addr, event_type);
 
                     if let Ok(mut conn) = redis.get_async_connection().await {
                         let timestamp =
@@ -1241,7 +1326,7 @@ async fn payala_stream(
                         .await;
                     }
                 } else {
-                    eprintln!("Payala non-JSON data from {}: {} bytes", peer_addr, n);
+                    warn!("payala_stream: non-JSON data from {}: {} bytes", peer_addr, n);
                 }
             }
         });
@@ -1284,7 +1369,11 @@ async fn create_transaction(
     Extension(pool): Extension<PgPool>,
     Json(payload): Json<CreateTransactionRequest>,
 ) -> Result<Json<CreateTransactionResponse>, StatusCode> {
+    info!("POST /transaction: stellar_tx_id={:?} payala_tx_id={:?}",
+        payload.stellar_tx_id, payload.payala_tx_id);
+
     if payload.stellar_tx_id.is_none() && payload.payala_tx_id.is_none() {
+        warn!("create_transaction: neither stellar_tx_id nor payala_tx_id provided");
         return Ok(Json(CreateTransactionResponse {
             success: false,
             message: "At least one of stellar_tx_id or payala_tx_id must be provided".to_string(),
@@ -1317,13 +1406,16 @@ async fn create_transaction(
     .await;
 
     match result {
-        Ok(btxid) => Ok(Json(CreateTransactionResponse {
-            success: true,
-            message: "Transaction created successfully".to_string(),
-            btxid: Some(btxid),
-        })),
+        Ok(btxid) => {
+            info!("create_transaction: created btxid={}", btxid);
+            Ok(Json(CreateTransactionResponse {
+                success: true,
+                message: "Transaction created successfully".to_string(),
+                btxid: Some(btxid),
+            }))
+        }
         Err(e) => {
-            eprintln!("Database error: {}", e);
+            error!("create_transaction: database error: {}", e);
             Err(StatusCode::INTERNAL_SERVER_ERROR)
         }
     }
@@ -1357,6 +1449,7 @@ async fn create_card(
     Extension(pool): Extension<PgPool>,
     Json(payload): Json<CreateCardRequest>,
 ) -> Result<Json<CardResponse>, StatusCode> {
+    info!("POST /card: registering card_id={} for account_id={}", payload.card_id, payload.account_id);
     let result = sqlx::query(
         r#"
         INSERT INTO card (account_id, card_id, ec_pubkey, rsa_pubkey)
@@ -1371,12 +1464,15 @@ async fn create_card(
     .await;
 
     match result {
-        Ok(_) => Ok(Json(CardResponse {
-            success: true,
-            message: "Card created successfully".to_string(),
-        })),
+        Ok(_) => {
+            info!("create_card: card_id={} registered", payload.card_id);
+            Ok(Json(CardResponse {
+                success: true,
+                message: "Card created successfully".to_string(),
+            }))
+        }
         Err(e) => {
-            eprintln!("Database error: {}", e);
+            error!("create_card: database error: {}", e);
             Err(StatusCode::INTERNAL_SERVER_ERROR)
         }
     }
@@ -1388,6 +1484,7 @@ async fn delete_card(
     Extension(pool): Extension<PgPool>,
     Json(payload): Json<DeleteCardRequest>,
 ) -> Result<Json<CardResponse>, StatusCode> {
+    info!("DELETE /card: card_id={}", payload.card_id);
     let result = sqlx::query(
         "UPDATE card SET is_delete = TRUE, updated_at = CURRENT_TIMESTAMP WHERE card_id = $1 AND is_delete = FALSE"
     )
@@ -1398,11 +1495,13 @@ async fn delete_card(
     match result {
         Ok(res) => {
             if res.rows_affected() == 0 {
+                warn!("delete_card: card_id={} not found or already deleted", payload.card_id);
                 Ok(Json(CardResponse {
                     success: false,
                     message: "Card not found or already deleted".to_string(),
                 }))
             } else {
+                info!("delete_card: card_id={} soft-deleted", payload.card_id);
                 Ok(Json(CardResponse {
                     success: true,
                     message: "Card deleted successfully".to_string(),
@@ -1410,7 +1509,7 @@ async fn delete_card(
             }
         }
         Err(e) => {
-            eprintln!("Database error: {}", e);
+            error!("delete_card: database error: {}", e);
             Err(StatusCode::INTERNAL_SERVER_ERROR)
         }
     }
@@ -1464,7 +1563,10 @@ async fn enroll_mfa(
     Extension(pool): Extension<PgPool>,
     Json(payload): Json<EnrollMfaRequest>,
 ) -> Result<Json<MfaResponse>, StatusCode> {
+    info!("POST /mfa: enrolling mfa_type={} for account_id={}", payload.mfa_type, payload.account_id);
+
     if payload.mfa_type != "totp" && payload.mfa_type != "sms" {
+        warn!("enroll_mfa: invalid mfa_type '{}'", payload.mfa_type);
         return Ok(Json(MfaResponse {
             success: false,
             message: "mfa_type must be 'totp' or 'sms'".to_string(),
@@ -1472,6 +1574,7 @@ async fn enroll_mfa(
     }
 
     if payload.mfa_type == "totp" && payload.secret.is_none() {
+        warn!("enroll_mfa: missing secret for TOTP enrollment");
         return Ok(Json(MfaResponse {
             success: false,
             message: "secret is required for TOTP enrollment".to_string(),
@@ -1479,6 +1582,7 @@ async fn enroll_mfa(
     }
 
     if payload.mfa_type == "sms" && payload.phone_number.is_none() {
+        warn!("enroll_mfa: missing phone_number for SMS enrollment");
         return Ok(Json(MfaResponse {
             success: false,
             message: "phone_number is required for SMS enrollment".to_string(),
@@ -1501,12 +1605,15 @@ async fn enroll_mfa(
     .await;
 
     match result {
-        Ok(_) => Ok(Json(MfaResponse {
-            success: true,
-            message: "MFA enrolled successfully".to_string(),
-        })),
+        Ok(_) => {
+            info!("enroll_mfa: {} enrolled for account_id={}", payload.mfa_type, payload.account_id);
+            Ok(Json(MfaResponse {
+                success: true,
+                message: "MFA enrolled successfully".to_string(),
+            }))
+        }
         Err(e) => {
-            eprintln!("MFA enrollment error: {}", e);
+            error!("enroll_mfa: database error: {}", e);
             Err(StatusCode::INTERNAL_SERVER_ERROR)
         }
     }
@@ -1520,6 +1627,7 @@ async fn get_mfa(
     Extension(pool): Extension<PgPool>,
     Query(params): Query<MfaQuery>,
 ) -> Result<Json<Vec<MfaEnrollment>>, StatusCode> {
+    debug!("GET /mfa: account_id={}", params.account_id);
     let rows = sqlx::query_as::<_, MfaEnrollment>(
         "SELECT account_id, mfa_type, secret, phone_number, enabled
          FROM impala_mfa WHERE account_id = $1"
@@ -1529,9 +1637,12 @@ async fn get_mfa(
     .await;
 
     match rows {
-        Ok(enrollments) => Ok(Json(enrollments)),
+        Ok(enrollments) => {
+            debug!("get_mfa: found {} enrollment(s) for account_id={}", enrollments.len(), params.account_id);
+            Ok(Json(enrollments))
+        }
         Err(e) => {
-            eprintln!("MFA lookup error: {}", e);
+            error!("get_mfa: database error: {}", e);
             Err(StatusCode::INTERNAL_SERVER_ERROR)
         }
     }
@@ -1571,8 +1682,11 @@ async fn create_notify(
     Extension(pool): Extension<PgPool>,
     Json(payload): Json<CreateNotifyRequest>,
 ) -> Result<Json<NotifyResponse>, StatusCode> {
+    info!("POST /notify: medium={} for account_id={}", payload.medium, payload.account_id);
+
     let valid_mediums = ["webhook", "sms", "mobile_push", "to_app"];
     if !valid_mediums.contains(&payload.medium.as_str()) {
+        warn!("create_notify: invalid medium '{}'", payload.medium);
         return Ok(Json(NotifyResponse {
             success: false,
             message: format!(
@@ -1586,6 +1700,7 @@ async fn create_notify(
     // Validate email format if provided
     if let Some(ref email) = payload.email {
         if !email.contains('@') || email.len() > 254 {
+            warn!("create_notify: invalid email address for account_id={}", payload.account_id);
             return Ok(Json(NotifyResponse {
                 success: false,
                 message: "Invalid email address".to_string(),
@@ -1597,6 +1712,7 @@ async fn create_notify(
     // Validate webhook URL if provided
     if let Some(ref url) = payload.url {
         if !url.starts_with("http://") && !url.starts_with("https://") {
+            warn!("create_notify: invalid webhook URL scheme for account_id={}", payload.account_id);
             return Ok(Json(NotifyResponse {
                 success: false,
                 message: "URL must start with http:// or https://".to_string(),
@@ -1625,13 +1741,16 @@ async fn create_notify(
     .await;
 
     match result {
-        Ok(id) => Ok(Json(NotifyResponse {
-            success: true,
-            message: "Notification record created successfully".to_string(),
-            id: Some(id),
-        })),
+        Ok(id) => {
+            info!("create_notify: created notify id={} for account_id={}", id, payload.account_id);
+            Ok(Json(NotifyResponse {
+                success: true,
+                message: "Notification record created successfully".to_string(),
+                id: Some(id),
+            }))
+        }
         Err(e) => {
-            eprintln!("Database error: {}", e);
+            error!("create_notify: database error: {}", e);
             Err(StatusCode::INTERNAL_SERVER_ERROR)
         }
     }
@@ -1658,9 +1777,12 @@ async fn update_notify(
     Extension(pool): Extension<PgPool>,
     Json(payload): Json<UpdateNotifyRequest>,
 ) -> Result<Json<NotifyResponse>, StatusCode> {
+    info!("PUT /notify: updating id={}", payload.id);
+
     if let Some(ref medium) = payload.medium {
         let valid_mediums = ["webhook", "sms", "mobile_push", "to_app"];
         if !valid_mediums.contains(&medium.as_str()) {
+            warn!("update_notify: invalid medium '{}'", medium);
             return Ok(Json(NotifyResponse {
                 success: false,
                 message: format!(
@@ -1710,6 +1832,7 @@ async fn update_notify(
     }
 
     if set_parts.is_empty() {
+        warn!("update_notify: no fields provided to update for id={}", payload.id);
         return Ok(Json(NotifyResponse {
             success: false,
             message: "No fields provided to update".to_string(),
@@ -1755,12 +1878,14 @@ async fn update_notify(
     match result {
         Ok(res) => {
             if res.rows_affected() == 0 {
+                debug!("update_notify: no record found for id={}", payload.id);
                 Ok(Json(NotifyResponse {
                     success: false,
                     message: "No notification record found with the provided id".to_string(),
                     id: None,
                 }))
             } else {
+                info!("update_notify: updated id={}", payload.id);
                 Ok(Json(NotifyResponse {
                     success: true,
                     message: "Notification record updated successfully".to_string(),
@@ -1769,7 +1894,7 @@ async fn update_notify(
             }
         }
         Err(e) => {
-            eprintln!("Database error: {}", e);
+            error!("update_notify: database error: {}", e);
             Err(StatusCode::INTERNAL_SERVER_ERROR)
         }
     }
@@ -1784,6 +1909,8 @@ async fn verify_mfa(
     Extension(pool): Extension<PgPool>,
     Json(payload): Json<VerifyMfaRequest>,
 ) -> Result<Json<MfaResponse>, StatusCode> {
+    info!("POST /mfa/verify: mfa_type={} for account_id={}", payload.mfa_type, payload.account_id);
+
     let enrollment = sqlx::query_as::<_, MfaEnrollment>(
         "SELECT account_id, mfa_type, secret, phone_number, enabled
          FROM impala_mfa WHERE account_id = $1 AND mfa_type = $2"
@@ -1794,12 +1921,16 @@ async fn verify_mfa(
     .await;
 
     match enrollment {
-        Ok(None) => Ok(Json(MfaResponse {
-            success: false,
-            message: "MFA not enrolled for this account/type".to_string(),
-        })),
+        Ok(None) => {
+            warn!("verify_mfa: no enrollment found for account_id={} mfa_type={}", payload.account_id, payload.mfa_type);
+            Ok(Json(MfaResponse {
+                success: false,
+                message: "MFA not enrolled for this account/type".to_string(),
+            }))
+        }
         Ok(Some(record)) => {
             if !record.enabled {
+                warn!("verify_mfa: MFA disabled for account_id={} mfa_type={}", payload.account_id, payload.mfa_type);
                 return Ok(Json(MfaResponse {
                     success: false,
                     message: "MFA is disabled for this enrollment".to_string(),
@@ -1811,6 +1942,7 @@ async fn verify_mfa(
             // For SMS: compare against a code previously sent and stored in Redis/DB.
             // This is a placeholder that validates the code is non-empty.
             if payload.code.is_empty() {
+                warn!("verify_mfa: empty code submitted for account_id={}", payload.account_id);
                 return Ok(Json(MfaResponse {
                     success: false,
                     message: "Code must not be empty".to_string(),
@@ -1818,13 +1950,14 @@ async fn verify_mfa(
             }
 
             // TODO: implement actual TOTP validation / SMS code lookup
+            info!("verify_mfa: MFA verified for account_id={} mfa_type={}", payload.account_id, payload.mfa_type);
             Ok(Json(MfaResponse {
                 success: true,
                 message: "MFA verification successful".to_string(),
             }))
         }
         Err(e) => {
-            eprintln!("MFA verify error: {}", e);
+            error!("verify_mfa: database error: {}", e);
             Err(StatusCode::INTERNAL_SERVER_ERROR)
         }
     }
