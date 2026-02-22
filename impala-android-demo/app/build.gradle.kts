@@ -1,6 +1,14 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
+}
+
+val localProperties = Properties()
+val localPropertiesFile = rootProject.file("local.properties")
+if (localPropertiesFile.exists()) {
+    localProperties.load(localPropertiesFile.inputStream())
 }
 
 android {
@@ -16,14 +24,16 @@ android {
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
-        // Bridge API base URL (10.0.2.2 is emulator loopback to host)
-        buildConfigField("String", "BRIDGE_BASE_URL", "\"http://10.0.2.2:8080\"")
-        // GitHub OAuth (replace with real credentials for testing)
-        buildConfigField("String", "GITHUB_CLIENT_ID", "\"YOUR_GITHUB_CLIENT_ID\"")
-        buildConfigField("String", "GITHUB_CLIENT_SECRET", "\"YOUR_GITHUB_CLIENT_SECRET\"")
-        buildConfigField("String", "GITHUB_REDIRECT_URI", "\"impala://github-callback\"")
-        // Google OAuth web client ID (replace with real credentials for testing)
-        buildConfigField("String", "GOOGLE_WEB_CLIENT_ID", "\"YOUR_GOOGLE_WEB_CLIENT_ID\"")
+        buildConfigField("String", "BRIDGE_BASE_URL",
+            "\"${localProperties.getProperty("BRIDGE_BASE_URL", "http://10.0.2.2:8080")}\"")
+        buildConfigField("String", "GITHUB_CLIENT_ID",
+            "\"${localProperties.getProperty("GITHUB_CLIENT_ID", "YOUR_GITHUB_CLIENT_ID")}\"")
+        buildConfigField("String", "GITHUB_CLIENT_SECRET",
+            "\"${localProperties.getProperty("GITHUB_CLIENT_SECRET", "YOUR_GITHUB_CLIENT_SECRET")}\"")
+        buildConfigField("String", "GITHUB_REDIRECT_URI",
+            "\"${localProperties.getProperty("GITHUB_REDIRECT_URI", "impala://github-callback")}\"")
+        buildConfigField("String", "GOOGLE_WEB_CLIENT_ID",
+            "\"${localProperties.getProperty("GOOGLE_WEB_CLIENT_ID", "YOUR_GOOGLE_WEB_CLIENT_ID")}\"")
     }
 
     buildTypes {
@@ -92,6 +102,13 @@ dependencies {
 
     // Testing
     testImplementation("junit:junit:4.13.2")
+    testImplementation("org.robolectric:robolectric:4.14.1")
+    testImplementation("androidx.test:core:1.6.1")
+    testImplementation("androidx.test.ext:junit:1.2.1")
+    testImplementation("androidx.arch.core:core-testing:2.2.0")
+    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.9.0")
+    testImplementation("org.mockito:mockito-core:5.14.2")
+    testImplementation("org.mockito.kotlin:mockito-kotlin:5.4.0")
     androidTestImplementation("androidx.test.ext:junit:1.2.1")
     androidTestImplementation("androidx.test.espresso:espresso-core:3.6.1")
 }

@@ -97,6 +97,11 @@ object Constants {
     const val SW_ERROR_ARRAY_INDEX_OUT_OF_BOUNDS_EXCEPTION: Short = 0x6689
     const val SW_ERROR_PIN_REQUIRED: Short = 0x6690
     const val SW_ERROR_PIN_REJECTED: Short = 0x6691
+    const val SW_SET_FULL_NAME_FAILED: Short = 0x6C03
+    const val SW_SET_GENDER_FAILED: Short = 0x6C04
+    const val SW_ERROR_WRONG_SIGNABLE_LENGTH: Short = 0x6226
+    const val SW_ERROR_WRONG_TAIL_LENGTH: Short = 0x6C02
+    const val SW_ERROR_ALREADY_INITIALIZED: Short = 0x6686
     const val SW_UNKNOWN: Short = 0x6F00
     const val SW_UNKNOWN_4469: Short = 0x4469
     const val SW_UNKNOWN_6F15: Short = 0x6F15

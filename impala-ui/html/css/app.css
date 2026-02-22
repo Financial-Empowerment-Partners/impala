@@ -201,6 +201,53 @@ table tbody tr:nth-child(even) {
     to { transform: rotate(360deg); }
 }
 
+/* Accessibility: screen reader only */
+.sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border-width: 0;
+}
+
+/* Accessibility: focus indicator */
+*:focus-visible {
+    outline: 2px solid #1779ba;
+    outline-offset: 2px;
+}
+
+/* Button loading spinner */
+.btn-loading {
+    position: relative;
+    color: transparent !important;
+    pointer-events: none;
+}
+
+.btn-loading::after {
+    content: '';
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 1rem;
+    height: 1rem;
+    margin: -0.5rem 0 0 -0.5rem;
+    border: 2px solid rgba(255, 255, 255, 0.4);
+    border-top-color: #fff;
+    border-radius: 50%;
+    animation: spin 0.6s linear infinite;
+}
+
+/* Form validation error text */
+.field-error {
+    color: var(--alert);
+    font-size: 0.8rem;
+    margin-top: 0.25rem;
+}
+
 /* Responsive tweaks */
 @media screen and (max-width: 640px) {
     .login-card {

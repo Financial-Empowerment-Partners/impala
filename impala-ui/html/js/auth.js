@@ -101,8 +101,11 @@ var Auth = (function () {
         });
     }
 
-    /** Clear tokens and redirect to the login page. */
+    /** Stop session timer, clear tokens, and redirect to the login page. */
     function logout() {
+        if (typeof SessionTimer !== 'undefined') {
+            SessionTimer.stop();
+        }
         API.clearTokens();
         window.location.href = 'index.html';
     }

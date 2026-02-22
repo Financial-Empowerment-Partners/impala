@@ -4,6 +4,7 @@ import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.location.Location;
+import android.util.Log;
 
 /**
  * BroadcastReceiver that listens for geolocation update intents and
@@ -22,6 +23,8 @@ import android.location.Location;
  */
 public class GeoUpdateReceiver extends BroadcastReceiver {
 
+    private static final String TAG = "ImpalaGeoUpdateReceiver";
+
     /** Broadcast action indicating a new location fix is available. */
     public static final String ACTION_LOCATION_UPDATE = "com.payala.impala.ACTION_LOCATION_UPDATE";
 
@@ -33,7 +36,11 @@ public class GeoUpdateReceiver extends BroadcastReceiver {
         if (ACTION_LOCATION_UPDATE.equals(intent.getAction())) {
             Location location = intent.getParcelableExtra(EXTRA_LOCATION);
             if (location != null) {
+                Log.d(TAG, "Location update: lat=" + location.getLatitude()
+                        + ", lon=" + location.getLongitude());
                 ImpalaGeoHandler.handle_geo_update(context, location);
+            } else {
+                Log.w(TAG, "Received null location update");
             }
         }
     }

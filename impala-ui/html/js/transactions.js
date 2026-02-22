@@ -3,7 +3,8 @@
  *
  * Transactions are submitted via POST /subscribe. A session-scoped log
  * (stored in sessionStorage) tracks all submissions with their status.
- * The log is cleared when the browser tab closes.
+ * The log is cleared when the browser tab closes. Capped at 100 entries.
+ * Supports client-side pagination of the transaction log.
  */
 (function () {
     Router.init();
@@ -11,6 +12,9 @@
     var txForm = document.getElementById('tx-form');
     var txLog = document.getElementById('tx-log');
     var LOG_KEY = 'impala_tx_log';
+    var LOG_MAX = 100;
+    var PAGE_SIZE = 10;
+    var currentPage = 1;
 
     // Load existing session log
     renderLog();
@@ -18,17 +22,31 @@
     txForm.addEventListener('submit', function (e) {
         e.preventDefault();
 
+        var source = document.getElementById('tx-source').value.trim();
+        var destination = document.getElementById('tx-destination').value.trim();
+        var amount = document.getElementById('tx-amount').value.trim();
+
+        // Validate inputs
+        var error = Validate.firstError([
+            Validate.stellarId(source),
+            Validate.stellarId(destination),
+            Validate.positiveNumber(amount)
+        ]);
+        if (error) {
+            Router.showToast(error, 'warning');
+            return;
+        }
+
         var body = {
-            source_account: document.getElementById('tx-source').value.trim(),
-            destination_account: document.getElementById('tx-destination').value.trim(),
-            amount: document.getElementById('tx-amount').value.trim(),
+            source_account: source,
+            destination_account: destination,
+            amount: amount,
             asset_code: document.getElementById('tx-asset-code').value.trim() || undefined,
             memo: document.getElementById('tx-memo').value.trim() || undefined
         };
 
         var submitBtn = txForm.querySelector('button[type="submit"]');
-        submitBtn.disabled = true;
-        submitBtn.textContent = 'Submitting...';
+        API.setButtonLoading(submitBtn, true);
 
         API.post('/subscribe', body)
             .then(function (data) {
@@ -41,8 +59,7 @@
                 addToLog(body, { error: err.message });
             })
             .then(function () {
-                submitBtn.disabled = false;
-                submitBtn.textContent = 'Submit Transaction';
+                API.setButtonLoading(submitBtn, false);
             });
     });
 
@@ -65,7 +82,14 @@
             status: response.error ? 'Error' : 'Submitted',
             detail: response.error || 'OK'
         });
+
+        // Cap at LOG_MAX entries
+        if (log.length > LOG_MAX) {
+            log = log.slice(0, LOG_MAX);
+        }
+
         sessionStorage.setItem(LOG_KEY, JSON.stringify(log));
+        currentPage = 1;
         renderLog();
     }
 
@@ -76,11 +100,13 @@
             return;
         }
 
+        var info = Paginate.paginate(log, currentPage, PAGE_SIZE);
+
         var html = '<table><thead><tr>' +
             '<th>Time</th><th>Source</th><th>Dest</th><th>Amount</th><th>Asset</th><th>Status</th>' +
             '</tr></thead><tbody>';
 
-        log.forEach(function (entry) {
+        info.items.forEach(function (entry) {
             var statusClass = entry.status === 'Error' ? 'error' : 'ok';
             html += '<tr>' +
                 '<td>' + escapeHtml(new Date(entry.timestamp).toLocaleTimeString()) + '</td>' +
@@ -93,7 +119,13 @@
         });
 
         html += '</tbody></table>';
+        html += '<div id="tx-log-pagination"></div>';
         txLog.innerHTML = html;
+
+        Paginate.renderControls(info, 'tx-log-pagination', function (newPage) {
+            currentPage = newPage;
+            renderLog();
+        });
     }
 
     function truncate(str, len) {

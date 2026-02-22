@@ -135,7 +135,7 @@ class LoginActivity : AppCompatActivity() {
                     binding.btnGoogle.isEnabled = true
                     binding.btnGithub.isEnabled = true
                     binding.btnCard.isEnabled = true
-                    binding.tvError.text = state.message
+                    binding.tvError.text = mapErrorToMessage(state)
                     binding.tvError.visibility = View.VISIBLE
                 }
                 is LoginViewModel.LoginState.Idle -> {
@@ -225,6 +225,17 @@ class LoginActivity : AppCompatActivity() {
             }
             awaitingCardTap = true
             Snackbar.make(binding.root, R.string.nfc_tap_prompt, Snackbar.LENGTH_LONG).show()
+        }
+    }
+
+    private fun mapErrorToMessage(error: LoginViewModel.LoginState.Error): String {
+        return when (error.errorType) {
+            LoginViewModel.ErrorType.NETWORK -> getString(R.string.error_network)
+            LoginViewModel.ErrorType.AUTH_FAILED -> getString(R.string.error_auth_failed)
+            LoginViewModel.ErrorType.TOKEN_FAILED -> getString(R.string.error_token_refresh_failed)
+            LoginViewModel.ErrorType.SERVER_ERROR -> getString(R.string.error_server)
+            LoginViewModel.ErrorType.VALIDATION -> error.message
+            LoginViewModel.ErrorType.UNKNOWN -> getString(R.string.error_unknown)
         }
     }
 

@@ -4,6 +4,7 @@
  * Registration stores the card's EC public key (and optional RSA public key)
  * linked to an account. Deactivation uses a confirmation modal (Foundation JS
  * if available, CSS fallback otherwise) before sending a PUT with card_active: false.
+ * Validates hex public keys before submission.
  */
 (function () {
     Router.init();
@@ -23,12 +24,40 @@
     registerForm.addEventListener('submit', function (e) {
         e.preventDefault();
 
+        var accountId = document.getElementById('reg-account-id').value.trim();
+        var cardId = document.getElementById('reg-card-id').value.trim();
+        var ecPubkey = document.getElementById('reg-ec-pubkey').value.trim();
+        var rsaPubkey = document.getElementById('reg-rsa-pubkey').value.trim();
+
+        // Validate required fields
+        var error = Validate.firstError([
+            Validate.required(accountId),
+            Validate.required(cardId),
+            Validate.hexString(ecPubkey)
+        ]);
+        if (error) {
+            Router.showToast(error, 'warning');
+            return;
+        }
+
+        // Validate optional RSA key if provided
+        if (rsaPubkey) {
+            var rsaCheck = Validate.hexString(rsaPubkey);
+            if (!rsaCheck.valid) {
+                Router.showToast('RSA public key: ' + rsaCheck.message, 'warning');
+                return;
+            }
+        }
+
         var body = {
-            account_id: document.getElementById('reg-account-id').value.trim(),
-            card_id: document.getElementById('reg-card-id').value.trim(),
-            ec_pubkey: document.getElementById('reg-ec-pubkey').value.trim(),
-            rsa_pubkey: document.getElementById('reg-rsa-pubkey').value.trim() || undefined
+            account_id: accountId,
+            card_id: cardId,
+            ec_pubkey: ecPubkey,
+            rsa_pubkey: rsaPubkey || undefined
         };
+
+        var submitBtn = registerForm.querySelector('button[type="submit"]');
+        API.setButtonLoading(submitBtn, true);
 
         API.post('/account', body)
             .then(function () {
@@ -37,6 +66,9 @@
             })
             .catch(function (err) {
                 Router.showToast('Error: ' + err.message, 'alert');
+            })
+            .then(function () {
+                API.setButtonLoading(submitBtn, false);
             });
     });
 
@@ -73,6 +105,8 @@
         var accountId = document.getElementById('deact-account-id').value.trim();
         var cardId = document.getElementById('deact-card-id').value.trim();
 
+        API.setButtonLoading(confirmYes, true);
+
         API.put('/account', {
             account_id: accountId,
             card_id: cardId,
@@ -85,6 +119,9 @@
             })
             .catch(function (err) {
                 Router.showToast('Error: ' + err.message, 'alert');
+            })
+            .then(function () {
+                API.setButtonLoading(confirmYes, false);
             });
     });
 

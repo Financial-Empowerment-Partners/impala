@@ -1,5 +1,6 @@
 package com.payala.impala.demo.api
 
+import com.payala.impala.demo.BuildConfig
 import com.payala.impala.demo.auth.TokenManager
 import okhttp3.OkHttpClient
 import okhttp3.logging.HttpLoggingInterceptor
@@ -19,6 +20,7 @@ object ApiClient {
     @Volatile
     private var service: BridgeApiService? = null
     private var currentBaseUrl: String? = null
+    private var client: OkHttpClient? = null
 
     /**
      * Returns a [BridgeApiService] configured for [baseUrl].
@@ -39,20 +41,35 @@ object ApiClient {
                 return service!!
             }
 
-            val logging = HttpLoggingInterceptor().apply {
-                level = HttpLoggingInterceptor.Level.BODY
+            val logging = HttpLoggingInterceptor { message ->
+                // Redact Authorization header values in logs
+                val redacted = if (message.startsWith("Authorization:")) {
+                    "Authorization: [REDACTED]"
+                } else {
+                    message
+                }
+                HttpLoggingInterceptor.Logger.DEFAULT.log(redacted)
+            }.apply {
+                level = if (BuildConfig.DEBUG) {
+                    HttpLoggingInterceptor.Level.HEADERS
+                } else {
+                    HttpLoggingInterceptor.Level.NONE
+                }
             }
 
-            val client = OkHttpClient.Builder()
+            val okHttpClient = OkHttpClient.Builder()
+                .addInterceptor(RetryInterceptor())
                 .addInterceptor(AuthInterceptor(tokenManager))
                 .addInterceptor(logging)
                 .connectTimeout(30, TimeUnit.SECONDS)
                 .readTimeout(30, TimeUnit.SECONDS)
                 .build()
 
+            client = okHttpClient
+
             val retrofit = Retrofit.Builder()
                 .baseUrl(normalizedUrl)
-                .client(client)
+                .client(okHttpClient)
                 .addConverterFactory(GsonConverterFactory.create())
                 .build()
 
@@ -65,8 +82,13 @@ object ApiClient {
     /** Discards the cached service instance, forcing re-creation on next call. */
     fun reset() {
         synchronized(this) {
+            client?.let {
+                it.connectionPool.evictAll()
+                it.dispatcher.cancelAll()
+            }
             service = null
             currentBaseUrl = null
+            client = null
         }
     }
 }

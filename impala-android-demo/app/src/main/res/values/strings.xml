@@ -14,6 +14,16 @@
     <string name="divider_or">OR</string>
     <string name="error_fields_required">Account ID and password are required</string>
     <string name="error_password_short">Password must be at least 8 characters</string>
+    <string name="error_network">Unable to connect. Please check your internet connection.</string>
+    <string name="error_auth_failed">Invalid username or password.</string>
+    <string name="error_token_refresh_failed">Session expired. Please log in again.</string>
+    <string name="error_server">Server error. Please try again later.</string>
+    <string name="error_timeout">Request timed out. Please try again.</string>
+    <string name="error_validation">Please check your input and try again.</string>
+    <string name="error_unknown">An unexpected error occurred.</string>
+    <string name="error_empty_username">Username is required</string>
+    <string name="error_empty_password">Password is required</string>
+    <string name="error_password_too_short">Password must be at least 8 characters</string>
 
     <!-- Navigation -->
     <string name="nav_cards">Cards</string>

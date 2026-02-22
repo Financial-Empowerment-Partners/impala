@@ -27,8 +27,7 @@ public class ExampleUnitTest {
     public void geoHandler_null_listener_does_not_throw() {
         // Ensure no NPE when no listener is registered
         ImpalaGeoHandler.setGeoUpdateListener(null);
-        // Cannot call handle_geo_update without android.location.Location on JVM,
-        // but we can verify the listener can be set to null safely.
+        assertNull(ImpalaGeoHandler.getGeoUpdateListener());
     }
 
     @Test

@@ -3,7 +3,7 @@
  *
  * Search by stellar_account_id, create new linked accounts, or edit existing
  * ones. The Edit button and create/update forms respect the manage_accounts
- * permission.
+ * permission. Validates Stellar IDs and phone numbers before submission.
  */
 (function () {
     Router.init();
@@ -22,8 +22,18 @@
 
     function doSearch() {
         var id = searchInput.value.trim();
-        if (!id) return;
+        if (!id) {
+            Router.showToast('Please enter an account ID to search', 'warning');
+            return;
+        }
 
+        var check = Validate.stellarId(id);
+        if (!check.valid) {
+            Router.showToast(check.message, 'warning');
+            return;
+        }
+
+        API.setButtonLoading(searchBtn, true);
         resultDiv.innerHTML = '<div class="spinner"></div> Searching...';
 
         API.get('/account?stellar_account_id=' + encodeURIComponent(id))
@@ -32,6 +42,9 @@
             })
             .catch(function (err) {
                 resultDiv.innerHTML = '<div class="callout warning">' + escapeHtml(err.message) + '</div>';
+            })
+            .then(function () {
+                API.setButtonLoading(searchBtn, false);
             });
     }
 
@@ -82,12 +95,37 @@
 
     createForm.addEventListener('submit', function (e) {
         e.preventDefault();
+
+        var stellarId = document.getElementById('create-stellar-id').value.trim();
+        var phone = document.getElementById('create-phone').value.trim();
+
+        // Validate required fields
+        var error = Validate.firstError([
+            Validate.stellarId(stellarId)
+        ]);
+        if (error) {
+            Router.showToast(error, 'warning');
+            return;
+        }
+
+        // Validate phone if provided
+        if (phone) {
+            var phoneCheck = Validate.phone(phone);
+            if (!phoneCheck.valid) {
+                Router.showToast(phoneCheck.message, 'warning');
+                return;
+            }
+        }
+
         var body = {
-            stellar_account_id: document.getElementById('create-stellar-id').value.trim(),
+            stellar_account_id: stellarId,
             payala_account_id: document.getElementById('create-payala-id').value.trim() || undefined,
             display_name: document.getElementById('create-display-name').value.trim() || undefined,
-            phone: document.getElementById('create-phone').value.trim() || undefined
+            phone: phone || undefined
         };
+
+        var submitBtn = createForm.querySelector('button[type="submit"]');
+        API.setButtonLoading(submitBtn, true);
 
         API.post('/account', body)
             .then(function () {
@@ -96,17 +134,35 @@
             })
             .catch(function (err) {
                 Router.showToast('Error: ' + err.message, 'alert');
+            })
+            .then(function () {
+                API.setButtonLoading(submitBtn, false);
             });
     });
 
     updateForm.addEventListener('submit', function (e) {
         e.preventDefault();
+
+        var phone = document.getElementById('update-phone').value.trim();
+
+        // Validate phone if provided
+        if (phone) {
+            var phoneCheck = Validate.phone(phone);
+            if (!phoneCheck.valid) {
+                Router.showToast(phoneCheck.message, 'warning');
+                return;
+            }
+        }
+
         var body = {
             stellar_account_id: document.getElementById('update-stellar-id').value.trim(),
             payala_account_id: document.getElementById('update-payala-id').value.trim() || undefined,
             display_name: document.getElementById('update-display-name').value.trim() || undefined,
-            phone: document.getElementById('update-phone').value.trim() || undefined
+            phone: phone || undefined
         };
+
+        var submitBtn = updateForm.querySelector('button[type="submit"]');
+        API.setButtonLoading(submitBtn, true);
 
         API.put('/account', body)
             .then(function () {
@@ -115,6 +171,9 @@
             })
             .catch(function (err) {
                 Router.showToast('Error: ' + err.message, 'alert');
+            })
+            .then(function () {
+                API.setButtonLoading(submitBtn, false);
             });
     });
 

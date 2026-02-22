@@ -1,0 +1,17 @@
+# Local configuration for impala-android-demo.
+# Copy this file to local.properties and fill in real values.
+# NEVER commit local.properties to version control.
+
+# Android SDK location (auto-set by Android Studio)
+# sdk.dir=/path/to/android/sdk
+
+# Bridge API base URL (default: emulator loopback to host)
+BRIDGE_BASE_URL=http://10.0.2.2:8080
+
+# GitHub OAuth credentials
+GITHUB_CLIENT_ID=YOUR_GITHUB_CLIENT_ID
+GITHUB_CLIENT_SECRET=YOUR_GITHUB_CLIENT_SECRET
+GITHUB_REDIRECT_URI=impala://github-callback
+
+# Google OAuth web client ID (from Google Cloud Console)
+GOOGLE_WEB_CLIENT_ID=YOUR_GOOGLE_WEB_CLIENT_ID

@@ -22,7 +22,7 @@
                 <h5>MFA Enrollments</h5>
                 <div class="grid-x grid-margin-x">
                     <div class="cell medium-8">
-                        <input type="text" id="mfa-lookup-id" placeholder="Enter account_id to lookup enrollments">
+                        <input type="text" id="mfa-lookup-id" placeholder="Enter account_id to lookup enrollments" aria-label="Account ID for MFA lookup">
                     </div>
                     <div class="cell medium-4">
                         <button class="button expanded" id="mfa-lookup-btn">Lookup</button>
@@ -58,7 +58,7 @@
                         </div>
                         <div class="cell medium-4 hidden" id="sms-field">
                             <label>Phone Number
-                                <input type="text" id="enroll-phone">
+                                <input type="text" id="enroll-phone" placeholder="+1234567890">
                             </label>
                         </div>
                     </div>
@@ -88,7 +88,7 @@
                         </div>
                         <div class="cell medium-4">
                             <label>Code
-                                <input type="text" id="verify-code" required>
+                                <input type="text" id="verify-code" required placeholder="6-digit code">
                             </label>
                         </div>
                     </div>
@@ -101,6 +101,8 @@
     <script src="js/api.js"></script>
     <script src="js/roles.js"></script>
     <script src="js/auth.js"></script>
+    <script src="js/validate.js"></script>
+    <script src="js/session-timer.js"></script>
     <script src="js/router.js"></script>
     <script src="js/mfa.js"></script>
 </body>

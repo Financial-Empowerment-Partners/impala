@@ -2,6 +2,9 @@ package com.payala.impala;
 
 import android.content.Context;
 import android.location.Location;
+import android.util.Log;
+
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * Singleton-style handler that dispatches geolocation updates to a registered listener.
@@ -19,6 +22,8 @@ import android.location.Location;
  */
 public class ImpalaGeoHandler {
 
+    private static final String TAG = "ImpalaGeoHandler";
+
     /**
      * Callback interface for receiving geolocation updates.
      */
@@ -34,14 +39,21 @@ public class ImpalaGeoHandler {
         void onGeoUpdate(double latitude, double longitude, float accuracy, long timestamp);
     }
 
-    private static volatile GeoUpdateListener listener;
+    private static final AtomicReference<GeoUpdateListener> listenerRef = new AtomicReference<>();
 
     /**
      * Register a listener to receive geolocation updates. Only one listener
      * is supported at a time; setting a new listener replaces the previous one.
      */
     public static void setGeoUpdateListener(GeoUpdateListener l) {
-        listener = l;
+        listenerRef.set(l);
+    }
+
+    /**
+     * Returns the currently registered listener, or null if none.
+     */
+    public static GeoUpdateListener getGeoUpdateListener() {
+        return listenerRef.get();
     }
 
     /**
@@ -49,13 +61,20 @@ public class ImpalaGeoHandler {
      * Called internally by {@link GeoUpdateReceiver}.
      */
     public static void handle_geo_update(Context context, Location location) {
-        if (listener != null) {
-            listener.onGeoUpdate(
-                    location.getLatitude(),
-                    location.getLongitude(),
-                    location.getAccuracy(),
-                    location.getTime()
-            );
+        GeoUpdateListener l = listenerRef.get();
+        if (l != null) {
+            try {
+                l.onGeoUpdate(
+                        location.getLatitude(),
+                        location.getLongitude(),
+                        location.getAccuracy(),
+                        location.getTime()
+                );
+            } catch (Exception e) {
+                Log.e(TAG, "Geo callback error: " + e.getMessage());
+            }
+        } else {
+            Log.w(TAG, "No geo listener registered");
         }
     }
 }

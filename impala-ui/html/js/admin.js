@@ -2,12 +2,16 @@
  * Admin page module — manage role assignments (admin-only).
  *
  * Displays role definitions with their permission sets, lists all current
- * role assignments, and allows assigning/removing roles. The current user
- * cannot modify their own role (self-demotion prevention).
+ * role assignments with pagination, and allows assigning/removing roles.
+ * The current user cannot modify their own role (self-demotion prevention).
+ * Role changes and removals require confirmation.
  */
 (function () {
     Router.init();
     if (!Router.requireAdmin()) return;
+
+    var PAGE_SIZE = 10;
+    var currentPage = 1;
 
     renderRoleDefinitions();
     renderAssignments();
@@ -20,13 +24,20 @@
         var accountId = document.getElementById('assign-account-id').value.trim();
         var role = document.getElementById('assign-role').value;
 
-        if (!accountId) {
+        var error = Validate.firstError([
+            Validate.required(accountId)
+        ]);
+        if (error) {
             Router.showToast('Please enter an account ID', 'warning');
             return;
         }
 
+        if (!confirm('Are you sure you want to assign role "' + role + '" to ' + accountId + '?')) {
+            return;
+        }
+
         Roles.setRole(accountId, role);
-        Router.showToast('Role assigned: ' + accountId + ' → ' + role, 'success');
+        Router.showToast('Role assigned: ' + accountId + ' \u2192 ' + role, 'success');
         assignForm.reset();
         renderAssignments();
     });
@@ -57,11 +68,12 @@
             return;
         }
 
+        var info = Paginate.paginate(keys, currentPage, PAGE_SIZE);
+
         var html = '<table><thead><tr><th>Account ID</th><th>Role</th><th>Actions</th></tr></thead><tbody>';
 
-        keys.forEach(function (accountId) {
+        info.items.forEach(function (accountId) {
             var role = assignments[accountId];
-            var roleDef = Roles.DEFINITIONS[role] || {};
             var currentUser = Auth.getUsername();
             var isSelf = accountId === currentUser;
 
@@ -86,23 +98,38 @@
         });
 
         html += '</tbody></table>';
+        html += '<div id="admin-pagination"></div>';
         document.getElementById('role-assignments').innerHTML = html;
 
-        // Bind change handlers
+        Paginate.renderControls(info, 'admin-pagination', function (newPage) {
+            currentPage = newPage;
+            renderAssignments();
+        });
+
+        // Bind change handlers with confirmation
         var selects = document.querySelectorAll('.role-select');
         for (var i = 0; i < selects.length; i++) {
             selects[i].addEventListener('change', function () {
                 var acct = this.getAttribute('data-account');
-                Roles.setRole(acct, this.value);
-                Router.showToast('Role updated: ' + acct + ' → ' + this.value, 'success');
+                var newRole = this.value;
+                if (!confirm('Are you sure you want to change this user\'s role?')) {
+                    // Revert to previous value
+                    this.value = Roles.getRole(acct);
+                    return;
+                }
+                Roles.setRole(acct, newRole);
+                Router.showToast('Role updated: ' + acct + ' \u2192 ' + newRole, 'success');
             });
         }
 
-        // Bind remove handlers
+        // Bind remove handlers with confirmation
         var removeBtns = document.querySelectorAll('.remove-role-btn');
         for (var j = 0; j < removeBtns.length; j++) {
             removeBtns[j].addEventListener('click', function () {
                 var acct = this.getAttribute('data-account');
+                if (!confirm('Are you sure you want to remove the role for ' + acct + '?')) {
+                    return;
+                }
                 Roles.removeRole(acct);
                 Router.showToast('Role removed: ' + acct, 'info');
                 renderAssignments();

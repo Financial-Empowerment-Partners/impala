@@ -7,6 +7,7 @@
  *
  * Enrollment uses POST /mfa with UPSERT semantics (re-enrollment replaces
  * existing method). Verification uses POST /mfa/verify.
+ * Validates TOTP codes (6 digits) and phone numbers (E.164) before submission.
  */
 (function () {
     Router.init();
@@ -39,8 +40,18 @@
 
     function doLookup() {
         var id = lookupInput.value.trim();
-        if (!id) return;
+        if (!id) {
+            Router.showToast('Please enter an account ID', 'warning');
+            return;
+        }
 
+        var check = Validate.required(id);
+        if (!check.valid) {
+            Router.showToast(check.message, 'warning');
+            return;
+        }
+
+        API.setButtonLoading(lookupBtn, true);
         enrollmentsDiv.innerHTML = '<div class="spinner"></div> Loading...';
 
         API.get('/mfa?account_id=' + encodeURIComponent(id))
@@ -67,22 +78,51 @@
             })
             .catch(function (err) {
                 enrollmentsDiv.innerHTML = '<div class="callout warning">' + escapeHtml(err.message) + '</div>';
+            })
+            .then(function () {
+                API.setButtonLoading(lookupBtn, false);
             });
     }
 
     // Enroll
     enrollForm.addEventListener('submit', function (e) {
         e.preventDefault();
+
+        var accountId = document.getElementById('enroll-account-id').value.trim();
+
+        var error = Validate.firstError([
+            Validate.required(accountId)
+        ]);
+        if (error) {
+            Router.showToast(error, 'warning');
+            return;
+        }
+
         var body = {
-            account_id: document.getElementById('enroll-account-id').value.trim(),
+            account_id: accountId,
             mfa_type: mfaTypeSelect.value
         };
 
         if (mfaTypeSelect.value === 'totp') {
-            body.secret = document.getElementById('enroll-secret').value.trim();
+            var secret = document.getElementById('enroll-secret').value.trim();
+            var secretCheck = Validate.required(secret);
+            if (!secretCheck.valid) {
+                Router.showToast('TOTP secret is required', 'warning');
+                return;
+            }
+            body.secret = secret;
         } else {
-            body.phone = document.getElementById('enroll-phone').value.trim();
+            var phone = document.getElementById('enroll-phone').value.trim();
+            var phoneCheck = Validate.phone(phone);
+            if (!phoneCheck.valid) {
+                Router.showToast(phoneCheck.message, 'warning');
+                return;
+            }
+            body.phone = phone;
         }
+
+        var submitBtn = enrollForm.querySelector('button[type="submit"]');
+        API.setButtonLoading(submitBtn, true);
 
         API.post('/mfa', body)
             .then(function (data) {
@@ -94,19 +134,41 @@
             })
             .catch(function (err) {
                 Router.showToast('Error: ' + err.message, 'alert');
+            })
+            .then(function () {
+                API.setButtonLoading(submitBtn, false);
             });
     });
 
     // Verify
     verifyForm.addEventListener('submit', function (e) {
         e.preventDefault();
+
+        var accountId = document.getElementById('verify-account-id').value.trim();
+        var code = document.getElementById('verify-code').value.trim();
+        var mfaType = document.getElementById('verify-mfa-type').value;
+
+        // Validate TOTP code format
+        var validations = [Validate.required(accountId)];
+        if (mfaType === 'totp') {
+            validations.push(Validate.totpCode(code));
+        } else {
+            validations.push(Validate.required(code));
+        }
+
+        var error = Validate.firstError(validations);
+        if (error) {
+            Router.showToast(error, 'warning');
+            return;
+        }
+
         var submitBtn = verifyForm.querySelector('button[type="submit"]');
-        if (submitBtn) submitBtn.disabled = true;
+        API.setButtonLoading(submitBtn, true);
 
         var body = {
-            account_id: document.getElementById('verify-account-id').value.trim(),
-            mfa_type: document.getElementById('verify-mfa-type').value,
-            code: document.getElementById('verify-code').value.trim()
+            account_id: accountId,
+            mfa_type: mfaType,
+            code: code
         };
 
         API.post('/mfa/verify', body)
@@ -118,7 +180,7 @@
                 Router.showToast('Verification failed: ' + err.message, 'alert');
             })
             .then(function () {
-                if (submitBtn) submitBtn.disabled = false;
+                API.setButtonLoading(submitBtn, false);
             });
     });
 

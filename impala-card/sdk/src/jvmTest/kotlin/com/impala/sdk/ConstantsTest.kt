@@ -51,7 +51,7 @@ class ConstantsTest {
 
     @Test
     fun `SW_OK is 0x9000`() {
-        assertEquals(0x9000, Constants.SW_OK)
+        assertEquals(0x9000.toShort(), Constants.SW_OK)
     }
 
     @Test

@@ -43,7 +43,7 @@ pub struct WrappedAsset {
 /// after `unlock_time` has passed.
 #[contracttype]
 pub struct TimeLock {
-    /// Operation type: 1=unwrap, 2=transfer, 3=config_change.
+    /// Operation type: 1=unwrap, 2=transfer.
     pub operation_type: u32,
     /// Signers who authorized the scheduling of this operation.
     pub signers: Vec<Address>,
@@ -72,7 +72,12 @@ pub enum DataKey {
     TimeLock(u64),
     NextTimeLockId,
     MinLockDuration,
+    /// Whether the contract is paused.
+    Paused,
 }
+
+/// Maximum allowed delay for timelocked operations (365 days in seconds).
+const MAX_LOCK_DURATION: u64 = 31_536_000;
 
 #[contract]
 pub struct MultisigAssetWrapper;
@@ -108,8 +113,58 @@ impl MultisigAssetWrapper {
         env.storage().instance().set(&DataKey::Initialized, &true);
     }
 
+    /// Pause the contract (requires multisig). Blocks all operations except cancel_timelock.
+    pub fn pause(env: Env, signers: Vec<Address>) {
+        Self::verify_multisig(&env, &signers);
+        env.storage().instance().set(&DataKey::Paused, &true);
+        env.events().publish(
+            (symbol_short!("pause"),),
+            0,
+        );
+    }
+
+    /// Unpause the contract (requires multisig).
+    pub fn unpause(env: Env, signers: Vec<Address>) {
+        Self::verify_multisig(&env, &signers);
+        env.storage().instance().set(&DataKey::Paused, &false);
+        env.events().publish(
+            (symbol_short!("unpause"),),
+            0,
+        );
+    }
+
+    /// Rotate the authorized signer set (requires current multisig).
+    pub fn rotate_signers(
+        env: Env,
+        current_signers: Vec<Address>,
+        new_signers: Vec<Address>,
+        new_threshold: u32,
+    ) {
+        if new_signers.len() == 0 {
+            panic!("New signers must not be empty");
+        }
+        if new_threshold == 0 || new_threshold > new_signers.len() {
+            panic!("Invalid new threshold");
+        }
+
+        Self::verify_multisig(&env, &current_signers);
+
+        let config = MultisigConfig {
+            signers: new_signers,
+            threshold: new_threshold,
+        };
+        env.storage().instance().set(&DataKey::MultisigConfig, &config);
+
+        env.events().publish(
+            (symbol_short!("rotate"),),
+            new_threshold,
+        );
+    }
+
     /// Wrap tokens (immediate execution, no timelock)
     pub fn wrap(env: Env, signers: Vec<Address>, amount: i128) {
+        Self::require_not_paused(&env);
+
         if amount <= 0 {
             panic!("Amount must be positive");
         }
@@ -164,6 +219,8 @@ impl MultisigAssetWrapper {
         amount: i128,
         delay_seconds: u64,
     ) -> u64 {
+        Self::require_not_paused(&env);
+
         if amount <= 0 {
             panic!("Amount must be positive");
         }
@@ -178,6 +235,10 @@ impl MultisigAssetWrapper {
 
         if delay_seconds < min_duration {
             panic!("Delay too short");
+        }
+
+        if delay_seconds > MAX_LOCK_DURATION {
+            panic!("Delay exceeds maximum lock duration");
         }
 
         let balance_key = DataKey::Balance(recipient.clone());
@@ -227,6 +288,8 @@ impl MultisigAssetWrapper {
 
     /// Execute a time-locked unwrap operation
     pub fn execute_unwrap(env: Env, timelock_id: u64) {
+        Self::require_not_paused(&env);
+
         let mut timelock: TimeLock = env
             .storage()
             .instance()
@@ -255,6 +318,12 @@ impl MultisigAssetWrapper {
             panic!("Insufficient balance");
         }
 
+        // Mark as executed BEFORE external calls (reentrancy prevention)
+        timelock.executed = true;
+        env.storage()
+            .instance()
+            .set(&DataKey::TimeLock(timelock_id), &timelock);
+
         let mut wrapped_asset: WrappedAsset = env
             .storage()
             .instance()
@@ -279,12 +348,6 @@ impl MultisigAssetWrapper {
             .instance()
             .set(&DataKey::WrappedAsset, &wrapped_asset);
 
-        // Mark as executed
-        timelock.executed = true;
-        env.storage()
-            .instance()
-            .set(&DataKey::TimeLock(timelock_id), &timelock);
-
         env.events().publish(
             (symbol_short!("exec_unw"), timelock.recipient, timelock_id),
             timelock.amount,
@@ -300,8 +363,14 @@ impl MultisigAssetWrapper {
         amount: i128,
         delay_seconds: u64,
     ) -> u64 {
+        Self::require_not_paused(&env);
+
         if amount <= 0 {
             panic!("Amount must be positive");
+        }
+
+        if from == to {
+            panic!("Self-transfer not allowed");
         }
 
         Self::verify_multisig(&env, &signers);
@@ -314,6 +383,10 @@ impl MultisigAssetWrapper {
 
         if delay_seconds < min_duration {
             panic!("Delay too short");
+        }
+
+        if delay_seconds > MAX_LOCK_DURATION {
+            panic!("Delay exceeds maximum lock duration");
         }
 
         let from_key = DataKey::Balance(from.clone());
@@ -359,6 +432,8 @@ impl MultisigAssetWrapper {
 
     /// Execute a time-locked transfer using the sender stored at schedule time.
     pub fn execute_transfer(env: Env, timelock_id: u64) {
+        Self::require_not_paused(&env);
+
         let mut timelock: TimeLock = env
             .storage()
             .instance()
@@ -385,15 +460,16 @@ impl MultisigAssetWrapper {
             panic!("Insufficient balance");
         }
 
-        let new_from = from_balance.checked_sub(timelock.amount).expect("Balance underflow");
-        let new_to = to_balance.checked_add(timelock.amount).expect("Balance overflow");
-        env.storage().instance().set(&from_key, &new_from);
-        env.storage().instance().set(&to_key, &new_to);
-
+        // Mark as executed BEFORE state changes (reentrancy prevention)
         timelock.executed = true;
         env.storage()
             .instance()
             .set(&DataKey::TimeLock(timelock_id), &timelock);
+
+        let new_from = from_balance.checked_sub(timelock.amount).expect("Balance underflow");
+        let new_to = to_balance.checked_add(timelock.amount).expect("Balance overflow");
+        env.storage().instance().set(&from_key, &new_from);
+        env.storage().instance().set(&to_key, &new_to);
 
         env.events().publish(
             (symbol_short!("exec_tx"), timelock.sender, timelock.recipient, timelock_id),
@@ -451,9 +527,22 @@ impl MultisigAssetWrapper {
         wrapped_asset.total_wrapped
     }
 
+    /// Panics if the contract is currently paused.
+    fn require_not_paused(env: &Env) {
+        let paused: bool = env
+            .storage()
+            .instance()
+            .get(&DataKey::Paused)
+            .unwrap_or(false);
+        if paused {
+            panic!("Contract is paused");
+        }
+    }
+
     /// Verify that at least `threshold` of the provided signers are in the
     /// authorized signer list and that each has called `require_auth()`.
-    /// Panics if any provided signer is not authorized or the threshold is not met.
+    /// Panics if any provided signer is not authorized, the threshold is not met,
+    /// or duplicate signers are provided.
     fn verify_multisig(env: &Env, provided_signers: &Vec<Address>) {
         let config: MultisigConfig = env
             .storage()
@@ -463,6 +552,15 @@ impl MultisigAssetWrapper {
 
         if provided_signers.len() < config.threshold {
             panic!("Insufficient signers");
+        }
+
+        // Check for duplicate signers
+        for i in 0..provided_signers.len() {
+            for j in (i + 1)..provided_signers.len() {
+                if provided_signers.get(i).unwrap() == provided_signers.get(j).unwrap() {
+                    panic!("Duplicate signer detected");
+                }
+            }
         }
 
         for provided_signer in provided_signers.iter() {
@@ -478,16 +576,13 @@ impl MultisigAssetWrapper {
             }
             provided_signer.require_auth();
         }
-
-        // All provided signers are authorized, so valid_count == provided_signers.len()
-        // which is already checked >= threshold above.
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_sdk::{testutils::Address as _, vec, Env};
+    use soroban_sdk::{testutils::Address as _, testutils::Ledger, vec, Env};
 
     fn setup_env() -> (Env, Address, Address, Address, Address) {
         let env = Env::default();
@@ -1078,5 +1173,411 @@ mod tests {
         let signers = vec![&env, s1.clone()];
         // Attempt to unwrap more than balance
         client.schedule_unwrap(&signers, &s1, &301, &10);
+    }
+
+    // ---- New tests ----
+
+    #[test]
+    #[should_panic(expected = "Amount must be positive")]
+    fn test_wrap_zero_amount_panics() {
+        let (env, contract_id, admin, s1, s2) = setup_env();
+        let token_addr = create_token(&env, &admin);
+        init_contract(&env, &contract_id, &token_addr, &s1, &s2);
+
+        let client = MultisigAssetWrapperClient::new(&env, &contract_id);
+        let signers = vec![&env, s1.clone()];
+        client.wrap(&signers, &0);
+    }
+
+    #[test]
+    #[should_panic(expected = "Duplicate signer detected")]
+    fn test_duplicate_signers_panics() {
+        let (env, contract_id, admin, s1, s2) = setup_env();
+        let token_addr = create_token(&env, &admin);
+        init_contract(&env, &contract_id, &token_addr, &s1, &s2);
+
+        env.as_contract(&contract_id, || {
+            env.storage()
+                .instance()
+                .set(&DataKey::Balance(s1.clone()), &500_i128);
+            let mut wa: WrappedAsset = env
+                .storage()
+                .instance()
+                .get(&DataKey::WrappedAsset)
+                .unwrap();
+            wa.total_wrapped = 500;
+            env.storage()
+                .instance()
+                .set(&DataKey::WrappedAsset, &wa);
+        });
+
+        let client = MultisigAssetWrapperClient::new(&env, &contract_id);
+        // Pass duplicate addresses
+        let signers = vec![&env, s1.clone(), s1.clone()];
+        client.schedule_unwrap(&signers, &s1, &100, &10);
+    }
+
+    #[test]
+    #[should_panic(expected = "Already executed")]
+    fn test_cancel_prevents_execution() {
+        let (env, contract_id, admin, s1, s2) = setup_env();
+        let token_addr = create_token(&env, &admin);
+        init_contract(&env, &contract_id, &token_addr, &s1, &s2);
+
+        env.as_contract(&contract_id, || {
+            env.storage()
+                .instance()
+                .set(&DataKey::Balance(s1.clone()), &500_i128);
+            let mut wa: WrappedAsset = env
+                .storage()
+                .instance()
+                .get(&DataKey::WrappedAsset)
+                .unwrap();
+            wa.total_wrapped = 500;
+            env.storage()
+                .instance()
+                .set(&DataKey::WrappedAsset, &wa);
+        });
+
+        let client = MultisigAssetWrapperClient::new(&env, &contract_id);
+        let signers = vec![&env, s1.clone()];
+        let tl_id = client.schedule_unwrap(&signers, &s1, &200, &10);
+        client.cancel_timelock(&signers, &tl_id);
+
+        // Advance time past the unlock
+        env.ledger().with_mut(|li| {
+            li.timestamp = 1000;
+        });
+
+        // Try to execute cancelled timelock — should panic
+        client.execute_unwrap(&tl_id);
+    }
+
+    #[test]
+    #[should_panic(expected = "Self-transfer not allowed")]
+    fn test_self_transfer_panics() {
+        let (env, contract_id, admin, s1, s2) = setup_env();
+        let token_addr = create_token(&env, &admin);
+        init_contract(&env, &contract_id, &token_addr, &s1, &s2);
+
+        env.as_contract(&contract_id, || {
+            env.storage()
+                .instance()
+                .set(&DataKey::Balance(s1.clone()), &500_i128);
+            let mut wa: WrappedAsset = env
+                .storage()
+                .instance()
+                .get(&DataKey::WrappedAsset)
+                .unwrap();
+            wa.total_wrapped = 500;
+            env.storage()
+                .instance()
+                .set(&DataKey::WrappedAsset, &wa);
+        });
+
+        let client = MultisigAssetWrapperClient::new(&env, &contract_id);
+        let signers = vec![&env, s1.clone()];
+        // from == to should panic
+        client.schedule_transfer(&signers, &s1, &s1, &100, &10);
+    }
+
+    #[test]
+    #[should_panic(expected = "Delay exceeds maximum lock duration")]
+    fn test_delay_too_long_panics() {
+        let (env, contract_id, admin, s1, s2) = setup_env();
+        let token_addr = create_token(&env, &admin);
+        init_contract(&env, &contract_id, &token_addr, &s1, &s2);
+
+        env.as_contract(&contract_id, || {
+            env.storage()
+                .instance()
+                .set(&DataKey::Balance(s1.clone()), &500_i128);
+            let mut wa: WrappedAsset = env
+                .storage()
+                .instance()
+                .get(&DataKey::WrappedAsset)
+                .unwrap();
+            wa.total_wrapped = 500;
+            env.storage()
+                .instance()
+                .set(&DataKey::WrappedAsset, &wa);
+        });
+
+        let client = MultisigAssetWrapperClient::new(&env, &contract_id);
+        let signers = vec![&env, s1.clone()];
+        // MAX_LOCK_DURATION is 31_536_000; exceed it
+        client.schedule_unwrap(&signers, &s1, &100, &31_536_001);
+    }
+
+    #[test]
+    #[should_panic(expected = "Contract is paused")]
+    fn test_pause_blocks_wrap() {
+        let (env, contract_id, admin, s1, s2) = setup_env();
+        let token_addr = create_token(&env, &admin);
+        init_contract(&env, &contract_id, &token_addr, &s1, &s2);
+
+        let client = MultisigAssetWrapperClient::new(&env, &contract_id);
+        let signers = vec![&env, s1.clone()];
+
+        // Pause the contract
+        client.pause(&signers);
+
+        // Try to wrap — should panic
+        client.wrap(&signers, &100);
+    }
+
+    #[test]
+    fn test_unpause_allows_operations() {
+        let (env, contract_id, admin, s1, s2) = setup_env();
+        let token_addr = create_token(&env, &admin);
+        init_contract(&env, &contract_id, &token_addr, &s1, &s2);
+
+        let client = MultisigAssetWrapperClient::new(&env, &contract_id);
+        let signers = vec![&env, s1.clone()];
+
+        // Seed a balance for s1
+        env.as_contract(&contract_id, || {
+            env.storage()
+                .instance()
+                .set(&DataKey::Balance(s1.clone()), &500_i128);
+            let mut wa: WrappedAsset = env
+                .storage()
+                .instance()
+                .get(&DataKey::WrappedAsset)
+                .unwrap();
+            wa.total_wrapped = 500;
+            env.storage()
+                .instance()
+                .set(&DataKey::WrappedAsset, &wa);
+        });
+
+        // Pause then unpause
+        client.pause(&signers);
+        client.unpause(&signers);
+
+        // schedule_unwrap should succeed after unpause
+        let tl_id = client.schedule_unwrap(&signers, &s1, &100, &10);
+        let tl = client.get_timelock(&tl_id);
+        assert_eq!(tl.amount, 100);
+        assert!(!tl.executed);
+    }
+
+    #[test]
+    fn test_cancel_still_works_while_paused() {
+        let (env, contract_id, admin, s1, s2) = setup_env();
+        let token_addr = create_token(&env, &admin);
+        init_contract(&env, &contract_id, &token_addr, &s1, &s2);
+
+        env.as_contract(&contract_id, || {
+            env.storage()
+                .instance()
+                .set(&DataKey::Balance(s1.clone()), &500_i128);
+            let mut wa: WrappedAsset = env
+                .storage()
+                .instance()
+                .get(&DataKey::WrappedAsset)
+                .unwrap();
+            wa.total_wrapped = 500;
+            env.storage()
+                .instance()
+                .set(&DataKey::WrappedAsset, &wa);
+        });
+
+        let client = MultisigAssetWrapperClient::new(&env, &contract_id);
+        let signers = vec![&env, s1.clone()];
+
+        // Schedule a timelock before pausing
+        let tl_id = client.schedule_unwrap(&signers, &s1, &200, &10);
+
+        // Pause the contract
+        client.pause(&signers);
+
+        // Cancel should still work while paused
+        client.cancel_timelock(&signers, &tl_id);
+
+        let tl = client.get_timelock(&tl_id);
+        assert!(tl.executed);
+    }
+
+    #[test]
+    fn test_rotate_signers() {
+        let (env, contract_id, admin, s1, s2) = setup_env();
+        let token_addr = create_token(&env, &admin);
+        init_contract(&env, &contract_id, &token_addr, &s1, &s2);
+
+        let client = MultisigAssetWrapperClient::new(&env, &contract_id);
+        let current_signers = vec![&env, s1.clone()];
+
+        // Generate new signers
+        let new_s1 = Address::generate(&env);
+        let new_s2 = Address::generate(&env);
+        let new_signers = vec![&env, new_s1.clone(), new_s2.clone()];
+
+        // Rotate
+        client.rotate_signers(&current_signers, &new_signers, &1);
+
+        // Seed a balance for new_s1
+        env.as_contract(&contract_id, || {
+            env.storage()
+                .instance()
+                .set(&DataKey::Balance(new_s1.clone()), &500_i128);
+            let mut wa: WrappedAsset = env
+                .storage()
+                .instance()
+                .get(&DataKey::WrappedAsset)
+                .unwrap();
+            wa.total_wrapped = 500;
+            env.storage()
+                .instance()
+                .set(&DataKey::WrappedAsset, &wa);
+        });
+
+        // New signers should be able to operate
+        let new_signer_vec = vec![&env, new_s1.clone()];
+        let tl_id = client.schedule_unwrap(&new_signer_vec, &new_s1, &100, &10);
+        let tl = client.get_timelock(&tl_id);
+        assert_eq!(tl.amount, 100);
+    }
+
+    #[test]
+    #[should_panic(expected = "Signer not authorized")]
+    fn test_rotate_signers_old_signers_rejected() {
+        let (env, contract_id, admin, s1, s2) = setup_env();
+        let token_addr = create_token(&env, &admin);
+        init_contract(&env, &contract_id, &token_addr, &s1, &s2);
+
+        let client = MultisigAssetWrapperClient::new(&env, &contract_id);
+        let current_signers = vec![&env, s1.clone()];
+
+        // Generate new signers
+        let new_s1 = Address::generate(&env);
+        let new_signers = vec![&env, new_s1.clone()];
+
+        // Rotate
+        client.rotate_signers(&current_signers, &new_signers, &1);
+
+        // Seed a balance for s1
+        env.as_contract(&contract_id, || {
+            env.storage()
+                .instance()
+                .set(&DataKey::Balance(s1.clone()), &500_i128);
+            let mut wa: WrappedAsset = env
+                .storage()
+                .instance()
+                .get(&DataKey::WrappedAsset)
+                .unwrap();
+            wa.total_wrapped = 500;
+            env.storage()
+                .instance()
+                .set(&DataKey::WrappedAsset, &wa);
+        });
+
+        // Old signer should be rejected
+        let old_signer_vec = vec![&env, s1.clone()];
+        client.schedule_unwrap(&old_signer_vec, &s1, &100, &10);
+    }
+
+    #[test]
+    fn test_execute_transfer_with_time_advancement() {
+        let (env, contract_id, admin, s1, s2) = setup_env();
+        let token_addr = create_token(&env, &admin);
+        init_contract(&env, &contract_id, &token_addr, &s1, &s2);
+
+        env.as_contract(&contract_id, || {
+            env.storage()
+                .instance()
+                .set(&DataKey::Balance(s1.clone()), &500_i128);
+            let mut wa: WrappedAsset = env
+                .storage()
+                .instance()
+                .get(&DataKey::WrappedAsset)
+                .unwrap();
+            wa.total_wrapped = 500;
+            env.storage()
+                .instance()
+                .set(&DataKey::WrappedAsset, &wa);
+        });
+
+        let client = MultisigAssetWrapperClient::new(&env, &contract_id);
+        let signers = vec![&env, s1.clone()];
+        let tl_id = client.schedule_transfer(&signers, &s1, &s2, &200, &10);
+
+        // Advance ledger time past the unlock
+        env.ledger().with_mut(|li| {
+            li.timestamp = 1000;
+        });
+
+        client.execute_transfer(&tl_id);
+
+        assert_eq!(client.balance(&s1), 300);
+        assert_eq!(client.balance(&s2), 200);
+    }
+
+    #[test]
+    #[should_panic(expected = "Timelock not expired")]
+    fn test_execute_transfer_before_unlock_panics() {
+        let (env, contract_id, admin, s1, s2) = setup_env();
+        let token_addr = create_token(&env, &admin);
+        init_contract(&env, &contract_id, &token_addr, &s1, &s2);
+
+        env.as_contract(&contract_id, || {
+            env.storage()
+                .instance()
+                .set(&DataKey::Balance(s1.clone()), &500_i128);
+            let mut wa: WrappedAsset = env
+                .storage()
+                .instance()
+                .get(&DataKey::WrappedAsset)
+                .unwrap();
+            wa.total_wrapped = 500;
+            env.storage()
+                .instance()
+                .set(&DataKey::WrappedAsset, &wa);
+        });
+
+        let client = MultisigAssetWrapperClient::new(&env, &contract_id);
+        let signers = vec![&env, s1.clone()];
+        let tl_id = client.schedule_transfer(&signers, &s1, &s2, &200, &10);
+
+        // Do NOT advance time — try to execute immediately
+        client.execute_transfer(&tl_id);
+    }
+
+    #[test]
+    #[should_panic(expected = "Already executed")]
+    fn test_double_execute_transfer_panics() {
+        let (env, contract_id, admin, s1, s2) = setup_env();
+        let token_addr = create_token(&env, &admin);
+        init_contract(&env, &contract_id, &token_addr, &s1, &s2);
+
+        env.as_contract(&contract_id, || {
+            env.storage()
+                .instance()
+                .set(&DataKey::Balance(s1.clone()), &500_i128);
+            let mut wa: WrappedAsset = env
+                .storage()
+                .instance()
+                .get(&DataKey::WrappedAsset)
+                .unwrap();
+            wa.total_wrapped = 500;
+            env.storage()
+                .instance()
+                .set(&DataKey::WrappedAsset, &wa);
+        });
+
+        let client = MultisigAssetWrapperClient::new(&env, &contract_id);
+        let signers = vec![&env, s1.clone()];
+        let tl_id = client.schedule_transfer(&signers, &s1, &s2, &200, &10);
+
+        // Advance time past the unlock
+        env.ledger().with_mut(|li| {
+            li.timestamp = 1000;
+        });
+
+        // Execute once — should succeed
+        client.execute_transfer(&tl_id);
+
+        // Execute again — should panic
+        client.execute_transfer(&tl_id);
     }
 }

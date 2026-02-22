@@ -71,9 +71,9 @@
         </div>
 
         <!-- Confirmation Modal -->
-        <div class="reveal" id="confirm-modal" data-reveal style="max-width:450px;">
-            <h5>Confirm Deactivation</h5>
-            <p>Are you sure you want to deactivate this card? This action cannot be undone.</p>
+        <div class="reveal" id="confirm-modal" data-reveal style="max-width:450px;" role="alertdialog" aria-modal="true" aria-labelledby="confirm-modal-title" aria-describedby="confirm-modal-desc">
+            <h5 id="confirm-modal-title">Confirm Deactivation</h5>
+            <p id="confirm-modal-desc">Are you sure you want to deactivate this card? This action cannot be undone.</p>
             <p><strong>Account:</strong> <span id="confirm-account"></span></p>
             <p><strong>Card:</strong> <span id="confirm-card"></span></p>
             <div class="grid-x grid-margin-x">
@@ -92,6 +92,8 @@
     <script src="js/api.js"></script>
     <script src="js/roles.js"></script>
     <script src="js/auth.js"></script>
+    <script src="js/validate.js"></script>
+    <script src="js/session-timer.js"></script>
     <script src="js/router.js"></script>
     <script src="js/cards.js"></script>
 </body>

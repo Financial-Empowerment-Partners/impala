@@ -1,5 +1,7 @@
 package com.impala.applet;
 
+import javacard.framework.ISO7816;
+import javacard.framework.ISOException;
 import javacard.framework.Util;
 
 /**

@@ -13,6 +13,8 @@ import com.payala.impala.demo.model.CreateAccountRequest
 import com.payala.impala.demo.model.CreateCardRequest
 import com.payala.impala.demo.model.TokenRequest
 import kotlinx.coroutines.launch
+import retrofit2.HttpException
+import java.io.IOException
 import java.security.MessageDigest
 
 /**
@@ -35,12 +37,52 @@ class LoginViewModel : ViewModel() {
     /** Observable authentication state. UI observes this to show loading/error/success. */
     val loginState: LiveData<LoginState> = _loginState
 
+    /** Classifies login errors for UI mapping to appropriate user-facing messages. */
+    enum class ErrorType {
+        NETWORK, AUTH_FAILED, TOKEN_FAILED, SERVER_ERROR, VALIDATION, UNKNOWN
+    }
+
     /** Represents the current state of the login flow. */
     sealed class LoginState {
         data object Idle : LoginState()
         data object Loading : LoginState()
         data class Success(val accountId: String) : LoginState()
-        data class Error(val message: String) : LoginState()
+        data class Error(val message: String, val errorType: ErrorType = ErrorType.UNKNOWN) : LoginState()
+    }
+
+    /** Input validation errors returned before making network calls. */
+    sealed class ValidationError(val message: String) {
+        class EmptyUsername : ValidationError("Username is required")
+        class EmptyPassword : ValidationError("Password is required")
+        class PasswordTooShort : ValidationError("Password must be at least 8 characters")
+        class InvalidToken : ValidationError("Authentication token is missing")
+    }
+
+    /** Validates username/password input before a password login attempt. */
+    fun validatePasswordLogin(username: String, password: String): ValidationError? {
+        if (username.isBlank()) return ValidationError.EmptyUsername()
+        if (password.isEmpty()) return ValidationError.EmptyPassword()
+        if (password.length < 8) return ValidationError.PasswordTooShort()
+        return null
+    }
+
+    /** Validates that an OAuth token is present before an OAuth login attempt. */
+    fun validateOAuthLogin(token: String?): ValidationError? {
+        if (token.isNullOrBlank()) return ValidationError.InvalidToken()
+        return null
+    }
+
+    /** Maps an exception to the appropriate [ErrorType]. */
+    private fun classifyError(e: Exception): ErrorType {
+        return when (e) {
+            is IOException -> ErrorType.NETWORK
+            is HttpException -> when (e.code()) {
+                401, 403 -> ErrorType.AUTH_FAILED
+                in 500..599 -> ErrorType.SERVER_ERROR
+                else -> ErrorType.UNKNOWN
+            }
+            else -> ErrorType.UNKNOWN
+        }
     }
 
     /** Authenticate with a direct account ID and password. */
@@ -50,6 +92,12 @@ class LoginViewModel : ViewModel() {
         accountId: String,
         password: String
     ) {
+        val validationError = validatePasswordLogin(accountId, password)
+        if (validationError != null) {
+            _loginState.value = LoginState.Error(validationError.message, ErrorType.VALIDATION)
+            return
+        }
+
         viewModelScope.launch {
             _loginState.value = LoginState.Loading
             try {
@@ -57,14 +105,14 @@ class LoginViewModel : ViewModel() {
                 val authResponse = api.authenticate(AuthenticateRequest(accountId, password))
                 if (!authResponse.success) {
                     AppLogger.w("Auth", "Password login failed: ${authResponse.message}")
-                    _loginState.value = LoginState.Error(authResponse.message)
+                    _loginState.value = LoginState.Error(authResponse.message, ErrorType.AUTH_FAILED)
                     return@launch
                 }
 
                 completeTokenFlow(api, tokenManager, accountId, password, "password")
             } catch (e: Exception) {
                 AppLogger.e("Auth", "Password login error: ${e.message}")
-                _loginState.value = LoginState.Error(e.message ?: "Network error")
+                _loginState.value = LoginState.Error(e.message ?: "Network error", classifyError(e))
             }
         }
     }
@@ -77,6 +125,12 @@ class LoginViewModel : ViewModel() {
         idToken: String,
         displayName: String?
     ) {
+        val validationError = validateOAuthLogin(idToken)
+        if (validationError != null) {
+            _loginState.value = LoginState.Error(validationError.message, ErrorType.VALIDATION)
+            return
+        }
+
         viewModelScope.launch {
             _loginState.value = LoginState.Loading
             try {
@@ -89,7 +143,7 @@ class LoginViewModel : ViewModel() {
                 val authResponse = api.authenticate(AuthenticateRequest(email, derivedPassword))
                 if (!authResponse.success) {
                     AppLogger.w("Auth", "Google login failed: ${authResponse.message}")
-                    _loginState.value = LoginState.Error(authResponse.message)
+                    _loginState.value = LoginState.Error(authResponse.message, ErrorType.AUTH_FAILED)
                     return@launch
                 }
 
@@ -100,7 +154,7 @@ class LoginViewModel : ViewModel() {
                 completeTokenFlow(api, tokenManager, email, derivedPassword, "google")
             } catch (e: Exception) {
                 AppLogger.e("Auth", "Google login error: ${e.message}")
-                _loginState.value = LoginState.Error(e.message ?: "Google login failed")
+                _loginState.value = LoginState.Error(e.message ?: "Google login failed", classifyError(e))
             }
         }
     }
@@ -113,6 +167,12 @@ class LoginViewModel : ViewModel() {
         accessToken: String,
         displayName: String?
     ) {
+        val validationError = validateOAuthLogin(accessToken)
+        if (validationError != null) {
+            _loginState.value = LoginState.Error(validationError.message, ErrorType.VALIDATION)
+            return
+        }
+
         viewModelScope.launch {
             _loginState.value = LoginState.Loading
             try {
@@ -124,7 +184,7 @@ class LoginViewModel : ViewModel() {
                 val authResponse = api.authenticate(AuthenticateRequest(login, derivedPassword))
                 if (!authResponse.success) {
                     AppLogger.w("Auth", "GitHub login failed: ${authResponse.message}")
-                    _loginState.value = LoginState.Error(authResponse.message)
+                    _loginState.value = LoginState.Error(authResponse.message, ErrorType.AUTH_FAILED)
                     return@launch
                 }
 
@@ -135,7 +195,7 @@ class LoginViewModel : ViewModel() {
                 completeTokenFlow(api, tokenManager, login, derivedPassword, "github")
             } catch (e: Exception) {
                 AppLogger.e("Auth", "GitHub login error: ${e.message}")
-                _loginState.value = LoginState.Error(e.message ?: "GitHub login failed")
+                _loginState.value = LoginState.Error(e.message ?: "GitHub login failed", classifyError(e))
             }
         }
     }
@@ -163,7 +223,7 @@ class LoginViewModel : ViewModel() {
                 )
                 if (!authResponse.success) {
                     AppLogger.w("Auth", "Card login failed: ${authResponse.message}")
-                    _loginState.value = LoginState.Error(authResponse.message)
+                    _loginState.value = LoginState.Error(authResponse.message, ErrorType.AUTH_FAILED)
                     return@launch
                 }
 
@@ -187,7 +247,7 @@ class LoginViewModel : ViewModel() {
                 completeTokenFlow(api, tokenManager, user.accountId, derivedPassword, "card")
             } catch (e: Exception) {
                 AppLogger.e("Auth", "Card login error: ${e.message}")
-                _loginState.value = LoginState.Error(e.message ?: "Card login failed")
+                _loginState.value = LoginState.Error(e.message ?: "Card login failed", classifyError(e))
             }
         }
     }
@@ -209,7 +269,7 @@ class LoginViewModel : ViewModel() {
         val tokenResponse = api.token(TokenRequest(username = accountId, password = password))
         if (!tokenResponse.success || tokenResponse.refresh_token == null) {
             AppLogger.w("Auth", "Token request failed: ${tokenResponse.message}")
-            _loginState.value = LoginState.Error(tokenResponse.message)
+            _loginState.value = LoginState.Error(tokenResponse.message, ErrorType.TOKEN_FAILED)
             return
         }
 

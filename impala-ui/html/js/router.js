@@ -3,23 +3,29 @@
  *
  * Handles:
  *  - Dynamic navigation bar construction with role-aware links
- *  - Active page highlighting
+ *  - Active page highlighting with aria-current
  *  - Permission-based DOM element visibility (data-permission attributes)
- *  - Toast notification display
+ *  - Accessible toast notification display
  *  - Admin-only page guard
+ *  - Session idle timer initialization
  *
  * @module Router
  */
 var Router = (function () {
     /**
      * Initialize the page: check auth, build nav, highlight active link,
-     * and hide elements the current user lacks permission for.
+     * hide elements the current user lacks permission for, and start
+     * the session idle timer.
      */
     function init() {
         if (!Auth.requireAuth()) return;
         buildNav();
         highlightActiveLink();
         enforcePermissions();
+        // Start session idle timer if available
+        if (typeof SessionTimer !== 'undefined') {
+            SessionTimer.init();
+        }
     }
 
     /**
@@ -67,12 +73,19 @@ var Router = (function () {
         if (logoutBtn) {
             logoutBtn.addEventListener('click', function (e) {
                 e.preventDefault();
+                // Stop session timer on logout
+                if (typeof SessionTimer !== 'undefined') {
+                    SessionTimer.stop();
+                }
                 Auth.logout();
             });
         }
     }
 
-    /** Add the 'active' CSS class to the nav link matching the current page. */
+    /**
+     * Add the 'active' CSS class and aria-current="page" to the nav link
+     * matching the current page.
+     */
     function highlightActiveLink() {
         var current = window.location.pathname.split('/').pop() || 'index.html';
         var links = document.querySelectorAll('#main-nav .menu a');
@@ -80,6 +93,7 @@ var Router = (function () {
             var href = links[i].getAttribute('href');
             if (href === current) {
                 links[i].parentElement.classList.add('active');
+                links[i].setAttribute('aria-current', 'page');
             }
         }
     }
@@ -102,6 +116,7 @@ var Router = (function () {
     /**
      * Display a temporary toast notification in the top-right corner.
      * Auto-dismisses after 4 seconds with a fade-out animation.
+     * Uses ARIA live region attributes for screen reader accessibility.
      * @param {string} message - The notification text.
      * @param {string} [type='info'] - CSS class for styling: 'success', 'warning', 'alert', 'info'.
      */
@@ -109,6 +124,13 @@ var Router = (function () {
         type = type || 'info';
         var container = document.getElementById('toast-container');
         if (!container) return;
+
+        // Ensure container has ARIA live region attributes
+        if (!container.hasAttribute('role')) {
+            container.setAttribute('role', 'alert');
+            container.setAttribute('aria-live', 'assertive');
+            container.setAttribute('aria-atomic', 'true');
+        }
 
         var toast = document.createElement('div');
         toast.className = 'toast ' + type;

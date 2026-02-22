@@ -253,6 +253,27 @@ public class ImpalaApplet extends Applet {
     /**
      * Processes an incoming APDU.
      *
+     * <p><b>Access control requirements per INS code:</b></p>
+     * <ul>
+     *   <li><b>No auth required (public):</b>
+     *       INS_NOP (0x02), INS_GET_BALANCE (0x04), INS_GET_ACCOUNT_ID (0x16),
+     *       INS_GET_VERSION (0x64), INS_GET_EC_PUB_KEY (0x24), INS_GET_FULL_NAME (0x20),
+     *       INS_GET_GENDER (0x21), INS_GET_USER_DATA (0x1E), INS_GET_CARD_NONCE (0x23),
+     *       INS_IS_CARD_ALIVE (0x2E), INS_GET_RSA_PUB_KEY (0x07)</li>
+     *   <li><b>Card must not be terminated:</b>
+     *       INS_INITIALIZE (0x2C), INS_VERIFY_PIN (0x18), INS_SET_FULL_NAME (0x1F),
+     *       INS_SET_GENDER (0x22), INS_SIGN_AUTH (0x25), INS_SIGN_TRANSFER (0x06),
+     *       INS_VERIFY_TRANSFER (0x14), INS_UPDATE_USER_PIN (0x19), INS_SET_CARD_DATA (0x26),
+     *       INS_IS_CARD_ALIVE (0x2E)</li>
+     *   <li><b>Master PIN required:</b>
+     *       INS_UPDATE_USER_PIN (0x19) — masterPIN.isValidated()</li>
+     *   <li><b>User PIN required (or PIN-less within limits):</b>
+     *       INS_SIGN_TRANSFER (0x06) — userPIN verified via validatePIN() or checkPINless()</li>
+     *   <li><b>SCP03 secure channel required (CLA 0x80):</b>
+     *       INS_SCP03_PROVISION_PIN (0x70), INS_SCP03_APPLET_UPDATE (0x71)
+     *       — scp03.isAuthenticated()</li>
+     * </ul>
+     *
      * @param apdu the incoming APDU
      * @throws ISOException with the response bytes per ISO 7816-4
      * @see APDU
@@ -609,7 +630,15 @@ public class ImpalaApplet extends Applet {
             ISOException.throwIt(SW_ERROR_WRONG_RECIPIENT);
         }
 
-        // TODO: check currency
+        // Currency validation: if the card has a currency set (non-zero),
+        // verify the transaction currency matches.
+        if (currency[0] != 0 || currency[1] != 0 || currency[2] != 0 || currency[3] != 0) {
+            if (Util.arrayCompare(buffer,
+                    (short) (OFFSET_SIGNABLE + TransactionParser.OFFSET_CURRENCY),
+                    currency, ZERO, (short) 4) != 0) {
+                ISOException.throwIt(Constants.SW_ERROR_WRONG_CURRENCY);
+            }
+        }
 
         TransactionParser.getAmount(buffer, OFFSET_SIGNABLE, tempAmount);
         if (!checkAmount(tempAmount)) {

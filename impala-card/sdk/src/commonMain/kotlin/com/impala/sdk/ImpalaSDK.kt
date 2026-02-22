@@ -12,6 +12,7 @@ import com.impala.sdk.models.ImpalaCardUser
 import com.impala.sdk.models.ImpalaException
 import com.impala.sdk.models.ImpalaUser
 import com.impala.sdk.models.ImpalaVersion
+import com.impala.sdk.models.toUuid
 import com.impala.sdk.scp03.SCP03Channel
 import com.impala.sdk.scp03.SCP03Constants
 import okio.ByteString
@@ -43,9 +44,10 @@ class ImpalaSDK(
         try {
             resp = apduChannel.transmit(cmd)
             if (!this.isResponseOk(resp)) {
-                // TODO: error based on cmd.ins parse to constant
-                throw ImpalaException("Operation unsuccessful: " + resp.sw)
+                throw ImpalaException.fromStatusWord(resp.sw)
             }
+        } catch (e: ImpalaException) {
+            throw e
         } catch (e: BIBOException) {
             throw ImpalaException("Unable to write to card", e)
         }
@@ -53,7 +55,8 @@ class ImpalaSDK(
     }
 
     /**
-     * Gets installed ImpalaApplet version from the card
+     * Gets installed ImpalaApplet version from the card.
+     * The response is 10 bytes: [major(2)] [minor(2)] [revList(2)] [shortHash(4)].
      *
      * @return ImpalaVersion
      * @throws ImpalaException
@@ -69,13 +72,13 @@ class ImpalaSDK(
             )
         }
 
-        val major = data[2].toShort()
-        val minor = data[3].toShort()
-        var revList = (data[4].toInt() shl 8).toShort()
-        revList = (revList.toInt() or data[5].toInt()).toShort()
-//            val shortHash: String = java.util.Arrays.copyOfRange(data, 6, 10).toString()
-//            val version: ImpalaVersion = ImpalaVersion(major, minor, revList, shortHash)
-        return ImpalaVersion(major, minor, revList, "0123")
+        val major = ((data[0].toInt() and 0xFF shl 8) or (data[1].toInt() and 0xFF)).toShort()
+        val minor = ((data[2].toInt() and 0xFF shl 8) or (data[3].toInt() and 0xFF)).toShort()
+        var revList = ((data[4].toInt() and 0xFF shl 8) or (data[5].toInt() and 0xFF)).toShort()
+        val shortHash = data.sliceArray(6..9).let { bytes ->
+            bytes.joinToString("") { b -> (b.toInt() and 0xFF).toString(16).padStart(2, '0') }
+        }
+        return ImpalaVersion(major, minor, revList, shortHash)
     }
 
     /**
@@ -88,6 +91,7 @@ class ImpalaSDK(
     @Throws(ImpalaException::class)
     fun setGender(gender: String) {
         val barr = gender.encodeToByteArray();
+        require(barr.size in 1..16) { "Gender must be 1-16 bytes" }
         tx(CommandAPDU(Constants.INS_SET_GENDER, barr))
     }
 
@@ -170,7 +174,164 @@ class ImpalaSDK(
      * @throws ImpalaException
      */
     fun setUserName(name: String) {
-        tx(CommandAPDU(Constants.INS_SET_FULL_NAME, name.encodeToByteArray()))
+        val barr = name.encodeToByteArray()
+        require(barr.size in 1..128) { "Name must be 1-128 bytes" }
+        tx(CommandAPDU(Constants.INS_SET_FULL_NAME, barr))
+    }
+
+    /**
+     * Gets the on-card balance as a Long (8-byte big-endian).
+     *
+     * @return the balance in the card's lowest denomination
+     * @throws ImpalaException
+     */
+    @Throws(ImpalaException::class)
+    fun getBalance(): Long {
+        val resp = tx(CommandAPDU(Constants.INS_GET_BALANCE))
+        val data = resp.data
+        if (data.size != 8) {
+            throw ImpalaException("Expected 8 bytes for balance, got ${data.size}")
+        }
+        var value = 0L
+        for (i in 0..7) {
+            value = (value shl 8) or (data[i].toLong() and 0xFF)
+        }
+        return value
+    }
+
+    /**
+     * Gets the account ID stored on the card as a UUID string.
+     *
+     * @return 16-byte UUID formatted as a string
+     * @throws ImpalaException
+     */
+    @Throws(ImpalaException::class)
+    fun getAccountId(): String {
+        val resp = tx(CommandAPDU(Constants.INS_GET_ACCOUNT_ID))
+        val data = resp.data
+        if (data.size != 16) {
+            throw ImpalaException("Expected 16 bytes for account ID, got ${data.size}")
+        }
+        return data.toUuid().toString()
+    }
+
+    /**
+     * Gets the full name stored on the card.
+     *
+     * @return the cardholder's full name
+     * @throws ImpalaException
+     */
+    @Throws(ImpalaException::class)
+    fun getFullName(): String {
+        val resp = tx(CommandAPDU(Constants.INS_GET_FULL_NAME))
+        return resp.data.decodeToString()
+    }
+
+    /**
+     * Signs a transfer with the user PIN and signable data.
+     * The card returns: [signature (72B)] [pubKey (65B)] [pubKeySig (72B)].
+     *
+     * @param userPin the 4-digit user PIN
+     * @param signableData the 60-byte signable transaction data
+     * @return Triple of (signature, pubKey, pubKeySig) as ByteStrings
+     * @throws ImpalaException
+     */
+    @Throws(ImpalaException::class)
+    fun signTransfer(userPin: String, signableData: ByteArray): Triple<ByteString, ByteString, ByteString> {
+        require(signableData.size == Constants.SIGNABLE_LENGTH.toInt()) {
+            "Signable data must be ${Constants.SIGNABLE_LENGTH} bytes"
+        }
+        val pinBytes = mapDigitsToByteArray(userPin)
+        val payload = pinBytes + signableData
+        val cmd = CommandAPDU(Constants.INS_SIGN_TRANSFER, payload)
+        val resp = tx(cmd)
+        val data = resp.data
+
+        val sigLen = Constants.MAX_SIG_LENGTH.toInt()
+        val pubKeyLen = Constants.PUB_KEY_LENGTH.toInt()
+        val expectedLen = sigLen + pubKeyLen + sigLen
+        if (data.size != expectedLen) {
+            throw ImpalaException("Expected $expectedLen bytes for signTransfer response, got ${data.size}")
+        }
+
+        val signature = data.sliceArray(0 until sigLen).toByteString()
+        val pubKey = data.sliceArray(sigLen until sigLen + pubKeyLen).toByteString()
+        val pubKeySig = data.sliceArray(sigLen + pubKeyLen until expectedLen).toByteString()
+        return Triple(signature, pubKey, pubKeySig)
+    }
+
+    /**
+     * Verifies an incoming transfer in two phases.
+     * Phase 1 (P1=0x00): sends signable data + signature.
+     * Phase 2 (P1=0x01): sends pubKey + pubKeySig.
+     *
+     * @param signableData the 60-byte signable transaction data
+     * @param signature DER-encoded ECDSA signature
+     * @param pubKey 65-byte EC public key
+     * @param pubKeySig DER-encoded ECDSA signature of the public key
+     * @throws ImpalaException
+     */
+    @Throws(ImpalaException::class)
+    fun verifyTransfer(signableData: ByteArray, signature: ByteArray, pubKey: ByteArray, pubKeySig: ByteArray) {
+        // Phase 1: send signable data
+        val cmd1 = CommandAPDU(0x00, Constants.INS_VERIFY_TRANSFER.toInt(), 0x00, 0x00, signableData)
+        tx(cmd1)
+        // Phase 2: send signature + pubKey + pubKeySig
+        val tailPayload = signature + pubKey + pubKeySig
+        val cmd2 = CommandAPDU(0x00, Constants.INS_VERIFY_TRANSFER.toInt(), 0x01, 0x00, tailPayload)
+        tx(cmd2)
+    }
+
+    /**
+     * Sets arbitrary card data on the applet.
+     *
+     * @param data the data to store on the card
+     * @throws ImpalaException
+     */
+    @Throws(ImpalaException::class)
+    fun setCardData(data: ByteArray) {
+        tx(CommandAPDU(Constants.INS_SET_CARD_DATA, data))
+    }
+
+    /**
+     * Updates the master PIN on the card.
+     *
+     * @param newPin the new 8-digit master PIN
+     * @throws ImpalaException
+     */
+    @Throws(ImpalaException::class)
+    fun updateMasterPin(newPin: String) {
+        require(newPin.length == 8 && newPin.all { it.isDigit() }) { "Master PIN must be exactly 8 digits" }
+        val pinBytes = mapDigitsToByteArray(newPin)
+        val cmd = CommandAPDU(0x00, Constants.INS_UPDATE_MASTER_PIN.toInt(), 0x00, 0x00, pinBytes)
+        tx(cmd)
+    }
+
+    /**
+     * Checks if the card is alive (not terminated).
+     *
+     * @return true if the card responded with SW_OK
+     */
+    fun isCardAlive(): Boolean {
+        return try {
+            tx(CommandAPDU(Constants.INS_IS_CARD_ALIVE))
+            true
+        } catch (_: ImpalaException) {
+            false
+        }
+    }
+
+    /**
+     * Verifies the user PIN on the card.
+     *
+     * @param pin the 4-digit user PIN
+     * @throws ImpalaException if PIN verification fails
+     */
+    @Throws(ImpalaException::class)
+    fun verifyUserPin(pin: String) {
+        val pinBytes = mapDigitsToByteArray(pin)
+        val cmd = CommandAPDU(0x00, Constants.INS_VERIFY_PIN, 0x00, Constants.P2_USER_PIN, pinBytes)
+        tx(cmd)
     }
 
     /**
@@ -229,8 +390,8 @@ class ImpalaSDK(
         return bArr.toByteString()
     }
 
-    fun verifyMasterPin(mPin: String = "14117298") {
-//        byteArrayOf(0, INS_VERIFY_PIN, 0, Constants.P2_MASTER_PIN) + appendParameters(masterPin)
+    fun verifyMasterPin(mPin: String) {
+        require(mPin.length == 8 && mPin.all { it.isDigit() }) { "Master PIN must be exactly 8 digits" }
         val masterPin = mapStringToByteArray(mPin)
         val cmd = CommandAPDU(0x00, Constants.INS_VERIFY_PIN, 0x00, Constants.P2_MASTER_PIN, masterPin)
         tx(cmd)
@@ -241,8 +402,8 @@ class ImpalaSDK(
         return getSignedNonce(bytes)
     }
 
-    fun updateUserPin(pin: String="1234"){
-//        = byteArrayOf(0, INS_UPDATE_USER_PIN, 0, Constants.P2_USER_PIN) + appendParameters(pin)
+    fun updateUserPin(pin: String) {
+        require(pin.length == 4 && pin.all { it.isDigit() } && pin != "0000") { "User PIN must be 4 digits and not 0000" }
         val pinBarr = mapDigitsToByteArray(pin)
         val cmd = CommandAPDU(0x00, Constants.INS_UPDATE_USER_PIN, 0x00, Constants.P2_USER_PIN, pinBarr)
         tx(cmd)
@@ -303,7 +464,7 @@ class ImpalaSDK(
         val channel = scp03Channel ?: throw ImpalaException("Secure channel is not open")
         val resp = channel.secureTransmit(cmd)
         if (!isResponseOk(resp)) {
-            throw ImpalaException("Secure operation unsuccessful: " + resp.sw)
+            throw ImpalaException.fromStatusWord(resp.sw)
         }
         return resp
     }

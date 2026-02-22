@@ -20,7 +20,7 @@ class CommandAPDUTest {
         // CLA=0x00 INS=0xA4 P1=0x04 P2=0x00
         val cmd = CommandAPDU(0x00, 0xA4, 0x04, 0x00)
         assertEquals(0x00, cmd.cLA)
-        assertEquals(0xA4.toByte(), cmd.iNS)
+        assertEquals(0xA4, cmd.iNS)
         assertEquals(0x04, cmd.p1)
         assertEquals(0x00, cmd.p2)
         assertEquals(0, cmd.nc)
@@ -29,8 +29,8 @@ class CommandAPDUTest {
     @Test
     fun `Case 2 APDU - no data, response expected`() {
         // CLA=0x00 INS=0xCA P1=0x00 P2=0x00 Ne=256
-        val cmd = CommandAPDU(0x00, 0xCA, 0x00, 0x00, 256)
-        assertEquals(0xCA.toByte(), cmd.iNS)
+        val cmd = CommandAPDU(0x00, 0xCA, 0x00, 0x00, ne = 256)
+        assertEquals(0xCA, cmd.iNS)
         assertEquals(256, cmd.ne)
         assertEquals(0, cmd.nc)
     }
@@ -46,7 +46,7 @@ class CommandAPDUTest {
     @Test
     fun `Case 4 APDU - data and response expected`() {
         val data = byteArrayOf(0xAA.toByte(), 0xBB.toByte())
-        val cmd = CommandAPDU(0x00, 0xDA, 0x01, 0x02, data, 128)
+        val cmd = CommandAPDU(0x00, 0xDA, 0x01, 0x02, data, 0, data.size, 128)
         assertEquals(2, cmd.nc)
         assertEquals(128, cmd.ne)
         assertEquals(data.toList(), cmd.data.toList())
@@ -55,7 +55,7 @@ class CommandAPDUTest {
     @Test
     fun `CommandAPDU round-trip via bytes`() {
         val data = byteArrayOf(0x10, 0x20, 0x30)
-        val original = CommandAPDU(0x80, 0x50, 0x00, 0x00, data, 0)
+        val original = CommandAPDU(0x80, 0x50, 0x00, 0x00, data)
         val bytes = original.bytes
         val restored = CommandAPDU(bytes)
 
@@ -82,8 +82,8 @@ class CommandAPDUTest {
         // SW=0x9000 (success), no data
         val resp = ResponseAPDU(byteArrayOf(0x90.toByte(), 0x00))
         assertEquals(0x9000, resp.sw)
-        assertEquals(0x90.toByte(), resp.sW1)
-        assertEquals(0x00.toByte(), resp.sW2)
+        assertEquals(0x90, resp.sW1)
+        assertEquals(0x00, resp.sW2)
         assertEquals(0, resp.data.size)
     }
 
@@ -109,7 +109,7 @@ class CommandAPDUTest {
         // SW=0x6982 (security status not satisfied)
         val resp = ResponseAPDU(byteArrayOf(0x69.toByte(), 0x82.toByte()))
         assertEquals(0x6982, resp.sw)
-        assertEquals(0x69.toByte(), resp.sW1)
-        assertEquals(0x82.toByte(), resp.sW2)
+        assertEquals(0x69, resp.sW1)
+        assertEquals(0x82, resp.sW2)
     }
 }

@@ -96,6 +96,11 @@ public class Constants {
     public static final short SW_ERROR_ARRAY_INDEX_OUT_OF_BOUNDS_EXCEPTION = 0x6689;
     public static final short SW_ERROR_PIN_REQUIRED = 0x6690;
     public static final short SW_ERROR_PIN_REJECTED = 0x6691;
+    public static final short SW_SET_FULL_NAME_FAILED = 0x6C03;
+    public static final short SW_SET_GENDER_FAILED = 0x6C04;
+    public static final short SW_ERROR_WRONG_SIGNABLE_LENGTH = 0x6226;
+    public static final short SW_ERROR_WRONG_TAIL_LENGTH = 0x6C02;
+    public static final short SW_ERROR_ALREADY_INITIALIZED = 0x6686;
     public static final short SW_UNKNOWN = 0x6F00;
     public static final short SW_UNKNOWN_4469 = 0x4469;
     public static final short SW_UNKNOWN_6F15 = 0x6F15;
