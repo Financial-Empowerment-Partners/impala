@@ -7,8 +7,8 @@ use sqlx::PgPool;
 use std::sync::Arc;
 
 use crate::constants::{
-    LOCKOUT_DURATION_SECS, LOCKOUT_THRESHOLD, MIN_PASSWORD_LENGTH, RATE_LIMIT_MAX_REQUESTS,
-    RATE_LIMIT_WINDOW_SECS,
+    AUTH_PROVIDER_LOCAL, LOCKOUT_DURATION_SECS, LOCKOUT_THRESHOLD, MIN_PASSWORD_LENGTH,
+    RATE_LIMIT_MAX_REQUESTS, RATE_LIMIT_WINDOW_SECS,
 };
 use crate::error::AppError;
 use crate::models::{AuthenticateRequest, AuthenticateResponse};
@@ -108,8 +108,8 @@ pub async fn authenticate(
     }
 
     // Check if auth credentials exist
-    let existing_auth = sqlx::query_as::<_, (String,)>(
-        "SELECT password_hash FROM impala_auth WHERE account_id = $1",
+    let existing_auth = sqlx::query_as::<_, (String, String)>(
+        "SELECT password_hash, auth_provider FROM impala_auth WHERE account_id = $1",
     )
     .bind(&payload.account_id)
     .fetch_optional(&pool)
@@ -146,7 +146,20 @@ pub async fn authenticate(
                 }
             }
         }
-        Ok(Some((stored_hash,))) => {
+        Ok(Some((stored_hash, auth_provider))) => {
+            // Reject non-local auth provider accounts (e.g. Okta users)
+            if auth_provider != AUTH_PROVIDER_LOCAL {
+                warn!(
+                    "authenticate: non-local auth user {} attempted password login",
+                    payload.account_id
+                );
+                return Ok(Json(AuthenticateResponse {
+                    success: false,
+                    message: "Invalid credentials".to_string(),
+                    action: "".to_string(),
+                }));
+            }
+
             match verify_password(&payload.password, &stored_hash) {
                 Ok(_) => {
                     // Reset failed login counter on success

@@ -1,4 +1,4 @@
-use crate::constants::TOKEN_TYPE_TEMPORAL;
+use crate::constants::{JWT_ISSUER, TOKEN_TYPE_TEMPORAL};
 use crate::error::AppError;
 use crate::models::Claims;
 use axum::extract::{Extension, FromRequest, RequestParts};
@@ -36,11 +36,14 @@ where
             .strip_prefix("Bearer ")
             .ok_or(AppError::Unauthorized)?;
 
-        // Decode and validate the JWT
+        // Decode and validate the JWT with explicit HS256 and issuer check
+        let mut validation = Validation::new(jsonwebtoken::Algorithm::HS256);
+        validation.iss = Some(JWT_ISSUER.to_string());
+
         let token_data = decode::<Claims>(
             token,
             &DecodingKey::from_secret(jwt_secret.as_bytes()),
-            &Validation::default(),
+            &validation,
         )
         .map_err(|_| AppError::Unauthorized)?;
 
@@ -57,7 +60,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use crate::constants::{REFRESH_TOKEN_TTL_SECS, TEMPORAL_TOKEN_TTL_SECS};
+    use crate::constants::{JWT_ISSUER, REFRESH_TOKEN_TTL_SECS, TEMPORAL_TOKEN_TTL_SECS};
     use crate::models::Claims;
     use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
 
@@ -71,6 +74,8 @@ mod tests {
             token_type: "temporal".to_string(),
             iat: now,
             exp: now + TEMPORAL_TOKEN_TTL_SECS,
+            jti: uuid::Uuid::new_v4().to_string(),
+            iss: JWT_ISSUER.to_string(),
         };
 
         let token = encode(
@@ -80,15 +85,20 @@ mod tests {
         )
         .expect("Failed to encode JWT");
 
+        let mut validation = Validation::new(jsonwebtoken::Algorithm::HS256);
+        validation.iss = Some(JWT_ISSUER.to_string());
+
         let decoded = decode::<Claims>(
             &token,
             &DecodingKey::from_secret(TEST_SECRET.as_bytes()),
-            &Validation::default(),
+            &validation,
         )
         .expect("Failed to decode JWT");
 
         assert_eq!(decoded.claims.sub, "testuser");
         assert_eq!(decoded.claims.token_type, "temporal");
+        assert_eq!(decoded.claims.iss, JWT_ISSUER);
+        assert!(!decoded.claims.jti.is_empty());
     }
 
     #[test]
@@ -99,6 +109,8 @@ mod tests {
             token_type: "refresh".to_string(),
             iat: now,
             exp: now + REFRESH_TOKEN_TTL_SECS,
+            jti: uuid::Uuid::new_v4().to_string(),
+            iss: JWT_ISSUER.to_string(),
         };
 
         let token = encode(
@@ -108,10 +120,13 @@ mod tests {
         )
         .expect("Failed to encode JWT");
 
+        let mut validation = Validation::new(jsonwebtoken::Algorithm::HS256);
+        validation.iss = Some(JWT_ISSUER.to_string());
+
         let decoded = decode::<Claims>(
             &token,
             &DecodingKey::from_secret(TEST_SECRET.as_bytes()),
-            &Validation::default(),
+            &validation,
         )
         .expect("Failed to decode JWT");
 
@@ -126,6 +141,8 @@ mod tests {
             token_type: "temporal".to_string(),
             iat: 1000,
             exp: 1001, // Already expired
+            jti: uuid::Uuid::new_v4().to_string(),
+            iss: JWT_ISSUER.to_string(),
         };
 
         let token = encode(
@@ -135,10 +152,13 @@ mod tests {
         )
         .expect("Failed to encode JWT");
 
+        let mut validation = Validation::new(jsonwebtoken::Algorithm::HS256);
+        validation.iss = Some(JWT_ISSUER.to_string());
+
         let result = decode::<Claims>(
             &token,
             &DecodingKey::from_secret(TEST_SECRET.as_bytes()),
-            &Validation::default(),
+            &validation,
         );
 
         assert!(result.is_err());
@@ -152,6 +172,8 @@ mod tests {
             token_type: "temporal".to_string(),
             iat: now,
             exp: now + TEMPORAL_TOKEN_TTL_SECS,
+            jti: uuid::Uuid::new_v4().to_string(),
+            iss: JWT_ISSUER.to_string(),
         };
 
         let token = encode(
@@ -161,10 +183,44 @@ mod tests {
         )
         .expect("Failed to encode JWT");
 
+        let mut validation = Validation::new(jsonwebtoken::Algorithm::HS256);
+        validation.iss = Some(JWT_ISSUER.to_string());
+
         let result = decode::<Claims>(
             &token,
             &DecodingKey::from_secret(b"wrong-secret"),
-            &Validation::default(),
+            &validation,
+        );
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_jwt_wrong_issuer_rejected() {
+        let now = chrono::Utc::now().timestamp() as usize;
+        let claims = Claims {
+            sub: "testuser".to_string(),
+            token_type: "temporal".to_string(),
+            iat: now,
+            exp: now + TEMPORAL_TOKEN_TTL_SECS,
+            jti: uuid::Uuid::new_v4().to_string(),
+            iss: "wrong-issuer".to_string(),
+        };
+
+        let token = encode(
+            &Header::default(),
+            &claims,
+            &EncodingKey::from_secret(TEST_SECRET.as_bytes()),
+        )
+        .expect("Failed to encode JWT");
+
+        let mut validation = Validation::new(jsonwebtoken::Algorithm::HS256);
+        validation.iss = Some(JWT_ISSUER.to_string());
+
+        let result = decode::<Claims>(
+            &token,
+            &DecodingKey::from_secret(TEST_SECRET.as_bytes()),
+            &validation,
         );
 
         assert!(result.is_err());

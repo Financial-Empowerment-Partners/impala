@@ -19,6 +19,9 @@ pub struct Config {
     pub db_max_connections: u32,
     pub cors_allowed_origins: String,
     pub http_client_timeout_secs: u64,
+    pub okta_issuer_url: Option<String>,
+    pub okta_client_id: Option<String>,
+    pub okta_jwks_refresh_secs: u64,
 }
 
 /// Load configuration from a JSON config file (if present) and environment variables.
@@ -109,6 +112,20 @@ pub fn load_config() -> Config {
         .and_then(|v| v.parse().ok())
         .unwrap_or(crate::constants::DEFAULT_HTTP_CLIENT_TIMEOUT_SECS);
 
+    let okta_issuer_url = env::var("OKTA_ISSUER_URL")
+        .ok()
+        .or_else(|| from_file("okta_issuer_url"));
+
+    let okta_client_id = env::var("OKTA_CLIENT_ID")
+        .ok()
+        .or_else(|| from_file("okta_client_id"));
+
+    let okta_jwks_refresh_secs = env::var("OKTA_JWKS_REFRESH_SECS")
+        .ok()
+        .or_else(|| from_file("okta_jwks_refresh_secs"))
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(crate::constants::DEFAULT_JWKS_REFRESH_SECS);
+
     Config {
         public_endpoint,
         service_address,
@@ -125,5 +142,8 @@ pub fn load_config() -> Config {
         db_max_connections,
         cors_allowed_origins,
         http_client_timeout_secs,
+        okta_issuer_url,
+        okta_client_id,
+        okta_jwks_refresh_secs,
     }
 }

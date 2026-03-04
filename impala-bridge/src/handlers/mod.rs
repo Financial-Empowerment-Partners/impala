@@ -4,6 +4,7 @@ pub mod card;
 pub mod health;
 pub mod mfa;
 pub mod notify;
+pub mod okta;
 pub mod subscribe;
 pub mod sync;
 pub mod token;

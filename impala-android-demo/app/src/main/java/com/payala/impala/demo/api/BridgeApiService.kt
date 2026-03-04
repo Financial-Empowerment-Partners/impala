@@ -27,6 +27,14 @@ interface BridgeApiService {
     @POST("token")
     suspend fun token(@Body request: TokenRequest): TokenResponse
 
+    /** Exchange an Okta access token for local JWT tokens. */
+    @POST("auth/okta")
+    suspend fun oktaTokenExchange(@Body request: OktaTokenExchangeRequest): TokenResponse
+
+    /** Get Okta client configuration (no auth required). */
+    @GET("auth/okta/config")
+    suspend fun getOktaConfig(): OktaConfigResponse
+
     // ── Account ─────────────────────────────────────────────────────────
 
     /** Look up an account by its Stellar public key. */

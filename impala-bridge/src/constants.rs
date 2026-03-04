@@ -45,3 +45,15 @@ pub const TOKEN_TYPE_REFRESH: &str = "refresh";
 
 /// Token type string for temporal tokens.
 pub const TOKEN_TYPE_TEMPORAL: &str = "temporal";
+
+/// Default JWKS refresh interval in seconds (1 hour).
+pub const DEFAULT_JWKS_REFRESH_SECS: u64 = 3600;
+
+/// Auth provider identifier for Okta users.
+pub const AUTH_PROVIDER_OKTA: &str = "okta";
+
+/// Auth provider identifier for local (password-based) users.
+pub const AUTH_PROVIDER_LOCAL: &str = "local";
+
+/// JWT issuer claim value for locally-issued tokens.
+pub const JWT_ISSUER: &str = "impala-bridge";

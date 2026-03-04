@@ -118,4 +118,25 @@
     </target>
 
     <target name="reinstall" depends="delete-applet,install,list" description="delete and reinstall the applet on the inserted card"/>
+
+    <!-- CAPRunner integration targets -->
+
+    <target name="caprunnerSetup" description="set up CAPRunner environment">
+        <exec executable="bash" failonerror="true" dir="../caprunner">
+            <arg value="./setup.sh"/>
+        </exec>
+    </target>
+
+    <target name="inspectCap" depends="buildJavacard" description="build and inspect CAP file with CAPRunner">
+        <exec executable="bash" failonerror="true" dir="../caprunner">
+            <arg value="./inspect.sh"/>
+        </exec>
+    </target>
+
+    <target name="caprunnerTest" depends="buildJavacard" description="build and run CAPRunner APDU tests">
+        <apply executable="bash" failonerror="true" dir="../caprunner">
+            <arg value="./test.sh"/>
+            <fileset dir="../caprunner/scripts" includes="*.txt"/>
+        </apply>
+    </target>
 </project>

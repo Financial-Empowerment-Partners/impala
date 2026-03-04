@@ -21,6 +21,12 @@
                 </label>
                 <button type="submit" class="button expanded" id="login-btn">Login</button>
             </form>
+            <div id="okta-divider" class="hidden" style="text-align:center;margin:1.2rem 0 0.8rem;">
+                <span style="display:inline-block;width:40%;border-bottom:1px solid #ccc;vertical-align:middle;"></span>
+                <span style="padding:0 0.7rem;color:#888;font-size:0.9rem;">or</span>
+                <span style="display:inline-block;width:40%;border-bottom:1px solid #ccc;vertical-align:middle;"></span>
+            </div>
+            <button type="button" class="button expanded secondary hidden" id="okta-login-btn">Sign in with Okta</button>
             <p class="text-center" style="margin-top:1rem;font-size:0.85rem;color:#666;">
                 New accounts are registered automatically on first login.
             </p>
@@ -31,6 +37,7 @@
     <script src="js/roles.js"></script>
     <script src="js/auth.js"></script>
     <script src="js/validate.js"></script>
+    <script src="js/okta-auth.js"></script>
     <script>
         (function () {
             // Redirect if already logged in
@@ -39,8 +46,19 @@
                 return;
             }
 
-            var form = document.getElementById('login-form');
+            // Display callback errors from sessionStorage
             var errorDiv = document.getElementById('login-error');
+            var callbackError = sessionStorage.getItem('okta_error');
+            if (callbackError) {
+                errorDiv.textContent = callbackError;
+                errorDiv.classList.remove('hidden');
+                sessionStorage.removeItem('okta_error');
+            }
+
+            // Initialize Okta (shows button if configured)
+            OktaAuth.init();
+
+            var form = document.getElementById('login-form');
             var loginBtn = document.getElementById('login-btn');
 
             form.addEventListener('submit', function (e) {

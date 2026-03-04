@@ -9,6 +9,8 @@ pub struct Claims {
     pub token_type: String,
     pub exp: usize,
     pub iat: usize,
+    pub jti: String,
+    pub iss: String,
 }
 
 // ── Pagination ─────────────────────────────────────────────────────────
@@ -293,4 +295,26 @@ pub struct HealthResponse {
     pub status: String,
     pub database: String,
     pub redis: String,
+}
+
+// ── Okta ───────────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct OktaTokenExchangeRequest {
+    pub okta_token: String,
+}
+
+#[derive(Serialize)]
+pub struct OktaConfigResponse {
+    pub enabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub issuer: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub authorization_endpoint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token_endpoint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scopes: Option<Vec<String>>,
 }

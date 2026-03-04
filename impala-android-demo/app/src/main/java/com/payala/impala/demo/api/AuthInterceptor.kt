@@ -18,7 +18,7 @@ class AuthInterceptor(private val tokenManager: TokenManager) : Interceptor {
         val path = request.url.encodedPath
 
         // Do not attach tokens to auth endpoints
-        if (path.endsWith("/authenticate") || path.endsWith("/token")) {
+        if (path.endsWith("/authenticate") || path.endsWith("/token") || path.contains("/auth/okta")) {
             return chain.proceed(request)
         }
 

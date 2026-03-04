@@ -17,6 +17,8 @@ import com.payala.impala.demo.auth.GoogleAuthHelper
 import com.payala.impala.demo.auth.GoogleSignInResult
 import com.payala.impala.demo.auth.NfcCardAuthHelper
 import com.payala.impala.demo.auth.NfcCardResult
+import com.payala.impala.demo.auth.OktaAuthHelper
+import com.payala.impala.demo.auth.OktaSignInResult
 import com.payala.impala.demo.databinding.ActivityLoginBinding
 import com.payala.impala.demo.ui.main.MainActivity
 import kotlinx.coroutines.launch
@@ -47,6 +49,7 @@ class LoginActivity : AppCompatActivity() {
     private lateinit var googleAuthHelper: GoogleAuthHelper
     private lateinit var gitHubAuthHelper: GitHubAuthHelper
     private lateinit var nfcHelper: NfcCardAuthHelper
+    private lateinit var oktaAuthHelper: OktaAuthHelper
 
     /** True when the user has tapped "Sign in with Card" and is waiting for a tap. */
     private var awaitingCardTap = false
@@ -67,10 +70,16 @@ class LoginActivity : AppCompatActivity() {
         googleAuthHelper = GoogleAuthHelper(this)
         gitHubAuthHelper = GitHubAuthHelper(this)
         nfcHelper = NfcCardAuthHelper(this)
+        oktaAuthHelper = OktaAuthHelper(this)
 
         // Hide NFC button if device lacks NFC hardware
         if (!nfcHelper.isNfcAvailable) {
             binding.btnCard.visibility = View.GONE
+        }
+
+        // Hide Okta button if not configured
+        if (BuildConfig.OKTA_ISSUER_URL.isEmpty()) {
+            binding.btnOkta.visibility = View.GONE
         }
 
         setupObservers()
@@ -123,6 +132,7 @@ class LoginActivity : AppCompatActivity() {
                     binding.btnGoogle.isEnabled = false
                     binding.btnGithub.isEnabled = false
                     binding.btnCard.isEnabled = false
+                    binding.btnOkta.isEnabled = false
                     binding.tvError.visibility = View.GONE
                 }
                 is LoginViewModel.LoginState.Success -> {
@@ -135,6 +145,7 @@ class LoginActivity : AppCompatActivity() {
                     binding.btnGoogle.isEnabled = true
                     binding.btnGithub.isEnabled = true
                     binding.btnCard.isEnabled = true
+                    binding.btnOkta.isEnabled = true
                     binding.tvError.text = mapErrorToMessage(state)
                     binding.tvError.visibility = View.VISIBLE
                 }
@@ -144,6 +155,7 @@ class LoginActivity : AppCompatActivity() {
                     binding.btnGoogle.isEnabled = true
                     binding.btnGithub.isEnabled = true
                     binding.btnCard.isEnabled = true
+                    binding.btnOkta.isEnabled = true
                 }
             }
         }
@@ -225,6 +237,50 @@ class LoginActivity : AppCompatActivity() {
             }
             awaitingCardTap = true
             Snackbar.make(binding.root, R.string.nfc_tap_prompt, Snackbar.LENGTH_LONG).show()
+        }
+
+        binding.btnOkta.setOnClickListener {
+            oktaAuthHelper.startSignIn(
+                BuildConfig.OKTA_ISSUER_URL,
+                BuildConfig.OKTA_CLIENT_ID
+            ) { result ->
+                when (result) {
+                    is OktaSignInResult.CodeReceived -> {
+                        lifecycleScope.launch {
+                            val codeVerifier = OktaAuthHelper.pendingCodeVerifier
+                            if (codeVerifier == null) {
+                                runOnUiThread {
+                                    binding.tvError.text = "Authentication session expired. Please try again."
+                                    binding.tvError.visibility = View.VISIBLE
+                                }
+                                return@launch
+                            }
+                            val accessToken = oktaAuthHelper.exchangeCodeForToken(
+                                BuildConfig.OKTA_ISSUER_URL,
+                                BuildConfig.OKTA_CLIENT_ID,
+                                result.code,
+                                codeVerifier
+                            )
+                            if (accessToken != null) {
+                                viewModel.loginWithOkta(
+                                    api, tokenManager, accessToken, null
+                                )
+                            } else {
+                                runOnUiThread {
+                                    binding.tvError.text = "Failed to exchange Okta authorization code"
+                                    binding.tvError.visibility = View.VISIBLE
+                                }
+                            }
+                        }
+                    }
+                    is OktaSignInResult.Error -> {
+                        runOnUiThread {
+                            binding.tvError.text = result.message
+                            binding.tvError.visibility = View.VISIBLE
+                        }
+                    }
+                }
+            }
         }
     }
 

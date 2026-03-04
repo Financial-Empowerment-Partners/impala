@@ -31,3 +31,18 @@ data class TokenResponse(
     val refresh_token: String? = null,
     val temporal_token: String? = null
 )
+
+/** Request body for `POST /auth/okta`. Exchanges an Okta access token for local JWT tokens. */
+data class OktaTokenExchangeRequest(
+    val okta_token: String
+)
+
+/** Response from `GET /auth/okta/config`. Contains Okta client configuration. */
+data class OktaConfigResponse(
+    val enabled: Boolean,
+    val issuer: String? = null,
+    val client_id: String? = null,
+    val authorization_endpoint: String? = null,
+    val token_endpoint: String? = null,
+    val scopes: List<String>? = null
+)

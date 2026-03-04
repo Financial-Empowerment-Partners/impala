@@ -11,6 +11,7 @@ import com.payala.impala.demo.log.AppLogger
 import com.payala.impala.demo.model.AuthenticateRequest
 import com.payala.impala.demo.model.CreateAccountRequest
 import com.payala.impala.demo.model.CreateCardRequest
+import com.payala.impala.demo.model.OktaTokenExchangeRequest
 import com.payala.impala.demo.model.TokenRequest
 import kotlinx.coroutines.launch
 import retrofit2.HttpException
@@ -248,6 +249,79 @@ class LoginViewModel : ViewModel() {
             } catch (e: Exception) {
                 AppLogger.e("Auth", "Card login error: ${e.message}")
                 _loginState.value = LoginState.Error(e.message ?: "Card login failed", classifyError(e))
+            }
+        }
+    }
+
+    /**
+     * Authenticate via Okta. Exchanges the Okta access token with the bridge
+     * via the dedicated `POST /auth/okta` endpoint (no password derivation).
+     */
+    fun loginWithOkta(
+        api: BridgeApiService,
+        tokenManager: TokenManager,
+        oktaAccessToken: String,
+        displayName: String?
+    ) {
+        val validationError = validateOAuthLogin(oktaAccessToken)
+        if (validationError != null) {
+            _loginState.value = LoginState.Error(validationError.message, ErrorType.VALIDATION)
+            return
+        }
+
+        viewModelScope.launch {
+            _loginState.value = LoginState.Loading
+            try {
+                AppLogger.i("Auth", "Okta login attempt")
+
+                // Exchange Okta token with bridge for local JWT tokens
+                val exchangeResponse = api.oktaTokenExchange(
+                    OktaTokenExchangeRequest(oktaAccessToken)
+                )
+
+                if (!exchangeResponse.success || exchangeResponse.refresh_token == null) {
+                    AppLogger.w("Auth", "Okta token exchange failed: ${exchangeResponse.message}")
+                    _loginState.value = LoginState.Error(
+                        exchangeResponse.message, ErrorType.AUTH_FAILED
+                    )
+                    return@launch
+                }
+
+                tokenManager.saveRefreshToken(exchangeResponse.refresh_token)
+                AppLogger.i("Auth", "Okta refresh token acquired")
+
+                // Extract account ID from JWT sub claim
+                val jwtPayload = exchangeResponse.refresh_token.split(".").getOrNull(1)
+                val accountId = jwtPayload?.let {
+                    try {
+                        val decoded = android.util.Base64.decode(it, android.util.Base64.URL_SAFE)
+                        val json = org.json.JSONObject(String(decoded))
+                        json.optString("sub", "okta-user")
+                    } catch (_: Exception) { "okta-user" }
+                } ?: "okta-user"
+
+                tokenManager.saveAccountId(accountId)
+                tokenManager.saveAuthProvider("okta")
+                if (displayName != null) {
+                    tokenManager.saveDisplayName(displayName)
+                }
+
+                // Get temporal token from refresh token
+                val temporalResponse = api.token(
+                    TokenRequest(refresh_token = exchangeResponse.refresh_token)
+                )
+                if (temporalResponse.success && temporalResponse.temporal_token != null) {
+                    tokenManager.saveTemporalToken(temporalResponse.temporal_token)
+                    AppLogger.i("Auth", "Temporal token acquired")
+                }
+
+                AppLogger.i("Auth", "Login successful via okta for: $accountId")
+                _loginState.value = LoginState.Success(accountId)
+            } catch (e: Exception) {
+                AppLogger.e("Auth", "Okta login error: ${e.message}")
+                _loginState.value = LoginState.Error(
+                    e.message ?: "Okta login failed", classifyError(e)
+                )
             }
         }
     }

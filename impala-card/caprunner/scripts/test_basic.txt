@@ -1,0 +1,21 @@
+-- test_basic.txt
+-- Basic lifecycle tests for ImpalaApplet
+-- Tests: NOP, Is Card Alive, Get Version
+
+load: ../applet/build/ImpalaApplet.cap
+install: 0b 01 02 03 04 05 06 07 08 01 02 00 00 00 : 00
+
+-- Select the applet
+==> 00 A4 04 00 0A 01 02 03 04 05 06 07 08 01 02
+<== 90 00
+
+-- Test NOP (INS 0x02) - should return 9000
+==> 00 02 00 00 00
+<== 90 00
+
+-- Test Is Card Alive (INS 0x2E) - should return 9000
+==> 00 2E 00 00 00
+<== 90 00
+
+-- Test Get Version (INS 0x64) - should return version bytes + 9000
+==> 00 64 00 00 00

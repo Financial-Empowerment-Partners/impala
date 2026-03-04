@@ -5,6 +5,7 @@ mod error;
 mod handlers;
 mod ldap;
 mod models;
+mod okta;
 mod streams;
 mod validate;
 mod vault;
@@ -12,15 +13,17 @@ mod vault;
 use axum::routing::{get, post};
 use axum::Router;
 use axum::extract::Extension;
+use axum::http::{header, HeaderName, HeaderValue, Method};
 use log::{debug, error, info};
 use sqlx::postgres::PgPoolOptions;
 use std::env;
 use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
+use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::trace::TraceLayer;
 
 use config::load_config;
-use handlers::{account, authenticate, card, health, mfa, notify, subscribe, sync, token, transaction};
+use handlers::{account, authenticate, card, health, mfa, notify, okta as okta_handler, subscribe, sync, token, transaction};
 
 #[tokio::main]
 async fn main() {
@@ -103,11 +106,34 @@ async fn main() {
             .unwrap_or_else(|_| "https://soroban-testnet.stellar.org".to_string()),
     );
 
-    // CORS layer
-    let cors = CorsLayer::new()
-        .allow_origin(Any)
-        .allow_methods(Any)
-        .allow_headers(Any);
+    // Initialize Okta provider (if configured)
+    let okta_provider = okta::init_okta_provider(&config).await;
+
+    // CORS layer — restrict to configured origins when not wildcard
+    let cors = if config.cors_allowed_origins == "*" {
+        CorsLayer::new()
+            .allow_origin(Any)
+            .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE])
+            .allow_headers([
+                header::AUTHORIZATION,
+                header::CONTENT_TYPE,
+                HeaderName::from_static("x-request-nonce"),
+            ])
+    } else {
+        let origins: Vec<HeaderValue> = config
+            .cors_allowed_origins
+            .split(',')
+            .filter_map(|o| o.trim().parse().ok())
+            .collect();
+        CorsLayer::new()
+            .allow_origin(origins)
+            .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE])
+            .allow_headers([
+                header::AUTHORIZATION,
+                header::CONTENT_TYPE,
+                HeaderName::from_static("x-request-nonce"),
+            ])
+    };
 
     // Build router with routes
     let app = Router::new()
@@ -124,13 +150,39 @@ async fn main() {
         .route("/mfa", post(mfa::enroll_mfa).get(mfa::get_mfa))
         .route("/mfa/verify", post(mfa::verify_mfa))
         .route("/notify", post(notify::create_notify).put(notify::update_notify))
+        .route("/auth/okta", post(okta_handler::okta_token_exchange))
+        .route("/auth/okta/config", get(okta_handler::okta_config))
         .layer(cors)
         .layer(TraceLayer::new_for_http())
+        .layer(SetResponseHeaderLayer::overriding(
+            header::X_CONTENT_TYPE_OPTIONS,
+            HeaderValue::from_static("nosniff"),
+        ))
+        .layer(SetResponseHeaderLayer::overriding(
+            header::X_FRAME_OPTIONS,
+            HeaderValue::from_static("DENY"),
+        ))
+        .layer(SetResponseHeaderLayer::overriding(
+            HeaderName::from_static("referrer-policy"),
+            HeaderValue::from_static("strict-origin-when-cross-origin"),
+        ))
         .layer(Extension(pool.clone()))
         .layer(Extension(redis_client.clone()))
         .layer(Extension(jwt_secret))
         .layer(Extension(horizon_url))
         .layer(Extension(stellar_rpc_url));
+
+    // Add Okta provider extension and spawn JWKS refresh task (if configured)
+    let app = if let Some(ref provider) = okta_provider {
+        let refresh_provider = provider.clone();
+        let refresh_secs = config.okta_jwks_refresh_secs;
+        tokio::spawn(async move {
+            okta::jwks_refresh_task(refresh_provider, refresh_secs).await;
+        });
+        app.layer(Extension(provider.clone()))
+    } else {
+        app
+    };
 
     // LDAP directory sync
     ldap::directory_sync(&pool, &config).await;

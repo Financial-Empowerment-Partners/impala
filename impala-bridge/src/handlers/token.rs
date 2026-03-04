@@ -8,7 +8,7 @@ use sqlx::PgPool;
 use std::sync::Arc;
 
 use crate::constants::{
-    RATE_LIMIT_MAX_REQUESTS, RATE_LIMIT_WINDOW_SECS, REFRESH_TOKEN_TTL_SECS,
+    JWT_ISSUER, RATE_LIMIT_MAX_REQUESTS, RATE_LIMIT_WINDOW_SECS, REFRESH_TOKEN_TTL_SECS,
     TEMPORAL_TOKEN_TTL_SECS, TOKEN_TYPE_REFRESH,
 };
 use crate::error::AppError;
@@ -30,10 +30,13 @@ pub async fn token(
 
     // Flow 1: refresh_token provided -> return a short-lived temporal_token
     if let Some(ref refresh_token) = payload.refresh_token {
+        let mut validation = Validation::new(jsonwebtoken::Algorithm::HS256);
+        validation.iss = Some(JWT_ISSUER.to_string());
+
         let token_data = decode::<Claims>(
             refresh_token,
             &DecodingKey::from_secret(key),
-            &Validation::default(),
+            &validation,
         )
         .map_err(|e| {
             warn!("token: invalid refresh token presented: {}", e);
@@ -59,6 +62,8 @@ pub async fn token(
             token_type: "temporal".to_string(),
             iat: now,
             exp: now + TEMPORAL_TOKEN_TTL_SECS,
+            jti: uuid::Uuid::new_v4().to_string(),
+            iss: JWT_ISSUER.to_string(),
         };
 
         let temporal_token = encode(
@@ -109,8 +114,8 @@ pub async fn token(
         let _: Result<(), _> = conn.expire(&rate_key, RATE_LIMIT_WINDOW_SECS).await;
     }
 
-    let stored_hash = sqlx::query_as::<_, (String,)>(
-        "SELECT password_hash FROM impala_auth WHERE account_id = $1",
+    let stored = sqlx::query_as::<_, (String, String)>(
+        "SELECT password_hash, auth_provider FROM impala_auth WHERE account_id = $1",
     )
     .bind(username)
     .fetch_optional(&pool)
@@ -120,8 +125,8 @@ pub async fn token(
         AppError::InternalError("Database error".to_string())
     })?;
 
-    let stored_hash = match stored_hash {
-        Some((hash,)) => hash,
+    let (stored_hash, auth_provider) = match stored {
+        Some((hash, provider)) => (hash, provider),
         None => {
             warn!("token: no credentials found for username={}", username);
             return Ok(Json(TokenResponse {
@@ -132,6 +137,13 @@ pub async fn token(
             }));
         }
     };
+
+    if auth_provider != crate::constants::AUTH_PROVIDER_LOCAL {
+        warn!("token: external auth user {} attempted password login", username);
+        return Err(AppError::BadRequest(
+            "Invalid credentials".to_string()
+        ));
+    }
 
     if verify_password(password, &stored_hash).is_err() {
         warn!("token: invalid password for username={}", username);
@@ -149,6 +161,8 @@ pub async fn token(
         token_type: "refresh".to_string(),
         iat: now,
         exp: now + REFRESH_TOKEN_TTL_SECS,
+        jti: uuid::Uuid::new_v4().to_string(),
+        iss: JWT_ISSUER.to_string(),
     };
 
     let refresh_token = encode(

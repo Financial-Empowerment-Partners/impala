@@ -34,6 +34,12 @@ android {
             "\"${localProperties.getProperty("GITHUB_REDIRECT_URI", "impala://github-callback")}\"")
         buildConfigField("String", "GOOGLE_WEB_CLIENT_ID",
             "\"${localProperties.getProperty("GOOGLE_WEB_CLIENT_ID", "YOUR_GOOGLE_WEB_CLIENT_ID")}\"")
+        buildConfigField("String", "OKTA_ISSUER_URL",
+            "\"${localProperties.getProperty("OKTA_ISSUER_URL", "")}\"")
+        buildConfigField("String", "OKTA_CLIENT_ID",
+            "\"${localProperties.getProperty("OKTA_CLIENT_ID", "")}\"")
+        buildConfigField("String", "OKTA_REDIRECT_URI",
+            "\"${localProperties.getProperty("OKTA_REDIRECT_URI", "impala://okta-callback")}\"")
     }
 
     buildTypes {

@@ -1,0 +1,22 @@
+-- test_pin.txt
+-- PIN operation tests for ImpalaApplet
+-- Tests: Initialize, Verify master PIN, Verify user PIN
+
+load: ../applet/build/ImpalaApplet.cap
+install: 0b 01 02 03 04 05 06 07 08 01 02 00 00 00 : 00
+
+-- Select the applet
+==> 00 A4 04 00 0A 01 02 03 04 05 06 07 08 01 02
+<== 90 00
+
+-- Initialize first (INS 0x2C)
+==> 00 2C 00 00 04 DE AD BE EF
+<== 90 00
+
+-- Verify default master PIN (14117298) - P2=0x81
+==> 00 18 00 81 08 01 04 01 01 07 02 09 08
+<== 90 00
+
+-- Verify default user PIN (1111) - P2=0x82
+==> 00 18 00 82 04 01 01 01 01
+<== 90 00

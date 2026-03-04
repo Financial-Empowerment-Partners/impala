@@ -57,6 +57,12 @@ class GitHubAuthHelper(private val activity: Activity) {
         private const val GITHUB_USER_URL = "https://api.github.com/user"
 
         var pendingCallback: ((GitHubSignInResult) -> Unit)? = null
+
+        private val httpClient = OkHttpClient.Builder()
+            .connectTimeout(10, java.util.concurrent.TimeUnit.SECONDS)
+            .readTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
+            .writeTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
+            .build()
     }
 
     /** Opens a Custom Chrome Tab for GitHub authorization. Results arrive via [pendingCallback]. */
@@ -85,7 +91,6 @@ class GitHubAuthHelper(private val activity: Activity) {
      * @return the [GitHubUser] on success, or `null` if any HTTP call fails
      */
     suspend fun exchangeCodeForUser(code: String): GitHubUser? = withContext(Dispatchers.IO) {
-        val client = OkHttpClient()
         val gson = Gson()
 
         // Exchange code for access token
@@ -102,7 +107,7 @@ class GitHubAuthHelper(private val activity: Activity) {
             .header("Accept", "application/json")
             .build()
 
-        val tokenResponse = client.newCall(tokenRequest).execute()
+        val tokenResponse = httpClient.newCall(tokenRequest).execute()
         if (!tokenResponse.isSuccessful) return@withContext null
 
         val tokenBody = tokenResponse.body?.string() ?: return@withContext null
@@ -116,7 +121,7 @@ class GitHubAuthHelper(private val activity: Activity) {
             .header("Accept", "application/json")
             .build()
 
-        val userResponse = client.newCall(userRequest).execute()
+        val userResponse = httpClient.newCall(userRequest).execute()
         if (!userResponse.isSuccessful) return@withContext null
 
         val userBody = userResponse.body?.string() ?: return@withContext null

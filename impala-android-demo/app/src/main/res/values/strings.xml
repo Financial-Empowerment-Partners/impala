@@ -10,6 +10,7 @@
     <string name="btn_sign_in">Sign In</string>
     <string name="btn_google">Continue with Google</string>
     <string name="btn_github">Continue with GitHub</string>
+    <string name="btn_okta">Continue with Okta</string>
     <string name="btn_card">Sign in with Card</string>
     <string name="divider_or">OR</string>
     <string name="error_fields_required">Account ID and password are required</string>
