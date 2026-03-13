@@ -1,15 +1,13 @@
 use axum::extract::Extension;
 use axum::Json;
-use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
+use jsonwebtoken::{decode, DecodingKey, Validation};
 use log::{debug, error, info, warn};
 use password_auth::verify_password;
-use redis::AsyncCommands;
 use sqlx::PgPool;
 use std::sync::Arc;
 
 use crate::constants::{
-    JWT_ISSUER, RATE_LIMIT_MAX_REQUESTS, RATE_LIMIT_WINDOW_SECS, REFRESH_TOKEN_TTL_SECS,
-    TEMPORAL_TOKEN_TTL_SECS, TOKEN_TYPE_REFRESH,
+    JWT_ISSUER, RATE_LIMIT_MAX_REQUESTS, RATE_LIMIT_WINDOW_SECS, TOKEN_TYPE_REFRESH,
 };
 use crate::error::AppError;
 use crate::models::{Claims, TokenRequest, TokenResponse};
@@ -22,7 +20,7 @@ use crate::models::{Claims, TokenRequest, TokenResponse};
 pub async fn token(
     Extension(pool): Extension<PgPool>,
     Extension(jwt_secret): Extension<Arc<String>>,
-    Extension(redis_client): Extension<Arc<redis::Client>>,
+    Extension(redis_pool): Extension<Arc<deadpool_redis::Pool>>,
     Json(payload): Json<TokenRequest>,
 ) -> Result<Json<TokenResponse>, AppError> {
     debug!("POST /token: request received");
@@ -56,34 +54,29 @@ pub async fn token(
             }));
         }
 
+        // Check if refresh token has been revoked
+        if crate::redis_helpers::is_token_revoked(&redis_pool, &token_data.claims.jti).await? {
+            warn!("token: revoked refresh token presented");
+            return Err(AppError::Unauthorized);
+        }
+
         let now = chrono::Utc::now().timestamp() as usize;
-        let temporal_claims = Claims {
-            sub: token_data.claims.sub,
-            token_type: "temporal".to_string(),
-            iat: now,
-            exp: now + TEMPORAL_TOKEN_TTL_SECS,
-            jti: uuid::Uuid::new_v4().to_string(),
-            iss: JWT_ISSUER.to_string(),
-        };
+        let sub = token_data.claims.sub.clone();
 
-        let temporal_token = encode(
-            &Header::default(),
-            &temporal_claims,
-            &EncodingKey::from_secret(key),
-        )
-        .map_err(|e| {
-            error!("token: failed to encode temporal token: {}", e);
-            AppError::InternalError("Failed to generate token".to_string())
-        })?;
+        // Issue rotated refresh + temporal token pair
+        let (new_refresh_token, temporal_token) = crate::jwt::encode_token_pair(key, &sub)?;
 
-        info!(
-            "token: temporal token issued for sub={}",
-            temporal_claims.sub
-        );
+        // Revoke the old refresh token
+        let remaining = token_data.claims.exp.saturating_sub(now);
+        if remaining > 0 {
+            crate::redis_helpers::revoke_token(&redis_pool, &token_data.claims.jti, remaining).await;
+        }
+
+        info!("token: tokens issued (with refresh rotation) for sub={}", sub);
         return Ok(Json(TokenResponse {
             success: true,
-            message: "Temporal token issued".to_string(),
-            refresh_token: None,
+            message: "Tokens issued".to_string(),
+            refresh_token: Some(new_refresh_token),
             temporal_token: Some(temporal_token),
         }));
     }
@@ -103,16 +96,7 @@ pub async fn token(
     }
 
     // Rate limiting check
-    if let Ok(mut conn) = redis_client.get_async_connection().await {
-        let rate_key = format!("rate:token:{}", username);
-        let count: u64 = conn.get(&rate_key).await.unwrap_or(0);
-        if count >= RATE_LIMIT_MAX_REQUESTS {
-            warn!("token: rate limit exceeded for username={}", username);
-            return Err(AppError::RateLimited);
-        }
-        let _: Result<(), _> = conn.incr(&rate_key, 1u64).await;
-        let _: Result<(), _> = conn.expire(&rate_key, RATE_LIMIT_WINDOW_SECS).await;
-    }
+    crate::redis_helpers::check_rate_limit(&redis_pool, "token", username, RATE_LIMIT_MAX_REQUESTS, RATE_LIMIT_WINDOW_SECS).await?;
 
     let stored = sqlx::query_as::<_, (String, String)>(
         "SELECT password_hash, auth_provider FROM impala_auth WHERE account_id = $1",
@@ -155,25 +139,7 @@ pub async fn token(
         }));
     }
 
-    let now = chrono::Utc::now().timestamp() as usize;
-    let refresh_claims = Claims {
-        sub: username.to_string(),
-        token_type: "refresh".to_string(),
-        iat: now,
-        exp: now + REFRESH_TOKEN_TTL_SECS,
-        jti: uuid::Uuid::new_v4().to_string(),
-        iss: JWT_ISSUER.to_string(),
-    };
-
-    let refresh_token = encode(
-        &Header::default(),
-        &refresh_claims,
-        &EncodingKey::from_secret(key),
-    )
-    .map_err(|e| {
-        error!("token: failed to encode refresh token: {}", e);
-        AppError::InternalError("Failed to generate token".to_string())
-    })?;
+    let refresh_token = crate::jwt::encode_refresh_token(key, username)?;
 
     info!("token: refresh token issued for username={}", username);
     Ok(Json(TokenResponse {

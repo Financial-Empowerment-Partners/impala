@@ -1,8 +1,8 @@
 use axum::extract::Extension;
 use axum::Json;
 use log::{debug, error, info, warn};
+use opentelemetry::KeyValue;
 use password_auth::{generate_hash, verify_password};
-use redis::AsyncCommands;
 use sqlx::PgPool;
 use std::sync::Arc;
 
@@ -12,6 +12,8 @@ use crate::constants::{
 };
 use crate::error::AppError;
 use crate::models::{AuthenticateRequest, AuthenticateResponse};
+use crate::notifications::{self, NotificationEvent};
+use crate::telemetry::AppMetrics;
 
 /// Register or authenticate a user (`POST /authenticate`).
 ///
@@ -20,44 +22,19 @@ use crate::models::{AuthenticateRequest, AuthenticateResponse};
 /// to prevent account enumeration.
 pub async fn authenticate(
     Extension(pool): Extension<PgPool>,
-    Extension(redis_client): Extension<Arc<redis::Client>>,
+    Extension(redis_pool): Extension<Arc<deadpool_redis::Pool>>,
+    Extension(metrics): Extension<Arc<AppMetrics>>,
+    sns_client: Option<Extension<Arc<aws_sdk_sns::Client>>>,
+    sns_topic_arn: Option<Extension<Arc<String>>>,
     Json(payload): Json<AuthenticateRequest>,
 ) -> Result<Json<AuthenticateResponse>, AppError> {
     info!("POST /authenticate: account_id={}", payload.account_id);
 
     // Rate limiting check
-    if let Ok(mut conn) = redis_client.get_async_connection().await {
-        let rate_key = format!("rate:auth:{}", payload.account_id);
-        let count: u64 = conn.get(&rate_key).await.unwrap_or(0);
-        if count >= RATE_LIMIT_MAX_REQUESTS {
-            warn!(
-                "authenticate: rate limit exceeded for account_id={}",
-                payload.account_id
-            );
-            return Err(AppError::RateLimited);
-        }
-        let _: Result<(), _> = conn.incr(&rate_key, 1u64).await;
-        let _: Result<(), _> = conn
-            .expire(&rate_key, RATE_LIMIT_WINDOW_SECS)
-            .await;
-    }
+    crate::redis_helpers::check_rate_limit(&redis_pool, "auth", &payload.account_id, RATE_LIMIT_MAX_REQUESTS, RATE_LIMIT_WINDOW_SECS).await?;
 
     // Account lockout check
-    if let Ok(mut conn) = redis_client.get_async_connection().await {
-        let lockout_key = format!("lockout:{}", payload.account_id);
-        let failures: u64 = conn.get(&lockout_key).await.unwrap_or(0);
-        if failures >= LOCKOUT_THRESHOLD {
-            warn!(
-                "authenticate: account locked out for account_id={}",
-                payload.account_id
-            );
-            return Ok(Json(AuthenticateResponse {
-                success: false,
-                message: "Account temporarily locked due to too many failed attempts".to_string(),
-                action: "".to_string(),
-            }));
-        }
-    }
+    crate::redis_helpers::check_lockout(&redis_pool, &payload.account_id, LOCKOUT_THRESHOLD).await?;
 
     // Validate password strength
     if payload.password.len() < MIN_PASSWORD_LENGTH {
@@ -134,6 +111,22 @@ pub async fn authenticate(
                         "authenticate: registered new user account_id={}",
                         payload.account_id
                     );
+                    metrics.auth_attempts.add(1, &[KeyValue::new("outcome", "registered")]);
+
+                    // Fire-and-forget notification for registration
+                    let sns_c = sns_client.as_ref().map(|e| &e.0);
+                    let sns_a = sns_topic_arn.as_ref().map(|e| &e.0);
+                    notifications::dispatch_event(
+                        &pool,
+                        sns_c,
+                        sns_a,
+                        NotificationEvent::LoginSuccess {
+                            account_id: payload.account_id.clone(),
+                        },
+                        Some(&metrics),
+                    )
+                    .await;
+
                     Ok(Json(AuthenticateResponse {
                         success: true,
                         message: "Registration successful".to_string(),
@@ -163,15 +156,28 @@ pub async fn authenticate(
             match verify_password(&payload.password, &stored_hash) {
                 Ok(_) => {
                     // Reset failed login counter on success
-                    if let Ok(mut conn) = redis_client.get_async_connection().await {
-                        let lockout_key = format!("lockout:{}", payload.account_id);
-                        let _: Result<(), _> = conn.del(&lockout_key).await;
-                    }
+                    crate::redis_helpers::clear_lockout(&redis_pool, &payload.account_id).await;
 
                     info!(
                         "authenticate: successful login for account_id={}",
                         payload.account_id
                     );
+                    metrics.auth_attempts.add(1, &[KeyValue::new("outcome", "authenticated")]);
+
+                    // Fire-and-forget notification for login success
+                    let sns_c = sns_client.as_ref().map(|e| &e.0);
+                    let sns_a = sns_topic_arn.as_ref().map(|e| &e.0);
+                    notifications::dispatch_event(
+                        &pool,
+                        sns_c,
+                        sns_a,
+                        NotificationEvent::LoginSuccess {
+                            account_id: payload.account_id.clone(),
+                        },
+                        Some(&metrics),
+                    )
+                    .await;
+
                     Ok(Json(AuthenticateResponse {
                         success: true,
                         message: "Authentication successful".to_string(),
@@ -180,18 +186,28 @@ pub async fn authenticate(
                 }
                 Err(_) => {
                     // Increment failed login counter
-                    if let Ok(mut conn) = redis_client.get_async_connection().await {
-                        let lockout_key = format!("lockout:{}", payload.account_id);
-                        let _: Result<(), _> = conn.incr(&lockout_key, 1u64).await;
-                        let _: Result<(), _> = conn
-                            .expire(&lockout_key, LOCKOUT_DURATION_SECS)
-                            .await;
-                    }
+                    crate::redis_helpers::increment_lockout(&redis_pool, &payload.account_id, LOCKOUT_DURATION_SECS).await;
 
                     warn!(
                         "authenticate: invalid password for account_id={}",
                         payload.account_id
                     );
+                    metrics.auth_attempts.add(1, &[KeyValue::new("outcome", "failed")]);
+
+                    // Fire-and-forget notification for login failure
+                    let sns_c = sns_client.as_ref().map(|e| &e.0);
+                    let sns_a = sns_topic_arn.as_ref().map(|e| &e.0);
+                    notifications::dispatch_event(
+                        &pool,
+                        sns_c,
+                        sns_a,
+                        NotificationEvent::LoginFailure {
+                            account_id: payload.account_id.clone(),
+                        },
+                        Some(&metrics),
+                    )
+                    .await;
+
                     Ok(Json(AuthenticateResponse {
                         success: false,
                         message: "Invalid credentials".to_string(),

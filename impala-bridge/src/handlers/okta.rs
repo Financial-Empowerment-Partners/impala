@@ -1,18 +1,15 @@
 use axum::extract::Extension;
 use axum::Json;
-use jsonwebtoken::{encode, EncodingKey, Header};
 use log::{debug, error, info, warn};
-use redis::AsyncCommands;
 use sqlx::PgPool;
 use std::sync::Arc;
 
 use crate::constants::{
-    AUTH_PROVIDER_OKTA, JWT_ISSUER, LOCKOUT_THRESHOLD, MAX_EMAIL_LENGTH,
-    RATE_LIMIT_MAX_REQUESTS, RATE_LIMIT_WINDOW_SECS, REFRESH_TOKEN_TTL_SECS,
-    TEMPORAL_TOKEN_TTL_SECS,
+    AUTH_PROVIDER_OKTA, LOCKOUT_THRESHOLD, MAX_EMAIL_LENGTH,
+    RATE_LIMIT_MAX_REQUESTS, RATE_LIMIT_WINDOW_SECS,
 };
 use crate::error::AppError;
-use crate::models::{Claims, OktaConfigResponse, OktaTokenExchangeRequest, TokenResponse};
+use crate::models::{OktaConfigResponse, OktaTokenExchangeRequest, TokenResponse};
 use crate::okta::{self, OktaProvider};
 
 /// `POST /auth/okta` — Exchange an Okta access token for local JWT tokens.
@@ -22,7 +19,7 @@ use crate::okta::{self, OktaProvider};
 pub async fn okta_token_exchange(
     Extension(pool): Extension<PgPool>,
     Extension(jwt_secret): Extension<Arc<String>>,
-    Extension(redis_client): Extension<Arc<redis::Client>>,
+    Extension(redis_pool): Extension<Arc<deadpool_redis::Pool>>,
     okta_provider: Option<Extension<Arc<OktaProvider>>>,
     Json(payload): Json<OktaTokenExchangeRequest>,
 ) -> Result<Json<TokenResponse>, AppError> {
@@ -59,30 +56,9 @@ pub async fn okta_token_exchange(
 
     info!("okta: token exchange for account_id={}", account_id);
 
-    // Rate limiting check
-    if let Ok(mut conn) = redis_client.get_async_connection().await {
-        // Check account lockout
-        let lockout_key = format!("lockout:{}", account_id);
-        let failures: u64 = conn.get(&lockout_key).await.unwrap_or(0);
-        if failures >= LOCKOUT_THRESHOLD {
-            warn!("okta: account locked out for account_id={}", account_id);
-            return Err(AppError::RateLimited);
-        }
-
-        let rate_key = format!("rate:okta:{}", account_id);
-        let count: u64 = conn.get(&rate_key).await.unwrap_or(0);
-        if count >= RATE_LIMIT_MAX_REQUESTS {
-            warn!(
-                "okta: rate limit exceeded for account_id={}",
-                account_id
-            );
-            return Err(AppError::RateLimited);
-        }
-        let _: Result<(), _> = conn.incr(&rate_key, 1u64).await;
-        let _: Result<(), _> = conn
-            .expire(&rate_key, RATE_LIMIT_WINDOW_SECS)
-            .await;
-    }
+    // Rate limiting and lockout checks
+    crate::redis_helpers::check_lockout(&redis_pool, &account_id, LOCKOUT_THRESHOLD).await?;
+    crate::redis_helpers::check_rate_limit(&redis_pool, "okta", &account_id, RATE_LIMIT_MAX_REQUESTS, RATE_LIMIT_WINDOW_SECS).await?;
 
     // Auto-provision using a database transaction
     let placeholder_stellar_id = format!(
@@ -143,37 +119,7 @@ pub async fn okta_token_exchange(
 
     // Issue local JWT tokens
     let key = jwt_secret.as_bytes();
-    let now = chrono::Utc::now().timestamp() as usize;
-
-    let refresh_claims = Claims {
-        sub: account_id.clone(),
-        token_type: "refresh".to_string(),
-        iat: now,
-        exp: now + REFRESH_TOKEN_TTL_SECS,
-        jti: uuid::Uuid::new_v4().to_string(),
-        iss: JWT_ISSUER.to_string(),
-    };
-
-    let refresh_token = encode(&Header::default(), &refresh_claims, &EncodingKey::from_secret(key))
-        .map_err(|e| {
-            error!("okta: failed to encode refresh token: {}", e);
-            AppError::InternalError("Failed to generate token".to_string())
-        })?;
-
-    let temporal_claims = Claims {
-        sub: account_id.clone(),
-        token_type: "temporal".to_string(),
-        iat: now,
-        exp: now + TEMPORAL_TOKEN_TTL_SECS,
-        jti: uuid::Uuid::new_v4().to_string(),
-        iss: JWT_ISSUER.to_string(),
-    };
-
-    let temporal_token = encode(&Header::default(), &temporal_claims, &EncodingKey::from_secret(key))
-        .map_err(|e| {
-            error!("okta: failed to encode temporal token: {}", e);
-            AppError::InternalError("Failed to generate token".to_string())
-        })?;
+    let (refresh_token, temporal_token) = crate::jwt::encode_token_pair(key, &account_id)?;
 
     info!("okta: tokens issued for account_id={}", account_id);
 

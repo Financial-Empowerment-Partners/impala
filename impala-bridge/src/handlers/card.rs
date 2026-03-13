@@ -9,10 +9,14 @@ use crate::models::{CardResponse, CreateCardRequest, DeleteCardRequest};
 
 /// Register a hardware smartcard (`POST /card`).
 pub async fn create_card(
-    _user: AuthenticatedUser,
+    user: AuthenticatedUser,
     Extension(pool): Extension<PgPool>,
     Json(payload): Json<CreateCardRequest>,
 ) -> Result<Json<CardResponse>, AppError> {
+    crate::auth::require_owner(&user, &payload.account_id)?;
+    crate::validate::validate_card_id(&payload.card_id)?;
+    crate::validate::validate_ec_pubkey(&payload.ec_pubkey)?;
+    crate::validate::validate_rsa_pubkey(&payload.rsa_pubkey)?;
     info!(
         "POST /card: registering card_id={} for account_id={}",
         payload.card_id, payload.account_id
@@ -47,15 +51,16 @@ pub async fn create_card(
 
 /// Soft-delete a card (`DELETE /card`).
 pub async fn delete_card(
-    _user: AuthenticatedUser,
+    user: AuthenticatedUser,
     Extension(pool): Extension<PgPool>,
     Json(payload): Json<DeleteCardRequest>,
 ) -> Result<Json<CardResponse>, AppError> {
     info!("DELETE /card: card_id={}", payload.card_id);
     let result = sqlx::query(
-        "UPDATE card SET is_delete = TRUE, updated_at = CURRENT_TIMESTAMP WHERE card_id = $1 AND is_delete = FALSE",
+        "UPDATE card SET is_delete = TRUE, deleted_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE card_id = $1 AND account_id = $2 AND is_delete = FALSE",
     )
     .bind(&payload.card_id)
+    .bind(&user.account_id)
     .execute(&pool)
     .await;
 

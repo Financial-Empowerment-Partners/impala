@@ -83,6 +83,10 @@ interface BridgeApiService {
 
     // ── Notify ────────────────────────────────────────────────────────
 
+    /** List notification preferences for the authenticated user. */
+    @GET("notify")
+    suspend fun listNotify(): List<NotifyListItem>
+
     /** Create a notification preference record. */
     @POST("notify")
     suspend fun createNotify(@Body request: CreateNotifyRequest): NotifyResponse
@@ -90,6 +94,37 @@ interface BridgeApiService {
     /** Update an existing notification preference record. */
     @PUT("notify")
     suspend fun updateNotify(@Body request: UpdateNotifyRequest): NotifyResponse
+
+    // ── Notification Subscriptions ────────────────────────────────────
+
+    /** List all event→medium subscriptions for the authenticated user. */
+    @GET("notification/subscriptions")
+    suspend fun listSubscriptions(): List<SubscriptionListItem>
+
+    /** Subscribe to an event on a delivery medium. */
+    @POST("notification/subscriptions")
+    suspend fun createSubscription(@Body request: CreateSubscriptionRequest): SubscriptionResponse
+
+    /** Enable or disable a subscription. */
+    @PUT("notification/subscriptions/{id}")
+    suspend fun updateSubscription(
+        @Path("id") id: Int,
+        @Body request: UpdateSubscriptionRequest
+    ): SubscriptionResponse
+
+    /** Remove a subscription. */
+    @DELETE("notification/subscriptions/{id}")
+    suspend fun deleteSubscription(@Path("id") id: Int): SubscriptionResponse
+
+    // ── Device Token ──────────────────────────────────────────────────
+
+    /** Register an FCM device token for push notifications. */
+    @POST("device-token")
+    suspend fun registerDeviceToken(@Body request: RegisterDeviceTokenRequest): DeviceTokenResponse
+
+    /** Remove a device token (on logout or uninstall). */
+    @HTTP(method = "DELETE", path = "device-token", hasBody = true)
+    suspend fun deleteDeviceToken(@Body request: DeleteDeviceTokenRequest): DeviceTokenResponse
 
     // ── Sync ────────────────────────────────────────────────────────────
 

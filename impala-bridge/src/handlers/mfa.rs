@@ -1,7 +1,6 @@
 use axum::extract::{Extension, Query};
 use axum::Json;
 use log::{debug, error, info, warn};
-use redis::AsyncCommands;
 use sqlx::PgPool;
 use std::sync::Arc;
 use totp_rs::{Algorithm, Secret, TOTP};
@@ -11,16 +10,20 @@ use crate::error::AppError;
 use crate::models::{
     EnrollMfaRequest, MfaEnrollment, MfaQuery, MfaResponse, VerifyMfaRequest,
 };
+use crate::telemetry::AppMetrics;
+use opentelemetry::KeyValue;
 
 /// Enroll or re-enroll an MFA method (`POST /mfa`).
 ///
 /// For TOTP: generates a secret and returns a provisioning URI for QR codes.
 /// For SMS: requires a phone_number.
 pub async fn enroll_mfa(
-    _user: AuthenticatedUser,
+    user: AuthenticatedUser,
     Extension(pool): Extension<PgPool>,
+    Extension(metrics): Extension<Arc<AppMetrics>>,
     Json(payload): Json<EnrollMfaRequest>,
 ) -> Result<Json<MfaResponse>, AppError> {
+    crate::auth::require_owner(&user, &payload.account_id)?;
     info!(
         "POST /mfa: enrolling mfa_type={} for account_id={}",
         payload.mfa_type, payload.account_id
@@ -35,13 +38,20 @@ pub async fn enroll_mfa(
         }));
     }
 
-    if payload.mfa_type == "sms" && payload.phone_number.is_none() {
-        warn!("enroll_mfa: missing phone_number for SMS enrollment");
-        return Ok(Json(MfaResponse {
-            success: false,
-            message: "phone_number is required for SMS enrollment".to_string(),
-            provisioning_uri: None,
-        }));
+    if payload.mfa_type == "sms" {
+        match &payload.phone_number {
+            None => {
+                warn!("enroll_mfa: missing phone_number for SMS enrollment");
+                return Ok(Json(MfaResponse {
+                    success: false,
+                    message: "phone_number is required for SMS enrollment".to_string(),
+                    provisioning_uri: None,
+                }));
+            }
+            Some(phone) => {
+                crate::validate::validate_phone_number(phone)?;
+            }
+        }
     }
 
     let (secret_value, provisioning_uri) = if payload.mfa_type == "totp" {
@@ -89,6 +99,10 @@ pub async fn enroll_mfa(
                 "enroll_mfa: {} enrolled for account_id={}",
                 payload.mfa_type, payload.account_id
             );
+            metrics.mfa_enrollments.add(1, &[
+                KeyValue::new("mfa_type", payload.mfa_type.clone()),
+                KeyValue::new("outcome", "success"),
+            ]);
             Ok(Json(MfaResponse {
                 success: true,
                 message: "MFA enrolled successfully".to_string(),
@@ -104,10 +118,11 @@ pub async fn enroll_mfa(
 
 /// List all MFA enrollments for an account (`GET /mfa?account_id=...`).
 pub async fn get_mfa(
-    _user: AuthenticatedUser,
+    user: AuthenticatedUser,
     Extension(pool): Extension<PgPool>,
     Query(params): Query<MfaQuery>,
 ) -> Result<Json<Vec<MfaEnrollment>>, AppError> {
+    crate::auth::require_owner(&user, &params.account_id)?;
     debug!("GET /mfa: account_id={}", params.account_id);
     let rows = sqlx::query_as::<_, MfaEnrollment>(
         "SELECT account_id, mfa_type, secret, phone_number, enabled
@@ -139,13 +154,17 @@ pub async fn get_mfa(
 /// For SMS: validates the code stored in Redis.
 pub async fn verify_mfa(
     Extension(pool): Extension<PgPool>,
-    Extension(redis_client): Extension<Arc<redis::Client>>,
+    Extension(redis_pool): Extension<Arc<deadpool_redis::Pool>>,
+    Extension(metrics): Extension<Arc<AppMetrics>>,
     Json(payload): Json<VerifyMfaRequest>,
 ) -> Result<Json<MfaResponse>, AppError> {
     info!(
         "POST /mfa/verify: mfa_type={} for account_id={}",
         payload.mfa_type, payload.account_id
     );
+
+    // Brute force protection: check if account is locked out
+    crate::redis_helpers::check_mfa_lockout(&redis_pool, &payload.account_id, &payload.mfa_type, crate::constants::LOCKOUT_THRESHOLD).await?;
 
     let enrollment = sqlx::query_as::<_, MfaEnrollment>(
         "SELECT account_id, mfa_type, secret, phone_number, enabled
@@ -241,6 +260,12 @@ pub async fn verify_mfa(
                             "verify_mfa: TOTP verified for account_id={}",
                             payload.account_id
                         );
+                        metrics.mfa_verifications.add(1, &[
+                            KeyValue::new("mfa_type", "totp"),
+                            KeyValue::new("outcome", "success"),
+                        ]);
+                        // Clear brute force attempts on success
+                        crate::redis_helpers::clear_mfa_attempts(&redis_pool, &payload.account_id, &payload.mfa_type).await;
                         Ok(Json(MfaResponse {
                             success: true,
                             message: "MFA verification successful".to_string(),
@@ -251,6 +276,12 @@ pub async fn verify_mfa(
                             "verify_mfa: invalid TOTP code for account_id={}",
                             payload.account_id
                         );
+                        metrics.mfa_verifications.add(1, &[
+                            KeyValue::new("mfa_type", "totp"),
+                            KeyValue::new("outcome", "failed"),
+                        ]);
+                        // Track failed attempt for brute force protection
+                        crate::redis_helpers::increment_mfa_attempts(&redis_pool, &payload.account_id, &payload.mfa_type, crate::constants::LOCKOUT_DURATION_SECS).await;
                         Ok(Json(MfaResponse {
                             success: false,
                             message: "Invalid verification code".to_string(),
@@ -261,27 +292,43 @@ pub async fn verify_mfa(
                 "sms" => {
                     // SMS: verify against code stored in Redis
                     let sms_key = format!("mfa:sms:{}:{}", payload.account_id, payload.mfa_type);
-                    if let Ok(mut conn) = redis_client.get_async_connection().await {
-                        let stored_code: Option<String> = conn.get(&sms_key).await.unwrap_or(None);
-                        match stored_code {
-                            Some(ref code) if code == &payload.code => {
-                                // Delete the code after successful verification
-                                let _: Result<(), _> = conn.del(&sms_key).await;
+                    let mut conn = redis_pool.get().await.map_err(|e| {
+                        error!("verify_mfa: Redis connection error: {}", e);
+                        AppError::InternalError("Redis connection error".to_string())
+                    })?;
+                    let stored_code: Option<String> = redis::AsyncCommands::get(&mut *conn, &sms_key).await.unwrap_or(None);
+                    match stored_code {
+                        Some(ref code) => {
+                            // Constant-time comparison to prevent timing attacks
+                            use subtle::ConstantTimeEq;
+                            let is_match = code.len() == payload.code.len()
+                                && code.as_bytes().ct_eq(payload.code.as_bytes()).into();
+                            if is_match {
+                                let _: Result<(), _> = redis::AsyncCommands::del(&mut *conn, &sms_key).await;
+                                crate::redis_helpers::clear_mfa_attempts(&redis_pool, &payload.account_id, &payload.mfa_type).await;
                                 info!(
                                     "verify_mfa: SMS verified for account_id={}",
                                     payload.account_id
                                 );
+                                metrics.mfa_verifications.add(1, &[
+                                    KeyValue::new("mfa_type", "sms"),
+                                    KeyValue::new("outcome", "success"),
+                                ]);
                                 Ok(Json(MfaResponse {
                                     success: true,
                                     message: "MFA verification successful".to_string(),
                                     provisioning_uri: None,
                                 }))
-                            }
-                            _ => {
+                            } else {
                                 warn!(
                                     "verify_mfa: invalid SMS code for account_id={}",
                                     payload.account_id
                                 );
+                                metrics.mfa_verifications.add(1, &[
+                                    KeyValue::new("mfa_type", "sms"),
+                                    KeyValue::new("outcome", "failed"),
+                                ]);
+                                crate::redis_helpers::increment_mfa_attempts(&redis_pool, &payload.account_id, &payload.mfa_type, crate::constants::LOCKOUT_DURATION_SECS).await;
                                 Ok(Json(MfaResponse {
                                     success: false,
                                     message: "Invalid verification code".to_string(),
@@ -289,9 +336,22 @@ pub async fn verify_mfa(
                                 }))
                             }
                         }
-                    } else {
-                        error!("verify_mfa: Redis connection error");
-                        Err(AppError::InternalError("Redis connection error".to_string()))
+                        None => {
+                            warn!(
+                                "verify_mfa: invalid SMS code for account_id={}",
+                                payload.account_id
+                            );
+                            metrics.mfa_verifications.add(1, &[
+                                KeyValue::new("mfa_type", "sms"),
+                                KeyValue::new("outcome", "failed"),
+                            ]);
+                            crate::redis_helpers::increment_mfa_attempts(&redis_pool, &payload.account_id, &payload.mfa_type, crate::constants::LOCKOUT_DURATION_SECS).await;
+                            Ok(Json(MfaResponse {
+                                success: false,
+                                message: "Invalid verification code".to_string(),
+                                provisioning_uri: None,
+                            }))
+                        }
                     }
                 }
                 _ => Ok(Json(MfaResponse {

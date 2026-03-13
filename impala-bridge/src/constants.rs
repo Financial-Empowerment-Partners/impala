@@ -4,14 +4,29 @@ pub const MIN_PASSWORD_LENGTH: usize = 8;
 /// Maximum length for name fields (first_name, last_name, etc.).
 pub const MAX_NAME_LENGTH: usize = 64;
 
-/// Refresh token time-to-live: 30 days in seconds.
-pub const REFRESH_TOKEN_TTL_SECS: usize = 30 * 24 * 3600;
+/// Refresh token time-to-live: 14 days in seconds.
+pub const REFRESH_TOKEN_TTL_SECS: usize = 14 * 24 * 3600;
 
 /// Temporal token time-to-live: 1 hour in seconds.
 pub const TEMPORAL_TOKEN_TTL_SECS: usize = 3600;
 
 /// Default database connection pool size.
-pub const DEFAULT_DB_MAX_CONNECTIONS: u32 = 5;
+pub const DEFAULT_DB_MAX_CONNECTIONS: u32 = 20;
+
+/// Database pool: acquire timeout in seconds.
+pub const DB_ACQUIRE_TIMEOUT_SECS: u64 = 5;
+
+/// Database pool: idle connection timeout in seconds (10 minutes).
+pub const DB_IDLE_TIMEOUT_SECS: u64 = 600;
+
+/// Database pool: maximum connection lifetime in seconds (30 minutes).
+pub const DB_MAX_LIFETIME_SECS: u64 = 1800;
+
+/// Default Redis connection pool size.
+pub const DEFAULT_REDIS_POOL_SIZE: usize = 16;
+
+/// Request timeout in seconds (applied globally via middleware).
+pub const REQUEST_TIMEOUT_SECS: u64 = 30;
 
 /// Rate limit: maximum requests per window.
 pub const RATE_LIMIT_MAX_REQUESTS: u64 = 10;
@@ -55,5 +70,17 @@ pub const AUTH_PROVIDER_OKTA: &str = "okta";
 /// Auth provider identifier for local (password-based) users.
 pub const AUTH_PROVIDER_LOCAL: &str = "local";
 
+/// Minimum length for JWT_SECRET (256 bits).
+pub const JWT_SECRET_MIN_LENGTH: usize = 32;
+
 /// JWT issuer claim value for locally-issued tokens.
 pub const JWT_ISSUER: &str = "impala-bridge";
+
+/// Default worker concurrency (max in-flight SQS messages).
+pub const DEFAULT_WORKER_CONCURRENCY: usize = 10;
+
+/// Default SQS long-poll wait time in seconds.
+pub const DEFAULT_SQS_WAIT_TIME_SECONDS: i32 = 20;
+
+/// Default SQS visibility timeout in seconds (5 minutes).
+pub const DEFAULT_SQS_VISIBILITY_TIMEOUT: i32 = 300;

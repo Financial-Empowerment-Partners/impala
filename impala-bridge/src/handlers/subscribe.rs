@@ -12,7 +12,7 @@ use crate::streams;
 pub async fn subscribe(
     _user: AuthenticatedUser,
     Extension(horizon_url): Extension<Arc<String>>,
-    Extension(redis_client): Extension<Arc<redis::Client>>,
+    Extension(redis_pool): Extension<Arc<deadpool_redis::Pool>>,
     Json(payload): Json<SubscribeRequest>,
 ) -> Result<Json<SubscribeResponse>, AppError> {
     info!("POST /subscribe: network={}", payload.network);
@@ -22,7 +22,7 @@ pub async fn subscribe(
                 "{}/ledgers?cursor=now&order=asc",
                 horizon_url.trim_end_matches('/')
             );
-            let redis = redis_client.clone();
+            let redis = redis_pool.clone();
 
             info!("subscribe: starting Stellar Horizon SSE stream");
             tokio::spawn(async move {
@@ -48,7 +48,7 @@ pub async fn subscribe(
                 }
             };
 
-            let redis = redis_client.clone();
+            let redis = redis_pool.clone();
 
             info!(
                 "subscribe: starting Payala TCP listener on {}",

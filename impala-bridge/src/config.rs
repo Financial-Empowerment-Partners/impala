@@ -22,6 +22,17 @@ pub struct Config {
     pub okta_issuer_url: Option<String>,
     pub okta_client_id: Option<String>,
     pub okta_jwks_refresh_secs: u64,
+    pub sqs_queue_url: Option<String>,
+    pub sns_topic_arn: Option<String>,
+    pub worker_concurrency: usize,
+    pub sqs_wait_time_seconds: i32,
+    pub sqs_visibility_timeout: i32,
+    pub ses_from_address: Option<String>,
+    pub fcm_project_id: Option<String>,
+    pub fcm_service_account_key: Option<String>,
+    pub otel_exporter_endpoint: Option<String>,
+    pub otel_service_name: Option<String>,
+    pub otel_environment: Option<String>,
 }
 
 /// Load configuration from a JSON config file (if present) and environment variables.
@@ -126,6 +137,56 @@ pub fn load_config() -> Config {
         .and_then(|v| v.parse().ok())
         .unwrap_or(crate::constants::DEFAULT_JWKS_REFRESH_SECS);
 
+    let sqs_queue_url = env::var("SQS_QUEUE_URL")
+        .ok()
+        .or_else(|| from_file("sqs_queue_url"));
+
+    let sns_topic_arn = env::var("SNS_TOPIC_ARN")
+        .ok()
+        .or_else(|| from_file("sns_topic_arn"));
+
+    let worker_concurrency = env::var("WORKER_CONCURRENCY")
+        .ok()
+        .or_else(|| from_file("worker_concurrency"))
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(crate::constants::DEFAULT_WORKER_CONCURRENCY);
+
+    let sqs_wait_time_seconds = env::var("SQS_WAIT_TIME_SECONDS")
+        .ok()
+        .or_else(|| from_file("sqs_wait_time_seconds"))
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(crate::constants::DEFAULT_SQS_WAIT_TIME_SECONDS);
+
+    let sqs_visibility_timeout = env::var("SQS_VISIBILITY_TIMEOUT")
+        .ok()
+        .or_else(|| from_file("sqs_visibility_timeout"))
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(crate::constants::DEFAULT_SQS_VISIBILITY_TIMEOUT);
+
+    let ses_from_address = env::var("SES_FROM_ADDRESS")
+        .ok()
+        .or_else(|| from_file("ses_from_address"));
+
+    let fcm_project_id = env::var("FCM_PROJECT_ID")
+        .ok()
+        .or_else(|| from_file("fcm_project_id"));
+
+    let fcm_service_account_key = env::var("FCM_SERVICE_ACCOUNT_KEY")
+        .ok()
+        .or_else(|| from_file("fcm_service_account_key"));
+
+    let otel_exporter_endpoint = env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
+        .ok()
+        .or_else(|| from_file("otel_exporter_endpoint"));
+
+    let otel_service_name = env::var("OTEL_SERVICE_NAME")
+        .ok()
+        .or_else(|| from_file("otel_service_name"));
+
+    let otel_environment = env::var("OTEL_ENVIRONMENT")
+        .ok()
+        .or_else(|| from_file("otel_environment"));
+
     Config {
         public_endpoint,
         service_address,
@@ -145,5 +206,16 @@ pub fn load_config() -> Config {
         okta_issuer_url,
         okta_client_id,
         okta_jwks_refresh_secs,
+        sqs_queue_url,
+        sns_topic_arn,
+        worker_concurrency,
+        sqs_wait_time_seconds,
+        sqs_visibility_timeout,
+        ses_from_address,
+        fcm_project_id,
+        fcm_service_account_key,
+        otel_exporter_endpoint,
+        otel_service_name,
+        otel_environment,
     }
 }

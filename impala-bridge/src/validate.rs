@@ -15,9 +15,9 @@ pub fn validate_stellar_account_id(id: &str) -> Result<(), AppError> {
             "Stellar account ID must start with 'G'".to_string(),
         ));
     }
-    if !id.chars().all(|c| c.is_ascii_alphanumeric()) {
+    if !id.chars().all(|c| matches!(c, 'A'..='Z' | '2'..='7')) {
         return Err(AppError::BadRequest(
-            "Stellar account ID must be alphanumeric".to_string(),
+            "Stellar account ID must contain only Base32 characters (A-Z, 2-7)".to_string(),
         ));
     }
     Ok(())
@@ -59,6 +59,51 @@ pub fn validate_phone_number(phone: &str) -> Result<(), AppError> {
     if !phone[1..].chars().all(|c| c.is_ascii_digit()) {
         return Err(AppError::BadRequest(
             "Phone number must contain only digits after '+'".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// Validate a card ID format: hex string, 8-32 characters.
+pub fn validate_card_id(id: &str) -> Result<(), AppError> {
+    if id.len() < 8 || id.len() > 32 {
+        return Err(AppError::BadRequest(
+            "Card ID must be between 8 and 32 characters".to_string(),
+        ));
+    }
+    if !id.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(AppError::BadRequest(
+            "Card ID must be a hexadecimal string".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// Validate an EC public key: hex string, 66 chars (compressed) or 130 chars (uncompressed P-256).
+pub fn validate_ec_pubkey(key: &str) -> Result<(), AppError> {
+    if key.len() != 66 && key.len() != 130 {
+        return Err(AppError::BadRequest(
+            "EC public key must be 66 (compressed) or 130 (uncompressed) hex characters".to_string(),
+        ));
+    }
+    if !key.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(AppError::BadRequest(
+            "EC public key must be a hexadecimal string".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// Validate an RSA public key: Base64-encoded, 100-2048 characters.
+pub fn validate_rsa_pubkey(key: &str) -> Result<(), AppError> {
+    if key.len() < 100 || key.len() > 2048 {
+        return Err(AppError::BadRequest(
+            "RSA public key must be between 100 and 2048 characters".to_string(),
+        ));
+    }
+    if !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '=') {
+        return Err(AppError::BadRequest(
+            "RSA public key must be Base64-encoded".to_string(),
         ));
     }
     Ok(())
@@ -157,7 +202,7 @@ mod tests {
 
     #[test]
     fn test_valid_stellar_id() {
-        let id = "GABC2345678901234567890123456789012345678901234567890123";
+        let id = "GABCDEFGHIJKLMNOPQRSTUVWXYZ234567ABCDEFGHIJKLMNOPQRSTUVW";
         assert!(validate_stellar_account_id(id).is_ok());
     }
 
@@ -295,5 +340,93 @@ mod tests {
     #[test]
     fn test_ldap_escape_null() {
         assert_eq!(ldap_escape("a\0b"), "a\\00b");
+    }
+
+    // ── Stellar Base32 enforcement ──────────────────────────────────────
+
+    #[test]
+    fn test_stellar_id_rejects_lowercase() {
+        let id = "Gabc2345678901234567890123456789012345678901234567890123";
+        assert!(validate_stellar_account_id(id).is_err());
+    }
+
+    #[test]
+    fn test_stellar_id_rejects_digit_0() {
+        let id = "G0BC2345678901234567890123456789012345678901234567890123";
+        assert!(validate_stellar_account_id(id).is_err());
+    }
+
+    #[test]
+    fn test_stellar_id_rejects_digit_1() {
+        let id = "G1BC2345678901234567890123456789012345678901234567890123";
+        assert!(validate_stellar_account_id(id).is_err());
+    }
+
+    #[test]
+    fn test_stellar_id_rejects_digit_8() {
+        let id = "G8BC2345678901234567890123456789012345678901234567890123";
+        assert!(validate_stellar_account_id(id).is_err());
+    }
+
+    #[test]
+    fn test_stellar_id_rejects_digit_9() {
+        let id = "G9BC2345678901234567890123456789012345678901234567890123";
+        assert!(validate_stellar_account_id(id).is_err());
+    }
+
+    // ── Card ID ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_valid_card_id() {
+        assert!(validate_card_id("A1B2C3D4E5F6").is_ok());
+    }
+
+    #[test]
+    fn test_card_id_too_short() {
+        assert!(validate_card_id("ABC").is_err());
+    }
+
+    #[test]
+    fn test_card_id_non_hex() {
+        assert!(validate_card_id("GGHHIIJJ").is_err());
+    }
+
+    // ── EC Public Key ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_valid_ec_pubkey_compressed() {
+        let key = "02".to_string() + &"ab".repeat(32);
+        assert!(validate_ec_pubkey(&key).is_ok());
+    }
+
+    #[test]
+    fn test_valid_ec_pubkey_uncompressed() {
+        let key = "04".to_string() + &"ab".repeat(64);
+        assert!(validate_ec_pubkey(&key).is_ok());
+    }
+
+    #[test]
+    fn test_ec_pubkey_wrong_length() {
+        assert!(validate_ec_pubkey("abcdef").is_err());
+    }
+
+    // ── RSA Public Key ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_valid_rsa_pubkey() {
+        let key = "A".repeat(200);
+        assert!(validate_rsa_pubkey(&key).is_ok());
+    }
+
+    #[test]
+    fn test_rsa_pubkey_too_short() {
+        let key = "A".repeat(50);
+        assert!(validate_rsa_pubkey(&key).is_err());
+    }
+
+    #[test]
+    fn test_rsa_pubkey_invalid_chars() {
+        let key = "!".repeat(200);
+        assert!(validate_rsa_pubkey(&key).is_err());
     }
 }

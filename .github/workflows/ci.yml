@@ -1,0 +1,306 @@
+# =============================================================================
+# CI/CD Pipeline for impala-bridge
+#
+# Builds multi-arch Docker images (amd64 + arm64/Graviton) and optionally
+# deploys to AWS via Terraform.
+#
+# Triggers:
+#   - Push to main: build + push to ECR + optional deploy
+#   - Pull request: build + test only (no push)
+#   - Manual dispatch: full control over architecture, deploy, and environment
+#
+# Required GitHub Secrets:
+#   AWS_ACCOUNT_ID         - AWS account ID for ECR
+#   AWS_REGION             - Primary AWS region (e.g. us-east-1)
+#   AWS_ROLE_ARN           - IAM role ARN for OIDC federation (recommended)
+#                            OR AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY
+#
+# Optional Secrets (for Terraform deploy):
+#   TF_VAR_jwt_secret      - JWT signing secret
+#   TF_VAR_signoz_endpoint - SigNoz OTLP endpoint
+#   TF_VAR_signoz_access_token - SigNoz access token
+# =============================================================================
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'impala-bridge/**'
+      - '.github/workflows/ci.yml'
+      - 'terraform/**'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'impala-bridge/**'
+      - '.github/workflows/ci.yml'
+  workflow_dispatch:
+    inputs:
+      architecture:
+        description: 'Target architecture(s)'
+        required: true
+        default: 'linux/amd64,linux/arm64'
+        type: choice
+        options:
+          - 'linux/amd64,linux/arm64'
+          - 'linux/amd64'
+          - 'linux/arm64'
+      deploy:
+        description: 'Deploy to AWS after build'
+        required: false
+        default: false
+        type: boolean
+      environment:
+        description: 'Deployment environment'
+        required: false
+        default: 'staging'
+        type: choice
+        options:
+          - staging
+          - production
+      terraform_action:
+        description: 'Terraform action'
+        required: false
+        default: 'plan'
+        type: choice
+        options:
+          - plan
+          - apply
+
+env:
+  CARGO_TERM_COLOR: always
+  REGISTRY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com
+  IMAGE_NAME: impala-bridge
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  # ===========================================================================
+  # Test — Run cargo test and clippy
+  # ===========================================================================
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: impala-bridge
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache cargo registry + build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            impala-bridge/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('impala-bridge/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Check formatting
+        run: cargo fmt -- --check
+
+      - name: Clippy
+        run: cargo clippy -- -D warnings
+
+      - name: Run tests
+        run: cargo test
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      - name: Audit dependencies for vulnerabilities
+        run: cargo audit
+
+  # ===========================================================================
+  # Build — Multi-arch Docker image build + push to ECR
+  # ===========================================================================
+  build:
+    name: Build (${{ matrix.platform }})
+    needs: test
+    runs-on: ${{ matrix.runner }}
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+            arch_tag: amd64
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            arch_tag: arm64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check if architecture is requested
+        id: check_arch
+        run: |
+          PLATFORMS="${{ github.event.inputs.architecture || 'linux/amd64,linux/arm64' }}"
+          if echo "$PLATFORMS" | grep -q "${{ matrix.platform }}"; then
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "should_build=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Configure AWS credentials
+        if: steps.check_arch.outputs.should_build == 'true'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        if: steps.check_arch.outputs.should_build == 'true'
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set up Docker Buildx
+        if: steps.check_arch.outputs.should_build == 'true'
+        uses: docker/setup-buildx-action@v3
+
+      - name: Docker metadata
+        if: steps.check_arch.outputs.should_build == 'true'
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha,prefix=
+            type=raw,value=latest
+            type=ref,event=branch
+
+      - name: Build and push (per-arch)
+        if: steps.check_arch.outputs.should_build == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: impala-bridge
+          platforms: ${{ matrix.platform }}
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}-${{ matrix.arch_tag }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest-${{ matrix.arch_tag }}
+          cache-from: type=gha,scope=${{ matrix.arch_tag }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.arch_tag }}
+          provenance: false
+
+  # ===========================================================================
+  # Manifest — Create multi-arch manifest from per-arch images
+  # ===========================================================================
+  manifest:
+    name: Create multi-arch manifest
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Determine architectures
+        id: archs
+        run: |
+          PLATFORMS="${{ github.event.inputs.architecture || 'linux/amd64,linux/arm64' }}"
+          SOURCES=""
+          if echo "$PLATFORMS" | grep -q "linux/amd64"; then
+            SOURCES="$SOURCES ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}-amd64"
+          fi
+          if echo "$PLATFORMS" | grep -q "linux/arm64"; then
+            SOURCES="$SOURCES ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}-arm64"
+          fi
+          echo "sources=$SOURCES" >> "$GITHUB_OUTPUT"
+
+          LATEST_SOURCES=""
+          if echo "$PLATFORMS" | grep -q "linux/amd64"; then
+            LATEST_SOURCES="$LATEST_SOURCES ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest-amd64"
+          fi
+          if echo "$PLATFORMS" | grep -q "linux/arm64"; then
+            LATEST_SOURCES="$LATEST_SOURCES ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest-arm64"
+          fi
+          echo "latest_sources=$LATEST_SOURCES" >> "$GITHUB_OUTPUT"
+
+      - name: Create and push SHA manifest
+        run: |
+          docker manifest create \
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }} \
+            ${{ steps.archs.outputs.sources }}
+          docker manifest push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+
+      - name: Create and push latest manifest
+        run: |
+          docker manifest create \
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest \
+            ${{ steps.archs.outputs.latest_sources }}
+          docker manifest push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+
+  # ===========================================================================
+  # Deploy — Terraform plan/apply (optional)
+  # ===========================================================================
+  deploy:
+    name: Terraform ${{ github.event.inputs.terraform_action || 'plan' }}
+    needs: manifest
+    runs-on: ubuntu-latest
+    if: >
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.deploy == 'true') ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    environment: ${{ github.event.inputs.environment || 'staging' }}
+
+    defaults:
+      run:
+        working-directory: terraform
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~> 1.5"
+
+      - name: Terraform Init
+        run: terraform init
+
+      - name: Terraform Plan
+        id: plan
+        run: |
+          terraform plan \
+            -var="container_image_tag=${{ github.sha }}" \
+            -var="environment=${{ github.event.inputs.environment || 'staging' }}" \
+            -out=tfplan \
+            -no-color
+        env:
+          TF_VAR_jwt_secret: ${{ secrets.TF_VAR_jwt_secret }}
+          TF_VAR_signoz_endpoint: ${{ secrets.TF_VAR_signoz_endpoint }}
+          TF_VAR_signoz_access_token: ${{ secrets.TF_VAR_signoz_access_token }}
+
+      - name: Terraform Apply
+        if: >
+          github.event.inputs.terraform_action == 'apply' ||
+          (github.event_name == 'push' && github.ref == 'refs/heads/main')
+        run: terraform apply -auto-approve tfplan
+        env:
+          TF_VAR_jwt_secret: ${{ secrets.TF_VAR_jwt_secret }}
+          TF_VAR_signoz_endpoint: ${{ secrets.TF_VAR_signoz_endpoint }}
+          TF_VAR_signoz_access_token: ${{ secrets.TF_VAR_signoz_access_token }}

@@ -1,4 +1,5 @@
 use axum::extract::Extension;
+use axum::http::StatusCode;
 use axum::Json;
 use log::error;
 use sqlx::PgPool;
@@ -34,7 +35,7 @@ pub async fn get_version(Extension(pool): Extension<PgPool>) -> Json<VersionResp
 /// Health check that verifies DB and Redis connectivity (`GET /health`).
 pub async fn health_check(
     Extension(pool): Extension<PgPool>,
-    Extension(redis_client): Extension<Arc<redis::Client>>,
+    Extension(redis_pool): Extension<Arc<deadpool_redis::Pool>>,
 ) -> Result<Json<HealthResponse>, AppError> {
     // Check database
     let db_status = match sqlx::query_scalar::<_, i32>("SELECT 1")
@@ -49,9 +50,9 @@ pub async fn health_check(
     };
 
     // Check Redis
-    let redis_status = match redis_client.get_async_connection().await {
+    let redis_status = match redis_pool.get().await {
         Ok(mut conn) => {
-            let result: Result<String, _> = redis::cmd("PING").query_async(&mut conn).await;
+            let result: Result<String, _> = redis::cmd("PING").query_async(&mut *conn).await;
             match result {
                 Ok(_) => "ok".to_string(),
                 Err(e) => {
@@ -77,4 +78,37 @@ pub async fn health_check(
         database: db_status,
         redis: redis_status,
     }))
+}
+
+/// Liveness probe (`GET /healthz`). Returns 200 if the process is running.
+pub async fn liveness() -> StatusCode {
+    StatusCode::OK
+}
+
+/// Readiness probe (`GET /readyz`). Returns 200 if DB and Redis are reachable,
+/// 503 otherwise.
+pub async fn readiness(
+    Extension(pool): Extension<PgPool>,
+    Extension(redis_pool): Extension<Arc<deadpool_redis::Pool>>,
+) -> StatusCode {
+    // Check database
+    let db_ok = sqlx::query_scalar::<_, i32>("SELECT 1")
+        .fetch_one(&pool)
+        .await
+        .is_ok();
+
+    // Check Redis
+    let redis_ok = match redis_pool.get().await {
+        Ok(mut conn) => {
+            let result: Result<String, _> = redis::cmd("PING").query_async(&mut *conn).await;
+            result.is_ok()
+        }
+        Err(_) => false,
+    };
+
+    if db_ok && redis_ok {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    }
 }

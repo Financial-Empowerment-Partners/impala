@@ -1,0 +1,63 @@
+# Copy this file to terraform.tfvars and fill in required values.
+# terraform.tfvars is gitignored and should never be committed.
+
+aws_region  = "us-east-1"
+environment = "staging"
+
+# Required: JWT signing secret
+jwt_secret = "CHANGE_ME_to_a_secure_random_string"
+
+# Optional: ACM certificate ARN for HTTPS
+# certificate_arn = "arn:aws:acm:us-east-1:123456789:certificate/abc-123"
+
+# ECS scaling
+# server_desired_count = 2
+# worker_desired_count = 1
+
+# Auto scaling limits
+# server_min_count = 2
+# server_max_count = 10
+# worker_min_count = 1
+# worker_max_count = 5
+
+# Auto scaling thresholds
+# autoscaling_cpu_threshold        = 85   # CPU % to trigger scale out
+# autoscaling_memory_threshold     = 90   # Memory % to trigger scale out
+# autoscaling_latency_threshold_ms = 250  # ALB response time ms to trigger scale out
+# autoscaling_scale_in_cooldown    = 300  # seconds before allowing scale in
+# autoscaling_scale_out_cooldown   = 60   # seconds before allowing scale out
+
+# Monitoring alerts (set to receive email notifications)
+# alert_email = "ops@example.com"
+
+# Instance sizes (use Graviton types for cost savings: db.t4g.micro, cache.t4g.micro)
+# rds_instance_class = "db.t4g.micro"
+# redis_node_type    = "cache.t4g.micro"
+
+# Container image tag and architecture
+# container_image_tag    = "latest"
+# container_architecture = "ARM64"   # ARM64 (Graviton, default) or X86_64
+
+# Notifications (optional)
+# ses_from_address = "noreply@example.com"  # SES verified sender for email notifications
+# fcm_project_id   = "my-firebase-project"  # Firebase project ID for push notifications
+
+# Observability — SigNoz (enables OTEL Collector sidecar when set)
+# signoz_endpoint     = "https://ingest.us.signoz.cloud:443"
+# signoz_access_token = "your-signoz-access-token"
+
+# Disaster Recovery (enables cross-region DR infrastructure)
+# dr_enabled              = true
+# dr_region               = "us-west-2"
+# dr_vpc_cidr             = "10.1.0.0/16"
+# dr_server_desired_count = 1
+# dr_worker_desired_count = 1
+# rds_backup_retention_days = 7
+
+# Route 53 failover DNS (requires dr_enabled = true)
+# domain_name    = "example.com"        # Creates api.example.com failover record
+# route53_zone_id = "Z1234567890"
+
+# Stellar endpoints
+# stellar_horizon_url = "https://horizon.stellar.org"
+# stellar_rpc_url     = "https://soroban-testnet.stellar.org"

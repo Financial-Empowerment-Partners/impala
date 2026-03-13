@@ -31,6 +31,17 @@ fn default_per_page() -> u64 {
     20
 }
 
+impl PaginationParams {
+    /// Return clamped `(per_page, offset)` suitable for SQL LIMIT/OFFSET.
+    /// `per_page` is clamped to `[1, 100]`, `page` to `[1, ..)`.
+    pub fn clamped(&self) -> (i64, i64) {
+        let per_page = (self.per_page.max(1).min(100)) as i64;
+        let page = self.page.max(1) as i64;
+        let offset = (page - 1) * per_page;
+        (per_page, offset)
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct PaginatedResponse<T: Serialize> {
     pub data: Vec<T>,
@@ -277,6 +288,76 @@ pub struct UpdateNotifyRequest {
     pub app: Option<String>,
 }
 
+// ── Notification Subscription ──────────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct CreateSubscriptionRequest {
+    pub event_type: String,
+    pub medium: String,
+}
+
+#[derive(Deserialize)]
+pub struct UpdateSubscriptionRequest {
+    pub enabled: bool,
+}
+
+#[derive(Serialize)]
+pub struct SubscriptionResponse {
+    pub success: bool,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<i32>,
+}
+
+#[derive(Serialize, sqlx::FromRow)]
+pub struct SubscriptionListItem {
+    pub id: i32,
+    pub event_type: String,
+    pub medium: String,
+    pub enabled: bool,
+}
+
+// ── Device Token ──────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct RegisterDeviceTokenRequest {
+    pub token: String,
+    #[serde(default = "default_platform")]
+    pub platform: String,
+}
+
+fn default_platform() -> String {
+    "android".to_string()
+}
+
+#[derive(Deserialize)]
+pub struct DeleteDeviceTokenRequest {
+    pub token: String,
+}
+
+#[derive(Serialize)]
+pub struct DeviceTokenResponse {
+    pub success: bool,
+    pub message: String,
+}
+
+// ── Notify List ───────────────────────────────────────────────────────
+
+#[derive(Serialize, sqlx::FromRow)]
+pub struct NotifyListItem {
+    pub id: i32,
+    pub account_id: String,
+    pub medium: String,
+    pub active: bool,
+    pub mobile: Option<String>,
+    pub wa: Option<String>,
+    pub signal: Option<String>,
+    pub tel: Option<String>,
+    pub email: Option<String>,
+    pub url: Option<String>,
+    pub app: Option<String>,
+}
+
 // ── Version ────────────────────────────────────────────────────────────
 
 #[derive(Serialize)]
@@ -317,4 +398,46 @@ pub struct OktaConfigResponse {
     pub token_endpoint: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scopes: Option<Vec<String>>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_pagination_defaults() {
+        let p = PaginationParams { page: 1, per_page: 20 };
+        let (per_page, offset) = p.clamped();
+        assert_eq!(per_page, 20);
+        assert_eq!(offset, 0);
+    }
+
+    #[test]
+    fn test_pagination_clamps_per_page_upper() {
+        let p = PaginationParams { page: 1, per_page: 500 };
+        let (per_page, _) = p.clamped();
+        assert_eq!(per_page, 100);
+    }
+
+    #[test]
+    fn test_pagination_clamps_per_page_lower() {
+        let p = PaginationParams { page: 1, per_page: 0 };
+        let (per_page, _) = p.clamped();
+        assert_eq!(per_page, 1);
+    }
+
+    #[test]
+    fn test_pagination_clamps_page_lower() {
+        let p = PaginationParams { page: 0, per_page: 20 };
+        let (_, offset) = p.clamped();
+        assert_eq!(offset, 0);
+    }
+
+    #[test]
+    fn test_pagination_offset_calculation() {
+        let p = PaginationParams { page: 3, per_page: 25 };
+        let (per_page, offset) = p.clamped();
+        assert_eq!(per_page, 25);
+        assert_eq!(offset, 50);
+    }
 }

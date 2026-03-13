@@ -1,14 +1,18 @@
-use crate::constants::{CRON_SYNC_INTERVAL_SECS, MAX_SSE_BUFFER_SIZE};
+use crate::constants::{CRON_SYNC_INTERVAL_SECS, DEFAULT_HTTP_CLIENT_TIMEOUT_SECS, MAX_SSE_BUFFER_SIZE};
 use crate::validate::validate_callback_url;
 use futures::StreamExt;
 use log::{debug, error, info, warn};
 use sqlx::PgPool;
+use tokio_util::sync::CancellationToken;
 
 /// Background task that periodically fetches callback URIs from the
 /// `cron_sync` table, invokes each one, and stores the JSON response back
-/// into the `callback_result` column.
-pub async fn cron_sync_task(pool: PgPool) {
-    let client = reqwest::Client::new();
+/// into the `callback_result` column.  Respects cancellation for graceful shutdown.
+pub async fn cron_sync_task(pool: PgPool, cancel: CancellationToken) {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(DEFAULT_HTTP_CLIENT_TIMEOUT_SECS))
+        .build()
+        .expect("Failed to create HTTP client");
     loop {
         let rows =
             sqlx::query_as::<_, (i32, String)>("SELECT id, callback_uri FROM cron_sync")
@@ -68,16 +72,24 @@ pub async fn cron_sync_task(pool: PgPool) {
             }
         }
 
-        tokio::time::sleep(std::time::Duration::from_secs(CRON_SYNC_INTERVAL_SECS)).await;
+        tokio::select! {
+            _ = tokio::time::sleep(std::time::Duration::from_secs(CRON_SYNC_INTERVAL_SECS)) => {}
+            _ = cancel.cancelled() => {
+                info!("cron_sync_task: shutdown requested, exiting");
+                return;
+            }
+        }
     }
 }
 
 /// Long-running SSE consumer for Stellar Horizon ledger events.
 pub async fn stellar_stream(
     url: &str,
-    redis_client: &redis::Client,
+    redis_pool: &deadpool_redis::Pool,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(DEFAULT_HTTP_CLIENT_TIMEOUT_SECS))
+        .build()?;
     let response = client
         .get(url)
         .header("Accept", "text/event-stream")
@@ -130,9 +142,9 @@ pub async fn stellar_stream(
 
                     info!("stellar_stream: ledger event sequence={}", sequence);
 
-                    if let Ok(mut conn) = redis_client.get_async_connection().await {
+                    if let Ok(mut conn) = redis_pool.get().await {
                         let _: Result<(), _> = redis::AsyncCommands::set(
-                            &mut conn,
+                            &mut *conn,
                             "stellar:latest_ledger",
                             &sequence,
                         )
@@ -142,7 +154,7 @@ pub async fn stellar_stream(
                             chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.6fZ").to_string();
                         let event_key = format!("stellar:ledger:{}", sequence);
                         let _: Result<(), _> =
-                            redis::AsyncCommands::set(&mut conn, &event_key, &timestamp).await;
+                            redis::AsyncCommands::set(&mut *conn, &event_key, &timestamp).await;
                     }
                 }
                 event_data.clear();
@@ -156,7 +168,7 @@ pub async fn stellar_stream(
 /// Long-running TCP listener for Payala network events.
 pub async fn payala_stream(
     listen_endpoint: &str,
-    redis_client: &redis::Client,
+    redis_pool: &deadpool_redis::Pool,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let addr: std::net::SocketAddr = listen_endpoint.parse().map_err(|e| {
         error!(
@@ -173,14 +185,14 @@ pub async fn payala_stream(
 
     info!("payala_stream: TCP listener started on {}", addr);
 
-    if let Ok(mut conn) = redis_client.get_async_connection().await {
+    if let Ok(mut conn) = redis_pool.get().await {
         let _: Result<(), _> =
-            redis::AsyncCommands::set(&mut conn, "payala:listen_endpoint", listen_endpoint).await;
+            redis::AsyncCommands::set(&mut *conn, "payala:listen_endpoint", listen_endpoint).await;
     }
 
     loop {
         let (mut socket, peer_addr) = listener.accept().await?;
-        let redis = redis_client.clone();
+        let redis = redis_pool.clone();
 
         tokio::spawn(async move {
             info!("payala_stream: connection accepted from {}", peer_addr);
@@ -209,7 +221,7 @@ pub async fn payala_stream(
                         peer_addr, event_type
                     );
 
-                    if let Ok(mut conn) = redis.get_async_connection().await {
+                    if let Ok(mut conn) = redis.get().await {
                         let timestamp =
                             chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.6fZ").to_string();
                         let event_key = format!(
@@ -218,9 +230,9 @@ pub async fn payala_stream(
                             uuid::Uuid::new_v4()
                         );
                         let _: Result<(), _> =
-                            redis::AsyncCommands::set(&mut conn, &event_key, &raw).await;
+                            redis::AsyncCommands::set(&mut *conn, &event_key, &raw).await;
                         let _: Result<(), _> =
-                            redis::AsyncCommands::set(&mut conn, "payala:latest_event", &raw)
+                            redis::AsyncCommands::set(&mut *conn, "payala:latest_event", &raw)
                                 .await;
                     }
                 } else {

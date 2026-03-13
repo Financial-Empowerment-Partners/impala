@@ -2,16 +2,22 @@ use axum::extract::Extension;
 use axum::Json;
 use log::{error, info, warn};
 use sqlx::PgPool;
+use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::auth::AuthenticatedUser;
 use crate::error::AppError;
 use crate::models::{CreateTransactionRequest, CreateTransactionResponse};
+use crate::notifications::{self, NotificationEvent};
+use crate::telemetry::AppMetrics;
 
 /// Create a dual-chain transaction record (`POST /transaction`).
 pub async fn create_transaction(
-    _user: AuthenticatedUser,
+    user: AuthenticatedUser,
     Extension(pool): Extension<PgPool>,
+    Extension(metrics): Extension<Arc<AppMetrics>>,
+    sns_client: Option<Extension<Arc<aws_sdk_sns::Client>>>,
+    sns_topic_arn: Option<Extension<Arc<String>>>,
     Json(payload): Json<CreateTransactionRequest>,
 ) -> Result<Json<CreateTransactionResponse>, AppError> {
     info!(
@@ -55,6 +61,24 @@ pub async fn create_transaction(
     match result {
         Ok(btxid) => {
             info!("create_transaction: created btxid={}", btxid);
+            metrics.transactions_created.add(1, &[]);
+
+            // Fire-and-forget notification for outgoing transfer
+            let sns_c = sns_client.as_ref().map(|e| &e.0);
+            let sns_a = sns_topic_arn.as_ref().map(|e| &e.0);
+            notifications::dispatch_event(
+                &pool,
+                sns_c,
+                sns_a,
+                NotificationEvent::TransferOutgoing {
+                    account_id: user.account_id.clone(),
+                    amount: payload.memo.clone().unwrap_or_default(),
+                    to: payload.source_account.clone().unwrap_or_default(),
+                },
+                Some(&metrics),
+            )
+            .await;
+
             Ok(Json(CreateTransactionResponse {
                 success: true,
                 message: "Transaction created successfully".to_string(),

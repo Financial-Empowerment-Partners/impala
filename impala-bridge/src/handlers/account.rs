@@ -2,6 +2,7 @@ use axum::extract::{Extension, Query};
 use axum::Json;
 use log::{debug, error, info, warn};
 use sqlx::PgPool;
+use std::sync::Arc;
 
 use crate::auth::AuthenticatedUser;
 use crate::constants::MAX_NAME_LENGTH;
@@ -10,25 +11,21 @@ use crate::models::{
     CreateAccountRequest, CreateAccountResponse, GetAccountQuery, GetAccountResponse,
     UpdateAccountRequest, UpdateAccountResponse,
 };
+use crate::notifications::{self, NotificationEvent};
 
 /// Create a new linked Stellar/Payala account (`POST /account`).
 pub async fn create_account(
-    _user: AuthenticatedUser,
+    user: AuthenticatedUser,
     Extension(pool): Extension<PgPool>,
     Json(payload): Json<CreateAccountRequest>,
 ) -> Result<Json<CreateAccountResponse>, AppError> {
+    crate::auth::require_owner(&user, &payload.payala_account_id)?;
     info!(
         "POST /account: creating account for stellar_id={}",
         payload.stellar_account_id
     );
 
-    if payload.stellar_account_id.len() != 56 || !payload.stellar_account_id.starts_with('G') {
-        warn!("create_account: invalid stellar_account_id format");
-        return Ok(Json(CreateAccountResponse {
-            success: false,
-            message: "stellar_account_id must be 56 characters starting with 'G'".to_string(),
-        }));
-    }
+    crate::validate::validate_stellar_account_id(&payload.stellar_account_id)?;
 
     if payload.first_name.trim().is_empty() || payload.last_name.trim().is_empty() {
         warn!("create_account: empty name fields");
@@ -96,7 +93,7 @@ pub async fn create_account(
 
 /// Look up an account by Stellar account ID (`GET /account?stellar_account_id=...`).
 pub async fn get_account(
-    _user: AuthenticatedUser,
+    user: AuthenticatedUser,
     Extension(pool): Extension<PgPool>,
     Query(params): Query<GetAccountQuery>,
 ) -> Result<Json<GetAccountResponse>, AppError> {
@@ -109,10 +106,11 @@ pub async fn get_account(
         SELECT payala_account_id, first_name, middle_name, last_name,
                nickname, affiliation, gender
         FROM impala_account
-        WHERE stellar_account_id = $1
+        WHERE stellar_account_id = $1 AND payala_account_id = $2
         "#,
     )
     .bind(&params.stellar_account_id)
+    .bind(&user.account_id)
     .fetch_optional(&pool)
     .await;
 
@@ -150,14 +148,17 @@ pub async fn get_account(
 
 /// Update account fields (`PUT /account`).
 pub async fn update_account(
-    _user: AuthenticatedUser,
+    user: AuthenticatedUser,
     Extension(pool): Extension<PgPool>,
+    sns_client: Option<Extension<Arc<aws_sdk_sns::Client>>>,
+    sns_topic_arn: Option<Extension<Arc<String>>>,
     Json(payload): Json<UpdateAccountRequest>,
 ) -> Result<Json<UpdateAccountResponse>, AppError> {
     info!("PUT /account: updating account");
     let (where_clause, where_value) = if let Some(ref stellar_id) = payload.stellar_account_id {
         ("stellar_account_id = $1", stellar_id.clone())
     } else if let Some(ref payala_id) = payload.payala_account_id {
+        crate::auth::require_owner(&user, payala_id)?;
         ("payala_account_id = $1", payala_id.clone())
     } else {
         warn!("update_account: no identifier provided");
@@ -167,6 +168,10 @@ pub async fn update_account(
             rows_affected: 0,
         }));
     };
+
+    if let Some(ref stellar_id) = payload.stellar_account_id {
+        crate::validate::validate_stellar_account_id(stellar_id)?;
+    }
 
     let mut set_parts = Vec::new();
     let mut param_index = 2;
@@ -204,9 +209,6 @@ pub async fn update_account(
         param_index += 1;
     }
 
-    // Suppress unused variable warning
-    let _ = param_index;
-
     if set_parts.is_empty() {
         warn!("update_account: no fields provided to update");
         return Ok(Json(UpdateAccountResponse {
@@ -216,11 +218,30 @@ pub async fn update_account(
         }));
     }
 
-    let sql = format!(
-        "UPDATE impala_account SET {} WHERE {}",
-        set_parts.join(", "),
-        where_clause
-    );
+    // Collect field names for notification
+    let mut changed_fields = Vec::new();
+    if payload.first_name.is_some() { changed_fields.push("first_name".to_string()); }
+    if payload.middle_name.is_some() { changed_fields.push("middle_name".to_string()); }
+    if payload.last_name.is_some() { changed_fields.push("last_name".to_string()); }
+    if payload.nickname.is_some() { changed_fields.push("nickname".to_string()); }
+    if payload.affiliation.is_some() { changed_fields.push("affiliation".to_string()); }
+    if payload.gender.is_some() { changed_fields.push("gender".to_string()); }
+
+    let needs_ownership_bind = where_clause.contains("stellar_account_id");
+    let sql = if needs_ownership_bind {
+        format!(
+            "UPDATE impala_account SET {} WHERE {} AND payala_account_id = ${}",
+            set_parts.join(", "),
+            where_clause,
+            param_index
+        )
+    } else {
+        format!(
+            "UPDATE impala_account SET {} WHERE {}",
+            set_parts.join(", "),
+            where_clause
+        )
+    };
 
     let mut query = sqlx::query(&sql);
     query = query.bind(&where_value);
@@ -249,6 +270,9 @@ pub async fn update_account(
     if let Some(ref val) = payload.gender {
         query = query.bind(val);
     }
+    if needs_ownership_bind {
+        query = query.bind(&user.account_id);
+    }
 
     let result = query.execute(&pool).await;
 
@@ -264,6 +288,22 @@ pub async fn update_account(
                 }))
             } else {
                 info!("update_account: updated {} row(s)", rows_affected);
+
+                // Fire-and-forget notification for profile update
+                let sns_c = sns_client.as_ref().map(|e| &e.0);
+                let sns_a = sns_topic_arn.as_ref().map(|e| &e.0);
+                notifications::dispatch_event(
+                    &pool,
+                    sns_c,
+                    sns_a,
+                    NotificationEvent::ProfileUpdated {
+                        account_id: where_value.clone(),
+                        fields: changed_fields,
+                    },
+                    None,
+                )
+                .await;
+
                 Ok(Json(UpdateAccountResponse {
                     success: true,
                     message: "Account updated successfully".to_string(),

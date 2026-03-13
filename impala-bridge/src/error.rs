@@ -1,4 +1,5 @@
-use axum::{http::StatusCode, Json};
+use axum::http::{header, HeaderValue, StatusCode};
+use axum::Json;
 use serde::Serialize;
 
 #[derive(Debug)]
@@ -6,7 +7,7 @@ pub enum AppError {
     Unauthorized,
     BadRequest(String),
     NotFound(String),
-    RateLimited,
+    RateLimited { retry_after: u64 },
     InternalError(String),
     Forbidden,
     Conflict(String),
@@ -25,6 +26,21 @@ struct ErrorDetail {
 
 impl axum::response::IntoResponse for AppError {
     fn into_response(self) -> axum::response::Response {
+        // Handle RateLimited specially to add Retry-After header
+        if let AppError::RateLimited { retry_after } = &self {
+            let body = ErrorBody {
+                error: ErrorDetail {
+                    code: "rate_limited".to_string(),
+                    message: "Too many requests, please try again later".to_string(),
+                },
+            };
+            let mut response = (StatusCode::TOO_MANY_REQUESTS, Json(body)).into_response();
+            if let Ok(val) = HeaderValue::from_str(&retry_after.to_string()) {
+                response.headers_mut().insert(header::RETRY_AFTER, val);
+            }
+            return response;
+        }
+
         let (status, code, message) = match self {
             AppError::Unauthorized => (
                 StatusCode::UNAUTHORIZED,
@@ -33,11 +49,7 @@ impl axum::response::IntoResponse for AppError {
             ),
             AppError::BadRequest(msg) => (StatusCode::BAD_REQUEST, "bad_request", msg),
             AppError::NotFound(msg) => (StatusCode::NOT_FOUND, "not_found", msg),
-            AppError::RateLimited => (
-                StatusCode::TOO_MANY_REQUESTS,
-                "rate_limited",
-                "Too many requests, please try again later".to_string(),
-            ),
+            AppError::RateLimited { .. } => unreachable!(),
             AppError::InternalError(msg) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "internal_error",
@@ -68,7 +80,7 @@ impl std::fmt::Display for AppError {
             AppError::Unauthorized => write!(f, "Unauthorized"),
             AppError::BadRequest(msg) => write!(f, "Bad request: {}", msg),
             AppError::NotFound(msg) => write!(f, "Not found: {}", msg),
-            AppError::RateLimited => write!(f, "Rate limited"),
+            AppError::RateLimited { retry_after } => write!(f, "Rate limited (retry after {}s)", retry_after),
             AppError::InternalError(msg) => write!(f, "Internal error: {}", msg),
             AppError::Forbidden => write!(f, "Forbidden"),
             AppError::Conflict(msg) => write!(f, "Conflict: {}", msg),
@@ -101,7 +113,7 @@ mod tests {
 
     #[test]
     fn test_rate_limited_status() {
-        let response = AppError::RateLimited.into_response();
+        let response = AppError::RateLimited { retry_after: 60 }.into_response();
         assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
     }
 

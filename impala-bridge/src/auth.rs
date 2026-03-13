@@ -11,6 +11,15 @@ pub struct AuthenticatedUser {
     pub account_id: String,
 }
 
+/// Verify that the authenticated user owns the specified account.
+/// Returns `Err(AppError::Forbidden)` if `user.account_id` does not match.
+pub fn require_owner(user: &AuthenticatedUser, account_id: &str) -> Result<(), AppError> {
+    if user.account_id != account_id {
+        return Err(AppError::Forbidden);
+    }
+    Ok(())
+}
+
 #[axum::async_trait]
 impl<B> FromRequest<B> for AuthenticatedUser
 where
@@ -49,6 +58,15 @@ where
 
         // Must be a temporal token
         if token_data.claims.token_type != TOKEN_TYPE_TEMPORAL {
+            return Err(AppError::Unauthorized);
+        }
+
+        // Check if token has been revoked (via /logout)
+        let Extension(redis_pool) = Extension::<Arc<deadpool_redis::Pool>>::from_request(req)
+            .await
+            .map_err(|_| AppError::Unauthorized)?;
+
+        if crate::redis_helpers::is_token_revoked(&redis_pool, &token_data.claims.jti).await? {
             return Err(AppError::Unauthorized);
         }
 

@@ -186,14 +186,21 @@ pub async fn init_okta_provider(config: &Config) -> Option<Arc<OktaProvider>> {
 
 /// Background task that periodically refreshes the JWKS key set.
 /// Uses exponential backoff on failure (capped at 5 minutes).
-pub async fn jwks_refresh_task(provider: Arc<OktaProvider>, interval_secs: u64) {
+/// Respects cancellation for graceful shutdown.
+pub async fn jwks_refresh_task(provider: Arc<OktaProvider>, interval_secs: u64, cancel: tokio_util::sync::CancellationToken) {
     use tokio::time::{Duration, Instant};
 
     let mut consecutive_failures: u32 = 0;
     let mut last_success = Instant::now();
 
     // Skip the first immediate tick since we already fetched during init
-    tokio::time::sleep(Duration::from_secs(interval_secs)).await;
+    tokio::select! {
+        _ = tokio::time::sleep(Duration::from_secs(interval_secs)) => {}
+        _ = cancel.cancelled() => {
+            info!("okta: jwks_refresh_task shutting down");
+            return;
+        }
+    }
 
     loop {
         debug!("okta: refreshing JWKS keys");
@@ -224,7 +231,13 @@ pub async fn jwks_refresh_task(provider: Arc<OktaProvider>, interval_secs: u64) 
         } else {
             interval_secs
         };
-        tokio::time::sleep(Duration::from_secs(wait_secs)).await;
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_secs(wait_secs)) => {}
+            _ = cancel.cancelled() => {
+                info!("okta: jwks_refresh_task shutting down");
+                return;
+            }
+        }
     }
 }
 

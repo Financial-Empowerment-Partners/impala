@@ -17,6 +17,15 @@
     <fragment
         android:id="@+id/nav_settings"
         android:name="com.payala.impala.demo.ui.fragments.SettingsFragment"
-        android:label="@string/nav_settings" />
+        android:label="@string/nav_settings">
+        <action
+            android:id="@+id/action_settings_to_notifications"
+            app:destination="@id/nav_notification_preferences" />
+    </fragment>
+
+    <fragment
+        android:id="@+id/nav_notification_preferences"
+        android:name="com.payala.impala.demo.ui.fragments.NotificationPreferencesFragment"
+        android:label="Notifications" />
 
 </navigation>

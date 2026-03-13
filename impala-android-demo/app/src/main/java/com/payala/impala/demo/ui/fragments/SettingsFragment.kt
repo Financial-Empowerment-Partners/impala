@@ -7,6 +7,7 @@ import android.view.View
 import android.widget.EditText
 import androidx.fragment.app.Fragment
 import androidx.lifecycle.lifecycleScope
+import androidx.navigation.fragment.findNavController
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.snackbar.Snackbar
 import com.payala.impala.demo.BuildConfig
@@ -57,6 +58,12 @@ class SettingsFragment : Fragment(R.layout.fragment_settings) {
 
         binding.btnManageMfa.setOnClickListener {
             showMfaEnrollmentDialog(accountId)
+        }
+
+        // Notification preferences
+        loadNotificationStatus()
+        binding.btnManageNotifications.setOnClickListener {
+            findNavController().navigate(R.id.action_settings_to_notifications)
         }
 
         binding.btnLogout.setOnClickListener {
@@ -204,6 +211,25 @@ class SettingsFragment : Fragment(R.layout.fragment_settings) {
                 }
             } catch (_: Exception) {
                 _binding?.tvMfaStatus?.text = getString(R.string.mfa_not_enrolled)
+            }
+        }
+    }
+
+    private fun loadNotificationStatus() {
+        val app = requireActivity().application as ImpalaApp
+        val api = ApiClient.getService(BuildConfig.BRIDGE_BASE_URL, app.tokenManager)
+
+        viewLifecycleOwner.lifecycleScope.launch {
+            try {
+                val subs = api.listSubscriptions()
+                val active = subs.count { it.enabled }
+                _binding?.tvNotificationStatus?.text = if (subs.isEmpty()) {
+                    "No subscriptions configured"
+                } else {
+                    "$active active subscription(s)"
+                }
+            } catch (_: Exception) {
+                _binding?.tvNotificationStatus?.text = "Unable to load"
             }
         }
     }

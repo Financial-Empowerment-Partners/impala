@@ -5,6 +5,7 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.NFC" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <uses-feature android:name="android.hardware.nfc" android:required="false" />
 
@@ -68,6 +69,15 @@
         <service
             android:name=".nfc.NfcWatcherService"
             android:exported="false" />
+
+        <!-- Firebase Cloud Messaging service for push notifications -->
+        <service
+            android:name=".push.ImpalaPushService"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.google.firebase.MESSAGING_EVENT" />
+            </intent-filter>
+        </service>
 
         <activity
             android:name=".auth.GitHubRedirectActivity"
