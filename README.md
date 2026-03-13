@@ -1,51 +1,42 @@
-# Payala and Stellar Integration
+# Payala-Impala
 
-**Impala implements a bridge between offline Payala payments and the Stellar network
- utilizing Soroban smart contracts for inflows and redemptions, while rooted in
- hardware protected cryptographic primitives (smartcard and HSM)
- supporting Android bindings for easy third party integration.**
+**A secure bridge between offline Payala payments and the Stellar network, using Soroban smart contracts, hardware-protected cryptographic primitives (JavaCard smartcard), and Android bindings.**
 
+Impala connects the Payala offline payment system to Stellar's on-chain infrastructure through a six-component architecture. The REST API bridge handles authentication, transaction recording, and event streaming. A JavaCard applet provides a hardware root of trust with ECDSA signing, PIN-protected key storage, and SCP03 secure messaging. Soroban smart contracts enforce multisig authorization and time-locked operations for wrapping, unwrapping, and transferring assets. Android libraries and a demo app deliver NFC card communication and mobile integration out of the box.
 
-## Impala-bridge
+## Components
 
-The impala bridge provides an interface between the Stellar network, smart contracts,
-and the Payala payment system.
+| Component | Language / Framework | Purpose |
+|---|---|---|
+| **impala-bridge** | Rust / Axum | REST API server — authentication, transactions, notifications, Stellar event streaming, background job processing |
+| **impala-card** | Java (JavaCard) + Kotlin Multiplatform | Smartcard applet (23 APDU commands) and cross-platform SDK for NFC card communication |
+| **impala-soroban** | Rust / Soroban SDK | `MultisigAssetWrapper` smart contract with time-locked operations and multisig verification |
+| **impala-lib** | Kotlin / Android | Android library for NFC (IsoDep + NDEF) and geolocation integration |
+| **impala-android-demo** | Kotlin / Android | Demo app with 5 auth methods, card management, transfers, and push notifications |
+| **impala-ui** | JavaScript / HTML / CSS | Admin dashboard with client-side RBAC, served via Nginx |
 
-The implementation is in [Rust](https://doc.rust-lang.org/cargo/getting-started/installation.html) using the [Axum framework](https://github.com/tokio-rs/axum/).
+## Documentation
 
----
+- **[ARCHITECTURE.md](ARCHITECTURE.md)** — Detailed system design, data flows, security architecture, API endpoint reference, APDU command reference, smart contract interface, deployment topology, and mermaid diagrams
+- **[CLAUDE.md](CLAUDE.md)** — Build commands, environment variables, and development notes for all subprojects
 
-## Impala-card
+## Quick Start
 
-The impala card is a JavaCard application facilitating online transfer capabilities in Payala
-and Stellar. Robust authentication is also supported for various uses.
+```bash
+# Start the bridge with PostgreSQL and Redis
+cd impala-bridge
+docker compose up
 
-Refer to [OpenSC](https://github.com/OpenSC/OpenSC) and [GlobalPlatform](https://github.com/kaoh/globalplatform) tool installation instructions.
+# Run bridge tests
+cargo test
 
----
+# Run JavaCard SDK tests (JVM, no hardware needed)
+cd impala-card
+./gradlew :sdk:jvmTest
 
-## Impala-soroban
+# Run Soroban contract tests
+cd impala-soroban/integration-test
+cargo test
+```
 
-Impala soroban smart contracts are used for bulk payments and offline escrow. Multi-party
-signatures are supported for mint authorizations into the Payala system.
-
-### soroban-into-payala
-
-### soroban-outof-payala
-
-### soroban-anchor-dist
-
-For typical bulk payments the [Stellar Disbursement Platform](https://github.com/stellar/stellar-disbursement-platform-backend) could be used. For simple
-bulk payments via the impala bridge a [direct smart contract for disbursement is utilized](https://github.com/stellar/soroban-examples) with proper authorization.
-
----
-
-## Impala-android
-
-The Payala android application is modified to support online transfers to Stellar
-recipients and supported Stellar anchor banking rails.
-
-A public Android Library for integrating authentication and online transactions
-via Payala and Stellar is also provided.
-
----
+See [CLAUDE.md](CLAUDE.md) for complete build instructions, required environment variables, and per-component commands.
