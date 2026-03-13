@@ -45,6 +45,6 @@ locals {
 
 # Random password for RDS master user
 resource "random_password" "rds_password" {
-  length           = 32
-  special          = false # avoid URL-encoding issues in DATABASE_URL
+  length  = 32
+  special = false # avoid URL-encoding issues in DATABASE_URL
 }

@@ -89,3 +89,25 @@ output "failover_dns" {
   description = "Route 53 failover DNS record"
   value       = var.domain_name != "" && var.route53_zone_id != "" ? "api.${var.domain_name}" : "not configured - set domain_name and route53_zone_id"
 }
+
+# --- Testnet Outputs (conditional) ---
+
+output "testnet_alb_dns_name" {
+  description = "Testnet ALB DNS name"
+  value       = var.testnet_enabled ? aws_lb.testnet[0].dns_name : "Testnet not enabled"
+}
+
+output "testnet_rds_endpoint" {
+  description = "Testnet RDS endpoint"
+  value       = var.testnet_enabled ? aws_db_instance.testnet[0].endpoint : "Testnet not enabled"
+}
+
+output "testnet_redis_endpoint" {
+  description = "Testnet Redis endpoint"
+  value       = var.testnet_enabled ? aws_elasticache_replication_group.testnet[0].primary_endpoint_address : "Testnet not enabled"
+}
+
+output "testnet_ecs_cluster_name" {
+  description = "Testnet ECS cluster name"
+  value       = var.testnet_enabled ? aws_ecs_cluster.testnet[0].name : "Testnet not enabled"
+}

@@ -70,10 +70,8 @@ pub async fn run(pool: PgPool, redis_pool: Arc<deadpool_redis::Pool>, config: Co
         .expect("SQS_QUEUE_URL must be set when RUN_MODE=worker")
         .clone();
 
-    let stellar_rpc_url = std::env::var("STELLAR_RPC_URL")
-        .unwrap_or_else(|_| "https://soroban-testnet.stellar.org".to_string());
-    let horizon_url = std::env::var("STELLAR_HORIZON_URL")
-        .unwrap_or_else(|_| "https://horizon.stellar.org".to_string());
+    let stellar_rpc_url = config.stellar_rpc_url.clone();
+    let horizon_url = config.stellar_horizon_url.clone();
 
     let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
 

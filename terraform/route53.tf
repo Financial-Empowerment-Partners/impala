@@ -8,12 +8,12 @@ resource "aws_route53_health_check" "primary" {
   count = var.domain_name != "" ? 1 : 0
 
   fqdn              = aws_lb.main.dns_name
-  port               = 80
-  type               = "HTTP"
-  resource_path      = "/health"
-  failure_threshold  = 3
-  request_interval   = 30
-  measure_latency    = true
+  port              = 80
+  type              = "HTTP"
+  resource_path     = "/health"
+  failure_threshold = 3
+  request_interval  = 30
+  measure_latency   = true
 
   tags = {
     Name = "${local.name_prefix}-primary-health"
@@ -26,12 +26,12 @@ resource "aws_route53_health_check" "dr" {
   count = var.dr_enabled && var.domain_name != "" ? 1 : 0
 
   fqdn              = aws_lb.dr[0].dns_name
-  port               = 80
-  type               = "HTTP"
-  resource_path      = "/health"
-  failure_threshold  = 3
-  request_interval   = 30
-  measure_latency    = true
+  port              = 80
+  type              = "HTTP"
+  resource_path     = "/health"
+  failure_threshold = 3
+  request_interval  = 30
+  measure_latency   = true
 
   tags = {
     Name = "${local.name_prefix}-dr-health"

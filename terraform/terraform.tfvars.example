@@ -61,3 +61,14 @@ jwt_secret = "CHANGE_ME_to_a_secure_random_string"
 # Stellar endpoints
 # stellar_horizon_url = "https://horizon.stellar.org"
 # stellar_rpc_url     = "https://soroban-testnet.stellar.org"
+
+# Testnet cluster (deploys separate ECS/ALB/RDS/Redis for Stellar testnet)
+# testnet_enabled              = true
+# testnet_jwt_secret           = "CHANGE_ME_testnet_jwt_secret"
+# testnet_soroban_contract_id  = "CABC123..."
+# testnet_server_desired_count = 1
+# testnet_worker_desired_count = 1
+# testnet_rds_instance_class   = "db.t3.micro"
+# testnet_redis_node_type      = "cache.t3.micro"
+# testnet_certificate_arn      = ""
+# testnet_vpc_cidr             = "10.2.0.0/16"

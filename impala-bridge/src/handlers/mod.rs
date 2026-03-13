@@ -5,6 +5,7 @@ pub mod device_token;
 pub mod health;
 pub mod logout;
 pub mod mfa;
+pub mod network;
 pub mod notification_subscription;
 pub mod notify;
 pub mod okta;

@@ -311,3 +311,84 @@ variable "stellar_rpc_url" {
   type        = string
   default     = "https://soroban-testnet.stellar.org"
 }
+
+# --- Testnet ---
+
+variable "testnet_enabled" {
+  description = "Enable separate testnet ECS cluster for Stellar testnet"
+  type        = bool
+  default     = false
+}
+
+variable "testnet_vpc_cidr" {
+  description = "CIDR block for the testnet VPC"
+  type        = string
+  default     = "10.2.0.0/16"
+}
+
+variable "testnet_server_desired_count" {
+  description = "Desired number of server tasks in testnet cluster"
+  type        = number
+  default     = 1
+}
+
+variable "testnet_worker_desired_count" {
+  description = "Desired number of worker tasks in testnet cluster"
+  type        = number
+  default     = 1
+}
+
+variable "testnet_server_cpu" {
+  description = "CPU units for testnet server task"
+  type        = number
+  default     = 256
+}
+
+variable "testnet_server_memory" {
+  description = "Memory in MiB for testnet server task"
+  type        = number
+  default     = 512
+}
+
+variable "testnet_worker_cpu" {
+  description = "CPU units for testnet worker task"
+  type        = number
+  default     = 256
+}
+
+variable "testnet_worker_memory" {
+  description = "Memory in MiB for testnet worker task"
+  type        = number
+  default     = 512
+}
+
+variable "testnet_rds_instance_class" {
+  description = "RDS instance class for testnet database"
+  type        = string
+  default     = "db.t3.micro"
+}
+
+variable "testnet_redis_node_type" {
+  description = "ElastiCache node type for testnet Redis"
+  type        = string
+  default     = "cache.t3.micro"
+}
+
+variable "testnet_jwt_secret" {
+  description = "JWT signing secret for testnet impala-bridge (must differ from production)"
+  type        = string
+  sensitive   = true
+  default     = ""
+}
+
+variable "testnet_soroban_contract_id" {
+  description = "Soroban contract ID deployed on Stellar testnet"
+  type        = string
+  default     = ""
+}
+
+variable "testnet_certificate_arn" {
+  description = "ACM certificate ARN for testnet HTTPS listener (optional)"
+  type        = string
+  default     = ""
+}

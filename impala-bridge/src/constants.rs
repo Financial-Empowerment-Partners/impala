@@ -84,3 +84,21 @@ pub const DEFAULT_SQS_WAIT_TIME_SECONDS: i32 = 20;
 
 /// Default SQS visibility timeout in seconds (5 minutes).
 pub const DEFAULT_SQS_VISIBILITY_TIMEOUT: i32 = 300;
+
+/// Stellar testnet Horizon API URL.
+pub const STELLAR_TESTNET_HORIZON_URL: &str = "https://horizon-testnet.stellar.org";
+
+/// Stellar testnet Soroban RPC URL.
+pub const STELLAR_TESTNET_RPC_URL: &str = "https://soroban-testnet.stellar.org";
+
+/// Stellar testnet network passphrase.
+pub const STELLAR_TESTNET_PASSPHRASE: &str = "Test SDF Network ; September 2015";
+
+/// Stellar public network (mainnet) Horizon API URL.
+pub const STELLAR_PUBNET_HORIZON_URL: &str = "https://horizon.stellar.org";
+
+/// Stellar public network (mainnet) Soroban RPC URL.
+pub const STELLAR_PUBNET_RPC_URL: &str = "https://soroban-rpc.stellar.org";
+
+/// Stellar public network (mainnet) passphrase.
+pub const STELLAR_PUBNET_PASSPHRASE: &str = "Public Global Stellar Network ; September 2015";

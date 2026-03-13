@@ -376,6 +376,19 @@ pub struct HealthResponse {
     pub status: String,
     pub database: String,
     pub redis: String,
+    pub stellar_network: String,
+}
+
+// ── Network Info ──────────────────────────────────────────────────────
+
+#[derive(Serialize)]
+pub struct NetworkInfoResponse {
+    pub stellar_network: String,
+    pub stellar_horizon_url: String,
+    pub stellar_rpc_url: String,
+    pub network_passphrase: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub soroban_contract_id: Option<String>,
 }
 
 // ── Okta ───────────────────────────────────────────────────────────────

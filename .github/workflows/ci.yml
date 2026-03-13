@@ -19,6 +19,8 @@
 #   TF_VAR_jwt_secret      - JWT signing secret
 #   TF_VAR_signoz_endpoint - SigNoz OTLP endpoint
 #   TF_VAR_signoz_access_token - SigNoz access token
+#   TF_VAR_testnet_jwt_secret  - JWT secret for testnet cluster
+#   TF_VAR_testnet_soroban_contract_id - Soroban contract on testnet
 # =============================================================================
 
 name: CI
@@ -294,6 +296,8 @@ jobs:
           TF_VAR_jwt_secret: ${{ secrets.TF_VAR_jwt_secret }}
           TF_VAR_signoz_endpoint: ${{ secrets.TF_VAR_signoz_endpoint }}
           TF_VAR_signoz_access_token: ${{ secrets.TF_VAR_signoz_access_token }}
+          TF_VAR_testnet_jwt_secret: ${{ secrets.TF_VAR_testnet_jwt_secret }}
+          TF_VAR_testnet_soroban_contract_id: ${{ secrets.TF_VAR_testnet_soroban_contract_id }}
 
       - name: Terraform Apply
         if: >
@@ -304,3 +308,5 @@ jobs:
           TF_VAR_jwt_secret: ${{ secrets.TF_VAR_jwt_secret }}
           TF_VAR_signoz_endpoint: ${{ secrets.TF_VAR_signoz_endpoint }}
           TF_VAR_signoz_access_token: ${{ secrets.TF_VAR_signoz_access_token }}
+          TF_VAR_testnet_jwt_secret: ${{ secrets.TF_VAR_testnet_jwt_secret }}
+          TF_VAR_testnet_soroban_contract_id: ${{ secrets.TF_VAR_testnet_soroban_contract_id }}

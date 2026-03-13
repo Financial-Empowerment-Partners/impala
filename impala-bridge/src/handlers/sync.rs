@@ -85,13 +85,13 @@ pub async fn sync_account(
     _user: AuthenticatedUser,
     Extension(pool): Extension<PgPool>,
     Extension(redis_pool): Extension<Arc<deadpool_redis::Pool>>,
-    Extension(stellar_rpc_url): Extension<Arc<String>>,
+    Extension(stellar_config): Extension<Arc<crate::config::StellarConfig>>,
     Json(payload): Json<SyncRequest>,
 ) -> Result<Json<SyncResponse>, AppError> {
     info!("POST /sync: account_id={}", payload.account_id);
 
     let timestamp =
-        sync_account_core(&pool, &redis_pool, &stellar_rpc_url, &payload.account_id)
+        sync_account_core(&pool, &redis_pool, &stellar_config.rpc_url, &payload.account_id)
             .await
             .map_err(AppError::InternalError)?;
 

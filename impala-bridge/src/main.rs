@@ -36,7 +36,7 @@ use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::trace::TraceLayer;
 
 use config::load_config;
-use handlers::{account, authenticate, card, device_token, health, logout, mfa, notification_subscription, notify, okta as okta_handler, subscribe, sync, token, transaction};
+use handlers::{account, authenticate, card, device_token, health, logout, mfa, network, notification_subscription, notify, okta as okta_handler, subscribe, sync, token, transaction};
 
 #[tokio::main]
 async fn main() {
@@ -159,15 +159,15 @@ async fn run_server(
         std::process::exit(1);
     }
 
-    // Stellar URLs
-    let horizon_url = Arc::new(
-        env::var("STELLAR_HORIZON_URL")
-            .unwrap_or_else(|_| "https://horizon.stellar.org".to_string()),
-    );
-    let stellar_rpc_url = Arc::new(
-        env::var("STELLAR_RPC_URL")
-            .unwrap_or_else(|_| "https://soroban-testnet.stellar.org".to_string()),
-    );
+    // Stellar network configuration
+    let stellar_config = Arc::new(config.stellar_config());
+    info!("Stellar network: {} (horizon={}, rpc={})",
+        stellar_config.network.as_str(),
+        stellar_config.horizon_url,
+        stellar_config.rpc_url);
+    if let Some(ref cid) = stellar_config.contract_id {
+        info!("Soroban contract ID: {}", cid);
+    }
 
     // Initialize Okta provider (if configured)
     let okta_provider = okta::init_okta_provider(&config).await;
@@ -183,7 +183,11 @@ async fn run_server(
 
     // CORS layer — restrict to configured origins when not wildcard
     if config.cors_allowed_origins == "*" {
-        warn!("CORS_ALLOWED_ORIGINS is set to wildcard '*' — consider restricting to specific origins in production");
+        if config.stellar_network == config::StellarNetwork::Testnet {
+            info!("CORS_ALLOWED_ORIGINS is set to wildcard '*' (testnet mode)");
+        } else {
+            warn!("CORS_ALLOWED_ORIGINS is set to wildcard '*' — consider restricting to specific origins in production");
+        }
     }
     let cors = if config.cors_allowed_origins == "*" {
         CorsLayer::new()
@@ -233,6 +237,7 @@ async fn run_server(
         .route("/auth/okta/config", get(okta_handler::okta_config))
         .route("/healthz", get(health::liveness))
         .route("/readyz", get(health::readiness))
+        .route("/network", get(network::network_info))
         .layer(cors)
         .layer(RequestBodyLimitLayer::new(1_048_576)) // 1 MB body limit
         .layer(CompressionLayer::new())
@@ -267,8 +272,7 @@ async fn run_server(
         .layer(Extension(pool.clone()))
         .layer(Extension(redis_pool.clone()))
         .layer(Extension(jwt_secret))
-        .layer(Extension(horizon_url))
-        .layer(Extension(stellar_rpc_url))
+        .layer(Extension(stellar_config.clone()))
         .layer(Extension(metrics));
 
     // Add optional SNS client extension

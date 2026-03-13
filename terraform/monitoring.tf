@@ -195,7 +195,7 @@ resource "aws_cloudwatch_dashboard" "main" {
         width  = 8
         height = 6
         properties = {
-          title   = "Server CPU & Memory"
+          title = "Server CPU & Memory"
           metrics = [
             ["AWS/ECS", "CPUUtilization", "ClusterName", aws_ecs_cluster.main.name, "ServiceName", aws_ecs_service.server.name, { stat = "Average", label = "CPU %" }],
             ["AWS/ECS", "MemoryUtilization", "ClusterName", aws_ecs_cluster.main.name, "ServiceName", aws_ecs_service.server.name, { stat = "Average", label = "Memory %" }],
@@ -218,7 +218,7 @@ resource "aws_cloudwatch_dashboard" "main" {
         width  = 8
         height = 6
         properties = {
-          title   = "ALB Response Time"
+          title = "ALB Response Time"
           metrics = [
             ["AWS/ApplicationELB", "TargetResponseTime", "LoadBalancer", aws_lb.main.arn_suffix, "TargetGroup", aws_lb_target_group.server.arn_suffix, { stat = "Average", label = "Avg Response Time" }],
             ["...", { stat = "p99", label = "p99 Response Time" }],
@@ -239,7 +239,7 @@ resource "aws_cloudwatch_dashboard" "main" {
         width  = 8
         height = 6
         properties = {
-          title   = "Server Task Count"
+          title = "Server Task Count"
           metrics = [
             ["AWS/ApplicationELB", "HealthyHostCount", "LoadBalancer", aws_lb.main.arn_suffix, "TargetGroup", aws_lb_target_group.server.arn_suffix, { stat = "Average", label = "Healthy" }],
             ["AWS/ApplicationELB", "UnHealthyHostCount", "LoadBalancer", aws_lb.main.arn_suffix, "TargetGroup", aws_lb_target_group.server.arn_suffix, { stat = "Average", label = "Unhealthy" }],
@@ -257,7 +257,7 @@ resource "aws_cloudwatch_dashboard" "main" {
         width  = 8
         height = 6
         properties = {
-          title   = "ALB Request Count & Errors"
+          title = "ALB Request Count & Errors"
           metrics = [
             ["AWS/ApplicationELB", "RequestCount", "LoadBalancer", aws_lb.main.arn_suffix, { stat = "Sum", label = "Requests" }],
             ["AWS/ApplicationELB", "HTTPCode_Target_5XX_Count", "LoadBalancer", aws_lb.main.arn_suffix, { stat = "Sum", label = "5xx Errors", color = "#cc0000" }],
@@ -274,7 +274,7 @@ resource "aws_cloudwatch_dashboard" "main" {
         width  = 8
         height = 6
         properties = {
-          title   = "Worker CPU & Memory"
+          title = "Worker CPU & Memory"
           metrics = [
             ["AWS/ECS", "CPUUtilization", "ClusterName", aws_ecs_cluster.main.name, "ServiceName", aws_ecs_service.worker.name, { stat = "Average", label = "CPU %" }],
             ["AWS/ECS", "MemoryUtilization", "ClusterName", aws_ecs_cluster.main.name, "ServiceName", aws_ecs_service.worker.name, { stat = "Average", label = "Memory %" }],
@@ -297,7 +297,7 @@ resource "aws_cloudwatch_dashboard" "main" {
         width  = 8
         height = 6
         properties = {
-          title   = "SQS Queue Depth"
+          title = "SQS Queue Depth"
           metrics = [
             ["AWS/SQS", "ApproximateNumberOfMessagesVisible", "QueueName", aws_sqs_queue.worker.name, { stat = "Average", label = "Visible" }],
             ["AWS/SQS", "ApproximateNumberOfMessagesNotVisible", "QueueName", aws_sqs_queue.worker.name, { stat = "Average", label = "In Flight" }],

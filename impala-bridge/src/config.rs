@@ -1,6 +1,37 @@
-use crate::constants::DEFAULT_DB_MAX_CONNECTIONS;
+use crate::constants::*;
 use std::env;
 use std::fs;
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum StellarNetwork {
+    Testnet,
+    Pubnet,
+}
+
+impl StellarNetwork {
+    pub fn from_str(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "pubnet" | "mainnet" | "public" => StellarNetwork::Pubnet,
+            _ => StellarNetwork::Testnet,
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            StellarNetwork::Testnet => "testnet",
+            StellarNetwork::Pubnet => "pubnet",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct StellarConfig {
+    pub network: StellarNetwork,
+    pub horizon_url: String,
+    pub rpc_url: String,
+    pub network_passphrase: String,
+    pub contract_id: Option<String>,
+}
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -33,6 +64,11 @@ pub struct Config {
     pub otel_exporter_endpoint: Option<String>,
     pub otel_service_name: Option<String>,
     pub otel_environment: Option<String>,
+    pub stellar_network: StellarNetwork,
+    pub stellar_horizon_url: String,
+    pub stellar_rpc_url: String,
+    pub stellar_network_passphrase: String,
+    pub soroban_contract_id: Option<String>,
 }
 
 /// Load configuration from a JSON config file (if present) and environment variables.
@@ -187,6 +223,44 @@ pub fn load_config() -> Config {
         .ok()
         .or_else(|| from_file("otel_environment"));
 
+    let stellar_network_str = env::var("STELLAR_NETWORK")
+        .ok()
+        .or_else(|| from_file("stellar_network"))
+        .unwrap_or_else(|| "testnet".to_string());
+    let stellar_network = StellarNetwork::from_str(&stellar_network_str);
+
+    let (default_horizon, default_rpc, default_passphrase) = match stellar_network {
+        StellarNetwork::Testnet => (
+            STELLAR_TESTNET_HORIZON_URL,
+            STELLAR_TESTNET_RPC_URL,
+            STELLAR_TESTNET_PASSPHRASE,
+        ),
+        StellarNetwork::Pubnet => (
+            STELLAR_PUBNET_HORIZON_URL,
+            STELLAR_PUBNET_RPC_URL,
+            STELLAR_PUBNET_PASSPHRASE,
+        ),
+    };
+
+    let stellar_horizon_url = env::var("STELLAR_HORIZON_URL")
+        .ok()
+        .or_else(|| from_file("stellar_horizon_url"))
+        .unwrap_or_else(|| default_horizon.to_string());
+
+    let stellar_rpc_url = env::var("STELLAR_RPC_URL")
+        .ok()
+        .or_else(|| from_file("stellar_rpc_url"))
+        .unwrap_or_else(|| default_rpc.to_string());
+
+    let stellar_network_passphrase = env::var("STELLAR_NETWORK_PASSPHRASE")
+        .ok()
+        .or_else(|| from_file("stellar_network_passphrase"))
+        .unwrap_or_else(|| default_passphrase.to_string());
+
+    let soroban_contract_id = env::var("SOROBAN_CONTRACT_ID")
+        .ok()
+        .or_else(|| from_file("soroban_contract_id"));
+
     Config {
         public_endpoint,
         service_address,
@@ -217,5 +291,22 @@ pub fn load_config() -> Config {
         otel_exporter_endpoint,
         otel_service_name,
         otel_environment,
+        stellar_network,
+        stellar_horizon_url,
+        stellar_rpc_url,
+        stellar_network_passphrase,
+        soroban_contract_id,
+    }
+}
+
+impl Config {
+    pub fn stellar_config(&self) -> StellarConfig {
+        StellarConfig {
+            network: self.stellar_network.clone(),
+            horizon_url: self.stellar_horizon_url.clone(),
+            rpc_url: self.stellar_rpc_url.clone(),
+            network_passphrase: self.stellar_network_passphrase.clone(),
+            contract_id: self.soroban_contract_id.clone(),
+        }
     }
 }

@@ -11,7 +11,7 @@ use crate::streams;
 /// Subscribe to network event streams (`POST /subscribe`).
 pub async fn subscribe(
     _user: AuthenticatedUser,
-    Extension(horizon_url): Extension<Arc<String>>,
+    Extension(stellar_config): Extension<Arc<crate::config::StellarConfig>>,
     Extension(redis_pool): Extension<Arc<deadpool_redis::Pool>>,
     Json(payload): Json<SubscribeRequest>,
 ) -> Result<Json<SubscribeResponse>, AppError> {
@@ -20,7 +20,7 @@ pub async fn subscribe(
         "stellar" => {
             let url = format!(
                 "{}/ledgers?cursor=now&order=asc",
-                horizon_url.trim_end_matches('/')
+                stellar_config.horizon_url.trim_end_matches('/')
             );
             let redis = redis_pool.clone();
 

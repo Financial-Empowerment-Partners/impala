@@ -36,6 +36,7 @@ pub async fn get_version(Extension(pool): Extension<PgPool>) -> Json<VersionResp
 pub async fn health_check(
     Extension(pool): Extension<PgPool>,
     Extension(redis_pool): Extension<Arc<deadpool_redis::Pool>>,
+    Extension(stellar_config): Extension<Arc<crate::config::StellarConfig>>,
 ) -> Result<Json<HealthResponse>, AppError> {
     // Check database
     let db_status = match sqlx::query_scalar::<_, i32>("SELECT 1")
@@ -77,6 +78,7 @@ pub async fn health_check(
         status: overall.to_string(),
         database: db_status,
         redis: redis_status,
+        stellar_network: stellar_config.network.as_str().to_string(),
     }))
 }
 
