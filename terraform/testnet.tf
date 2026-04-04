@@ -4,6 +4,13 @@
 # Deploys a separate environment pointing at Stellar testnet (same region)
 # =============================================================================
 
+check "testnet_jwt_secret_required" {
+  assert {
+    condition     = !var.testnet_enabled || length(var.testnet_jwt_secret) >= 32
+    error_message = "testnet_jwt_secret must be at least 32 characters when testnet_enabled is true."
+  }
+}
+
 # --- Testnet Availability Zones ---
 
 data "aws_availability_zones" "testnet" {
@@ -360,7 +367,7 @@ resource "aws_elasticache_replication_group" "testnet" {
   multi_az_enabled           = false
 
   at_rest_encryption_enabled = true
-  transit_encryption_enabled = false
+  transit_encryption_enabled = true
 
   tags = {
     Name = "${local.name_prefix}-redis-testnet"
@@ -734,7 +741,7 @@ resource "aws_ecs_task_definition" "testnet_server" {
       environment = [
         { name = "RUN_MODE", value = "server" },
         { name = "SERVICE_ADDRESS", value = "0.0.0.0:8080" },
-        { name = "REDIS_URL", value = "redis://${aws_elasticache_replication_group.testnet[0].primary_endpoint_address}:6379" },
+        { name = "REDIS_URL", value = "rediss://${aws_elasticache_replication_group.testnet[0].primary_endpoint_address}:6379" },
         { name = "STELLAR_NETWORK", value = "testnet" },
         { name = "STELLAR_HORIZON_URL", value = "https://horizon-testnet.stellar.org" },
         { name = "STELLAR_RPC_URL", value = "https://soroban-testnet.stellar.org" },
@@ -798,7 +805,7 @@ resource "aws_ecs_task_definition" "testnet_worker" {
       environment = [
         { name = "RUN_MODE", value = "worker" },
         { name = "SQS_QUEUE_URL", value = aws_sqs_queue.testnet_worker[0].url },
-        { name = "REDIS_URL", value = "redis://${aws_elasticache_replication_group.testnet[0].primary_endpoint_address}:6379" },
+        { name = "REDIS_URL", value = "rediss://${aws_elasticache_replication_group.testnet[0].primary_endpoint_address}:6379" },
         { name = "STELLAR_NETWORK", value = "testnet" },
         { name = "STELLAR_HORIZON_URL", value = "https://horizon-testnet.stellar.org" },
         { name = "STELLAR_RPC_URL", value = "https://soroban-testnet.stellar.org" },

@@ -26,7 +26,7 @@ resource "aws_elasticache_replication_group" "main" {
   multi_az_enabled           = true
 
   at_rest_encryption_enabled = true
-  transit_encryption_enabled = false # Would require app-level TLS config changes
+  transit_encryption_enabled = true
 
   tags = {
     Name = "${local.name_prefix}-redis"

@@ -14,10 +14,8 @@ struct ReconcilePayload {
 
 /// Reconcile Stellar transactions against the local database.
 pub async fn execute(ctx: &WorkerContext, payload: &serde_json::Value) -> Result<(), JobError> {
-    let parsed: ReconcilePayload =
-        serde_json::from_value(payload.clone()).map_err(|e| {
-            JobError::Permanent(format!("Invalid stellar_reconcile payload: {}", e))
-        })?;
+    let parsed: ReconcilePayload = serde_json::from_value(payload.clone())
+        .map_err(|e| JobError::Permanent(format!("Invalid stellar_reconcile payload: {}", e)))?;
 
     info!(
         "stellar_reconcile: start_ledger={:?} end_ledger={:?}",
@@ -37,13 +35,12 @@ pub async fn execute(ctx: &WorkerContext, payload: &serde_json::Value) -> Result
         .json(&rpc_request)
         .send()
         .await
-        .map_err(|e| {
-            JobError::Transient(format!("Stellar RPC request failed: {}", e))
-        })?;
+        .map_err(|e| JobError::Transient(format!("Stellar RPC request failed: {}", e)))?;
 
-    let body: serde_json::Value = response.json().await.map_err(|e| {
-        JobError::Transient(format!("Failed to parse Stellar RPC response: {}", e))
-    })?;
+    let body: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|e| JobError::Transient(format!("Failed to parse Stellar RPC response: {}", e)))?;
 
     let transactions = body["result"]["transactions"]
         .as_array()
@@ -66,18 +63,20 @@ pub async fn execute(ctx: &WorkerContext, payload: &serde_json::Value) -> Result
             .bind(tx_id)
             .fetch_one(&ctx.pool)
             .await
-            .map_err(|e| {
-                JobError::Transient(format!("Database query failed: {}", e))
-            })?;
+            .map_err(|e| JobError::Transient(format!("Database query failed: {}", e)))?;
 
             if count > 0 {
                 debug!("stellar_reconcile: matched tx {}", tx_id);
                 matched += 1;
-                ctx.metrics.stellar_reconcile_txns.add(1, &[KeyValue::new("status", "matched")]);
+                ctx.metrics
+                    .stellar_reconcile_txns
+                    .add(1, &[KeyValue::new("status", "matched")]);
             } else {
                 warn!("stellar_reconcile: unmatched Stellar tx {}", tx_id);
                 unmatched += 1;
-                ctx.metrics.stellar_reconcile_txns.add(1, &[KeyValue::new("status", "unmatched")]);
+                ctx.metrics
+                    .stellar_reconcile_txns
+                    .add(1, &[KeyValue::new("status", "unmatched")]);
             }
         }
     }
@@ -104,4 +103,36 @@ pub async fn execute(ctx: &WorkerContext, payload: &serde_json::Value) -> Result
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_reconcile_payload_deserialize_with_ledgers() {
+        let json = serde_json::json!({
+            "start_ledger": 1000,
+            "end_ledger": 2000
+        });
+        let parsed: ReconcilePayload = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed.start_ledger, Some(1000));
+        assert_eq!(parsed.end_ledger, Some(2000));
+    }
+
+    #[test]
+    fn test_reconcile_payload_deserialize_defaults() {
+        let json = serde_json::json!({});
+        let parsed: ReconcilePayload = serde_json::from_value(json).unwrap();
+        assert!(parsed.start_ledger.is_none());
+        assert!(parsed.end_ledger.is_none());
+    }
+
+    #[test]
+    fn test_reconcile_payload_partial() {
+        let json = serde_json::json!({ "start_ledger": 500 });
+        let parsed: ReconcilePayload = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed.start_ledger, Some(500));
+        assert!(parsed.end_ledger.is_none());
+    }
 }

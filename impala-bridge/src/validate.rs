@@ -26,14 +26,10 @@ pub fn validate_stellar_account_id(id: &str) -> Result<(), AppError> {
 /// Validate an email address with a basic check.
 pub fn validate_email(email: &str) -> Result<(), AppError> {
     if email.len() > MAX_EMAIL_LENGTH {
-        return Err(AppError::BadRequest(
-            "Email address too long".to_string(),
-        ));
+        return Err(AppError::BadRequest("Email address too long".to_string()));
     }
     if !email.contains('@') {
-        return Err(AppError::BadRequest(
-            "Invalid email address".to_string(),
-        ));
+        return Err(AppError::BadRequest("Invalid email address".to_string()));
     }
     let parts: Vec<&str> = email.splitn(2, '@').collect();
     if parts.len() != 2 || parts[0].is_empty() || parts[1].is_empty() || !parts[1].contains('.') {
@@ -83,7 +79,8 @@ pub fn validate_card_id(id: &str) -> Result<(), AppError> {
 pub fn validate_ec_pubkey(key: &str) -> Result<(), AppError> {
     if key.len() != 66 && key.len() != 130 {
         return Err(AppError::BadRequest(
-            "EC public key must be 66 (compressed) or 130 (uncompressed) hex characters".to_string(),
+            "EC public key must be 66 (compressed) or 130 (uncompressed) hex characters"
+                .to_string(),
         ));
     }
     if !key.chars().all(|c| c.is_ascii_hexdigit()) {
@@ -101,7 +98,10 @@ pub fn validate_rsa_pubkey(key: &str) -> Result<(), AppError> {
             "RSA public key must be between 100 and 2048 characters".to_string(),
         ));
     }
-    if !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '=') {
+    if !key
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '=')
+    {
         return Err(AppError::BadRequest(
             "RSA public key must be Base64-encoded".to_string(),
         ));
@@ -112,9 +112,8 @@ pub fn validate_rsa_pubkey(key: &str) -> Result<(), AppError> {
 /// Validate a callback URL for SSRF prevention.
 /// Blocks localhost, private IPs, link-local, and cloud metadata endpoints.
 pub fn validate_callback_url(url: &str) -> Result<(), AppError> {
-    let parsed = url::Url::parse(url).map_err(|_| {
-        AppError::BadRequest("Invalid URL format".to_string())
-    })?;
+    let parsed =
+        url::Url::parse(url).map_err(|_| AppError::BadRequest("Invalid URL format".to_string()))?;
 
     let scheme = parsed.scheme();
     if scheme != "http" && scheme != "https" {
@@ -128,7 +127,12 @@ pub fn validate_callback_url(url: &str) -> Result<(), AppError> {
         .ok_or_else(|| AppError::BadRequest("URL must have a host".to_string()))?;
 
     // Block localhost
-    if host == "localhost" || host == "127.0.0.1" || host == "::1" || host == "[::1]" || host == "0.0.0.0" {
+    if host == "localhost"
+        || host == "127.0.0.1"
+        || host == "::1"
+        || host == "[::1]"
+        || host == "0.0.0.0"
+    {
         return Err(AppError::BadRequest(
             "Callback URL must not target localhost".to_string(),
         ));
@@ -176,6 +180,68 @@ fn is_private_ip(ip: &IpAddr) -> bool {
             || v6.segments()[0] & 0xfe00 == 0xfc00 // unique local
         }
     }
+}
+
+/// Validate a transaction ID: non-empty, max 128 chars, alphanumeric/hex.
+pub fn validate_transaction_id(id: &str) -> Result<(), AppError> {
+    if id.is_empty() || id.len() > 128 {
+        return Err(AppError::BadRequest(
+            "Transaction ID must be between 1 and 128 characters".to_string(),
+        ));
+    }
+    if !id.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return Err(AppError::BadRequest(
+            "Transaction ID must be alphanumeric".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// Validate a hex hash string (e.g. Stellar transaction hash).
+pub fn validate_hex_hash(hash: &str, field_name: &str) -> Result<(), AppError> {
+    if hash.is_empty() || hash.len() > 128 {
+        return Err(AppError::BadRequest(format!(
+            "{} must be between 1 and 128 characters",
+            field_name
+        )));
+    }
+    if !hash.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(AppError::BadRequest(format!(
+            "{} must be a hex string",
+            field_name
+        )));
+    }
+    Ok(())
+}
+
+/// Validate a listen endpoint: must be a valid socket address on localhost
+/// with a non-privileged port. Prevents binding on external interfaces.
+pub fn validate_listen_endpoint(endpoint: &str) -> Result<(), AppError> {
+    let addr: std::net::SocketAddr = endpoint.parse().map_err(|_| {
+        AppError::BadRequest(
+            "listen_endpoint must be a valid socket address (e.g. 127.0.0.1:8080)".to_string(),
+        )
+    })?;
+
+    if !addr.ip().is_loopback() {
+        return Err(AppError::BadRequest(
+            "listen_endpoint must bind to localhost (127.0.0.1 or ::1)".to_string(),
+        ));
+    }
+
+    if addr.port() == 0 {
+        return Err(AppError::BadRequest(
+            "listen_endpoint must specify a non-zero port".to_string(),
+        ));
+    }
+
+    if addr.port() < 1024 {
+        return Err(AppError::BadRequest(
+            "listen_endpoint port must be >= 1024".to_string(),
+        ));
+    }
+
+    Ok(())
 }
 
 /// Escape special characters in LDAP filter values per RFC 4515.
@@ -428,5 +494,94 @@ mod tests {
     fn test_rsa_pubkey_invalid_chars() {
         let key = "!".repeat(200);
         assert!(validate_rsa_pubkey(&key).is_err());
+    }
+
+    // ── Transaction ID ────────────────────────────────────────────────
+
+    #[test]
+    fn test_valid_transaction_id() {
+        assert!(validate_transaction_id("abc123def456").is_ok());
+    }
+
+    #[test]
+    fn test_transaction_id_empty() {
+        assert!(validate_transaction_id("").is_err());
+    }
+
+    #[test]
+    fn test_transaction_id_too_long() {
+        let id = "a".repeat(129);
+        assert!(validate_transaction_id(&id).is_err());
+    }
+
+    #[test]
+    fn test_transaction_id_max_length() {
+        let id = "a".repeat(128);
+        assert!(validate_transaction_id(&id).is_ok());
+    }
+
+    #[test]
+    fn test_transaction_id_special_chars() {
+        assert!(validate_transaction_id("abc-123").is_err());
+    }
+
+    // ── Hex Hash ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_valid_hex_hash() {
+        assert!(validate_hex_hash("abcdef0123456789", "stellar_hash").is_ok());
+    }
+
+    #[test]
+    fn test_hex_hash_empty() {
+        assert!(validate_hex_hash("", "stellar_hash").is_err());
+    }
+
+    #[test]
+    fn test_hex_hash_non_hex() {
+        assert!(validate_hex_hash("xyz123", "stellar_hash").is_err());
+    }
+
+    #[test]
+    fn test_hex_hash_too_long() {
+        let hash = "a".repeat(129);
+        assert!(validate_hex_hash(&hash, "stellar_hash").is_err());
+    }
+
+    // ── Listen Endpoint ───────────────────────────────────────────────
+
+    #[test]
+    fn test_valid_listen_endpoint() {
+        assert!(validate_listen_endpoint("127.0.0.1:8080").is_ok());
+    }
+
+    #[test]
+    fn test_listen_endpoint_ipv6_localhost() {
+        assert!(validate_listen_endpoint("[::1]:8080").is_ok());
+    }
+
+    #[test]
+    fn test_listen_endpoint_external_ip() {
+        assert!(validate_listen_endpoint("0.0.0.0:8080").is_err());
+    }
+
+    #[test]
+    fn test_listen_endpoint_port_zero() {
+        assert!(validate_listen_endpoint("127.0.0.1:0").is_err());
+    }
+
+    #[test]
+    fn test_listen_endpoint_privileged_port() {
+        assert!(validate_listen_endpoint("127.0.0.1:80").is_err());
+    }
+
+    #[test]
+    fn test_listen_endpoint_invalid_format() {
+        assert!(validate_listen_endpoint("not-an-address").is_err());
+    }
+
+    #[test]
+    fn test_listen_endpoint_private_ip() {
+        assert!(validate_listen_endpoint("192.168.1.1:8080").is_err());
     }
 }

@@ -30,16 +30,15 @@ pub async fn list_subscriptions(
 ) -> Result<Json<PaginatedResponse<SubscriptionListItem>>, AppError> {
     let (per_page, offset) = pagination.clamped();
 
-    let total: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM notification_subscription WHERE account_id = $1",
-    )
-    .bind(&user.account_id)
-    .fetch_one(&pool)
-    .await
-    .map_err(|e| {
-        error!("list_subscriptions: count query error: {}", e);
-        AppError::InternalError("Database error".to_string())
-    })?;
+    let total: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM notification_subscription WHERE account_id = $1")
+            .bind(&user.account_id)
+            .fetch_one(&pool)
+            .await
+            .map_err(|e| {
+                error!("list_subscriptions: count query error: {}", e);
+                AppError::InternalError("Database error".to_string())
+            })?;
 
     let rows = sqlx::query_as::<_, SubscriptionListItem>(
         r#"
@@ -196,13 +195,12 @@ pub async fn delete_subscription(
         id, user.account_id
     );
 
-    let result = sqlx::query(
-        "DELETE FROM notification_subscription WHERE id = $1 AND account_id = $2",
-    )
-    .bind(id)
-    .bind(&user.account_id)
-    .execute(&pool)
-    .await;
+    let result =
+        sqlx::query("DELETE FROM notification_subscription WHERE id = $1 AND account_id = $2")
+            .bind(id)
+            .bind(&user.account_id)
+            .execute(&pool)
+            .await;
 
     match result {
         Ok(res) => {
@@ -224,5 +222,49 @@ pub async fn delete_subscription(
             error!("delete_subscription: database error: {}", e);
             Err(AppError::InternalError("Database error".to_string()))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_valid_event_types_contains_expected() {
+        assert!(VALID_EVENT_TYPES.contains(&"login_success"));
+        assert!(VALID_EVENT_TYPES.contains(&"login_failure"));
+        assert!(VALID_EVENT_TYPES.contains(&"password_change"));
+        assert!(VALID_EVENT_TYPES.contains(&"transfer_incoming"));
+        assert!(VALID_EVENT_TYPES.contains(&"transfer_outgoing"));
+        assert!(VALID_EVENT_TYPES.contains(&"profile_updated"));
+    }
+
+    #[test]
+    fn test_valid_event_types_count() {
+        assert_eq!(VALID_EVENT_TYPES.len(), 6);
+    }
+
+    #[test]
+    fn test_valid_mediums_contains_expected() {
+        assert!(VALID_MEDIUMS.contains(&"webhook"));
+        assert!(VALID_MEDIUMS.contains(&"sms"));
+        assert!(VALID_MEDIUMS.contains(&"mobile_push"));
+        assert!(VALID_MEDIUMS.contains(&"to_app"));
+        assert!(VALID_MEDIUMS.contains(&"email"));
+    }
+
+    #[test]
+    fn test_valid_mediums_count() {
+        assert_eq!(VALID_MEDIUMS.len(), 5);
+    }
+
+    #[test]
+    fn test_invalid_event_type_not_in_list() {
+        assert!(!VALID_EVENT_TYPES.contains(&"invalid_event"));
+    }
+
+    #[test]
+    fn test_invalid_medium_not_in_list() {
+        assert!(!VALID_MEDIUMS.contains(&"carrier_pigeon"));
     }
 }

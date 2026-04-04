@@ -59,10 +59,7 @@ pub fn encode_temporal_token(secret: &[u8], subject: &str) -> Result<String, App
 /// Encode both a refresh and a temporal token for the given subject.
 ///
 /// Returns `(refresh_token, temporal_token)`.
-pub fn encode_token_pair(
-    secret: &[u8],
-    subject: &str,
-) -> Result<(String, String), AppError> {
+pub fn encode_token_pair(secret: &[u8], subject: &str) -> Result<(String, String), AppError> {
     let refresh = encode_refresh_token(secret, subject)?;
     let temporal = encode_temporal_token(secret, subject)?;
     Ok((refresh, temporal))

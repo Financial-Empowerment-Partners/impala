@@ -13,6 +13,16 @@
  */
 var Router = (function () {
     /**
+     * Escape a string for safe insertion into an HTML context.
+     * Uses a text node to ensure all special characters are entity-encoded.
+     */
+    function escapeHtml(str) {
+        var div = document.createElement('div');
+        div.appendChild(document.createTextNode(str));
+        return div.innerHTML;
+    }
+
+    /**
      * Initialize the page: check auth, build nav, highlight active link,
      * hide elements the current user lacks permission for, and start
      * the session idle timer.
@@ -63,7 +73,7 @@ var Router = (function () {
         html += '</ul></div>' +
             '<div class="top-bar-right">' +
             '<ul class="menu">' +
-            '<li class="menu-text">' + username + ' <span class="role-badge ' + role + '">' + (roleDef.label || role) + '</span></li>' +
+            '<li class="menu-text">' + escapeHtml(username) + ' <span class="role-badge ' + escapeHtml(role) + '">' + escapeHtml(roleDef.label || role) + '</span></li>' +
             '<li><a href="#" id="logout-btn">Logout</a></li>' +
             '</ul></div>';
 

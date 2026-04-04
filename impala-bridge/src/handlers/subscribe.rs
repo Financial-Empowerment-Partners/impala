@@ -48,6 +48,8 @@ pub async fn subscribe(
                 }
             };
 
+            crate::validate::validate_listen_endpoint(&listen_endpoint)?;
+
             let redis = redis_pool.clone();
 
             info!(
@@ -63,10 +65,7 @@ pub async fn subscribe(
 
             Ok(Json(SubscribeResponse {
                 success: true,
-                message: format!(
-                    "Subscribed to Payala network events on {}",
-                    listen_endpoint
-                ),
+                message: format!("Subscribed to Payala network events on {}", listen_endpoint),
             }))
         }
         _ => {

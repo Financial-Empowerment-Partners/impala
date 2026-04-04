@@ -419,7 +419,10 @@ mod tests {
 
     #[test]
     fn test_pagination_defaults() {
-        let p = PaginationParams { page: 1, per_page: 20 };
+        let p = PaginationParams {
+            page: 1,
+            per_page: 20,
+        };
         let (per_page, offset) = p.clamped();
         assert_eq!(per_page, 20);
         assert_eq!(offset, 0);
@@ -427,30 +430,195 @@ mod tests {
 
     #[test]
     fn test_pagination_clamps_per_page_upper() {
-        let p = PaginationParams { page: 1, per_page: 500 };
+        let p = PaginationParams {
+            page: 1,
+            per_page: 500,
+        };
         let (per_page, _) = p.clamped();
         assert_eq!(per_page, 100);
     }
 
     #[test]
     fn test_pagination_clamps_per_page_lower() {
-        let p = PaginationParams { page: 1, per_page: 0 };
+        let p = PaginationParams {
+            page: 1,
+            per_page: 0,
+        };
         let (per_page, _) = p.clamped();
         assert_eq!(per_page, 1);
     }
 
     #[test]
     fn test_pagination_clamps_page_lower() {
-        let p = PaginationParams { page: 0, per_page: 20 };
+        let p = PaginationParams {
+            page: 0,
+            per_page: 20,
+        };
         let (_, offset) = p.clamped();
         assert_eq!(offset, 0);
     }
 
     #[test]
     fn test_pagination_offset_calculation() {
-        let p = PaginationParams { page: 3, per_page: 25 };
+        let p = PaginationParams {
+            page: 3,
+            per_page: 25,
+        };
         let (per_page, offset) = p.clamped();
         assert_eq!(per_page, 25);
         assert_eq!(offset, 50);
+    }
+
+    #[test]
+    fn test_authenticate_request_deserialize() {
+        let json = r#"{"account_id":"user1","password":"secret123"}"#;
+        let req: AuthenticateRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.account_id, "user1");
+        assert_eq!(req.password, "secret123");
+    }
+
+    #[test]
+    fn test_token_request_deserialize_refresh_flow() {
+        let json = r#"{"refresh_token":"eyJ..."}"#;
+        let req: TokenRequest = serde_json::from_str(json).unwrap();
+        assert!(req.refresh_token.is_some());
+        assert!(req.username.is_none());
+        assert!(req.password.is_none());
+    }
+
+    #[test]
+    fn test_token_request_deserialize_password_flow() {
+        let json = r#"{"username":"admin","password":"pass123"}"#;
+        let req: TokenRequest = serde_json::from_str(json).unwrap();
+        assert!(req.refresh_token.is_none());
+        assert_eq!(req.username.as_deref(), Some("admin"));
+        assert_eq!(req.password.as_deref(), Some("pass123"));
+    }
+
+    #[test]
+    fn test_token_response_skips_none_tokens() {
+        let resp = TokenResponse {
+            success: true,
+            message: "ok".to_string(),
+            refresh_token: None,
+            temporal_token: None,
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(!json.contains("refresh_token"));
+        assert!(!json.contains("temporal_token"));
+    }
+
+    #[test]
+    fn test_token_response_includes_present_tokens() {
+        let resp = TokenResponse {
+            success: true,
+            message: "ok".to_string(),
+            refresh_token: Some("rt".to_string()),
+            temporal_token: Some("tt".to_string()),
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains("refresh_token"));
+        assert!(json.contains("temporal_token"));
+    }
+
+    #[test]
+    fn test_create_account_request_with_optionals() {
+        let json = r#"{
+            "stellar_account_id": "GABCDEF",
+            "payala_account_id": "payala1",
+            "first_name": "John",
+            "last_name": "Doe",
+            "middle_name": "M",
+            "nickname": "johnny",
+            "affiliation": "Corp",
+            "gender": "male"
+        }"#;
+        let req: CreateAccountRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.first_name, "John");
+        assert_eq!(req.middle_name, Some("M".to_string()));
+        assert_eq!(req.nickname, Some("johnny".to_string()));
+    }
+
+    #[test]
+    fn test_create_account_request_without_optionals() {
+        let json = r#"{
+            "stellar_account_id": "GABCDEF",
+            "payala_account_id": "payala1",
+            "first_name": "John",
+            "last_name": "Doe"
+        }"#;
+        let req: CreateAccountRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.first_name, "John");
+        assert!(req.middle_name.is_none());
+        assert!(req.nickname.is_none());
+    }
+
+    #[test]
+    fn test_subscribe_request_deserialize() {
+        let json = r#"{"network":"stellar"}"#;
+        let req: SubscribeRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.network, "stellar");
+        assert!(req.listen_endpoint.is_none());
+    }
+
+    #[test]
+    fn test_subscribe_request_with_endpoint() {
+        let json = r#"{"network":"payala","listen_endpoint":"127.0.0.1:9000"}"#;
+        let req: SubscribeRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.network, "payala");
+        assert_eq!(req.listen_endpoint, Some("127.0.0.1:9000".to_string()));
+    }
+
+    #[test]
+    fn test_register_device_token_default_platform() {
+        let json = r#"{"token":"fcm-token-abc"}"#;
+        let req: RegisterDeviceTokenRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.token, "fcm-token-abc");
+        assert_eq!(req.platform, "android");
+    }
+
+    #[test]
+    fn test_create_transaction_response_skips_none_btxid() {
+        let resp = CreateTransactionResponse {
+            success: true,
+            message: "ok".to_string(),
+            btxid: None,
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(!json.contains("btxid"));
+    }
+
+    #[test]
+    fn test_notification_subscription_request_deserialize() {
+        let json = r#"{"event_type":"login_success","medium":"sms"}"#;
+        let req: CreateSubscriptionRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.event_type, "login_success");
+        assert_eq!(req.medium, "sms");
+    }
+
+    #[test]
+    fn test_mfa_response_skips_none_provisioning_uri() {
+        let resp = MfaResponse {
+            success: true,
+            message: "ok".to_string(),
+            provisioning_uri: None,
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(!json.contains("provisioning_uri"));
+    }
+
+    #[test]
+    fn test_okta_config_response_disabled() {
+        let resp = OktaConfigResponse {
+            enabled: false,
+            issuer: None,
+            client_id: None,
+            authorization_endpoint: None,
+            token_endpoint: None,
+            scopes: None,
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains("\"enabled\":false"));
+        assert!(!json.contains("issuer"));
     }
 }

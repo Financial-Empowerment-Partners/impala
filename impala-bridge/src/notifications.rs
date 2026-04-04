@@ -34,7 +34,7 @@ pub enum NotificationEvent {
 }
 
 impl NotificationEvent {
-    fn account_id(&self) -> &str {
+    pub(crate) fn account_id(&self) -> &str {
         match self {
             Self::LoginSuccess { account_id, .. }
             | Self::LoginFailure { account_id, .. }
@@ -45,7 +45,7 @@ impl NotificationEvent {
         }
     }
 
-    fn event_type_str(&self) -> &'static str {
+    pub(crate) fn event_type_str(&self) -> &'static str {
         match self {
             Self::LoginSuccess { .. } => "login_success",
             Self::LoginFailure { .. } => "login_failure",
@@ -56,7 +56,7 @@ impl NotificationEvent {
         }
     }
 
-    fn format_message(&self) -> (String, String) {
+    pub(crate) fn format_message(&self) -> (String, String) {
         match self {
             Self::LoginSuccess { account_id } => (
                 "Login Successful".to_string(),
@@ -108,6 +108,126 @@ struct SubscriptionTarget {
     mobile: Option<String>,
     email: Option<String>,
     url: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_event_account_id_login_success() {
+        let event = NotificationEvent::LoginSuccess {
+            account_id: "acc123".to_string(),
+        };
+        assert_eq!(event.account_id(), "acc123");
+    }
+
+    #[test]
+    fn test_event_account_id_transfer_outgoing() {
+        let event = NotificationEvent::TransferOutgoing {
+            account_id: "acc456".to_string(),
+            amount: "100".to_string(),
+            to: "dest".to_string(),
+        };
+        assert_eq!(event.account_id(), "acc456");
+    }
+
+    #[test]
+    fn test_event_type_str_all_variants() {
+        let cases: Vec<(NotificationEvent, &str)> = vec![
+            (
+                NotificationEvent::LoginSuccess {
+                    account_id: "a".into(),
+                },
+                "login_success",
+            ),
+            (
+                NotificationEvent::LoginFailure {
+                    account_id: "a".into(),
+                },
+                "login_failure",
+            ),
+            (
+                NotificationEvent::PasswordChange {
+                    account_id: "a".into(),
+                },
+                "password_change",
+            ),
+            (
+                NotificationEvent::TransferIncoming {
+                    account_id: "a".into(),
+                    amount: "0".into(),
+                    from: "b".into(),
+                },
+                "transfer_incoming",
+            ),
+            (
+                NotificationEvent::TransferOutgoing {
+                    account_id: "a".into(),
+                    amount: "0".into(),
+                    to: "b".into(),
+                },
+                "transfer_outgoing",
+            ),
+            (
+                NotificationEvent::ProfileUpdated {
+                    account_id: "a".into(),
+                    fields: vec![],
+                },
+                "profile_updated",
+            ),
+        ];
+        for (event, expected) in cases {
+            assert_eq!(event.event_type_str(), expected);
+        }
+    }
+
+    #[test]
+    fn test_format_message_login_success() {
+        let event = NotificationEvent::LoginSuccess {
+            account_id: "user1".to_string(),
+        };
+        let (subject, body) = event.format_message();
+        assert_eq!(subject, "Login Successful");
+        assert!(body.contains("user1"));
+    }
+
+    #[test]
+    fn test_format_message_transfer_outgoing() {
+        let event = NotificationEvent::TransferOutgoing {
+            account_id: "user1".to_string(),
+            amount: "500 XLM".to_string(),
+            to: "GDEST".to_string(),
+        };
+        let (subject, body) = event.format_message();
+        assert_eq!(subject, "Outgoing Transfer");
+        assert!(body.contains("500 XLM"));
+        assert!(body.contains("GDEST"));
+    }
+
+    #[test]
+    fn test_format_message_profile_updated() {
+        let event = NotificationEvent::ProfileUpdated {
+            account_id: "user1".to_string(),
+            fields: vec!["first_name".to_string(), "email".to_string()],
+        };
+        let (subject, body) = event.format_message();
+        assert_eq!(subject, "Profile Updated");
+        assert!(body.contains("first_name, email"));
+    }
+
+    #[test]
+    fn test_format_message_transfer_incoming() {
+        let event = NotificationEvent::TransferIncoming {
+            account_id: "user1".to_string(),
+            amount: "250 XLM".to_string(),
+            from: "GSRC".to_string(),
+        };
+        let (subject, body) = event.format_message();
+        assert_eq!(subject, "Incoming Transfer");
+        assert!(body.contains("250 XLM"));
+        assert!(body.contains("GSRC"));
+    }
 }
 
 /// Dispatch notification jobs for a given event.
@@ -230,9 +350,7 @@ pub async fn dispatch_event(
                 match tokens {
                     Ok(t) if !t.is_empty() => {
                         payload["device_tokens"] = serde_json::Value::Array(
-                            t.into_iter()
-                                .map(serde_json::Value::String)
-                                .collect(),
+                            t.into_iter().map(serde_json::Value::String).collect(),
                         );
                     }
                     Ok(_) => {
@@ -254,18 +372,20 @@ pub async fn dispatch_event(
             _ => continue,
         }
 
-        if let Err(e) =
-            sns::publish_job(sns_client, topic_arn, "send_notification", payload).await
+        if let Err(e) = sns::publish_job(sns_client, topic_arn, "send_notification", payload).await
         {
             error!(
                 "dispatch_event: failed to publish job for notify_id={}: {}",
                 target.notify_id, e
             );
         } else if let Some(m) = metrics {
-            m.notifications_dispatched.add(1, &[
-                KeyValue::new("event_type", event_type.to_string()),
-                KeyValue::new("medium", target.medium.clone()),
-            ]);
+            m.notifications_dispatched.add(
+                1,
+                &[
+                    KeyValue::new("event_type", event_type.to_string()),
+                    KeyValue::new("medium", target.medium.clone()),
+                ],
+            );
         }
     }
 }

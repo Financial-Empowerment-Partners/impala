@@ -152,7 +152,9 @@ pub async fn init_okta_provider(config: &Config) -> Option<Arc<OktaProvider>> {
     info!("okta: initializing provider for issuer {}", issuer_url);
 
     let http_client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(config.http_client_timeout_secs))
+        .timeout(std::time::Duration::from_secs(
+            config.http_client_timeout_secs,
+        ))
         .redirect(reqwest::redirect::Policy::limited(5))
         .build()
         .expect("Failed to create HTTP client");
@@ -187,7 +189,11 @@ pub async fn init_okta_provider(config: &Config) -> Option<Arc<OktaProvider>> {
 /// Background task that periodically refreshes the JWKS key set.
 /// Uses exponential backoff on failure (capped at 5 minutes).
 /// Respects cancellation for graceful shutdown.
-pub async fn jwks_refresh_task(provider: Arc<OktaProvider>, interval_secs: u64, cancel: tokio_util::sync::CancellationToken) {
+pub async fn jwks_refresh_task(
+    provider: Arc<OktaProvider>,
+    interval_secs: u64,
+    cancel: tokio_util::sync::CancellationToken,
+) {
     use tokio::time::{Duration, Instant};
 
     let mut consecutive_failures: u32 = 0;
@@ -309,22 +315,19 @@ fn try_validate_with_jwks(
             AppError::Unauthorized
         })?;
 
-    let decoding_key =
-        jsonwebtoken::DecodingKey::from_rsa_components(&jwk.n, &jwk.e);
+    let decoding_key = jsonwebtoken::DecodingKey::from_rsa_components(&jwk.n, &jwk.e);
 
     let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::RS256);
     validation.iss = Some(provider.issuer_url.clone());
     validation.set_audience(&[&provider.client_id]);
 
-    let token_data = jsonwebtoken::decode::<OktaAccessTokenClaims>(
-        token,
-        &decoding_key,
-        &validation,
-    )
-    .map_err(|e| {
-        warn!("okta: token validation failed: {}", e);
-        AppError::Unauthorized
-    })?;
+    let token_data =
+        jsonwebtoken::decode::<OktaAccessTokenClaims>(token, &decoding_key, &validation).map_err(
+            |e| {
+                warn!("okta: token validation failed: {}", e);
+                AppError::Unauthorized
+            },
+        )?;
 
     debug!("okta: token validated for sub={}", token_data.claims.sub);
     Ok(token_data.claims)
@@ -345,7 +348,10 @@ mod tests {
         }"#;
 
         let discovery: OidcDiscovery = serde_json::from_str(json).unwrap();
-        assert_eq!(discovery.issuer, "https://dev-12345.okta.com/oauth2/default");
+        assert_eq!(
+            discovery.issuer,
+            "https://dev-12345.okta.com/oauth2/default"
+        );
         assert_eq!(discovery.scopes_supported.len(), 3);
     }
 

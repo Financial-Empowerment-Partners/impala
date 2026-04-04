@@ -34,6 +34,31 @@ pub async fn create_transaction(
         }));
     }
 
+    // Validate optional fields that have defined formats
+    if let Some(ref tx_id) = payload.stellar_tx_id {
+        crate::validate::validate_transaction_id(tx_id)?;
+    }
+    if let Some(ref tx_id) = payload.payala_tx_id {
+        crate::validate::validate_transaction_id(tx_id)?;
+    }
+    if let Some(ref account) = payload.source_account {
+        if !account.is_empty() {
+            crate::validate::validate_stellar_account_id(account)?;
+        }
+    }
+    if let Some(ref hash) = payload.stellar_hash {
+        if !hash.is_empty() {
+            crate::validate::validate_hex_hash(hash, "stellar_hash")?;
+        }
+    }
+    if let Some(ref memo) = payload.memo {
+        if memo.len() > 256 {
+            return Err(AppError::BadRequest(
+                "memo must not exceed 256 characters".to_string(),
+            ));
+        }
+    }
+
     let result = sqlx::query_scalar::<_, Uuid>(
         r#"
         INSERT INTO transaction

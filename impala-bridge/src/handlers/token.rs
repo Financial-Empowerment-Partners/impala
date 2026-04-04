@@ -31,15 +31,13 @@ pub async fn token(
         let mut validation = Validation::new(jsonwebtoken::Algorithm::HS256);
         validation.iss = Some(JWT_ISSUER.to_string());
 
-        let token_data = decode::<Claims>(
-            refresh_token,
-            &DecodingKey::from_secret(key),
-            &validation,
-        )
-        .map_err(|e| {
-            warn!("token: invalid refresh token presented: {}", e);
-            AppError::Unauthorized
-        })?;
+        let token_data =
+            decode::<Claims>(refresh_token, &DecodingKey::from_secret(key), &validation).map_err(
+                |e| {
+                    warn!("token: invalid refresh token presented: {}", e);
+                    AppError::Unauthorized
+                },
+            )?;
 
         if token_data.claims.token_type != TOKEN_TYPE_REFRESH {
             warn!(
@@ -69,10 +67,14 @@ pub async fn token(
         // Revoke the old refresh token
         let remaining = token_data.claims.exp.saturating_sub(now);
         if remaining > 0 {
-            crate::redis_helpers::revoke_token(&redis_pool, &token_data.claims.jti, remaining).await;
+            crate::redis_helpers::revoke_token(&redis_pool, &token_data.claims.jti, remaining)
+                .await;
         }
 
-        info!("token: tokens issued (with refresh rotation) for sub={}", sub);
+        info!(
+            "token: tokens issued (with refresh rotation) for sub={}",
+            sub
+        );
         return Ok(Json(TokenResponse {
             success: true,
             message: "Tokens issued".to_string(),
@@ -96,7 +98,14 @@ pub async fn token(
     }
 
     // Rate limiting check
-    crate::redis_helpers::check_rate_limit(&redis_pool, "token", username, RATE_LIMIT_MAX_REQUESTS, RATE_LIMIT_WINDOW_SECS).await?;
+    crate::redis_helpers::check_rate_limit(
+        &redis_pool,
+        "token",
+        username,
+        RATE_LIMIT_MAX_REQUESTS,
+        RATE_LIMIT_WINDOW_SECS,
+    )
+    .await?;
 
     let stored = sqlx::query_as::<_, (String, String)>(
         "SELECT password_hash, auth_provider FROM impala_auth WHERE account_id = $1",
@@ -123,10 +132,11 @@ pub async fn token(
     };
 
     if auth_provider != crate::constants::AUTH_PROVIDER_LOCAL {
-        warn!("token: external auth user {} attempted password login", username);
-        return Err(AppError::BadRequest(
-            "Invalid credentials".to_string()
-        ));
+        warn!(
+            "token: external auth user {} attempted password login",
+            username
+        );
+        return Err(AppError::BadRequest("Invalid credentials".to_string()));
     }
 
     if verify_password(password, &stored_hash).is_err() {

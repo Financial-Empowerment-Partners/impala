@@ -18,10 +18,10 @@ mod validate;
 mod vault;
 mod worker;
 
-use axum::routing::{get, post, put};
-use axum::Router;
 use axum::extract::Extension;
 use axum::http::{header, HeaderName, HeaderValue, Method};
+use axum::routing::{get, post, put};
+use axum::Router;
 use log::{debug, error, info, warn};
 use sqlx::postgres::PgPoolOptions;
 use std::env;
@@ -36,7 +36,10 @@ use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::trace::TraceLayer;
 
 use config::load_config;
-use handlers::{account, authenticate, card, device_token, health, logout, mfa, network, notification_subscription, notify, okta as okta_handler, subscribe, sync, token, transaction};
+use handlers::{
+    account, authenticate, card, device_token, health, logout, mfa, network,
+    notification_subscription, notify, okta as okta_handler, subscribe, sync, token, transaction,
+};
 
 #[tokio::main]
 async fn main() {
@@ -95,8 +98,7 @@ async fn main() {
             }
         }
     } else {
-        env::var("DATABASE_URL")
-            .expect("Either DATABASE_URL or DATABASE_URL_WRAPPED must be set")
+        env::var("DATABASE_URL").expect("Either DATABASE_URL or DATABASE_URL_WRAPPED must be set")
     };
 
     // Create database connection pool with timeouts
@@ -151,20 +153,24 @@ async fn run_server(
     metrics: Arc<telemetry::AppMetrics>,
 ) {
     // JWT signing secret
-    let jwt_secret = Arc::new(
-        env::var("JWT_SECRET").expect("JWT_SECRET environment variable must be set"),
-    );
+    let jwt_secret =
+        Arc::new(env::var("JWT_SECRET").expect("JWT_SECRET environment variable must be set"));
     if jwt_secret.len() < crate::constants::JWT_SECRET_MIN_LENGTH {
-        error!("JWT_SECRET must be at least {} characters for security", crate::constants::JWT_SECRET_MIN_LENGTH);
+        error!(
+            "JWT_SECRET must be at least {} characters for security",
+            crate::constants::JWT_SECRET_MIN_LENGTH
+        );
         std::process::exit(1);
     }
 
     // Stellar network configuration
     let stellar_config = Arc::new(config.stellar_config());
-    info!("Stellar network: {} (horizon={}, rpc={})",
+    info!(
+        "Stellar network: {} (horizon={}, rpc={})",
         stellar_config.network.as_str(),
         stellar_config.horizon_url,
-        stellar_config.rpc_url);
+        stellar_config.rpc_url
+    );
     if let Some(ref cid) = stellar_config.contract_id {
         info!("Soroban contract ID: {}", cid);
     }
@@ -219,7 +225,12 @@ async fn run_server(
         .route("/", get(health::default_route))
         .route("/health", get(health::health_check))
         .route("/version", get(health::get_version))
-        .route("/account", post(account::create_account).get(account::get_account).put(account::update_account))
+        .route(
+            "/account",
+            post(account::create_account)
+                .get(account::get_account)
+                .put(account::update_account),
+        )
         .route("/authenticate", post(authenticate::authenticate))
         .route("/sync", post(sync::sync_account))
         .route("/token", post(token::token))
@@ -228,10 +239,26 @@ async fn run_server(
         .route("/card", post(card::create_card).delete(card::delete_card))
         .route("/mfa", post(mfa::enroll_mfa).get(mfa::get_mfa))
         .route("/mfa/verify", post(mfa::verify_mfa))
-        .route("/notify", get(notify::list_notify).post(notify::create_notify).put(notify::update_notify))
-        .route("/notification/subscriptions", get(notification_subscription::list_subscriptions).post(notification_subscription::create_subscription))
-        .route("/notification/subscriptions/:id", put(notification_subscription::update_subscription).delete(notification_subscription::delete_subscription))
-        .route("/device-token", post(device_token::register_device_token).delete(device_token::delete_device_token))
+        .route(
+            "/notify",
+            get(notify::list_notify)
+                .post(notify::create_notify)
+                .put(notify::update_notify),
+        )
+        .route(
+            "/notification/subscriptions",
+            get(notification_subscription::list_subscriptions)
+                .post(notification_subscription::create_subscription),
+        )
+        .route(
+            "/notification/subscriptions/:id",
+            put(notification_subscription::update_subscription)
+                .delete(notification_subscription::delete_subscription),
+        )
+        .route(
+            "/device-token",
+            post(device_token::register_device_token).delete(device_token::delete_device_token),
+        )
         .route("/logout", post(logout::logout))
         .route("/auth/okta", post(okta_handler::okta_token_exchange))
         .route("/auth/okta/config", get(okta_handler::okta_config))
@@ -310,9 +337,14 @@ async fn run_server(
 
     // Run server with graceful shutdown
     info!("Server listening on {}", config.service_address);
-    let server = axum::Server::bind(&config.service_address.parse().expect("Invalid SERVICE_ADDRESS format"))
-        .serve(app.into_make_service())
-        .with_graceful_shutdown(shutdown_signal(cancel));
+    let server = axum::Server::bind(
+        &config
+            .service_address
+            .parse()
+            .expect("Invalid SERVICE_ADDRESS format"),
+    )
+    .serve(app.into_make_service())
+    .with_graceful_shutdown(shutdown_signal(cancel));
 
     if let Err(e) = server.await {
         error!("Server error: {}", e);
@@ -326,9 +358,8 @@ async fn shutdown_signal(cancel: CancellationToken) {
 
     #[cfg(unix)]
     {
-        let mut sigterm =
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-                .expect("Failed to install SIGTERM handler");
+        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("Failed to install SIGTERM handler");
         tokio::select! {
             _ = ctrl_c => { info!("Received Ctrl+C, shutting down"); }
             _ = sigterm.recv() => { info!("Received SIGTERM, shutting down"); }

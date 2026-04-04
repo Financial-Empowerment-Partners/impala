@@ -119,3 +119,30 @@ resource "aws_wafv2_web_acl_association" "alb" {
   resource_arn = aws_lb.main.arn
   web_acl_arn  = aws_wafv2_web_acl.main.arn
 }
+
+# --- WAF Logging to CloudWatch ---
+resource "aws_cloudwatch_log_group" "waf" {
+  name              = "aws-waf-logs-${local.name_prefix}"
+  retention_in_days = 30
+
+  tags = {
+    Name = "${local.name_prefix}-waf-logs"
+  }
+}
+
+resource "aws_wafv2_web_acl_logging_configuration" "main" {
+  log_destination_configs = [aws_cloudwatch_log_group.waf.arn]
+  resource_arn            = aws_wafv2_web_acl.main.arn
+
+  redacted_fields {
+    single_header {
+      name = "authorization"
+    }
+  }
+
+  redacted_fields {
+    single_header {
+      name = "cookie"
+    }
+  }
+}

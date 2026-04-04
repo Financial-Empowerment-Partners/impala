@@ -108,7 +108,7 @@ variable "rds_allocated_storage" {
 variable "rds_skip_final_snapshot" {
   description = "Skip final snapshot on RDS deletion"
   type        = bool
-  default     = true
+  default     = false
 }
 
 # --- ElastiCache ---
@@ -391,4 +391,10 @@ variable "testnet_certificate_arn" {
   description = "ACM certificate ARN for testnet HTTPS listener (optional)"
   type        = string
   default     = ""
+}
+
+variable "enable_vpc_endpoints" {
+  description = "Create VPC endpoints for AWS services to avoid NAT gateway for API traffic"
+  type        = bool
+  default     = true
 }

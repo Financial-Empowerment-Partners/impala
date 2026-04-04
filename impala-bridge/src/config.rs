@@ -122,9 +122,7 @@ pub fn load_config() -> Config {
         .ok()
         .or_else(|| from_file("twilio_number"));
 
-    let ldap_url = env::var("LDAP_URL")
-        .ok()
-        .or_else(|| from_file("ldap_url"));
+    let ldap_url = env::var("LDAP_URL").ok().or_else(|| from_file("ldap_url"));
 
     let ldap_bind_dn = env::var("LDAP_BIND_DN")
         .ok()
@@ -308,5 +306,102 @@ impl Config {
             network_passphrase: self.stellar_network_passphrase.clone(),
             contract_id: self.soroban_contract_id.clone(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_stellar_network_from_str_testnet() {
+        assert_eq!(StellarNetwork::from_str("testnet"), StellarNetwork::Testnet);
+    }
+
+    #[test]
+    fn test_stellar_network_from_str_pubnet() {
+        assert_eq!(StellarNetwork::from_str("pubnet"), StellarNetwork::Pubnet);
+    }
+
+    #[test]
+    fn test_stellar_network_from_str_mainnet() {
+        assert_eq!(StellarNetwork::from_str("mainnet"), StellarNetwork::Pubnet);
+    }
+
+    #[test]
+    fn test_stellar_network_from_str_public() {
+        assert_eq!(StellarNetwork::from_str("public"), StellarNetwork::Pubnet);
+    }
+
+    #[test]
+    fn test_stellar_network_from_str_unknown_defaults_testnet() {
+        assert_eq!(
+            StellarNetwork::from_str("anything"),
+            StellarNetwork::Testnet
+        );
+    }
+
+    #[test]
+    fn test_stellar_network_from_str_case_insensitive() {
+        assert_eq!(StellarNetwork::from_str("PUBNET"), StellarNetwork::Pubnet);
+        assert_eq!(StellarNetwork::from_str("Testnet"), StellarNetwork::Testnet);
+    }
+
+    #[test]
+    fn test_stellar_network_as_str_testnet() {
+        assert_eq!(StellarNetwork::Testnet.as_str(), "testnet");
+    }
+
+    #[test]
+    fn test_stellar_network_as_str_pubnet() {
+        assert_eq!(StellarNetwork::Pubnet.as_str(), "pubnet");
+    }
+
+    #[test]
+    fn test_stellar_config_from_config() {
+        // Verify stellar_config() correctly copies fields
+        // Note: we can't easily test load_config() since it reads env vars,
+        // but we can test the Config -> StellarConfig conversion
+        let config = Config {
+            public_endpoint: String::new(),
+            service_address: String::new(),
+            log_file: String::new(),
+            debug_mode: false,
+            twilio_sid: None,
+            twilio_token: None,
+            twilio_number: None,
+            ldap_url: None,
+            ldap_bind_dn: None,
+            ldap_bind_password: None,
+            ldap_base_dn: None,
+            ldap_search_filter: None,
+            db_max_connections: 5,
+            cors_allowed_origins: String::new(),
+            http_client_timeout_secs: 30,
+            okta_issuer_url: None,
+            okta_client_id: None,
+            okta_jwks_refresh_secs: 3600,
+            sqs_queue_url: None,
+            sns_topic_arn: None,
+            worker_concurrency: 10,
+            sqs_wait_time_seconds: 20,
+            sqs_visibility_timeout: 300,
+            ses_from_address: None,
+            fcm_project_id: None,
+            fcm_service_account_key: None,
+            otel_exporter_endpoint: None,
+            otel_service_name: None,
+            otel_environment: None,
+            stellar_network: StellarNetwork::Testnet,
+            stellar_horizon_url: "https://horizon-testnet.stellar.org".to_string(),
+            stellar_rpc_url: "https://soroban-testnet.stellar.org".to_string(),
+            stellar_network_passphrase: "Test SDF Network ; September 2015".to_string(),
+            soroban_contract_id: Some("CONTRACT123".to_string()),
+        };
+        let sc = config.stellar_config();
+        assert_eq!(sc.network, StellarNetwork::Testnet);
+        assert_eq!(sc.horizon_url, "https://horizon-testnet.stellar.org");
+        assert_eq!(sc.rpc_url, "https://soroban-testnet.stellar.org");
+        assert_eq!(sc.contract_id, Some("CONTRACT123".to_string()));
     }
 }

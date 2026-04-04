@@ -63,7 +63,12 @@ impl std::fmt::Display for JobError {
 }
 
 /// Main worker entry point. Polls SQS in a loop with graceful shutdown.
-pub async fn run(pool: PgPool, redis_pool: Arc<deadpool_redis::Pool>, config: Config, metrics: Arc<AppMetrics>) {
+pub async fn run(
+    pool: PgPool,
+    redis_pool: Arc<deadpool_redis::Pool>,
+    config: Config,
+    metrics: Arc<AppMetrics>,
+) {
     let queue_url = config
         .sqs_queue_url
         .as_ref()
@@ -156,8 +161,18 @@ async fn poll_once(
         tokio::spawn(async move {
             let _permit = permit; // held until task completes
             let timeout_duration = Duration::from_secs(visibility_timeout as u64);
-            if tokio::time::timeout(timeout_duration, process_message(&sqs, &queue_url, &ctx, &message)).await.is_err() {
-                error!("worker: message {} timed out after {}s", message.message_id().unwrap_or("unknown"), visibility_timeout);
+            if tokio::time::timeout(
+                timeout_duration,
+                process_message(&sqs, &queue_url, &ctx, &message),
+            )
+            .await
+            .is_err()
+            {
+                error!(
+                    "worker: message {} timed out after {}s",
+                    message.message_id().unwrap_or("unknown"),
+                    visibility_timeout
+                );
             }
         });
     }
@@ -171,10 +186,7 @@ async fn process_message(
     ctx: &WorkerContext,
     message: &aws_sdk_sqs::types::Message,
 ) {
-    let message_id = message
-        .message_id()
-        .unwrap_or("unknown")
-        .to_string();
+    let message_id = message.message_id().unwrap_or("unknown").to_string();
     let receipt_handle = match message.receipt_handle() {
         Some(rh) => rh.to_string(),
         None => {
@@ -211,10 +223,7 @@ async fn process_message(
             match serde_json::from_str::<JobMessage>(&body) {
                 Ok(j) => j,
                 Err(e) => {
-                    error!(
-                        "worker: message {} has invalid JSON: {}",
-                        message_id, e
-                    );
+                    error!("worker: message {} has invalid JSON: {}", message_id, e);
                     return;
                 }
             }
@@ -223,19 +232,13 @@ async fn process_message(
         match serde_json::from_str::<JobMessage>(&body) {
             Ok(j) => j,
             Err(e) => {
-                error!(
-                    "worker: message {} has invalid JSON: {}",
-                    message_id, e
-                );
+                error!("worker: message {} has invalid JSON: {}", message_id, e);
                 return;
             }
         }
     };
 
-    let job_id = job
-        .job_id
-        .as_deref()
-        .unwrap_or("none");
+    let job_id = job.job_id.as_deref().unwrap_or("none");
     info!(
         "worker: dispatching job_type={} job_id={} message_id={}",
         job.job_type, job_id, message_id
@@ -270,10 +273,9 @@ async fn process_message(
         Err(JobError::Transient(_)) => "transient_error",
         Err(JobError::Permanent(_)) => "permanent_error",
     };
-    ctx.metrics.jobs_processed.add(
-        1,
-        &[job_type_attr, KeyValue::new("outcome", outcome)],
-    );
+    ctx.metrics
+        .jobs_processed
+        .add(1, &[job_type_attr, KeyValue::new("outcome", outcome)]);
 
     match result {
         Ok(()) => {
@@ -301,9 +303,8 @@ async fn shutdown_signal() {
 
     #[cfg(unix)]
     {
-        let mut sigterm =
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-                .expect("Failed to install SIGTERM handler");
+        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("Failed to install SIGTERM handler");
         tokio::select! {
             _ = ctrl_c => {}
             _ = sigterm.recv() => {}
@@ -313,5 +314,67 @@ async fn shutdown_signal() {
     #[cfg(not(unix))]
     {
         ctrl_c.await.expect("Failed to listen for Ctrl+C");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_job_message_deserialize() {
+        let json = r#"{
+            "job_type": "send_notification",
+            "payload": {"account_id": "user1", "medium": "sms"},
+            "job_id": "job-123"
+        }"#;
+        let msg: JobMessage = serde_json::from_str(json).unwrap();
+        assert_eq!(msg.job_type, "send_notification");
+        assert_eq!(msg.job_id, Some("job-123".to_string()));
+        assert!(msg.payload.is_object());
+    }
+
+    #[test]
+    fn test_job_message_deserialize_without_job_id() {
+        let json = r#"{
+            "job_type": "batch_sync",
+            "payload": {"account_ids": ["a", "b"]}
+        }"#;
+        let msg: JobMessage = serde_json::from_str(json).unwrap();
+        assert_eq!(msg.job_type, "batch_sync");
+        assert!(msg.job_id.is_none());
+    }
+
+    #[test]
+    fn test_sns_envelope_deserialize() {
+        let json = r#"{
+            "Message": "{\"job_type\":\"test\",\"payload\":{}}",
+            "Type": "Notification"
+        }"#;
+        let env: SnsEnvelope = serde_json::from_str(json).unwrap();
+        assert_eq!(env.notification_type, Some("Notification".to_string()));
+
+        // Verify inner message can be parsed
+        let inner: JobMessage = serde_json::from_str(&env.message).unwrap();
+        assert_eq!(inner.job_type, "test");
+    }
+
+    #[test]
+    fn test_sns_envelope_without_type() {
+        let json = r#"{"Message": "{}"}"#;
+        let env: SnsEnvelope = serde_json::from_str(json).unwrap();
+        assert!(env.notification_type.is_none());
+    }
+
+    #[test]
+    fn test_job_error_display_transient() {
+        let err = JobError::Transient("connection timeout".to_string());
+        assert_eq!(err.to_string(), "Transient error: connection timeout");
+    }
+
+    #[test]
+    fn test_job_error_display_permanent() {
+        let err = JobError::Permanent("invalid payload".to_string());
+        assert_eq!(err.to_string(), "Permanent error: invalid payload");
     }
 }

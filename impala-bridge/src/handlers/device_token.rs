@@ -63,18 +63,13 @@ pub async fn delete_device_token(
     Extension(pool): Extension<PgPool>,
     Json(payload): Json<DeleteDeviceTokenRequest>,
 ) -> Result<Json<DeviceTokenResponse>, AppError> {
-    info!(
-        "DELETE /device-token: for account_id={}",
-        user.account_id
-    );
+    info!("DELETE /device-token: for account_id={}", user.account_id);
 
-    let result = sqlx::query(
-        "DELETE FROM device_token WHERE account_id = $1 AND token = $2",
-    )
-    .bind(&user.account_id)
-    .bind(&payload.token)
-    .execute(&pool)
-    .await;
+    let result = sqlx::query("DELETE FROM device_token WHERE account_id = $1 AND token = $2")
+        .bind(&user.account_id)
+        .bind(&payload.token)
+        .execute(&pool)
+        .await;
 
     match result {
         Ok(res) => {

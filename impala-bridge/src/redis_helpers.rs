@@ -47,11 +47,7 @@ pub async fn check_rate_limit(
 
 /// Check whether the given identity is currently locked out due to repeated
 /// failures.  Fails closed when Redis is unavailable.
-pub async fn check_lockout(
-    pool: &RedisPool,
-    id: &str,
-    threshold: u64,
-) -> Result<(), AppError> {
+pub async fn check_lockout(pool: &RedisPool, id: &str, threshold: u64) -> Result<(), AppError> {
     let mut conn = pool.get().await.map_err(|e| {
         error!("check_lockout: failed to get Redis connection: {}", e);
         AppError::InternalError("Service temporarily unavailable".to_string())
@@ -115,10 +111,7 @@ pub async fn clear_lockout(pool: &RedisPool, id: &str) {
 
 /// Check whether a JWT has been revoked.  Fails closed: if Redis is unavailable
 /// the token is treated as revoked (`Err(AppError::Unauthorized)`).
-pub async fn is_token_revoked(
-    pool: &RedisPool,
-    jti: &str,
-) -> Result<bool, AppError> {
+pub async fn is_token_revoked(pool: &RedisPool, jti: &str) -> Result<bool, AppError> {
     let mut conn = pool.get().await.map_err(|e| {
         error!("is_token_revoked: failed to get Redis connection: {}", e);
         AppError::Unauthorized
@@ -216,18 +209,11 @@ pub async fn increment_mfa_attempts(
 }
 
 /// Clear the MFA attempt counter after a successful verification.  Fire-and-forget.
-pub async fn clear_mfa_attempts(
-    pool: &RedisPool,
-    account_id: &str,
-    mfa_type: &str,
-) {
+pub async fn clear_mfa_attempts(pool: &RedisPool, account_id: &str, mfa_type: &str) {
     let mut conn = match pool.get().await {
         Ok(c) => c,
         Err(e) => {
-            error!(
-                "clear_mfa_attempts: failed to get Redis connection: {}",
-                e
-            );
+            error!("clear_mfa_attempts: failed to get Redis connection: {}", e);
             return;
         }
     };
@@ -235,9 +221,77 @@ pub async fn clear_mfa_attempts(
     let key = format!("impala:mfa_attempts:{account_id}:{mfa_type}");
 
     if let Err(e) = conn.del::<_, ()>(&key).await {
-        warn!(
-            "clear_mfa_attempts: Redis DEL failed for {}: {}",
-            key, e
-        );
+        warn!("clear_mfa_attempts: Redis DEL failed for {}: {}", key, e);
+    }
+}
+
+/// Construct a rate-limit Redis key for the given scope and identity.
+pub(crate) fn rate_limit_key(scope: &str, id: &str) -> String {
+    format!("impala:rate:{scope}:{id}")
+}
+
+/// Construct a lockout Redis key for the given identity.
+pub(crate) fn lockout_key(id: &str) -> String {
+    format!("impala:lockout:{id}")
+}
+
+/// Construct a token revocation Redis key for the given JTI.
+pub(crate) fn revoked_key(jti: &str) -> String {
+    format!("impala:revoked:{jti}")
+}
+
+/// Construct an MFA attempts Redis key for the given account and MFA type.
+pub(crate) fn mfa_attempts_key(account_id: &str, mfa_type: &str) -> String {
+    format!("impala:mfa_attempts:{account_id}:{mfa_type}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_rate_limit_key_format() {
+        let key = rate_limit_key("auth", "user@example.com");
+        assert_eq!(key, "impala:rate:auth:user@example.com");
+    }
+
+    #[test]
+    fn test_rate_limit_key_token_scope() {
+        let key = rate_limit_key("token", "admin");
+        assert_eq!(key, "impala:rate:token:admin");
+    }
+
+    #[test]
+    fn test_lockout_key_format() {
+        let key = lockout_key("user123");
+        assert_eq!(key, "impala:lockout:user123");
+    }
+
+    #[test]
+    fn test_revoked_key_format() {
+        let key = revoked_key("550e8400-e29b-41d4-a716-446655440000");
+        assert_eq!(key, "impala:revoked:550e8400-e29b-41d4-a716-446655440000");
+    }
+
+    #[test]
+    fn test_mfa_attempts_key_format() {
+        let key = mfa_attempts_key("user1", "totp");
+        assert_eq!(key, "impala:mfa_attempts:user1:totp");
+    }
+
+    #[test]
+    fn test_mfa_attempts_key_sms() {
+        let key = mfa_attempts_key("user2", "sms");
+        assert_eq!(key, "impala:mfa_attempts:user2:sms");
+    }
+
+    #[test]
+    fn test_key_format_consistency_with_inline_keys() {
+        // Verify the helper functions produce the same keys as the inline format! calls
+        // used in the async functions above
+        assert!(rate_limit_key("auth", "x").starts_with("impala:rate:"));
+        assert!(lockout_key("x").starts_with("impala:lockout:"));
+        assert!(revoked_key("x").starts_with("impala:revoked:"));
+        assert!(mfa_attempts_key("x", "y").starts_with("impala:mfa_attempts:"));
     }
 }

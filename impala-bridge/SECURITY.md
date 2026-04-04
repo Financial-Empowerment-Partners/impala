@@ -82,7 +82,7 @@ TLS is terminated at the ALB with an ACM certificate. When `certificate_arn` is 
 ### Encryption
 
 - **At rest**: RDS (KMS), S3 (KMS), ElastiCache (at-rest encryption enabled).
-- **In transit**: ALB (TLS), ElastiCache (transit encryption).
+- **In transit**: ALB (TLS), ElastiCache (transit encryption enabled via `rediss://` TLS connections).
 
 ### Secrets Management
 

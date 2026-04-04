@@ -58,7 +58,11 @@ var API = (function () {
      */
     function parseJwt(token) {
         try {
-            var payload = token.split('.')[1];
+            if (!token || typeof token !== 'string') return null;
+            var parts = token.split('.');
+            if (parts.length !== 3) return null;
+            var payload = parts[1];
+            if (!payload) return null;
             return JSON.parse(atob(payload));
         } catch (e) {
             return null;

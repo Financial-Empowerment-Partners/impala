@@ -36,7 +36,10 @@ pub async fn create_account(
     }
 
     if payload.first_name.len() > MAX_NAME_LENGTH || payload.last_name.len() > MAX_NAME_LENGTH {
-        warn!("create_account: name fields exceed {} characters", MAX_NAME_LENGTH);
+        warn!(
+            "create_account: name fields exceed {} characters",
+            MAX_NAME_LENGTH
+        );
         return Ok(Json(CreateAccountResponse {
             success: false,
             message: format!("Name fields must not exceed {} characters", MAX_NAME_LENGTH),
@@ -101,7 +104,18 @@ pub async fn get_account(
         "GET /account: lookup stellar_id={}",
         params.stellar_account_id
     );
-    let result = sqlx::query_as::<_, (String, String, Option<String>, String, Option<String>, Option<String>, Option<String>)>(
+    let result = sqlx::query_as::<
+        _,
+        (
+            String,
+            String,
+            Option<String>,
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        ),
+    >(
         r#"
         SELECT payala_account_id, first_name, middle_name, last_name,
                nickname, affiliation, gender
@@ -220,12 +234,24 @@ pub async fn update_account(
 
     // Collect field names for notification
     let mut changed_fields = Vec::new();
-    if payload.first_name.is_some() { changed_fields.push("first_name".to_string()); }
-    if payload.middle_name.is_some() { changed_fields.push("middle_name".to_string()); }
-    if payload.last_name.is_some() { changed_fields.push("last_name".to_string()); }
-    if payload.nickname.is_some() { changed_fields.push("nickname".to_string()); }
-    if payload.affiliation.is_some() { changed_fields.push("affiliation".to_string()); }
-    if payload.gender.is_some() { changed_fields.push("gender".to_string()); }
+    if payload.first_name.is_some() {
+        changed_fields.push("first_name".to_string());
+    }
+    if payload.middle_name.is_some() {
+        changed_fields.push("middle_name".to_string());
+    }
+    if payload.last_name.is_some() {
+        changed_fields.push("last_name".to_string());
+    }
+    if payload.nickname.is_some() {
+        changed_fields.push("nickname".to_string());
+    }
+    if payload.affiliation.is_some() {
+        changed_fields.push("affiliation".to_string());
+    }
+    if payload.gender.is_some() {
+        changed_fields.push("gender".to_string());
+    }
 
     let needs_ownership_bind = where_clause.contains("stellar_account_id");
     let sql = if needs_ownership_bind {

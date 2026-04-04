@@ -27,7 +27,8 @@ pub async fn sync_account_core(
         .format("%Y-%m-%dT%H:%M:%S%.6fZ")
         .to_string();
 
-    conn.set::<_, _, ()>(account_id, &timestamp)
+    let redis_key = format!("impala:sync:{}", account_id);
+    conn.set::<_, _, ()>(&redis_key, &timestamp)
         .await
         .map_err(|e| {
             error!("sync_account_core: Redis set error: {}", e);
@@ -36,7 +37,9 @@ pub async fn sync_account_core(
 
     // Call Stellar Soroban RPC getTransactions and check against local DB
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(DEFAULT_HTTP_CLIENT_TIMEOUT_SECS))
+        .timeout(std::time::Duration::from_secs(
+            DEFAULT_HTTP_CLIENT_TIMEOUT_SECS,
+        ))
         .build()
         .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
     let rpc_request = serde_json::json!({
@@ -90,10 +93,16 @@ pub async fn sync_account(
 ) -> Result<Json<SyncResponse>, AppError> {
     info!("POST /sync: account_id={}", payload.account_id);
 
-    let timestamp =
-        sync_account_core(&pool, &redis_pool, &stellar_config.rpc_url, &payload.account_id)
-            .await
-            .map_err(AppError::InternalError)?;
+    crate::validate::validate_stellar_account_id(&payload.account_id)?;
+
+    let timestamp = sync_account_core(
+        &pool,
+        &redis_pool,
+        &stellar_config.rpc_url,
+        &payload.account_id,
+    )
+    .await
+    .map_err(AppError::InternalError)?;
 
     Ok(Json(SyncResponse {
         success: true,

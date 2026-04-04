@@ -62,7 +62,7 @@ resource "aws_ecs_task_definition" "server" {
           [
             { name = "RUN_MODE", value = "server" },
             { name = "SERVICE_ADDRESS", value = "0.0.0.0:8080" },
-            { name = "REDIS_URL", value = "redis://${aws_elasticache_replication_group.main.primary_endpoint_address}:6379" },
+            { name = "REDIS_URL", value = "rediss://${aws_elasticache_replication_group.main.primary_endpoint_address}:6379" },
             { name = "STELLAR_HORIZON_URL", value = var.stellar_horizon_url },
             { name = "STELLAR_RPC_URL", value = var.stellar_rpc_url },
             { name = "SNS_TOPIC_ARN", value = aws_sns_topic.jobs.arn },
@@ -128,7 +128,7 @@ resource "aws_ecs_task_definition" "worker" {
           [
             { name = "RUN_MODE", value = "worker" },
             { name = "SQS_QUEUE_URL", value = aws_sqs_queue.worker.url },
-            { name = "REDIS_URL", value = "redis://${aws_elasticache_replication_group.main.primary_endpoint_address}:6379" },
+            { name = "REDIS_URL", value = "rediss://${aws_elasticache_replication_group.main.primary_endpoint_address}:6379" },
             { name = "STELLAR_HORIZON_URL", value = var.stellar_horizon_url },
             { name = "STELLAR_RPC_URL", value = var.stellar_rpc_url },
             { name = "AWS_REGION", value = var.aws_region },
