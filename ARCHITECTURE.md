@@ -77,7 +77,7 @@ graph TB
 
     subgraph Bridge["impala-bridge &lpar;Rust / Axum&rpar;"]
         direction TB
-        ClientAPI["Client API<br/><i>24 endpoints</i>"]
+        ClientAPI["Client API<br/><i>~30 endpoints</i>"]
         AdminAPI["Admin API"]
         AuthEngine["Auth Engine<br/><i>Argon2 + JWT + Okta</i>"]
         Validation["Input Validation<br/><i>11 validators, SSRF prevention</i>"]

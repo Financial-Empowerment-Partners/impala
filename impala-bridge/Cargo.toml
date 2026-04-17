@@ -22,7 +22,7 @@ futures = "0.3"
 log = "0.4"
 syslog = "6.1"
 ldap3 = "0.11"
-tower = "0.4"
+tower = { version = "0.4", features = ["timeout", "util"] }
 tower-http = { version = "0.3", features = ["cors", "trace", "request-id", "set-header", "limit", "compression-gzip"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 subtle = "2"

@@ -1,6 +1,7 @@
 # ── OS ────────────────────────────────────────────────────────
 .DS_Store
 Thumbs.db
+Desktop.ini
 *~
 *.swp
 *.swo
@@ -9,14 +10,36 @@ Thumbs.db
 .idea/
 .vscode/
 *.iml
+*.ipr
+*.iws
 *.sublime-project
 *.sublime-workspace
 .project
 .classpath
 .settings/
+out/
+nbproject/private/
+
+# ── Merge / Patch artifacts ───────────────────────────────────
+*.orig
+*.rej
+
+# ── Temp / Backup ─────────────────────────────────────────────
+tmp/
+temp/
+*.bak
+*.tmp
+
+# ── Claude Code / local tool settings ────────────────────────
+.claude/settings.local.json
 
 # ── Rust (impala-bridge, impala-soroban) ──────────────────────
 target/
+*.rs.bk
+*.profraw
+perf.data
+perf.data.old
+flamegraph.svg
 
 # ── Gradle / Android (impala-card, impala-lib, impala-android-demo)
 .gradle/
@@ -25,13 +48,18 @@ local.properties
 captures/
 .externalNativeBuild/
 .cxx/
+release/
 *.apk
 *.aab
+*.ap_
+*.dex
 *.hprof
+*.keystore
+*.jks
+*.p12
 
 # ── JavaCard ──────────────────────────────────────────────────
-# Keep SDK JARs in impala-card/applet/libs/sdks/ (vendor deps)
-# Build output from ant:
+# Vendor SDK JARs live in impala-card/applet/libs/sdks/ and are committed.
 *.cap
 *.exp
 *.jca
@@ -39,20 +67,39 @@ captures/
 # ── Terraform ─────────────────────────────────────────────────
 .terraform/
 *.tfstate
-*.tfstate.backup
+*.tfstate.*
 *.tfplan
 crash.log
+crash.*.log
 override.tf
 override.tf.json
 *_override.tf
 *_override.tf.json
 
+# ── Node / JS (impala-ui) ─────────────────────────────────────
+node_modules/
+coverage/
+.nyc_output/
+*.tsbuildinfo
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.pnpm-store/
+
 # ── Python (caprunner) ────────────────────────────────────────
 __pycache__/
-*.pyc
-*.pyo
+*.py[cod]
+*.egg-info/
 .venv/
 venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ── Caprunner generated artifacts ─────────────────────────────
+impala-card/caprunner/vendor/
+impala-card/caprunner/*.json
 
 # ── Environment / Secrets ─────────────────────────────────────
 .env
@@ -60,9 +107,10 @@ venv/
 .env.*.local
 *.pem
 *.key
+secrets/
 
 # ── Logs ──────────────────────────────────────────────────────
 *.log
 
-# ── Firebase (Android) ───────────────────────────────────────
-app/google-services.json
+# ── Firebase (impala-android-demo) ────────────────────────────
+impala-android-demo/app/google-services.json

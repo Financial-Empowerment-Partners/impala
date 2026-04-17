@@ -21,7 +21,7 @@ interface BridgeApiService {
 
     /**
      * Obtain tokens. Two modes:
-     * - **Login**: send `username` + `password` to receive a 30-day `refresh_token`.
+     * - **Login**: send `username` + `password` to receive a 14-day `refresh_token`.
      * - **Refresh**: send `refresh_token` to receive a 1-hour `temporal_token`.
      */
     @POST("token")

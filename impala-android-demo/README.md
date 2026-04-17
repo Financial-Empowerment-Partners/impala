@@ -77,7 +77,7 @@ com.payala.impala.demo
 ### Username / Password
 1. User enters account ID and password
 2. `POST /authenticate` registers or verifies the credentials
-3. `POST /token` with username/password returns a 30-day refresh token
+3. `POST /token` with username/password returns a 14-day refresh token
 4. `POST /token` with refresh token returns a 1-hour temporal token
 5. Both tokens are stored in EncryptedSharedPreferences
 

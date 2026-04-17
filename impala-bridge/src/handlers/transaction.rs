@@ -6,6 +6,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::auth::AuthenticatedUser;
+use crate::constants::{RATE_LIMIT_MAX_REQUESTS, RATE_LIMIT_WINDOW_SECS};
 use crate::error::AppError;
 use crate::models::{CreateTransactionRequest, CreateTransactionResponse};
 use crate::notifications::{self, NotificationEvent};
@@ -15,6 +16,7 @@ use crate::telemetry::AppMetrics;
 pub async fn create_transaction(
     user: AuthenticatedUser,
     Extension(pool): Extension<PgPool>,
+    Extension(redis_pool): Extension<Arc<deadpool_redis::Pool>>,
     Extension(metrics): Extension<Arc<AppMetrics>>,
     sns_client: Option<Extension<Arc<aws_sdk_sns::Client>>>,
     sns_topic_arn: Option<Extension<Arc<String>>>,
@@ -24,6 +26,17 @@ pub async fn create_transaction(
         "POST /transaction: stellar_tx_id={:?} payala_tx_id={:?}",
         payload.stellar_tx_id, payload.payala_tx_id
     );
+
+    // Per-account rate limiting. Prevents a single compromised token from
+    // flooding the transaction table and the downstream notification fanout.
+    crate::redis_helpers::check_rate_limit(
+        &redis_pool,
+        "tx",
+        &user.account_id,
+        RATE_LIMIT_MAX_REQUESTS,
+        RATE_LIMIT_WINDOW_SECS,
+    )
+    .await?;
 
     if payload.stellar_tx_id.is_none() && payload.payala_tx_id.is_none() {
         warn!("create_transaction: neither stellar_tx_id nor payala_tx_id provided");

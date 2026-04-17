@@ -328,7 +328,7 @@ class LoginViewModel : ViewModel() {
 
     /**
      * Completes the two-step token exchange:
-     * 1. username/password -> refresh_token (30-day)
+     * 1. username/password -> refresh_token (14-day)
      * 2. refresh_token -> temporal_token (1-hour)
      */
     private suspend fun completeTokenFlow(

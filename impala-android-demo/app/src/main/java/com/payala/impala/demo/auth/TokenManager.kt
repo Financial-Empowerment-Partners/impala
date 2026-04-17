@@ -9,7 +9,7 @@ import androidx.security.crypto.MasterKeys
  * Secure token storage backed by [EncryptedSharedPreferences].
  *
  * Manages the two-tier JWT lifecycle used by impala-bridge:
- * - **Refresh token** – valid for 30 days, obtained via username/password login.
+ * - **Refresh token** – valid for 14 days, obtained via username/password login.
  * - **Temporal token** – valid for 1 hour, obtained by presenting the refresh token.
  *
  * Also stores auxiliary session data: account ID, auth provider name, and

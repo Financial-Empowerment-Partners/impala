@@ -6,7 +6,7 @@
 
 impala-bridge uses a two-token JWT approach:
 
-- **Refresh token** (30-day TTL): Issued via `POST /token` with username/password. Used only to obtain temporal tokens.
+- **Refresh token** (14-day TTL): Issued via `POST /token` with username/password. Used only to obtain temporal tokens.
 - **Temporal token** (1-hour TTL): Issued via `POST /token` with a valid refresh token. Used for all authenticated API calls.
 
 Both tokens use HS256 with a mandatory 32+ character secret (`JWT_SECRET`), include a unique JTI (JWT ID), and are validated for issuer (`impala-bridge`) and algorithm.

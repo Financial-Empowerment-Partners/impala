@@ -6,7 +6,7 @@
  * are cleared and the user is redirected to the login page.
  *
  * Token strategy:
- *  - refresh_token (30-day): obtained via username+password
+ *  - refresh_token (14-day): obtained via username+password
  *  - temporal_token (1-hour): obtained from refresh_token, used for API calls
  *
  * Features:
@@ -38,7 +38,7 @@ var API = (function () {
     /**
      * Store JWT tokens in localStorage.
      * @param {string|null} temporal - Temporal token (1-hour), or null to skip.
-     * @param {string|null} refresh  - Refresh token (30-day), or null to skip.
+     * @param {string|null} refresh  - Refresh token (14-day), or null to skip.
      */
     function setTokens(temporal, refresh) {
         if (temporal) localStorage.setItem('temporal_token', temporal);

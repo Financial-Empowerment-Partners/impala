@@ -40,7 +40,7 @@ All JS modules use the IIFE (Immediately Invoked Function Expression) pattern fo
 ### Authentication & Token Flow
 
 1. `POST /api/authenticate` — validate credentials (unauthenticated)
-2. `POST /api/token` — obtain 30-day refresh token (username + password)
+2. `POST /api/token` — obtain 14-day refresh token (username + password)
 3. `POST /api/token` — obtain 1-hour temporal token (refresh token)
 4. All subsequent requests use `Authorization: Bearer <temporal_token>`
 5. Automatic refresh on expiry or 401 → redirect to login

@@ -18,16 +18,19 @@ mod validate;
 mod vault;
 mod worker;
 
+use axum::error_handling::HandleErrorLayer;
 use axum::extract::Extension;
-use axum::http::{header, HeaderName, HeaderValue, Method};
+use axum::http::{header, HeaderName, HeaderValue, Method, StatusCode};
+use axum::response::IntoResponse;
 use axum::routing::{get, post, put};
-use axum::Router;
+use axum::{BoxError, Json, Router};
 use log::{debug, error, info, warn};
 use sqlx::postgres::PgPoolOptions;
 use std::env;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
+use tower::ServiceBuilder;
 use tower_http::compression::CompressionLayer;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::limit::RequestBodyLimitLayer;
@@ -101,12 +104,26 @@ async fn main() {
         env::var("DATABASE_URL").expect("Either DATABASE_URL or DATABASE_URL_WRAPPED must be set")
     };
 
-    // Create database connection pool with timeouts
+    // Create database connection pool with timeouts.
+    //
+    // `after_connect` sets a per-session `statement_timeout` so no single
+    // query can wedge a connection indefinitely. The value is deliberately
+    // larger than the global HTTP request timeout so fast endpoints time out
+    // at the HTTP layer first; the DB limit is the last-resort catch.
     let pool = PgPoolOptions::new()
         .max_connections(config.db_max_connections)
         .acquire_timeout(Duration::from_secs(constants::DB_ACQUIRE_TIMEOUT_SECS))
         .idle_timeout(Duration::from_secs(constants::DB_IDLE_TIMEOUT_SECS))
         .max_lifetime(Duration::from_secs(constants::DB_MAX_LIFETIME_SECS))
+        .after_connect(|conn, _meta| {
+            Box::pin(async move {
+                // 60_000 ms = 60s. Must exceed REQUEST_TIMEOUT_SECS.
+                sqlx::query("SET statement_timeout = 60000")
+                    .execute(conn)
+                    .await?;
+                Ok(())
+            })
+        })
         .connect(&database_url)
         .await
         .expect("Failed to connect to database");
@@ -309,6 +326,17 @@ async fn run_server(
         app
     };
 
+    // Global request timeout. Any request that exceeds REQUEST_TIMEOUT_SECS
+    // is aborted at the middleware boundary with HTTP 408. Combined with the
+    // per-session Postgres `statement_timeout` (set in the pool's
+    // `after_connect` hook), this bounds the time a single request can hold
+    // any connection. This layer is added outermost so it wraps every other
+    // layer below; it does not apply to long-lived background tasks.
+    let timeout_layer = ServiceBuilder::new()
+        .layer(HandleErrorLayer::new(handle_middleware_error))
+        .timeout(Duration::from_secs(constants::REQUEST_TIMEOUT_SECS));
+    let app = app.layer(timeout_layer);
+
     // Cancellation token for graceful background task shutdown
     let cancel = CancellationToken::new();
 
@@ -374,4 +402,46 @@ async fn shutdown_signal(cancel: CancellationToken) {
 
     // Signal background tasks to stop
     cancel.cancel();
+
+    // Graceful-shutdown drain deadline. Axum waits for in-flight requests
+    // to complete after shutdown_signal() returns; if that stalls (e.g. a
+    // downstream hang), this watchdog bounds the wait so the orchestrator
+    // doesn't have to SIGKILL us. The deadline is tuned to fit inside
+    // typical ECS/Kubernetes stop timeouts (30s default).
+    tokio::spawn(async {
+        tokio::time::sleep(Duration::from_secs(constants::SHUTDOWN_DRAIN_DEADLINE_SECS)).await;
+        warn!(
+            "Graceful shutdown exceeded {}s drain deadline — forcing exit",
+            constants::SHUTDOWN_DRAIN_DEADLINE_SECS
+        );
+        std::process::exit(0);
+    });
+}
+
+/// Error handler for middleware (timeout, etc.) emitting the same JSON shape
+/// as the rest of the API so clients can parse a single schema.
+async fn handle_middleware_error(err: BoxError) -> impl IntoResponse {
+    if err.is::<tower::timeout::error::Elapsed>() {
+        return (
+            StatusCode::REQUEST_TIMEOUT,
+            Json(serde_json::json!({
+                "error": {
+                    "code": "request_timeout",
+                    "message": "Request exceeded server timeout"
+                }
+            })),
+        )
+            .into_response();
+    }
+    error!("middleware error: {}", err);
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(serde_json::json!({
+            "error": {
+                "code": "internal_error",
+                "message": "Internal middleware error"
+            }
+        })),
+    )
+        .into_response()
 }

@@ -167,6 +167,18 @@ pub async fn verify_mfa(
         payload.mfa_type, payload.account_id
     );
 
+    // Per-(account, mfa_type) rate limiting in addition to the existing
+    // brute-force lockout check. Lockout engages at threshold; rate limiting
+    // caps burst traffic before the threshold is reached.
+    crate::redis_helpers::check_rate_limit(
+        &redis_pool,
+        "mfa",
+        &format!("{}:{}", payload.account_id, payload.mfa_type),
+        crate::constants::RATE_LIMIT_MAX_REQUESTS,
+        crate::constants::RATE_LIMIT_WINDOW_SECS,
+    )
+    .await?;
+
     // Brute force protection: check if account is locked out
     crate::redis_helpers::check_mfa_lockout(
         &redis_pool,

@@ -5,7 +5,14 @@ pub const MIN_PASSWORD_LENGTH: usize = 8;
 pub const MAX_NAME_LENGTH: usize = 64;
 
 /// Refresh token time-to-live: 14 days in seconds.
+///
+/// This value is the source of truth for the refresh-token lifetime. Any
+/// documentation (README, SECURITY.md, client SDK kdoc) that quotes a
+/// different duration is stale — update the docs, not this constant,
+/// unless you mean to change the actual TTL. The compile-time assert below
+/// prevents silent drift of the multiplier.
 pub const REFRESH_TOKEN_TTL_SECS: usize = 14 * 24 * 3600;
+const _: () = assert!(REFRESH_TOKEN_TTL_SECS == 1_209_600);
 
 /// Temporal token time-to-live: 1 hour in seconds.
 pub const TEMPORAL_TOKEN_TTL_SECS: usize = 3600;
@@ -27,6 +34,12 @@ pub const DEFAULT_REDIS_POOL_SIZE: usize = 16;
 
 /// Request timeout in seconds (applied globally via middleware).
 pub const REQUEST_TIMEOUT_SECS: u64 = 30;
+
+/// Maximum time (seconds) to wait for in-flight requests to drain after a
+/// SIGTERM / Ctrl-C. If exceeded the process force-exits so the container
+/// orchestrator doesn't have to SIGKILL us. Must fit inside the typical ECS
+/// / Kubernetes stop timeout (30s default), so keep this below 30.
+pub const SHUTDOWN_DRAIN_DEADLINE_SECS: u64 = 25;
 
 /// Rate limit: maximum requests per window.
 pub const RATE_LIMIT_MAX_REQUESTS: u64 = 10;

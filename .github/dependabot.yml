@@ -1,0 +1,92 @@
+version: 2
+updates:
+  # Rust — impala-bridge
+  - package-ecosystem: cargo
+    directory: /impala-bridge
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    labels: [dependencies, rust, bridge]
+
+  # Rust — soroban contracts (two crates, no workspace)
+  - package-ecosystem: cargo
+    directory: /impala-soroban/integration-test
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 3
+    labels: [dependencies, rust, soroban]
+
+  - package-ecosystem: cargo
+    directory: /impala-soroban/testnet-tests
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 3
+    labels: [dependencies, rust, soroban]
+
+  # Gradle — impala-card
+  - package-ecosystem: gradle
+    directory: /impala-card
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    labels: [dependencies, kotlin, card]
+
+  - package-ecosystem: gradle
+    directory: /impala-lib
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    labels: [dependencies, android, lib]
+
+  - package-ecosystem: gradle
+    directory: /impala-android-demo
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    labels: [dependencies, android, demo]
+
+  # npm — impala-ui (only if package.json lands as part of the test harness)
+  - package-ecosystem: npm
+    directory: /impala-ui
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    labels: [dependencies, javascript, ui]
+
+  # Docker base images
+  - package-ecosystem: docker
+    directory: /impala-bridge
+    schedule:
+      interval: weekly
+      day: monday
+    labels: [dependencies, docker]
+
+  - package-ecosystem: docker
+    directory: /impala-ui
+    schedule:
+      interval: weekly
+      day: monday
+    labels: [dependencies, docker]
+
+  # Terraform
+  - package-ecosystem: terraform
+    directory: /terraform
+    schedule:
+      interval: weekly
+      day: monday
+    labels: [dependencies, terraform]
+
+  # GitHub Actions
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    labels: [dependencies, ci]

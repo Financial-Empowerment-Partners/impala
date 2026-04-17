@@ -76,7 +76,13 @@ cargo test
 
 - **[ARCHITECTURE.md](ARCHITECTURE.md)** — System design, data flows, API reference, APDU command reference, smart contract interface, deployment topology, narrative use cases, and mermaid diagrams
 - **[CLAUDE.md](CLAUDE.md)** — Build commands, environment variables, conventions, and gotchas for all sub-projects
+- **[CONTRIBUTING.md](CONTRIBUTING.md)** — Local bootstrap, per-sub-project workflows, testing expectations, commit style
+- **[CHANGELOG.md](CHANGELOG.md)** — Notable changes (Keep-a-Changelog format)
+- **[impala-bridge/openapi.yaml](impala-bridge/openapi.yaml)** — OpenAPI 3.1 spec for all bridge REST endpoints
 - **[impala-bridge/SECURITY.md](impala-bridge/SECURITY.md)** — Security architecture: token strategy, brute-force protection, input validation, HTTP headers, infrastructure hardening, disaster recovery
+- **[terraform/README.md](terraform/README.md)** — Infrastructure: variables, deploy workflow, migrations, rollback
+- **[docs/runbooks/](docs/runbooks/)** — Operational runbooks: [deploy](docs/runbooks/deploy.md), [incident response](docs/runbooks/incident-response.md), [rotate secrets](docs/runbooks/rotate-secrets.md)
+- **[impala-card/docs/apdu.md](impala-card/docs/apdu.md)** — Smartcard APDU command reference (INS codes, response formats, auth requirements)
 
 ## Typical End-to-End Flows
 
