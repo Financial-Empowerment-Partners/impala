@@ -1,0 +1,216 @@
+# =============================================================================
+# CI for impala-card
+#
+# Builds and tests the Kotlin Multiplatform SDK and the JavaCard applet.
+#
+# Triggers:
+#   - Push to main (paths under impala-card/): test + build + publish
+#   - Pull request to main (paths under impala-card/): test + build only
+#   - Manual dispatch: full run
+#
+# Jobs:
+#   test-and-build  Required. JVM SDK tests + Ant CAP build, uploads CAP as
+#                   a workflow artifact.
+#   caprunner       Non-blocking. Runs the Python APDU emulator against the
+#                   built CAP. The emulator targets JavaCard <= 3.0.1 while
+#                   the applet targets 3.0.5, so cryptographic APDUs may
+#                   mismatch; failures do not fail the workflow.
+#   publish         main-branch only. Publishes the SDK (JVM + Android
+#                   variants) to GitHub Packages via the repo configured in
+#                   impala-card/sdk/build.gradle.kts, and uploads the CAP as
+#                   a long-retention artifact.
+#
+# No external secrets required for test-and-build or caprunner. The publish
+# job uses the built-in GITHUB_TOKEN with packages:write permission.
+# =============================================================================
+
+name: impala-card
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'impala-card/**'
+      - '.github/workflows/impala-card.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'impala-card/**'
+      - '.github/workflows/impala-card.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: impala-card-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # ===========================================================================
+  # Test + Build — SDK JVM tests, applet CAP build, CAP artifact upload
+  # ===========================================================================
+  test-and-build:
+    name: Test SDK + build CAP
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: impala-card
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-read-only: ${{ github.ref != 'refs/heads/main' }}
+
+      - name: SDK JVM tests
+        run: ./gradlew :sdk:jvmTest --no-daemon --stacktrace
+
+      - name: Build applet CAP
+        run: ./gradlew :applet:buildJavacard --no-daemon --stacktrace
+
+      - name: Upload CAP file
+        uses: actions/upload-artifact@v4
+        with:
+          name: ImpalaApplet-cap-${{ github.sha }}
+          path: impala-card/applet/build/ImpalaApplet.cap
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Upload test reports on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gradle-test-reports-${{ github.sha }}
+          path: |
+            impala-card/**/build/reports/tests/**
+            impala-card/**/build/test-results/**
+          if-no-files-found: ignore
+          retention-days: 14
+
+  # ===========================================================================
+  # CAPRunner — Python-based APDU emulation. Non-blocking.
+  #
+  # CAPRunner targets JavaCard <= 3.0.1 while the applet targets 3.0.5, so
+  # cryptographic APDUs (ECDSA-SHA256, secp256r1) may mismatch. Individual
+  # test scripts and the job itself are marked continue-on-error so these
+  # expected mismatches surface as warnings without blocking the PR.
+  # ===========================================================================
+  caprunner:
+    name: CAPRunner emulation
+    needs: test-and-build
+    runs-on: ubuntu-latest
+    continue-on-error: true
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-read-only: true
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Build applet CAP for emulator
+        working-directory: impala-card
+        run: ./gradlew :applet:buildJavacard --no-daemon
+
+      - name: Cache CAPRunner vendor + venv
+        uses: actions/cache@v4
+        with:
+          path: |
+            impala-card/caprunner/vendor
+            impala-card/caprunner/.venv
+            impala-card/caprunner/3.0.1.json
+            impala-card/caprunner/3.0.4.json
+            impala-card/caprunner/3.0.5.json
+          key: caprunner-${{ runner.os }}-${{ hashFiles('impala-card/caprunner/setup.sh') }}
+
+      - name: CAPRunner setup
+        working-directory: impala-card/caprunner
+        run: ./setup.sh
+
+      - name: Run test_basic.txt
+        working-directory: impala-card/caprunner
+        continue-on-error: true
+        run: ./test.sh scripts/test_basic.txt
+
+      - name: Run test_initialize.txt
+        working-directory: impala-card/caprunner
+        continue-on-error: true
+        run: ./test.sh scripts/test_initialize.txt
+
+      - name: Run test_pin.txt
+        working-directory: impala-card/caprunner
+        continue-on-error: true
+        run: ./test.sh scripts/test_pin.txt
+
+  # ===========================================================================
+  # Publish — SDK to GitHub Packages + long-retention CAP artifact.
+  # Main-branch push only.
+  # ===========================================================================
+  publish:
+    name: Publish SDK + CAP
+    needs: test-and-build
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    permissions:
+      contents: read
+      packages: write
+
+    defaults:
+      run:
+        working-directory: impala-card
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      # The sdk/build.gradle.kts publishing block uses PasswordCredentials
+      # for a repo named "githubPackages". Gradle resolves these from
+      # ORG_GRADLE_PROJECT_<name>Username / <name>Password env vars.
+      - name: Build CAP + publish SDK to GitHub Packages
+        env:
+          ORG_GRADLE_PROJECT_githubPackagesUsername: ${{ github.actor }}
+          ORG_GRADLE_PROJECT_githubPackagesPassword: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ./gradlew \
+            :applet:buildJavacard \
+            :sdk:publishAllPublicationsToGithubPackagesRepository \
+            --no-daemon --stacktrace
+
+      - name: Upload CAP file (long retention)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ImpalaApplet-cap-main-${{ github.sha }}
+          path: impala-card/applet/build/ImpalaApplet.cap
+          if-no-files-found: error
+          retention-days: 365
