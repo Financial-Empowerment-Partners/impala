@@ -29,6 +29,8 @@ name: impala-card
 on:
   push:
     branches: [main]
+    tags:
+      - 'impala-card-v*'
     paths:
       - 'impala-card/**'
       - '.github/workflows/impala-card.yml'
@@ -214,3 +216,63 @@ jobs:
           path: impala-card/applet/build/ImpalaApplet.cap
           if-no-files-found: error
           retention-days: 365
+
+  # ===========================================================================
+  # GitHub Release — tag-push only (impala-card-v*). Builds the CAP and
+  # assembles the SDK, bundles the SDK outputs (JVM jar + Android AARs) into
+  # a zip, and attaches everything to a GitHub Release named after the tag.
+  # ===========================================================================
+  release:
+    name: GitHub Release
+    needs: test-and-build
+    if: startsWith(github.ref, 'refs/tags/impala-card-v')
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+    defaults:
+      run:
+        working-directory: impala-card
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Build CAP + assemble SDK
+        run: ./gradlew :applet:buildJavacard :sdk:assemble --no-daemon --stacktrace
+
+      - name: Stage release assets
+        run: |
+          VERSION="${GITHUB_REF_NAME#impala-card-v}"
+          mkdir -p dist
+          cp applet/build/ImpalaApplet.cap "dist/ImpalaApplet-${VERSION}.cap"
+
+          SDK_STAGE="impala-sdk-${VERSION}"
+          mkdir -p "dist/${SDK_STAGE}"
+          find sdk/build/libs -name '*.jar' -exec cp {} "dist/${SDK_STAGE}/" \; 2>/dev/null || true
+          find sdk/build/outputs/aar -name '*.aar' -exec cp {} "dist/${SDK_STAGE}/" \; 2>/dev/null || true
+          (cd dist && zip -r "${SDK_STAGE}.zip" "${SDK_STAGE}" && rm -rf "${SDK_STAGE}")
+
+          (cd dist && sha256sum "ImpalaApplet-${VERSION}.cap" "${SDK_STAGE}.zip" > SHA256SUMS)
+          ls -la dist
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: impala-card ${{ github.ref_name }}
+          tag_name: ${{ github.ref_name }}
+          files: |
+            impala-card/dist/ImpalaApplet-*.cap
+            impala-card/dist/impala-sdk-*.zip
+            impala-card/dist/SHA256SUMS
+          generate_release_notes: true
+          fail_on_unmatched_files: true

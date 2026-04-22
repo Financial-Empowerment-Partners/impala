@@ -28,6 +28,8 @@ name: CI
 on:
   push:
     branches: [main]
+    tags:
+      - 'impala-bridge-v*'
     paths:
       - 'impala-bridge/**'
       - '.github/workflows/ci.yml'
@@ -310,3 +312,104 @@ jobs:
           TF_VAR_signoz_access_token: ${{ secrets.TF_VAR_signoz_access_token }}
           TF_VAR_testnet_jwt_secret: ${{ secrets.TF_VAR_testnet_jwt_secret }}
           TF_VAR_testnet_soroban_contract_id: ${{ secrets.TF_VAR_testnet_soroban_contract_id }}
+
+  # ===========================================================================
+  # Native binary — glibc Linux tarballs for the GitHub Release.
+  # Tag-push-only (impala-bridge-v*). Runs in parallel with the Docker build
+  # matrix; reuses the same amd64/arm64 runners.
+  # ===========================================================================
+  native-build:
+    name: Native binary (${{ matrix.platform }})
+    needs: test
+    if: startsWith(github.ref, 'refs/tags/impala-bridge-v')
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-amd64
+            runner: ubuntu-latest
+          - platform: linux-arm64
+            runner: ubuntu-24.04-arm
+
+    runs-on: ${{ matrix.runner }}
+
+    defaults:
+      run:
+        working-directory: impala-bridge
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry + build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            impala-bridge/target
+          key: ${{ runner.os }}-${{ matrix.platform }}-cargo-release-${{ hashFiles('impala-bridge/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-${{ matrix.platform }}-cargo-release-
+
+      - name: Build release binary
+        run: cargo build --release --locked
+
+      - name: Package tarball
+        run: |
+          VERSION="${GITHUB_REF_NAME#impala-bridge-v}"
+          STAGE="impala-bridge-${VERSION}-${{ matrix.platform }}"
+          mkdir -p "dist/${STAGE}"
+          cp target/release/impala-bridge "dist/${STAGE}/"
+          cp README.md "dist/${STAGE}/README.md"
+          cp ../LICENSE-2.0.txt "dist/${STAGE}/LICENSE-2.0.txt" 2>/dev/null || true
+          tar -czf "dist/${STAGE}.tar.gz" -C dist "${STAGE}"
+          (cd dist && sha256sum "${STAGE}.tar.gz" > "${STAGE}.tar.gz.sha256")
+          ls -la dist
+
+      - name: Upload tarball
+        uses: actions/upload-artifact@v4
+        with:
+          name: impala-bridge-${{ matrix.platform }}
+          path: |
+            impala-bridge/dist/impala-bridge-*.tar.gz
+            impala-bridge/dist/impala-bridge-*.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 14
+
+  # ===========================================================================
+  # GitHub Release — attach the per-arch tarballs to a release named after
+  # the tag. Tag-push-only.
+  # ===========================================================================
+  release:
+    name: GitHub Release
+    needs: native-build
+    if: startsWith(github.ref, 'refs/tags/impala-bridge-v')
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download tarball artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: impala-bridge-linux-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: List assets
+        run: ls -la release-assets
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: impala-bridge ${{ github.ref_name }}
+          tag_name: ${{ github.ref_name }}
+          files: |
+            release-assets/*.tar.gz
+            release-assets/*.tar.gz.sha256
+          generate_release_notes: true
+          fail_on_unmatched_files: true
