@@ -1,9 +1,9 @@
 [versions]
-android-compileSdk = "34"
+android-compileSdk = "36"
 android-minSdk = "30"
-android-targetSdk = "34"
-agp = "8.12.0-alpha06"
-kotlin = "2.2.10"
+android-targetSdk = "36"
+agp = "9.2.0"
+kotlin = "2.3.20"
 okio = "3.16.1"
 bignum = "0.3.10"
 datatypes = "3.6.0"

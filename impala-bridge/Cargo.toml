@@ -3,6 +3,44 @@ name = "impala-bridge"
 version = "0.0.0"
 edition = "2021"
 publish = false
+rust-version = "1.89"
+
+# =============================================================================
+# DEFERRED MAJOR UPGRADES — 2026-04
+#
+# The following dependency upgrades were scoped by the operator but not applied
+# because they require a local cargo build loop to iterate through compile
+# errors cascading across many source files. Once a build environment is
+# available, bump together and migrate the code accordingly:
+#
+#   axum               0.4 → 0.8     Handler/extractor API rewrite; State
+#                                    replaces Extension for typed state;
+#                                    headers feature moved to axum-extra.
+#   tower-http         0.3 → 0.6     CompressionLayer/TraceLayer largely stable
+#                                    but some middleware renamed.
+#   tower              0.4 → 0.5     tower-util removed.
+#   sqlx               0.6 → 0.8     Feature rename: runtime-tokio-rustls →
+#                                    runtime-tokio + tls-rustls. Offline macro
+#                                    data requires `cargo sqlx prepare`.
+#   redis              0.23 → 1.x    AsyncCommands signatures, connection
+#                                    ownership rewritten.
+#   deadpool-redis     0.13 → latest Match redis 1.x.
+#   reqwest            0.11 → 0.13   TLS feature flags, default features.
+#   jsonwebtoken       7.2 → 10.x    Full API rewrite: Algorithm, EncodingKey,
+#                                    DecodingKey, Validation setup.
+#   tracing-opentelemetry 0.25 → 0.32  Aligned with opentelemetry 0.31.
+#   opentelemetry      0.24 → 0.31   MeterProvider trait split.
+#   opentelemetry_sdk  0.24 → 0.31
+#   opentelemetry-otlp 0.17 → 0.31   Builder API rewrite
+#                                    (MetricsExporter::builder()...).
+#   ldap3              0.11 → 0.12
+#   totp-rs            5.6 → 5.7
+#   syslog             6.1 → 7.x
+#
+# The crates below with loose version strings (e.g. "1", "0.4") will pick up
+# patch updates automatically on `cargo update`; the pins above are the ones
+# that deliberately hold at an older major.
+# =============================================================================
 
 [dependencies]
 axum = { version = "0.4", features = ["headers"] }

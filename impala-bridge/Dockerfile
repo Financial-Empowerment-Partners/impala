@@ -11,7 +11,7 @@
 # --- Builder stage ---
 # Uses the native platform for the builder when cross-compiling via buildx.
 # For arm64 targets on x86 hosts, QEMU emulation handles the Rust compilation.
-FROM --platform=$BUILDPLATFORM rust:1.83-slim AS planner
+FROM --platform=$BUILDPLATFORM rust:1.90-slim AS planner
 
 WORKDIR /app
 RUN apt-get update && apt-get install -y pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
@@ -24,7 +24,7 @@ COPY migrations/ migrations/
 # This layer is cached as long as Cargo.toml/Cargo.lock don't change
 RUN cargo fetch
 
-FROM rust:1.83-slim AS builder
+FROM rust:1.90-slim AS builder
 
 ARG TARGETARCH
 
