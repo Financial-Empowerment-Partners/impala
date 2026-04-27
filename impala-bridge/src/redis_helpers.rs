@@ -37,7 +37,7 @@ pub async fn check_rate_limit(
         AppError::InternalError("Service temporarily unavailable".to_string())
     })?;
 
-    let _: () = conn.expire(&key, window_secs).await.map_err(|e| {
+    let _: () = conn.expire(&key, window_secs as i64).await.map_err(|e| {
         warn!("check_rate_limit: Redis EXPIRE failed for {}: {}", key, e);
         AppError::InternalError("Service temporarily unavailable".to_string())
     })?;
@@ -91,7 +91,7 @@ pub async fn increment_lockout(pool: &RedisPool, id: &str, ttl_secs: usize) {
         return;
     }
 
-    if let Err(e) = conn.expire::<_, ()>(&key, ttl_secs).await {
+    if let Err(e) = conn.expire::<_, ()>(&key, ttl_secs as i64).await {
         warn!("increment_lockout: Redis EXPIRE failed for {}: {}", key, e);
     }
 }
@@ -146,7 +146,7 @@ pub async fn revoke_token(pool: &RedisPool, jti: &str, ttl_secs: usize) {
 
     let key = format!("impala:revoked:{jti}");
 
-    if let Err(e) = conn.set_ex::<_, &str, ()>(&key, "1", ttl_secs).await {
+    if let Err(e) = conn.set_ex::<_, &str, ()>(&key, "1", ttl_secs as u64).await {
         warn!("revoke_token: Redis SET_EX failed for {}: {}", key, e);
     }
 }
@@ -207,7 +207,7 @@ pub async fn increment_mfa_attempts(
         return;
     }
 
-    if let Err(e) = conn.expire::<_, ()>(&key, ttl_secs).await {
+    if let Err(e) = conn.expire::<_, ()>(&key, ttl_secs as i64).await {
         warn!(
             "increment_mfa_attempts: Redis EXPIRE failed for {}: {}",
             key, e

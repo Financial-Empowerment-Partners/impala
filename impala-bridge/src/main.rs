@@ -310,11 +310,13 @@ async fn run_server(
 
     // Run server with graceful shutdown
     info!("Server listening on {}", config.service_address);
-    let server = axum::Server::bind(&config.service_address.parse().expect("Invalid SERVICE_ADDRESS format"))
-        .serve(app.into_make_service())
-        .with_graceful_shutdown(shutdown_signal(cancel));
-
-    if let Err(e) = server.await {
+    let listener = tokio::net::TcpListener::bind(&config.service_address)
+        .await
+        .expect("Failed to bind SERVICE_ADDRESS");
+    if let Err(e) = axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal(cancel))
+        .await
+    {
         error!("Server error: {}", e);
     }
 

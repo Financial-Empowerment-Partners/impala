@@ -1,10 +1,5 @@
-*.iml
-.gradle
+# Module-scoped redundancy: everything here is also covered by the repo-root
+# .gitignore. Kept for IDE clarity (Android Studio prefers a per-module file).
+/build/
+/captures/
 /local.properties
-/.idea
-.DS_Store
-/build
-/captures
-.externalNativeBuild
-.cxx
-local.properties

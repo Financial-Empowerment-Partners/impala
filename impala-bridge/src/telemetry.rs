@@ -50,66 +50,66 @@ impl AppMetrics {
             http_request_duration: meter
                 .f64_histogram("http.server.request.duration")
                 .with_description("HTTP request duration in seconds")
-                .init(),
+                .build(),
             http_active_requests: meter
                 .i64_up_down_counter("http.server.active_requests")
                 .with_description("Number of in-flight HTTP requests")
-                .init(),
+                .build(),
 
             auth_attempts: meter
                 .u64_counter("auth.attempts")
                 .with_description("Authentication attempts by outcome")
-                .init(),
+                .build(),
 
             transactions_created: meter
                 .u64_counter("transaction.created")
                 .with_description("Transactions created")
-                .init(),
+                .build(),
 
             mfa_enrollments: meter
                 .u64_counter("mfa.enrollment")
                 .with_description("MFA enrollment attempts by type and outcome")
-                .init(),
+                .build(),
             mfa_verifications: meter
                 .u64_counter("mfa.verification")
                 .with_description("MFA verification attempts by type and outcome")
-                .init(),
+                .build(),
 
             notifications_dispatched: meter
                 .u64_counter("notification.dispatched")
                 .with_description("Notification events dispatched by event type and medium")
-                .init(),
+                .build(),
             notifications_delivered: meter
                 .u64_counter("notification.delivered")
                 .with_description("Notifications delivered by medium and outcome")
-                .init(),
+                .build(),
             notification_delivery_duration: meter
                 .f64_histogram("notification.delivery.duration")
                 .with_description("Notification delivery duration in seconds")
-                .init(),
+                .build(),
 
             jobs_processed: meter
                 .u64_counter("worker.job.processed")
                 .with_description("Background jobs processed by type and outcome")
-                .init(),
+                .build(),
             job_duration: meter
                 .f64_histogram("worker.job.duration")
                 .with_description("Background job processing duration in seconds")
-                .init(),
+                .build(),
             jobs_active: meter
                 .i64_up_down_counter("worker.job.active")
                 .with_description("Currently in-flight background jobs")
-                .init(),
+                .build(),
 
             stellar_reconcile_txns: meter
                 .u64_counter("stellar.reconcile.transactions")
                 .with_description("Stellar reconciliation transaction match outcomes")
-                .init(),
+                .build(),
 
             batch_sync_accounts: meter
                 .u64_counter("batch_sync.accounts")
                 .with_description("Batch sync account outcomes")
-                .init(),
+                .build(),
         }
     }
 }
@@ -130,55 +130,56 @@ pub fn init_otel(config: &Config) -> bool {
     let service_name = config
         .otel_service_name
         .as_deref()
-        .unwrap_or("impala-bridge");
+        .unwrap_or("impala-bridge")
+        .to_string();
 
     let run_mode = std::env::var("RUN_MODE").unwrap_or_else(|_| "server".to_string());
 
-    let resource = Resource::new(vec![
-        KeyValue::new("service.name", service_name.to_string()),
-        KeyValue::new("service.version", env!("CARGO_PKG_VERSION").to_string()),
-        KeyValue::new(
-            "deployment.environment",
-            config
-                .otel_environment
-                .as_deref()
-                .unwrap_or("staging")
-                .to_string(),
-        ),
-        KeyValue::new(
-            "service.instance.id",
-            format!("{}-{}", run_mode, uuid::Uuid::new_v4()),
-        ),
-    ]);
+    let resource = Resource::builder()
+        .with_attributes(vec![
+            KeyValue::new("service.name", service_name),
+            KeyValue::new("service.version", env!("CARGO_PKG_VERSION").to_string()),
+            KeyValue::new(
+                "deployment.environment",
+                config
+                    .otel_environment
+                    .as_deref()
+                    .unwrap_or("staging")
+                    .to_string(),
+            ),
+            KeyValue::new(
+                "service.instance.id",
+                format!("{}-{}", run_mode, uuid::Uuid::new_v4()),
+            ),
+        ])
+        .build();
 
-    // OTLP trace pipeline
-    let tracer_provider = opentelemetry_otlp::new_pipeline()
-        .tracing()
-        .with_exporter(
-            opentelemetry_otlp::new_exporter()
-                .tonic()
-                .with_endpoint(&endpoint),
-        )
-        .with_trace_config(
-            opentelemetry_sdk::trace::Config::default().with_resource(resource.clone()),
-        )
-        .install_batch(opentelemetry_sdk::runtime::Tokio)
-        .expect("Failed to initialize OTLP trace pipeline");
+    // OTLP trace exporter + provider
+    let span_exporter = opentelemetry_otlp::SpanExporter::builder()
+        .with_tonic()
+        .with_endpoint(&endpoint)
+        .build()
+        .expect("Failed to build OTLP span exporter");
+
+    let tracer_provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
+        .with_batch_exporter(span_exporter)
+        .with_resource(resource.clone())
+        .build();
 
     let tracer = tracer_provider.tracer("impala-bridge");
     opentelemetry::global::set_tracer_provider(tracer_provider);
 
-    // OTLP metrics pipeline
-    let meter_provider = opentelemetry_otlp::new_pipeline()
-        .metrics(opentelemetry_sdk::runtime::Tokio)
-        .with_exporter(
-            opentelemetry_otlp::new_exporter()
-                .tonic()
-                .with_endpoint(&endpoint),
-        )
-        .with_resource(resource)
+    // OTLP metrics exporter + provider
+    let metric_exporter = opentelemetry_otlp::MetricExporter::builder()
+        .with_tonic()
+        .with_endpoint(&endpoint)
         .build()
-        .expect("Failed to initialize OTLP metrics pipeline");
+        .expect("Failed to build OTLP metric exporter");
+
+    let meter_provider = opentelemetry_sdk::metrics::SdkMeterProvider::builder()
+        .with_periodic_exporter(metric_exporter)
+        .with_resource(resource)
+        .build();
 
     opentelemetry::global::set_meter_provider(meter_provider);
 
@@ -211,7 +212,12 @@ pub fn create_metrics() -> Arc<AppMetrics> {
     Arc::new(AppMetrics::new(meter))
 }
 
-/// Flush and shut down OpenTelemetry trace and metrics providers.
+/// Flush and shut down OpenTelemetry providers.
+///
+/// In OpenTelemetry 0.31 the global `shutdown_tracer_provider` helper was
+/// removed; shutdown is performed on the provider directly. The bridge does
+/// not currently retain a handle to the provider it installs, so the global
+/// shutdown is a no-op (the providers will be dropped on process exit).
 pub fn shutdown_otel() {
-    opentelemetry::global::shutdown_tracer_provider();
+    // Intentionally empty — see doc comment above.
 }

@@ -309,11 +309,14 @@ fn try_validate_with_jwks(
             AppError::Unauthorized
         })?;
 
-    let decoding_key =
-        jsonwebtoken::DecodingKey::from_rsa_components(&jwk.n, &jwk.e);
+    let decoding_key = jsonwebtoken::DecodingKey::from_rsa_components(&jwk.n, &jwk.e)
+        .map_err(|e| {
+            warn!("okta: failed to construct decoding key: {}", e);
+            AppError::Unauthorized
+        })?;
 
     let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::RS256);
-    validation.iss = Some(provider.issuer_url.clone());
+    validation.set_issuer(&[provider.issuer_url.as_str()]);
     validation.set_audience(&[&provider.client_id]);
 
     let token_data = jsonwebtoken::decode::<OktaAccessTokenClaims>(

@@ -71,7 +71,10 @@ public class NfcContactActivity extends Activity {
             isoDep.connect();
 
             IsoDepBibo bibo = new IsoDepBibo(isoDep);
-            ImpalaSDK sdk = new ImpalaSDK(bibo);
+            // Pass null for scp03Keys; SCP03 channel only needed for provisioning APDUs.
+            // Default-parameter aware Kotlin constructors aren't visible to Java callers
+            // unless annotated @JvmOverloads, so we have to pass the second arg explicitly.
+            ImpalaSDK sdk = new ImpalaSDK(bibo, null);
 
             // Use the tag ID from the intent, falling back to tag.getId()
             byte[] tagId = intent.getByteArrayExtra(NfcAdapter.EXTRA_ID);

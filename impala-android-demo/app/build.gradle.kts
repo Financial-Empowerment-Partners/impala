@@ -1,4 +1,5 @@
 import java.util.Properties
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
     id("com.android.application")
@@ -63,8 +64,11 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
-    kotlinOptions {
-        jvmTarget = "17"
+}
+
+kotlin {
+    compilerOptions {
+        jvmTarget.set(JvmTarget.JVM_17)
     }
 }
 
@@ -97,8 +101,8 @@ dependencies {
     implementation("androidx.security:security-crypto:1.1.0-alpha06")
 
     // Google Sign-In via Credential Manager
-    implementation("androidx.credentials:credentials:1.4.0")
-    implementation("androidx.credentials:credentials-play-services-auth:1.4.0")
+    implementation("androidx.credentials:credentials:1.5.0")
+    implementation("androidx.credentials:credentials-play-services-auth:1.5.0")
     implementation("com.google.android.libraries.identity.googleid:googleid:1.1.1")
 
     // Custom Tabs for GitHub OAuth

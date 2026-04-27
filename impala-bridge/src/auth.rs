@@ -1,7 +1,8 @@
 use crate::constants::{JWT_ISSUER, TOKEN_TYPE_TEMPORAL};
 use crate::error::AppError;
 use crate::models::Claims;
-use axum::extract::{Extension, FromRequest, RequestParts};
+use axum::extract::{Extension, FromRequestParts};
+use axum::http::request::Parts;
 use jsonwebtoken::{decode, DecodingKey, Validation};
 use std::sync::Arc;
 
@@ -20,22 +21,24 @@ pub fn require_owner(user: &AuthenticatedUser, account_id: &str) -> Result<(), A
     Ok(())
 }
 
-#[axum::async_trait]
-impl<B> FromRequest<B> for AuthenticatedUser
+impl<S> FromRequestParts<S> for AuthenticatedUser
 where
-    B: Send,
+    S: Send + Sync,
 {
     type Rejection = AppError;
 
-    async fn from_request(req: &mut RequestParts<B>) -> Result<Self, Self::Rejection> {
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
         // Extract the JWT secret from extensions
-        let Extension(jwt_secret) = Extension::<Arc<String>>::from_request(req)
-            .await
-            .map_err(|_| AppError::InternalError("JWT secret not configured".to_string()))?;
+        let Extension(jwt_secret) =
+            Extension::<Arc<String>>::from_request_parts(parts, state)
+                .await
+                .map_err(|_| {
+                    AppError::InternalError("JWT secret not configured".to_string())
+                })?;
 
         // Extract Authorization header
-        let headers = req.headers().ok_or(AppError::Unauthorized)?;
-        let auth_header = headers
+        let auth_header = parts
+            .headers
             .get("Authorization")
             .and_then(|v| v.to_str().ok())
             .ok_or(AppError::Unauthorized)?;
@@ -47,7 +50,7 @@ where
 
         // Decode and validate the JWT with explicit HS256 and issuer check
         let mut validation = Validation::new(jsonwebtoken::Algorithm::HS256);
-        validation.iss = Some(JWT_ISSUER.to_string());
+        validation.set_issuer(&[JWT_ISSUER]);
 
         let token_data = decode::<Claims>(
             token,
@@ -62,9 +65,10 @@ where
         }
 
         // Check if token has been revoked (via /logout)
-        let Extension(redis_pool) = Extension::<Arc<deadpool_redis::Pool>>::from_request(req)
-            .await
-            .map_err(|_| AppError::Unauthorized)?;
+        let Extension(redis_pool) =
+            Extension::<Arc<deadpool_redis::Pool>>::from_request_parts(parts, state)
+                .await
+                .map_err(|_| AppError::Unauthorized)?;
 
         if crate::redis_helpers::is_token_revoked(&redis_pool, &token_data.claims.jti).await? {
             return Err(AppError::Unauthorized);
@@ -104,7 +108,7 @@ mod tests {
         .expect("Failed to encode JWT");
 
         let mut validation = Validation::new(jsonwebtoken::Algorithm::HS256);
-        validation.iss = Some(JWT_ISSUER.to_string());
+        validation.set_issuer(&[JWT_ISSUER]);
 
         let decoded = decode::<Claims>(
             &token,
@@ -139,7 +143,7 @@ mod tests {
         .expect("Failed to encode JWT");
 
         let mut validation = Validation::new(jsonwebtoken::Algorithm::HS256);
-        validation.iss = Some(JWT_ISSUER.to_string());
+        validation.set_issuer(&[JWT_ISSUER]);
 
         let decoded = decode::<Claims>(
             &token,
@@ -171,7 +175,7 @@ mod tests {
         .expect("Failed to encode JWT");
 
         let mut validation = Validation::new(jsonwebtoken::Algorithm::HS256);
-        validation.iss = Some(JWT_ISSUER.to_string());
+        validation.set_issuer(&[JWT_ISSUER]);
 
         let result = decode::<Claims>(
             &token,
@@ -202,7 +206,7 @@ mod tests {
         .expect("Failed to encode JWT");
 
         let mut validation = Validation::new(jsonwebtoken::Algorithm::HS256);
-        validation.iss = Some(JWT_ISSUER.to_string());
+        validation.set_issuer(&[JWT_ISSUER]);
 
         let result = decode::<Claims>(
             &token,
@@ -233,7 +237,7 @@ mod tests {
         .expect("Failed to encode JWT");
 
         let mut validation = Validation::new(jsonwebtoken::Algorithm::HS256);
-        validation.iss = Some(JWT_ISSUER.to_string());
+        validation.set_issuer(&[JWT_ISSUER]);
 
         let result = decode::<Claims>(
             &token,

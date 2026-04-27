@@ -93,7 +93,7 @@ mod tests {
             encode_token_pair(TEST_SECRET, "bob").expect("token pair should succeed");
 
         let mut validation = Validation::new(jsonwebtoken::Algorithm::HS256);
-        validation.iss = Some(JWT_ISSUER.to_string());
+        validation.set_issuer(&[JWT_ISSUER]);
 
         let refresh_data = decode::<Claims>(
             &refresh,
@@ -119,7 +119,7 @@ mod tests {
             encode_token_pair(TEST_SECRET, "carol").expect("token pair should succeed");
 
         let mut validation = Validation::new(jsonwebtoken::Algorithm::HS256);
-        validation.iss = Some(JWT_ISSUER.to_string());
+        validation.set_issuer(&[JWT_ISSUER]);
 
         let refresh_claims = decode::<Claims>(
             &refresh,

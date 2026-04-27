@@ -29,7 +29,7 @@ pub async fn token(
     // Flow 1: refresh_token provided -> return a short-lived temporal_token
     if let Some(ref refresh_token) = payload.refresh_token {
         let mut validation = Validation::new(jsonwebtoken::Algorithm::HS256);
-        validation.iss = Some(JWT_ISSUER.to_string());
+        validation.set_issuer(&[JWT_ISSUER]);
 
         let token_data = decode::<Claims>(
             refresh_token,

@@ -1,7 +1,8 @@
-use axum::extract::{Extension, TypedHeader};
+use axum::extract::Extension;
 use axum::Json;
-use headers::authorization::Bearer;
-use headers::Authorization;
+use axum_extra::headers::authorization::Bearer;
+use axum_extra::headers::Authorization;
+use axum_extra::TypedHeader;
 use jsonwebtoken::{decode, DecodingKey, Validation};
 use log::info;
 use serde::Serialize;
@@ -30,7 +31,7 @@ pub async fn logout(
 
     // Decode the token (validates signature and expiry)
     let mut validation = Validation::new(jsonwebtoken::Algorithm::HS256);
-    validation.iss = Some(JWT_ISSUER.to_string());
+    validation.set_issuer(&[JWT_ISSUER]);
 
     let token_data = decode::<Claims>(
         token,
