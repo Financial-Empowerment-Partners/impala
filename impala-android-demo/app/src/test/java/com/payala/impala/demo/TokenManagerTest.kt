@@ -11,7 +11,7 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [28], manifest = Config.NONE)
+@Config(sdk = [24, 36], manifest = Config.NONE)
 class TokenManagerTest {
 
     private lateinit var tokenManager: TokenManager
