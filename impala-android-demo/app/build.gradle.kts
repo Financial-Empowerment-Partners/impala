@@ -25,23 +25,6 @@ android {
         versionName = "1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-
-        buildConfigField("String", "BRIDGE_BASE_URL",
-            "\"${localProperties.getProperty("BRIDGE_BASE_URL", "http://10.0.2.2:8080")}\"")
-        buildConfigField("String", "GITHUB_CLIENT_ID",
-            "\"${localProperties.getProperty("GITHUB_CLIENT_ID", "YOUR_GITHUB_CLIENT_ID")}\"")
-        buildConfigField("String", "GITHUB_CLIENT_SECRET",
-            "\"${localProperties.getProperty("GITHUB_CLIENT_SECRET", "YOUR_GITHUB_CLIENT_SECRET")}\"")
-        buildConfigField("String", "GITHUB_REDIRECT_URI",
-            "\"${localProperties.getProperty("GITHUB_REDIRECT_URI", "impala://github-callback")}\"")
-        buildConfigField("String", "GOOGLE_WEB_CLIENT_ID",
-            "\"${localProperties.getProperty("GOOGLE_WEB_CLIENT_ID", "YOUR_GOOGLE_WEB_CLIENT_ID")}\"")
-        buildConfigField("String", "OKTA_ISSUER_URL",
-            "\"${localProperties.getProperty("OKTA_ISSUER_URL", "")}\"")
-        buildConfigField("String", "OKTA_CLIENT_ID",
-            "\"${localProperties.getProperty("OKTA_CLIENT_ID", "")}\"")
-        buildConfigField("String", "OKTA_REDIRECT_URI",
-            "\"${localProperties.getProperty("OKTA_REDIRECT_URI", "impala://okta-callback")}\"")
     }
 
     buildTypes {
@@ -51,6 +34,54 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+        }
+    }
+
+    flavorDimensions += "network"
+    productFlavors {
+        create("testnet") {
+            dimension = "network"
+            applicationIdSuffix = ".testnet"
+            versionNameSuffix = "-testnet"
+
+            buildConfigField("String", "STELLAR_NETWORK", "\"testnet\"")
+            buildConfigField("String", "BRIDGE_BASE_URL",
+                "\"${localProperties.getProperty("TESTNET_BRIDGE_BASE_URL", "http://10.0.2.2:8080")}\"")
+            buildConfigField("String", "GITHUB_CLIENT_ID",
+                "\"${localProperties.getProperty("TESTNET_GITHUB_CLIENT_ID", "YOUR_GITHUB_CLIENT_ID")}\"")
+            buildConfigField("String", "GITHUB_CLIENT_SECRET",
+                "\"${localProperties.getProperty("TESTNET_GITHUB_CLIENT_SECRET", "YOUR_GITHUB_CLIENT_SECRET")}\"")
+            buildConfigField("String", "GITHUB_REDIRECT_URI",
+                "\"${localProperties.getProperty("TESTNET_GITHUB_REDIRECT_URI", "impala://github-callback")}\"")
+            buildConfigField("String", "GOOGLE_WEB_CLIENT_ID",
+                "\"${localProperties.getProperty("TESTNET_GOOGLE_WEB_CLIENT_ID", "YOUR_GOOGLE_WEB_CLIENT_ID")}\"")
+            buildConfigField("String", "OKTA_ISSUER_URL",
+                "\"${localProperties.getProperty("TESTNET_OKTA_ISSUER_URL", "")}\"")
+            buildConfigField("String", "OKTA_CLIENT_ID",
+                "\"${localProperties.getProperty("TESTNET_OKTA_CLIENT_ID", "")}\"")
+            buildConfigField("String", "OKTA_REDIRECT_URI",
+                "\"${localProperties.getProperty("TESTNET_OKTA_REDIRECT_URI", "impala://okta-callback")}\"")
+        }
+        create("live") {
+            dimension = "network"
+
+            buildConfigField("String", "STELLAR_NETWORK", "\"pubnet\"")
+            buildConfigField("String", "BRIDGE_BASE_URL",
+                "\"${localProperties.getProperty("LIVE_BRIDGE_BASE_URL", "https://api.impala.example.com")}\"")
+            buildConfigField("String", "GITHUB_CLIENT_ID",
+                "\"${localProperties.getProperty("LIVE_GITHUB_CLIENT_ID", "YOUR_GITHUB_CLIENT_ID")}\"")
+            buildConfigField("String", "GITHUB_CLIENT_SECRET",
+                "\"${localProperties.getProperty("LIVE_GITHUB_CLIENT_SECRET", "YOUR_GITHUB_CLIENT_SECRET")}\"")
+            buildConfigField("String", "GITHUB_REDIRECT_URI",
+                "\"${localProperties.getProperty("LIVE_GITHUB_REDIRECT_URI", "impala://github-callback")}\"")
+            buildConfigField("String", "GOOGLE_WEB_CLIENT_ID",
+                "\"${localProperties.getProperty("LIVE_GOOGLE_WEB_CLIENT_ID", "YOUR_GOOGLE_WEB_CLIENT_ID")}\"")
+            buildConfigField("String", "OKTA_ISSUER_URL",
+                "\"${localProperties.getProperty("LIVE_OKTA_ISSUER_URL", "")}\"")
+            buildConfigField("String", "OKTA_CLIENT_ID",
+                "\"${localProperties.getProperty("LIVE_OKTA_CLIENT_ID", "")}\"")
+            buildConfigField("String", "OKTA_REDIRECT_URI",
+                "\"${localProperties.getProperty("LIVE_OKTA_REDIRECT_URI", "impala://okta-callback")}\"")
         }
     }
 

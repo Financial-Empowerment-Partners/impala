@@ -9,17 +9,17 @@
 #   - Manual workflow_dispatch.
 #
 # Jobs:
-#   unit-tests          JVM unit tests for both projects. Robolectric runs
-#                       SDK-sensitive test classes twice via @Config(sdk = [24, 36])
-#                       — covering the projects' minSdk and targetSdk in a
-#                       single Gradle invocation.
-#   assemble            assembleDebug for both projects. Uploads the demo APK
-#                       and the lib AAR as workflow artifacts.
-#   instrumented-tests  Matrix on api-level [24, 36]. Boots an x86_64 emulator
-#                       via reactivecircus/android-emulator-runner and runs
-#                       connectedDebugAndroidTest for both projects. AVD images
-#                       are cached per (api-level, target) to keep subsequent
-#                       runs fast.
+#   unit-tests          JVM unit tests. Demo runs both flavors
+#                       (testTestnetDebugUnitTest, testLiveDebugUnitTest); lib
+#                       is flavor-agnostic. Robolectric covers minSdk + targetSdk
+#                       in a single invocation via @Config(sdk = [24, 36]).
+#   assemble            assembleTestnetDebug + assembleLiveDebug for the demo
+#                       (two APKs uploaded as separate artifacts) and
+#                       assembleDebug for the lib (single AAR).
+#   instrumented-tests  Matrix on api-level [24, 36]. Runs the testnet flavor's
+#                       connectedTestnetDebugAndroidTest (live flavor exercises
+#                       the same code paths and would just double emulator boot
+#                       time). lib's instrumented tests also run.
 #
 # No external secrets required.
 # =============================================================================
@@ -72,9 +72,9 @@ jobs:
         with:
           cache-read-only: ${{ github.ref != 'refs/heads/main' }}
 
-      - name: impala-android-demo unit tests
+      - name: impala-android-demo unit tests (testnet + live flavors)
         working-directory: impala-android-demo
-        run: ./gradlew testDebugUnitTest --no-daemon --stacktrace
+        run: ./gradlew testTestnetDebugUnitTest testLiveDebugUnitTest --no-daemon --stacktrace
 
       - name: impala-lib unit tests
         working-directory: impala-lib
@@ -114,19 +114,27 @@ jobs:
         with:
           cache-read-only: ${{ github.ref != 'refs/heads/main' }}
 
-      - name: Assemble demo APK
+      - name: Assemble demo APKs (testnet + live)
         working-directory: impala-android-demo
-        run: ./gradlew assembleDebug --no-daemon --stacktrace
+        run: ./gradlew assembleTestnetDebug assembleLiveDebug --no-daemon --stacktrace
 
       - name: Assemble lib AAR
         working-directory: impala-lib
         run: ./gradlew assembleDebug --no-daemon --stacktrace
 
-      - name: Upload demo APK
+      - name: Upload testnet demo APK
         uses: actions/upload-artifact@v4
         with:
-          name: impala-android-demo-debug-${{ github.sha }}
-          path: impala-android-demo/app/build/outputs/apk/debug/*.apk
+          name: impala-android-demo-testnet-debug-${{ github.sha }}
+          path: impala-android-demo/app/build/outputs/apk/testnet/debug/*.apk
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Upload live demo APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: impala-android-demo-live-debug-${{ github.sha }}
+          path: impala-android-demo/app/build/outputs/apk/live/debug/*.apk
           if-no-files-found: error
           retention-days: 90
 
@@ -210,7 +218,7 @@ jobs:
           emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
           disable-animations: true
           script: |
-            cd impala-android-demo && ./gradlew connectedDebugAndroidTest --no-daemon --stacktrace
+            cd impala-android-demo && ./gradlew connectedTestnetDebugAndroidTest --no-daemon --stacktrace
             cd ../impala-lib && ./gradlew connectedDebugAndroidTest --no-daemon --stacktrace
 
       - name: Upload instrumented test reports on failure

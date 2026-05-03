@@ -16,11 +16,15 @@
 #                            OR AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY
 #
 # Optional Secrets (for Terraform deploy):
-#   TF_VAR_jwt_secret      - JWT signing secret
-#   TF_VAR_signoz_endpoint - SigNoz OTLP endpoint
-#   TF_VAR_signoz_access_token - SigNoz access token
-#   TF_VAR_testnet_jwt_secret  - JWT secret for testnet cluster
-#   TF_VAR_testnet_soroban_contract_id - Soroban contract on testnet
+#   TF_VAR_testnet_jwt_secret           - JWT secret for testnet cluster
+#   TF_VAR_testnet_soroban_contract_id  - Soroban contract on testnet
+#   TF_VAR_testnet_certificate_arn      - ACM cert ARN for testnet HTTPS (optional)
+#   TF_VAR_live_jwt_secret              - JWT secret for live cluster
+#   TF_VAR_live_certificate_arn         - ACM cert ARN for live HTTPS (optional)
+#
+# Optional Repository Variables (vars, not secrets):
+#   TESTNET_ENABLED  - "true" to enable testnet stack (default false)
+#   LIVE_ENABLED     - "true" to enable live stack (default false)
 # =============================================================================
 
 name: CI
@@ -292,14 +296,16 @@ jobs:
           terraform plan \
             -var="container_image_tag=${{ github.sha }}" \
             -var="environment=${{ github.event.inputs.environment || 'staging' }}" \
+            -var="testnet_enabled=${{ vars.TESTNET_ENABLED || 'false' }}" \
+            -var="live_enabled=${{ vars.LIVE_ENABLED || 'false' }}" \
             -out=tfplan \
             -no-color
         env:
-          TF_VAR_jwt_secret: ${{ secrets.TF_VAR_jwt_secret }}
-          TF_VAR_signoz_endpoint: ${{ secrets.TF_VAR_signoz_endpoint }}
-          TF_VAR_signoz_access_token: ${{ secrets.TF_VAR_signoz_access_token }}
           TF_VAR_testnet_jwt_secret: ${{ secrets.TF_VAR_testnet_jwt_secret }}
           TF_VAR_testnet_soroban_contract_id: ${{ secrets.TF_VAR_testnet_soroban_contract_id }}
+          TF_VAR_testnet_certificate_arn: ${{ secrets.TF_VAR_testnet_certificate_arn }}
+          TF_VAR_live_jwt_secret: ${{ secrets.TF_VAR_live_jwt_secret }}
+          TF_VAR_live_certificate_arn: ${{ secrets.TF_VAR_live_certificate_arn }}
 
       - name: Terraform Apply
         if: >
@@ -307,11 +313,11 @@ jobs:
           (github.event_name == 'push' && github.ref == 'refs/heads/main')
         run: terraform apply -auto-approve tfplan
         env:
-          TF_VAR_jwt_secret: ${{ secrets.TF_VAR_jwt_secret }}
-          TF_VAR_signoz_endpoint: ${{ secrets.TF_VAR_signoz_endpoint }}
-          TF_VAR_signoz_access_token: ${{ secrets.TF_VAR_signoz_access_token }}
           TF_VAR_testnet_jwt_secret: ${{ secrets.TF_VAR_testnet_jwt_secret }}
           TF_VAR_testnet_soroban_contract_id: ${{ secrets.TF_VAR_testnet_soroban_contract_id }}
+          TF_VAR_testnet_certificate_arn: ${{ secrets.TF_VAR_testnet_certificate_arn }}
+          TF_VAR_live_jwt_secret: ${{ secrets.TF_VAR_live_jwt_secret }}
+          TF_VAR_live_certificate_arn: ${{ secrets.TF_VAR_live_certificate_arn }}
 
   # ===========================================================================
   # Native binary — glibc Linux tarballs for the GitHub Release.

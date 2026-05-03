@@ -4,6 +4,14 @@
     <property name="debug" value="false"/>
 
     <property name="applet.version" value="0.3"/>
+    <!--
+      Defaults below are testnet-safe. CI overrides them per network via
+      gradle -P (forwarded to Ant in applet/build.gradle.kts):
+        live build  → -Papplet.aid=$LIVE_AID -Papplet.aid.app=$LIVE_AID_APP
+                       -Papplet.issuerkey=$LIVE_ISSUER_KEY
+                      (sourced from the production-card-keys GitHub Environment)
+        testnet build → no overrides; defaults apply.
+    -->
     <property name="applet.aid" value="0102030405060708"/>
     <property name="applet.aid.app" value="01020304050607080102"/>
     <property name="applet.issuerkey" value="02:0C:04:72:D8:84:78:B9:02:F3:D7:2A:FC:67:1D:95"/>
