@@ -250,3 +250,19 @@ variable "live_certificate_arn" {
   type        = string
   default     = ""
 }
+
+# =============================================================================
+# Impala cluster (minimal Fargate stack for impala-api / impala-admin)
+# =============================================================================
+
+variable "impala_enabled" {
+  description = "Enable the impala ECS cluster (single task per service, public subnets, two ALBs)"
+  type        = bool
+  default     = false
+}
+
+variable "impala_vpc_cidr" {
+  description = "CIDR block for the impala VPC (must not overlap testnet_vpc_cidr or live_vpc_cidr)"
+  type        = string
+  default     = "10.4.0.0/16"
+}

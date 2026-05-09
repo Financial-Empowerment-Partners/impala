@@ -46,3 +46,20 @@ output "live_ecs_cluster_name" {
   description = "Live ECS cluster name"
   value       = var.live_enabled ? aws_ecs_cluster.live[0].name : "Live not enabled"
 }
+
+# --- Impala cluster outputs (conditional) ---
+
+output "impala_ecs_cluster_name" {
+  description = "Impala ECS cluster name"
+  value       = var.impala_enabled ? aws_ecs_cluster.impala[0].name : "Impala not enabled"
+}
+
+output "impala_api_alb_dns_name" {
+  description = "Impala-api ALB DNS name"
+  value       = var.impala_enabled ? aws_lb.impala["impala-api"].dns_name : "Impala not enabled"
+}
+
+output "impala_admin_alb_dns_name" {
+  description = "Impala-admin ALB DNS name"
+  value       = var.impala_enabled ? aws_lb.impala["impala-admin"].dns_name : "Impala not enabled"
+}
