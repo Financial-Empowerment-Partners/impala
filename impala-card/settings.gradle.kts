@@ -22,7 +22,7 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "ImpalaApplet"
+rootProject.name = "ImpalaCard"
 
 plugins {
     // Auto-provisioning JVM toolchains
