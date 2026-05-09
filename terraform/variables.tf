@@ -266,3 +266,14 @@ variable "impala_vpc_cidr" {
   type        = string
   default     = "10.4.0.0/16"
 }
+
+variable "impala_certificate_arn" {
+  description = "ACM certificate ARN for impala ALBs (required when impala_enabled = true; HTTPS-only listener)"
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = var.impala_certificate_arn == "" || can(regex("^arn:aws:acm:", var.impala_certificate_arn))
+    error_message = "impala_certificate_arn must be a valid ACM certificate ARN (must start with arn:aws:acm:) or empty."
+  }
+}
