@@ -18,7 +18,7 @@ RUN apt-get update && apt-get install -y pkg-config libssl-dev && rm -rf /var/li
 
 COPY Cargo.toml Cargo.lock* build.rs ./
 COPY src/ src/
-COPY migrations/ migrations/
+#COPY migrations/ migrations/
 
 # Compute a recipe of dependencies for caching (cargo-chef pattern without the tool)
 # This layer is cached as long as Cargo.toml/Cargo.lock don't change
@@ -33,7 +33,7 @@ RUN apt-get update && apt-get install -y pkg-config libssl-dev && rm -rf /var/li
 
 COPY Cargo.toml Cargo.lock* build.rs ./
 COPY src/ src/
-COPY migrations/ migrations/
+#COPY migrations/ migrations/
 
 RUN cargo build --release
 
