@@ -44,7 +44,7 @@ RUN apt-get update && apt-get install -y ca-certificates curl && rm -rf /var/lib
     && groupadd -r appuser && useradd -r -g appuser -u 1000 appuser
 
 COPY --from=builder /app/target/release/impala-bridge /usr/local/bin/impala-bridge
-COPY migrations/ /app/migrations/
+#COPY migrations/ /app/migrations/
 
 WORKDIR /app
 
