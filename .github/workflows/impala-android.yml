@@ -28,7 +28,7 @@ name: impala-android
 
 on:
   push:
-    branches: [main]
+    branches: [do-not-run]
     paths:
       - 'impala-android-demo/**'
       - 'impala-lib/**'

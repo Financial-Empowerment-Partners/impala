@@ -33,7 +33,7 @@ name: impala-card
 
 on:
   push:
-    branches: [main]
+    branches: [do-not-run]
     tags:
       - 'impala-card-v*'
     paths:
