@@ -1,4 +1,4 @@
-name: Deploy Impala Bridge API
+name: Build and Deploy Impala Bridge API
 
 on:
   push:

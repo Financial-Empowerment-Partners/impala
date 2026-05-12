@@ -24,7 +24,7 @@
 # No external secrets required.
 # =============================================================================
 
-name: impala-android
+name: Impala Android Build
 
 on:
   push:

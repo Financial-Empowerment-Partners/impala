@@ -27,7 +27,7 @@
 #   LIVE_ENABLED     - "true" to enable live stack (default false)
 # =============================================================================
 
-name: CI
+name: Impala CI
 
 on:
   push:
