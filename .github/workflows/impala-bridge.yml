@@ -55,7 +55,7 @@ jobs:
           --cache-to "type=local,dest=/tmp/.buildx-cache" \
           --load \
           --tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG \
-          --file ./impala-bridge/Dockerfile ./
+          --file ./impala-bridge/Dockerfile ./impala-bridge
 
     - name: Docker Buildx (push)
       id: push-image-to-ecr
@@ -70,13 +70,13 @@ jobs:
           --cache-from "type=local,src=/tmp/.buildx-cache" \
           --output "type=image,push=true" \
           --tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG \
-          --file ./impala-bridge/Dockerfile ./
+          --file ./impala-bridge/Dockerfile ./impala-bridge
         # push docker tag to indicate branch
         docker buildx build \
           --cache-from "type=local,src=/tmp/.buildx-cache" \
           --output "type=image,push=true" \
           --tag $ECR_REGISTRY/$ECR_REPOSITORY:$BRANCH \
-          --file ./impala-bridge/Dockerfile ./
+          --file ./impala-bridge/Dockerfile ./impala-bridge
 
     - name: Reset cache
       id: reset-cache
