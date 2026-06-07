@@ -3,7 +3,7 @@ name = "soroban-impala-integration-test"
 version = "0.0.1"
 edition = "2021"
 publish = false
-rust-version = "1.89.0"
+rust-version = "1.91"
 
 [lib]
 crate-type = ["cdylib"]

@@ -23,9 +23,11 @@ pub const DB_IDLE_TIMEOUT_SECS: u64 = 600;
 pub const DB_MAX_LIFETIME_SECS: u64 = 1800;
 
 /// Default Redis connection pool size.
+#[allow(dead_code)] // reserved config knob; not yet wired to the pool builder
 pub const DEFAULT_REDIS_POOL_SIZE: usize = 16;
 
 /// Request timeout in seconds (applied globally via middleware).
+#[allow(dead_code)] // documented default; timeout currently set per-client
 pub const REQUEST_TIMEOUT_SECS: u64 = 30;
 
 /// Rate limit: maximum requests per window.
@@ -84,6 +86,15 @@ pub const DEFAULT_SQS_WAIT_TIME_SECONDS: i32 = 20;
 
 /// Default SQS visibility timeout in seconds (5 minutes).
 pub const DEFAULT_SQS_VISIBILITY_TIMEOUT: i32 = 300;
+
+/// Admin webhook: max delivery attempts before a delivery is marked failed.
+pub const DEFAULT_ADMIN_WEBHOOK_MAX_ATTEMPTS: u32 = 6;
+
+/// Admin webhook: consecutive failures before a webhook is auto-disabled.
+pub const DEFAULT_ADMIN_WEBHOOK_DISABLE_THRESHOLD: i64 = 10;
+
+/// Admin webhook: delivery worker poll interval in seconds.
+pub const DEFAULT_ADMIN_WEBHOOK_POLL_SECS: u64 = 5;
 
 /// Stellar testnet Horizon API URL.
 pub const STELLAR_TESTNET_HORIZON_URL: &str = "https://horizon-testnet.stellar.org";

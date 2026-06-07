@@ -7,9 +7,7 @@ use totp_rs::{Algorithm, Secret, TOTP};
 
 use crate::auth::AuthenticatedUser;
 use crate::error::AppError;
-use crate::models::{
-    EnrollMfaRequest, MfaEnrollment, MfaQuery, MfaResponse, VerifyMfaRequest,
-};
+use crate::models::{EnrollMfaRequest, MfaEnrollment, MfaQuery, MfaResponse, VerifyMfaRequest};
 use crate::telemetry::AppMetrics;
 use opentelemetry::KeyValue;
 
@@ -78,6 +76,11 @@ pub async fn enroll_mfa(
         (None, None)
     };
 
+    let mut tx = pool.begin().await.map_err(|e| {
+        error!("enroll_mfa: begin tx error: {}", e);
+        AppError::InternalError("Database error".to_string())
+    })?;
+
     let result = sqlx::query(
         "INSERT INTO impala_mfa (account_id, mfa_type, secret, phone_number, enabled)
          VALUES ($1, $2, $3, $4, TRUE)
@@ -90,19 +93,35 @@ pub async fn enroll_mfa(
     .bind(&payload.mfa_type)
     .bind(&secret_value)
     .bind(&payload.phone_number)
-    .execute(&pool)
+    .execute(&mut *tx)
     .await;
 
     match result {
         Ok(_) => {
+            // Event carries only the mfa_type — never the secret or phone number.
+            crate::events::emit_event(
+                &mut tx,
+                &crate::events::AccountEvent::MfaEnrolled {
+                    account_id: payload.account_id.clone(),
+                    mfa_type: payload.mfa_type.clone(),
+                },
+            )
+            .await?;
+            tx.commit().await.map_err(|e| {
+                error!("enroll_mfa: commit error: {}", e);
+                AppError::InternalError("Database error".to_string())
+            })?;
             info!(
                 "enroll_mfa: {} enrolled for account_id={}",
                 payload.mfa_type, payload.account_id
             );
-            metrics.mfa_enrollments.add(1, &[
-                KeyValue::new("mfa_type", payload.mfa_type.clone()),
-                KeyValue::new("outcome", "success"),
-            ]);
+            metrics.mfa_enrollments.add(
+                1,
+                &[
+                    KeyValue::new("mfa_type", payload.mfa_type.clone()),
+                    KeyValue::new("outcome", "success"),
+                ],
+            );
             Ok(Json(MfaResponse {
                 success: true,
                 message: "MFA enrolled successfully".to_string(),
@@ -164,7 +183,13 @@ pub async fn verify_mfa(
     );
 
     // Brute force protection: check if account is locked out
-    crate::redis_helpers::check_mfa_lockout(&redis_pool, &payload.account_id, &payload.mfa_type, crate::constants::LOCKOUT_THRESHOLD).await?;
+    crate::redis_helpers::check_mfa_lockout(
+        &redis_pool,
+        &payload.account_id,
+        &payload.mfa_type,
+        crate::constants::LOCKOUT_THRESHOLD,
+    )
+    .await?;
 
     let enrollment = sqlx::query_as::<_, MfaEnrollment>(
         "SELECT account_id, mfa_type, secret, phone_number, enabled
@@ -229,12 +254,10 @@ pub async fn verify_mfa(
                         }
                     };
 
-                    let secret = Secret::Encoded(secret_str)
-                        .to_bytes()
-                        .map_err(|e| {
-                            error!("verify_mfa: invalid TOTP secret: {}", e);
-                            AppError::InternalError("Invalid TOTP configuration".to_string())
-                        })?;
+                    let secret = Secret::Encoded(secret_str).to_bytes().map_err(|e| {
+                        error!("verify_mfa: invalid TOTP secret: {}", e);
+                        AppError::InternalError("Invalid TOTP configuration".to_string())
+                    })?;
 
                     let totp = TOTP::new(
                         Algorithm::SHA1,
@@ -260,12 +283,20 @@ pub async fn verify_mfa(
                             "verify_mfa: TOTP verified for account_id={}",
                             payload.account_id
                         );
-                        metrics.mfa_verifications.add(1, &[
-                            KeyValue::new("mfa_type", "totp"),
-                            KeyValue::new("outcome", "success"),
-                        ]);
+                        metrics.mfa_verifications.add(
+                            1,
+                            &[
+                                KeyValue::new("mfa_type", "totp"),
+                                KeyValue::new("outcome", "success"),
+                            ],
+                        );
                         // Clear brute force attempts on success
-                        crate::redis_helpers::clear_mfa_attempts(&redis_pool, &payload.account_id, &payload.mfa_type).await;
+                        crate::redis_helpers::clear_mfa_attempts(
+                            &redis_pool,
+                            &payload.account_id,
+                            &payload.mfa_type,
+                        )
+                        .await;
                         Ok(Json(MfaResponse {
                             success: true,
                             message: "MFA verification successful".to_string(),
@@ -276,12 +307,21 @@ pub async fn verify_mfa(
                             "verify_mfa: invalid TOTP code for account_id={}",
                             payload.account_id
                         );
-                        metrics.mfa_verifications.add(1, &[
-                            KeyValue::new("mfa_type", "totp"),
-                            KeyValue::new("outcome", "failed"),
-                        ]);
+                        metrics.mfa_verifications.add(
+                            1,
+                            &[
+                                KeyValue::new("mfa_type", "totp"),
+                                KeyValue::new("outcome", "failed"),
+                            ],
+                        );
                         // Track failed attempt for brute force protection
-                        crate::redis_helpers::increment_mfa_attempts(&redis_pool, &payload.account_id, &payload.mfa_type, crate::constants::LOCKOUT_DURATION_SECS).await;
+                        crate::redis_helpers::increment_mfa_attempts(
+                            &redis_pool,
+                            &payload.account_id,
+                            &payload.mfa_type,
+                            crate::constants::LOCKOUT_DURATION_SECS,
+                        )
+                        .await;
                         Ok(Json(MfaResponse {
                             success: false,
                             message: "Invalid verification code".to_string(),
@@ -296,7 +336,10 @@ pub async fn verify_mfa(
                         error!("verify_mfa: Redis connection error: {}", e);
                         AppError::InternalError("Redis connection error".to_string())
                     })?;
-                    let stored_code: Option<String> = redis::AsyncCommands::get(&mut *conn, &sms_key).await.unwrap_or(None);
+                    let stored_code: Option<String> =
+                        redis::AsyncCommands::get(&mut *conn, &sms_key)
+                            .await
+                            .unwrap_or(None);
                     match stored_code {
                         Some(ref code) => {
                             // Constant-time comparison to prevent timing attacks
@@ -304,16 +347,25 @@ pub async fn verify_mfa(
                             let is_match = code.len() == payload.code.len()
                                 && code.as_bytes().ct_eq(payload.code.as_bytes()).into();
                             if is_match {
-                                let _: Result<(), _> = redis::AsyncCommands::del(&mut *conn, &sms_key).await;
-                                crate::redis_helpers::clear_mfa_attempts(&redis_pool, &payload.account_id, &payload.mfa_type).await;
+                                let _: Result<(), _> =
+                                    redis::AsyncCommands::del(&mut *conn, &sms_key).await;
+                                crate::redis_helpers::clear_mfa_attempts(
+                                    &redis_pool,
+                                    &payload.account_id,
+                                    &payload.mfa_type,
+                                )
+                                .await;
                                 info!(
                                     "verify_mfa: SMS verified for account_id={}",
                                     payload.account_id
                                 );
-                                metrics.mfa_verifications.add(1, &[
-                                    KeyValue::new("mfa_type", "sms"),
-                                    KeyValue::new("outcome", "success"),
-                                ]);
+                                metrics.mfa_verifications.add(
+                                    1,
+                                    &[
+                                        KeyValue::new("mfa_type", "sms"),
+                                        KeyValue::new("outcome", "success"),
+                                    ],
+                                );
                                 Ok(Json(MfaResponse {
                                     success: true,
                                     message: "MFA verification successful".to_string(),
@@ -324,11 +376,20 @@ pub async fn verify_mfa(
                                     "verify_mfa: invalid SMS code for account_id={}",
                                     payload.account_id
                                 );
-                                metrics.mfa_verifications.add(1, &[
-                                    KeyValue::new("mfa_type", "sms"),
-                                    KeyValue::new("outcome", "failed"),
-                                ]);
-                                crate::redis_helpers::increment_mfa_attempts(&redis_pool, &payload.account_id, &payload.mfa_type, crate::constants::LOCKOUT_DURATION_SECS).await;
+                                metrics.mfa_verifications.add(
+                                    1,
+                                    &[
+                                        KeyValue::new("mfa_type", "sms"),
+                                        KeyValue::new("outcome", "failed"),
+                                    ],
+                                );
+                                crate::redis_helpers::increment_mfa_attempts(
+                                    &redis_pool,
+                                    &payload.account_id,
+                                    &payload.mfa_type,
+                                    crate::constants::LOCKOUT_DURATION_SECS,
+                                )
+                                .await;
                                 Ok(Json(MfaResponse {
                                     success: false,
                                     message: "Invalid verification code".to_string(),
@@ -341,11 +402,20 @@ pub async fn verify_mfa(
                                 "verify_mfa: invalid SMS code for account_id={}",
                                 payload.account_id
                             );
-                            metrics.mfa_verifications.add(1, &[
-                                KeyValue::new("mfa_type", "sms"),
-                                KeyValue::new("outcome", "failed"),
-                            ]);
-                            crate::redis_helpers::increment_mfa_attempts(&redis_pool, &payload.account_id, &payload.mfa_type, crate::constants::LOCKOUT_DURATION_SECS).await;
+                            metrics.mfa_verifications.add(
+                                1,
+                                &[
+                                    KeyValue::new("mfa_type", "sms"),
+                                    KeyValue::new("outcome", "failed"),
+                                ],
+                            );
+                            crate::redis_helpers::increment_mfa_attempts(
+                                &redis_pool,
+                                &payload.account_id,
+                                &payload.mfa_type,
+                                crate::constants::LOCKOUT_DURATION_SECS,
+                            )
+                            .await;
                             Ok(Json(MfaResponse {
                                 success: false,
                                 message: "Invalid verification code".to_string(),

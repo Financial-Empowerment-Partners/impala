@@ -30,11 +30,9 @@ impl TestFixture {
         // Small delay for ledger finality
         thread::sleep(Duration::from_secs(5));
 
-        let native_sac_id =
-            deploy_sac_native(&deployer.name).expect("deploy native SAC");
+        let native_sac_id = deploy_sac_native(&deployer.name).expect("deploy native SAC");
 
-        let contract_id =
-            deploy_contract(&deployer.name).expect("deploy contract");
+        let contract_id = deploy_contract(&deployer.name).expect("deploy contract");
 
         TestFixture {
             deployer,
@@ -76,12 +74,7 @@ impl TestFixture {
             &self.contract_id,
             &signer.name,
             "wrap",
-            &[
-                "--signers",
-                &signers_json,
-                "--amount",
-                &amount.to_string(),
-            ],
+            &["--signers", &signers_json, "--amount", &amount.to_string()],
         )
         .expect("wrap tokens");
     }
@@ -95,27 +88,14 @@ impl TestFixture {
         )
         .expect("query balance");
 
-        result
-            .trim()
-            .trim_matches('"')
-            .parse::<i128>()
-            .unwrap_or(0)
+        result.trim().trim_matches('"').parse::<i128>().unwrap_or(0)
     }
 
     fn query_total_supply(&self) -> i128 {
-        let result = invoke(
-            &self.contract_id,
-            &self.deployer.name,
-            "total_supply",
-            &[],
-        )
-        .expect("query total_supply");
+        let result = invoke(&self.contract_id, &self.deployer.name, "total_supply", &[])
+            .expect("query total_supply");
 
-        result
-            .trim()
-            .trim_matches('"')
-            .parse::<i128>()
-            .unwrap_or(0)
+        result.trim().trim_matches('"').parse::<i128>().unwrap_or(0)
     }
 }
 
@@ -148,7 +128,10 @@ fn test_wrap_tokens() {
     assert_eq!(bal, wrap_amount, "Balance should equal wrapped amount");
 
     let supply = f.query_total_supply();
-    assert_eq!(supply, wrap_amount, "Total supply should equal wrapped amount");
+    assert_eq!(
+        supply, wrap_amount,
+        "Total supply should equal wrapped amount"
+    );
 }
 
 #[test]
@@ -304,12 +287,7 @@ fn test_cancel_timelock() {
         &f.contract_id,
         &f.signer1.name,
         "cancel_timelock",
-        &[
-            "--signers",
-            &signers_json,
-            "--timelock_id",
-            timelock_id,
-        ],
+        &["--signers", &signers_json, "--timelock_id", timelock_id],
     )
     .expect("cancel_timelock");
 
@@ -331,7 +309,10 @@ fn test_cancel_timelock() {
 
     // Balance should be unchanged
     let bal = f.query_balance(&f.signer1.public_key);
-    assert_eq!(bal, wrap_amount, "Balance should remain unchanged after cancel");
+    assert_eq!(
+        bal, wrap_amount,
+        "Balance should remain unchanged after cancel"
+    );
 }
 
 #[test]
@@ -347,12 +328,7 @@ fn test_insufficient_signers_rejected() {
         &f.contract_id,
         &f.signer1.name,
         "wrap",
-        &[
-            "--signers",
-            &signers_json,
-            "--amount",
-            "1000000",
-        ],
+        &["--signers", &signers_json, "--amount", "1000000"],
     )
     .expect("wrap with insufficient signers should fail");
 

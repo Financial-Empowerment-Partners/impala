@@ -18,8 +18,11 @@ class TokenManagerTest {
 
     @Before
     fun setUp() {
+        // Inject a plain SharedPreferences: EncryptedSharedPreferences needs the
+        // AndroidKeyStore, which Robolectric does not provide.
         val context = ApplicationProvider.getApplicationContext<Context>()
-        tokenManager = TokenManager(context)
+        val prefs = context.getSharedPreferences("impala_test_prefs", Context.MODE_PRIVATE)
+        tokenManager = TokenManager(prefs)
         tokenManager.clearAll()
     }
 

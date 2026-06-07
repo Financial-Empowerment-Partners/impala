@@ -34,7 +34,13 @@ pub async fn create_transaction(
         }));
     }
 
-    let result = sqlx::query_scalar::<_, Uuid>(
+    // Insert the transaction and append the admin-feed event atomically.
+    let mut tx = pool.begin().await.map_err(|e| {
+        error!("create_transaction: begin tx error: {}", e);
+        AppError::InternalError("Database error".to_string())
+    })?;
+
+    let btxid = sqlx::query_scalar::<_, Uuid>(
         r#"
         INSERT INTO transaction
             (stellar_tx_id, payala_tx_id, stellar_hash, source_account,
@@ -55,39 +61,52 @@ pub async fn create_transaction(
     .bind(&payload.preconditions)
     .bind(&payload.payala_currency)
     .bind(&payload.payala_digest)
-    .fetch_one(&pool)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(|e| {
+        error!("create_transaction: database error: {}", e);
+        AppError::InternalError("Database error".to_string())
+    })?;
+
+    crate::events::emit_event(
+        &mut tx,
+        &crate::events::AccountEvent::TransactionCreated {
+            account_id: user.account_id.clone(),
+            btxid: btxid.to_string(),
+            stellar_tx_id: payload.stellar_tx_id.clone(),
+            payala_tx_id: payload.payala_tx_id.clone(),
+        },
+    )
+    .await?;
+
+    tx.commit().await.map_err(|e| {
+        error!("create_transaction: commit error: {}", e);
+        AppError::InternalError("Database error".to_string())
+    })?;
+
+    info!("create_transaction: created btxid={}", btxid);
+    metrics.transactions_created.add(1, &[]);
+
+    // Fire-and-forget user notification for outgoing transfer (separate from the
+    // admin event feed above).
+    let sns_c = sns_client.as_ref().map(|e| &e.0);
+    let sns_a = sns_topic_arn.as_ref().map(|e| &e.0);
+    notifications::dispatch_event(
+        &pool,
+        sns_c,
+        sns_a,
+        NotificationEvent::TransferOutgoing {
+            account_id: user.account_id.clone(),
+            amount: payload.memo.clone().unwrap_or_default(),
+            to: payload.source_account.clone().unwrap_or_default(),
+        },
+        Some(&metrics),
+    )
     .await;
 
-    match result {
-        Ok(btxid) => {
-            info!("create_transaction: created btxid={}", btxid);
-            metrics.transactions_created.add(1, &[]);
-
-            // Fire-and-forget notification for outgoing transfer
-            let sns_c = sns_client.as_ref().map(|e| &e.0);
-            let sns_a = sns_topic_arn.as_ref().map(|e| &e.0);
-            notifications::dispatch_event(
-                &pool,
-                sns_c,
-                sns_a,
-                NotificationEvent::TransferOutgoing {
-                    account_id: user.account_id.clone(),
-                    amount: payload.memo.clone().unwrap_or_default(),
-                    to: payload.source_account.clone().unwrap_or_default(),
-                },
-                Some(&metrics),
-            )
-            .await;
-
-            Ok(Json(CreateTransactionResponse {
-                success: true,
-                message: "Transaction created successfully".to_string(),
-                btxid: Some(btxid),
-            }))
-        }
-        Err(e) => {
-            error!("create_transaction: database error: {}", e);
-            Err(AppError::InternalError("Database error".to_string()))
-        }
-    }
+    Ok(Json(CreateTransactionResponse {
+        success: true,
+        message: "Transaction created successfully".to_string(),
+        btxid: Some(btxid),
+    }))
 }

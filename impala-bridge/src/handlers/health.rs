@@ -15,13 +15,12 @@ pub async fn default_route() -> &'static str {
 
 /// Return build info and database schema version (`GET /version`).
 pub async fn get_version(Extension(pool): Extension<PgPool>) -> Json<VersionResponse> {
-    let schema_version = sqlx::query_scalar::<_, String>(
-        "SELECT current_version FROM impala_schema LIMIT 1",
-    )
-    .fetch_optional(&pool)
-    .await
-    .ok()
-    .flatten();
+    let schema_version =
+        sqlx::query_scalar::<_, String>("SELECT current_version FROM impala_schema LIMIT 1")
+            .fetch_optional(&pool)
+            .await
+            .ok()
+            .flatten();
 
     Json(VersionResponse {
         name: env!("CARGO_PKG_NAME"),

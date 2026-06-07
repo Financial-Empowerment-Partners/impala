@@ -7,6 +7,7 @@ use crate::sns;
 use crate::telemetry::AppMetrics;
 
 /// Events that can trigger user notifications.
+#[allow(dead_code)] // complete event taxonomy; not every variant is emitted yet
 pub enum NotificationEvent {
     LoginSuccess {
         account_id: String,
@@ -230,9 +231,7 @@ pub async fn dispatch_event(
                 match tokens {
                     Ok(t) if !t.is_empty() => {
                         payload["device_tokens"] = serde_json::Value::Array(
-                            t.into_iter()
-                                .map(serde_json::Value::String)
-                                .collect(),
+                            t.into_iter().map(serde_json::Value::String).collect(),
                         );
                     }
                     Ok(_) => {
@@ -254,18 +253,20 @@ pub async fn dispatch_event(
             _ => continue,
         }
 
-        if let Err(e) =
-            sns::publish_job(sns_client, topic_arn, "send_notification", payload).await
+        if let Err(e) = sns::publish_job(sns_client, topic_arn, "send_notification", payload).await
         {
             error!(
                 "dispatch_event: failed to publish job for notify_id={}: {}",
                 target.notify_id, e
             );
         } else if let Some(m) = metrics {
-            m.notifications_dispatched.add(1, &[
-                KeyValue::new("event_type", event_type.to_string()),
-                KeyValue::new("medium", target.medium.clone()),
-            ]);
+            m.notifications_dispatched.add(
+                1,
+                &[
+                    KeyValue::new("event_type", event_type.to_string()),
+                    KeyValue::new("medium", target.medium.clone()),
+                ],
+            );
         }
     }
 }

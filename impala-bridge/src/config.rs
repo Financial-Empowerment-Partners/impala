@@ -1,4 +1,5 @@
 use crate::constants::*;
+use std::collections::HashSet;
 use std::env;
 use std::fs;
 
@@ -34,6 +35,7 @@ pub struct StellarConfig {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // config surface; several fields are populated from env but not yet read
 pub struct Config {
     pub public_endpoint: String,
     pub service_address: String,
@@ -69,6 +71,14 @@ pub struct Config {
     pub stellar_rpc_url: String,
     pub stellar_network_passphrase: String,
     pub soroban_contract_id: Option<String>,
+    /// Account IDs (JWT `sub`) granted admin; source of the `is_admin` claim.
+    pub admin_account_ids: HashSet<String>,
+    /// Max delivery attempts before an admin-webhook delivery is marked failed.
+    pub admin_webhook_max_attempts: u32,
+    /// Consecutive-failure count after which a webhook is auto-disabled.
+    pub admin_webhook_disable_threshold: i64,
+    /// Poll interval (seconds) for the admin-webhook delivery worker.
+    pub admin_webhook_poll_secs: u64,
 }
 
 /// Load configuration from a JSON config file (if present) and environment variables.
@@ -122,9 +132,7 @@ pub fn load_config() -> Config {
         .ok()
         .or_else(|| from_file("twilio_number"));
 
-    let ldap_url = env::var("LDAP_URL")
-        .ok()
-        .or_else(|| from_file("ldap_url"));
+    let ldap_url = env::var("LDAP_URL").ok().or_else(|| from_file("ldap_url"));
 
     let ldap_bind_dn = env::var("LDAP_BIND_DN")
         .ok()
@@ -261,6 +269,35 @@ pub fn load_config() -> Config {
         .ok()
         .or_else(|| from_file("soroban_contract_id"));
 
+    let admin_account_ids = env::var("ADMIN_ACCOUNT_IDS")
+        .ok()
+        .or_else(|| from_file("admin_account_ids"))
+        .map(|s| {
+            s.split(',')
+                .map(|p| p.trim().to_string())
+                .filter(|p| !p.is_empty())
+                .collect::<HashSet<String>>()
+        })
+        .unwrap_or_default();
+
+    let admin_webhook_max_attempts = env::var("ADMIN_WEBHOOK_MAX_ATTEMPTS")
+        .ok()
+        .or_else(|| from_file("admin_webhook_max_attempts"))
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(DEFAULT_ADMIN_WEBHOOK_MAX_ATTEMPTS);
+
+    let admin_webhook_disable_threshold = env::var("ADMIN_WEBHOOK_DISABLE_THRESHOLD")
+        .ok()
+        .or_else(|| from_file("admin_webhook_disable_threshold"))
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(DEFAULT_ADMIN_WEBHOOK_DISABLE_THRESHOLD);
+
+    let admin_webhook_poll_secs = env::var("ADMIN_WEBHOOK_POLL_SECS")
+        .ok()
+        .or_else(|| from_file("admin_webhook_poll_secs"))
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(DEFAULT_ADMIN_WEBHOOK_POLL_SECS);
+
     Config {
         public_endpoint,
         service_address,
@@ -296,6 +333,10 @@ pub fn load_config() -> Config {
         stellar_rpc_url,
         stellar_network_passphrase,
         soroban_contract_id,
+        admin_account_ids,
+        admin_webhook_max_attempts,
+        admin_webhook_disable_threshold,
+        admin_webhook_poll_secs,
     }
 }
 

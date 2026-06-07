@@ -21,10 +21,16 @@ pub async fn check_rate_limit(
 
     let key = format!("impala:rate:{scope}:{id}");
 
-    let count: u64 = conn.get(&key).await.map_err(|e| {
-        warn!("check_rate_limit: Redis GET failed for {}: {}", key, e);
-        AppError::InternalError("Service temporarily unavailable".to_string())
-    })?;
+    // A missing key (Nil) means zero prior requests; only a real Redis error is
+    // fail-closed. Decoding Nil straight into u64 would error, so read Option.
+    let count: u64 = conn
+        .get::<_, Option<u64>>(&key)
+        .await
+        .map_err(|e| {
+            warn!("check_rate_limit: Redis GET failed for {}: {}", key, e);
+            AppError::InternalError("Service temporarily unavailable".to_string())
+        })?
+        .unwrap_or(0);
 
     if count >= max_requests {
         return Err(AppError::RateLimited {
@@ -32,12 +38,12 @@ pub async fn check_rate_limit(
         });
     }
 
-    let _: () = conn.incr(&key, 1u64).await.map_err(|e| {
+    let _: i64 = conn.incr(&key, 1u64).await.map_err(|e| {
         warn!("check_rate_limit: Redis INCR failed for {}: {}", key, e);
         AppError::InternalError("Service temporarily unavailable".to_string())
     })?;
 
-    let _: () = conn.expire(&key, window_secs as i64).await.map_err(|e| {
+    let _: bool = conn.expire(&key, window_secs as i64).await.map_err(|e| {
         warn!("check_rate_limit: Redis EXPIRE failed for {}: {}", key, e);
         AppError::InternalError("Service temporarily unavailable".to_string())
     })?;
@@ -47,11 +53,7 @@ pub async fn check_rate_limit(
 
 /// Check whether the given identity is currently locked out due to repeated
 /// failures.  Fails closed when Redis is unavailable.
-pub async fn check_lockout(
-    pool: &RedisPool,
-    id: &str,
-    threshold: u64,
-) -> Result<(), AppError> {
+pub async fn check_lockout(pool: &RedisPool, id: &str, threshold: u64) -> Result<(), AppError> {
     let mut conn = pool.get().await.map_err(|e| {
         error!("check_lockout: failed to get Redis connection: {}", e);
         AppError::InternalError("Service temporarily unavailable".to_string())
@@ -59,10 +61,14 @@ pub async fn check_lockout(
 
     let key = format!("impala:lockout:{id}");
 
-    let count: u64 = conn.get(&key).await.map_err(|e| {
-        warn!("check_lockout: Redis GET failed for {}: {}", key, e);
-        AppError::InternalError("Service temporarily unavailable".to_string())
-    })?;
+    let count: u64 = conn
+        .get::<_, Option<u64>>(&key)
+        .await
+        .map_err(|e| {
+            warn!("check_lockout: Redis GET failed for {}: {}", key, e);
+            AppError::InternalError("Service temporarily unavailable".to_string())
+        })?
+        .unwrap_or(0);
 
     if count >= threshold {
         return Err(AppError::RateLimited {
@@ -115,10 +121,7 @@ pub async fn clear_lockout(pool: &RedisPool, id: &str) {
 
 /// Check whether a JWT has been revoked.  Fails closed: if Redis is unavailable
 /// the token is treated as revoked (`Err(AppError::Unauthorized)`).
-pub async fn is_token_revoked(
-    pool: &RedisPool,
-    jti: &str,
-) -> Result<bool, AppError> {
+pub async fn is_token_revoked(pool: &RedisPool, jti: &str) -> Result<bool, AppError> {
     let mut conn = pool.get().await.map_err(|e| {
         error!("is_token_revoked: failed to get Redis connection: {}", e);
         AppError::Unauthorized
@@ -165,10 +168,14 @@ pub async fn check_mfa_lockout(
 
     let key = format!("impala:mfa_attempts:{account_id}:{mfa_type}");
 
-    let count: u64 = conn.get(&key).await.map_err(|e| {
-        warn!("check_mfa_lockout: Redis GET failed for {}: {}", key, e);
-        AppError::InternalError("Service temporarily unavailable".to_string())
-    })?;
+    let count: u64 = conn
+        .get::<_, Option<u64>>(&key)
+        .await
+        .map_err(|e| {
+            warn!("check_mfa_lockout: Redis GET failed for {}: {}", key, e);
+            AppError::InternalError("Service temporarily unavailable".to_string())
+        })?
+        .unwrap_or(0);
 
     if count >= threshold {
         return Err(AppError::RateLimited {
@@ -216,18 +223,11 @@ pub async fn increment_mfa_attempts(
 }
 
 /// Clear the MFA attempt counter after a successful verification.  Fire-and-forget.
-pub async fn clear_mfa_attempts(
-    pool: &RedisPool,
-    account_id: &str,
-    mfa_type: &str,
-) {
+pub async fn clear_mfa_attempts(pool: &RedisPool, account_id: &str, mfa_type: &str) {
     let mut conn = match pool.get().await {
         Ok(c) => c,
         Err(e) => {
-            error!(
-                "clear_mfa_attempts: failed to get Redis connection: {}",
-                e
-            );
+            error!("clear_mfa_attempts: failed to get Redis connection: {}", e);
             return;
         }
     };
@@ -235,9 +235,6 @@ pub async fn clear_mfa_attempts(
     let key = format!("impala:mfa_attempts:{account_id}:{mfa_type}");
 
     if let Err(e) = conn.del::<_, ()>(&key).await {
-        warn!(
-            "clear_mfa_attempts: Redis DEL failed for {}: {}",
-            key, e
-        );
+        warn!("clear_mfa_attempts: Redis DEL failed for {}: {}", key, e);
     }
 }

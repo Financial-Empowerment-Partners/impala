@@ -3,7 +3,7 @@
  *
  * Login is a 3-step process:
  *  1. POST /authenticate — validate credentials and register if first login
- *  2. POST /token (username+password) — obtain a 30-day refresh token
+ *  2. POST /token (username+password) — obtain a 14-day refresh token
  *  3. POST /token (refresh_token) — obtain a 1-hour temporal token
  *
  * The first user to log in is automatically bootstrapped as admin via Roles.bootstrap().

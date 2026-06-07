@@ -39,7 +39,11 @@ android {
 
     flavorDimensions += "network"
     productFlavors {
-        create("testnet") {
+        // Flavor token must not start with "test" (Android Gradle Plugin forbids it),
+        // so the flavor is named "tnet". The Stellar network, applicationId suffix,
+        // versionName suffix, and TESTNET_* local.properties keys remain "testnet"
+        // so installed app identity and config keys are unchanged.
+        create("tnet") {
             dimension = "network"
             applicationIdSuffix = ".testnet"
             versionNameSuffix = "-testnet"
@@ -128,7 +132,12 @@ dependencies {
     implementation("com.squareup.retrofit2:converter-gson:2.11.0")
     implementation("com.google.code.gson:gson:2.11.0")
 
-    // Encrypted SharedPreferences
+    // Encrypted SharedPreferences (backs TokenManager's secure token store).
+    // NOTE: androidx.security:security-crypto is deprecated by Google and never
+    // left 1.1.0-alpha06. It still works, but for new work prefer migrating the
+    // TokenManager store to Tink directly or the platform Keystore. Tracked as a
+    // follow-up; TokenManager already takes an injectable SharedPreferences so the
+    // backing store can be swapped without touching call sites.
     implementation("androidx.security:security-crypto:1.1.0-alpha06")
 
     // Google Sign-In via Credential Manager
@@ -148,7 +157,7 @@ dependencies {
 
     // Testing
     testImplementation("junit:junit:4.13.2")
-    testImplementation("org.robolectric:robolectric:4.15.1")
+    testImplementation("org.robolectric:robolectric:4.16")
     testImplementation("androidx.test:core:1.6.1")
     testImplementation("androidx.test.ext:junit:1.2.1")
     testImplementation("androidx.arch.core:core-testing:2.2.0")

@@ -9,7 +9,15 @@ use crate::error::AppError;
 use crate::models::Claims;
 
 /// Encode a long-lived refresh token for the given subject.
-pub fn encode_refresh_token(secret: &[u8], subject: &str) -> Result<String, AppError> {
+///
+/// `is_admin` is stamped from the caller's allowlist check at issuance time; it
+/// is re-derived (never trusted from a presented token), bounding admin-grant
+/// staleness to the temporal-token TTL.
+pub fn encode_refresh_token(
+    secret: &[u8],
+    subject: &str,
+    is_admin: bool,
+) -> Result<String, AppError> {
     let now = chrono::Utc::now().timestamp() as usize;
 
     let claims = Claims {
@@ -19,6 +27,7 @@ pub fn encode_refresh_token(secret: &[u8], subject: &str) -> Result<String, AppE
         exp: now + REFRESH_TOKEN_TTL_SECS,
         jti: uuid::Uuid::new_v4().to_string(),
         iss: JWT_ISSUER.to_string(),
+        is_admin,
     };
 
     encode(
@@ -33,7 +42,11 @@ pub fn encode_refresh_token(secret: &[u8], subject: &str) -> Result<String, AppE
 }
 
 /// Encode a short-lived temporal token for the given subject.
-pub fn encode_temporal_token(secret: &[u8], subject: &str) -> Result<String, AppError> {
+pub fn encode_temporal_token(
+    secret: &[u8],
+    subject: &str,
+    is_admin: bool,
+) -> Result<String, AppError> {
     let now = chrono::Utc::now().timestamp() as usize;
 
     let claims = Claims {
@@ -43,6 +56,7 @@ pub fn encode_temporal_token(secret: &[u8], subject: &str) -> Result<String, App
         exp: now + TEMPORAL_TOKEN_TTL_SECS,
         jti: uuid::Uuid::new_v4().to_string(),
         iss: JWT_ISSUER.to_string(),
+        is_admin,
     };
 
     encode(
@@ -62,9 +76,10 @@ pub fn encode_temporal_token(secret: &[u8], subject: &str) -> Result<String, App
 pub fn encode_token_pair(
     secret: &[u8],
     subject: &str,
+    is_admin: bool,
 ) -> Result<(String, String), AppError> {
-    let refresh = encode_refresh_token(secret, subject)?;
-    let temporal = encode_temporal_token(secret, subject)?;
+    let refresh = encode_refresh_token(secret, subject, is_admin)?;
+    let temporal = encode_temporal_token(secret, subject, is_admin)?;
     Ok((refresh, temporal))
 }
 
@@ -80,7 +95,7 @@ mod tests {
     #[test]
     fn test_encode_token_pair_returns_two_different_tokens() {
         let (refresh, temporal) =
-            encode_token_pair(TEST_SECRET, "alice").expect("token pair should succeed");
+            encode_token_pair(TEST_SECRET, "alice", false).expect("token pair should succeed");
 
         assert_ne!(refresh, temporal, "refresh and temporal tokens must differ");
         assert!(!refresh.is_empty());
@@ -90,7 +105,7 @@ mod tests {
     #[test]
     fn test_tokens_decode_with_same_secret() {
         let (refresh, temporal) =
-            encode_token_pair(TEST_SECRET, "bob").expect("token pair should succeed");
+            encode_token_pair(TEST_SECRET, "bob", false).expect("token pair should succeed");
 
         let mut validation = Validation::new(jsonwebtoken::Algorithm::HS256);
         validation.set_issuer(&[JWT_ISSUER]);
@@ -116,7 +131,7 @@ mod tests {
     #[test]
     fn test_tokens_contain_correct_claims() {
         let (refresh, temporal) =
-            encode_token_pair(TEST_SECRET, "carol").expect("token pair should succeed");
+            encode_token_pair(TEST_SECRET, "carol", false).expect("token pair should succeed");
 
         let mut validation = Validation::new(jsonwebtoken::Algorithm::HS256);
         validation.set_issuer(&[JWT_ISSUER]);
@@ -158,5 +173,34 @@ mod tests {
         let now = chrono::Utc::now().timestamp() as usize;
         assert!(refresh_claims.exp > now);
         assert!(temporal_claims.exp > now);
+
+        // Non-admin issuance => is_admin false on both tokens
+        assert!(!refresh_claims.is_admin);
+        assert!(!temporal_claims.is_admin);
+    }
+
+    #[test]
+    fn test_admin_flag_propagates_into_both_tokens() {
+        let (refresh, temporal) =
+            encode_token_pair(TEST_SECRET, "root", true).expect("token pair should succeed");
+
+        let mut validation = Validation::new(jsonwebtoken::Algorithm::HS256);
+        validation.set_issuer(&[JWT_ISSUER]);
+
+        for tok in [&refresh, &temporal] {
+            let claims = decode::<Claims>(tok, &DecodingKey::from_secret(TEST_SECRET), &validation)
+                .expect("token should decode")
+                .claims;
+            assert!(claims.is_admin, "is_admin must be stamped when requested");
+        }
+    }
+
+    #[test]
+    fn claims_is_admin_defaults_false_when_absent() {
+        // A pre-existing token body that predates the is_admin claim must decode
+        // as non-admin (serde default), never accidentally as admin.
+        let json = r#"{"sub":"u","token_type":"temporal","exp":9999999999,"iat":1,"jti":"j","iss":"impala-bridge"}"#;
+        let claims: Claims = serde_json::from_str(json).expect("legacy claims should deserialize");
+        assert!(!claims.is_admin);
     }
 }

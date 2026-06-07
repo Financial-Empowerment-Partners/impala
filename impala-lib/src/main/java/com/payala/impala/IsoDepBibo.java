@@ -1,5 +1,6 @@
 package com.payala.impala;
 
+import android.nfc.TagLostException;
 import android.nfc.tech.IsoDep;
 import android.util.Log;
 
@@ -11,6 +12,10 @@ import java.io.IOException;
 /**
  * BIBO implementation backed by an Android IsoDep NFC tag,
  * allowing the ImpalaSDK to transceive APDUs over NFC.
+ *
+ * <p>Distinguishes tag-loss (card removed mid-exchange) from other I/O errors so
+ * callers can prompt a re-tap, and guards against APDUs that exceed the card's
+ * {@link IsoDep#getMaxTransceiveLength() max transceive length}.
  */
 public class IsoDepBibo implements BIBO {
 
@@ -30,8 +35,19 @@ public class IsoDepBibo implements BIBO {
 
     @Override
     public byte[] transceive(byte[] bytes) throws BIBOException {
+        if (bytes != null) {
+            int max = isoDep.getMaxTransceiveLength();
+            if (max > 0 && bytes.length > max) {
+                throw new BIBOException("APDU length " + bytes.length
+                        + " exceeds IsoDep max transceive length " + max
+                        + " (extendedApduSupported=" + isoDep.isExtendedLengthApduSupported() + ")");
+            }
+        }
         try {
             return isoDep.transceive(bytes);
+        } catch (TagLostException e) {
+            Log.e(TAG, "Tag lost during transceive");
+            throw new BIBOException("NFC tag lost (card removed during transceive)", e);
         } catch (IOException e) {
             Log.e(TAG, "Transceive failed: " + e.getMessage());
             throw new BIBOException("NFC transceive failed", e);

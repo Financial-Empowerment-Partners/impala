@@ -31,10 +31,18 @@ pub async fn authenticate(
     info!("POST /authenticate: account_id={}", payload.account_id);
 
     // Rate limiting check
-    crate::redis_helpers::check_rate_limit(&redis_pool, "auth", &payload.account_id, RATE_LIMIT_MAX_REQUESTS, RATE_LIMIT_WINDOW_SECS).await?;
+    crate::redis_helpers::check_rate_limit(
+        &redis_pool,
+        "auth",
+        &payload.account_id,
+        RATE_LIMIT_MAX_REQUESTS,
+        RATE_LIMIT_WINDOW_SECS,
+    )
+    .await?;
 
     // Account lockout check
-    crate::redis_helpers::check_lockout(&redis_pool, &payload.account_id, LOCKOUT_THRESHOLD).await?;
+    crate::redis_helpers::check_lockout(&redis_pool, &payload.account_id, LOCKOUT_THRESHOLD)
+        .await?;
 
     // Validate password strength
     if payload.password.len() < MIN_PASSWORD_LENGTH {
@@ -97,13 +105,12 @@ pub async fn authenticate(
             // No credentials exist - register new user
             let password_hash = generate_hash(&payload.password);
 
-            let insert_result = sqlx::query(
-                "INSERT INTO impala_auth (account_id, password_hash) VALUES ($1, $2)",
-            )
-            .bind(&payload.account_id)
-            .bind(&password_hash)
-            .execute(&pool)
-            .await;
+            let insert_result =
+                sqlx::query("INSERT INTO impala_auth (account_id, password_hash) VALUES ($1, $2)")
+                    .bind(&payload.account_id)
+                    .bind(&password_hash)
+                    .execute(&pool)
+                    .await;
 
             match insert_result {
                 Ok(_) => {
@@ -111,7 +118,9 @@ pub async fn authenticate(
                         "authenticate: registered new user account_id={}",
                         payload.account_id
                     );
-                    metrics.auth_attempts.add(1, &[KeyValue::new("outcome", "registered")]);
+                    metrics
+                        .auth_attempts
+                        .add(1, &[KeyValue::new("outcome", "registered")]);
 
                     // Fire-and-forget notification for registration
                     let sns_c = sns_client.as_ref().map(|e| &e.0);
@@ -162,7 +171,9 @@ pub async fn authenticate(
                         "authenticate: successful login for account_id={}",
                         payload.account_id
                     );
-                    metrics.auth_attempts.add(1, &[KeyValue::new("outcome", "authenticated")]);
+                    metrics
+                        .auth_attempts
+                        .add(1, &[KeyValue::new("outcome", "authenticated")]);
 
                     // Fire-and-forget notification for login success
                     let sns_c = sns_client.as_ref().map(|e| &e.0);
@@ -186,13 +197,20 @@ pub async fn authenticate(
                 }
                 Err(_) => {
                     // Increment failed login counter
-                    crate::redis_helpers::increment_lockout(&redis_pool, &payload.account_id, LOCKOUT_DURATION_SECS).await;
+                    crate::redis_helpers::increment_lockout(
+                        &redis_pool,
+                        &payload.account_id,
+                        LOCKOUT_DURATION_SECS,
+                    )
+                    .await;
 
                     warn!(
                         "authenticate: invalid password for account_id={}",
                         payload.account_id
                     );
-                    metrics.auth_attempts.add(1, &[KeyValue::new("outcome", "failed")]);
+                    metrics
+                        .auth_attempts
+                        .add(1, &[KeyValue::new("outcome", "failed")]);
 
                     // Fire-and-forget notification for login failure
                     let sns_c = sns_client.as_ref().map(|e| &e.0);

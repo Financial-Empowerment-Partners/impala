@@ -5,8 +5,8 @@ use sqlx::PgPool;
 use std::sync::Arc;
 
 use crate::constants::{
-    AUTH_PROVIDER_OKTA, LOCKOUT_THRESHOLD, MAX_EMAIL_LENGTH,
-    RATE_LIMIT_MAX_REQUESTS, RATE_LIMIT_WINDOW_SECS,
+    AUTH_PROVIDER_OKTA, LOCKOUT_THRESHOLD, MAX_EMAIL_LENGTH, RATE_LIMIT_MAX_REQUESTS,
+    RATE_LIMIT_WINDOW_SECS,
 };
 use crate::error::AppError;
 use crate::models::{OktaConfigResponse, OktaTokenExchangeRequest, TokenResponse};
@@ -20,6 +20,7 @@ pub async fn okta_token_exchange(
     Extension(pool): Extension<PgPool>,
     Extension(jwt_secret): Extension<Arc<String>>,
     Extension(redis_pool): Extension<Arc<deadpool_redis::Pool>>,
+    Extension(admin_ids): Extension<Arc<std::collections::HashSet<String>>>,
     okta_provider: Option<Extension<Arc<OktaProvider>>>,
     Json(payload): Json<OktaTokenExchangeRequest>,
 ) -> Result<Json<TokenResponse>, AppError> {
@@ -43,22 +44,35 @@ pub async fn okta_token_exchange(
     let account_id = account_id.trim().to_lowercase();
     if account_id.is_empty() {
         warn!("okta: empty account_id derived from token");
-        return Err(AppError::BadRequest("Invalid account identifier".to_string()));
+        return Err(AppError::BadRequest(
+            "Invalid account identifier".to_string(),
+        ));
     }
     if account_id.len() > MAX_EMAIL_LENGTH {
         warn!("okta: account_id exceeds max length: {}", account_id.len());
-        return Err(AppError::BadRequest("Invalid account identifier".to_string()));
+        return Err(AppError::BadRequest(
+            "Invalid account identifier".to_string(),
+        ));
     }
     if account_id.chars().any(|c| c.is_control()) {
         warn!("okta: account_id contains control characters");
-        return Err(AppError::BadRequest("Invalid account identifier".to_string()));
+        return Err(AppError::BadRequest(
+            "Invalid account identifier".to_string(),
+        ));
     }
 
     info!("okta: token exchange for account_id={}", account_id);
 
     // Rate limiting and lockout checks
     crate::redis_helpers::check_lockout(&redis_pool, &account_id, LOCKOUT_THRESHOLD).await?;
-    crate::redis_helpers::check_rate_limit(&redis_pool, "okta", &account_id, RATE_LIMIT_MAX_REQUESTS, RATE_LIMIT_WINDOW_SECS).await?;
+    crate::redis_helpers::check_rate_limit(
+        &redis_pool,
+        "okta",
+        &account_id,
+        RATE_LIMIT_MAX_REQUESTS,
+        RATE_LIMIT_WINDOW_SECS,
+    )
+    .await?;
 
     // Auto-provision using a database transaction
     let placeholder_stellar_id = format!(
@@ -79,7 +93,7 @@ pub async fn okta_token_exchange(
     sqlx::query(
         "INSERT INTO impala_account (stellar_account_id, payala_account_id, first_name, last_name)
          VALUES ($1, $2, $3, '')
-         ON CONFLICT (payala_account_id) DO NOTHING"
+         ON CONFLICT (payala_account_id) DO NOTHING",
     )
     .bind(&placeholder_stellar_id)
     .bind(&account_id)
@@ -93,14 +107,12 @@ pub async fn okta_token_exchange(
 
     // Upsert into impala_auth with auth_provider = 'okta'
     // Use a random password hash since Okta users don't use password login
-    let random_hash = password_auth::generate_hash(
-        uuid::Uuid::new_v4().to_string()
-    );
+    let random_hash = password_auth::generate_hash(uuid::Uuid::new_v4().to_string());
 
     sqlx::query(
         "INSERT INTO impala_auth (account_id, password_hash, auth_provider)
          VALUES ($1, $2, $3)
-         ON CONFLICT (account_id) DO UPDATE SET auth_provider = $3"
+         ON CONFLICT (account_id) DO UPDATE SET auth_provider = $3",
     )
     .bind(&account_id)
     .bind(&random_hash)
@@ -117,9 +129,11 @@ pub async fn okta_token_exchange(
         AppError::InternalError("Database error".to_string())
     })?;
 
-    // Issue local JWT tokens
+    // Issue local JWT tokens (admin derived from the allowlist at issuance)
     let key = jwt_secret.as_bytes();
-    let (refresh_token, temporal_token) = crate::jwt::encode_token_pair(key, &account_id)?;
+    let is_admin = admin_ids.contains(&account_id);
+    let (refresh_token, temporal_token) =
+        crate::jwt::encode_token_pair(key, &account_id, is_admin)?;
 
     info!("okta: tokens issued for account_id={}", account_id);
 

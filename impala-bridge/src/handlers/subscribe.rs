@@ -3,14 +3,14 @@ use axum::Json;
 use log::{error, info, warn};
 use std::sync::Arc;
 
-use crate::auth::AuthenticatedUser;
+use crate::auth::AdminUser;
 use crate::error::AppError;
 use crate::models::{SubscribeRequest, SubscribeResponse};
 use crate::streams;
 
-/// Subscribe to network event streams (`POST /subscribe`).
+/// Subscribe to network event streams (`POST /subscribe`). Admin-only.
 pub async fn subscribe(
-    _user: AuthenticatedUser,
+    _user: AdminUser,
     Extension(stellar_config): Extension<Arc<crate::config::StellarConfig>>,
     Extension(redis_pool): Extension<Arc<deadpool_redis::Pool>>,
     Json(payload): Json<SubscribeRequest>,
@@ -63,10 +63,7 @@ pub async fn subscribe(
 
             Ok(Json(SubscribeResponse {
                 success: true,
-                message: format!(
-                    "Subscribed to Payala network events on {}",
-                    listen_endpoint
-                ),
+                message: format!("Subscribed to Payala network events on {}", listen_endpoint),
             }))
         }
         _ => {

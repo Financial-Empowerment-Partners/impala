@@ -1,7 +1,9 @@
+mod admin_webhook_delivery;
 mod auth;
 mod config;
 mod constants;
 mod error;
+mod events;
 mod handlers;
 mod jobs;
 mod jwt;
@@ -18,10 +20,10 @@ mod validate;
 mod vault;
 mod worker;
 
-use axum::routing::{get, post, put};
-use axum::Router;
 use axum::extract::Extension;
 use axum::http::{header, HeaderName, HeaderValue, Method};
+use axum::routing::{get, post, put};
+use axum::Router;
 use log::{debug, error, info, warn};
 use sqlx::postgres::PgPoolOptions;
 use std::env;
@@ -36,7 +38,10 @@ use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::trace::TraceLayer;
 
 use config::load_config;
-use handlers::{account, authenticate, card, device_token, health, logout, mfa, network, notification_subscription, notify, okta as okta_handler, subscribe, sync, token, transaction};
+use handlers::{
+    account, admin_webhook, authenticate, card, device_token, health, logout, mfa, network,
+    notification_subscription, notify, okta as okta_handler, subscribe, sync, token, transaction,
+};
 
 #[tokio::main]
 async fn main() {
@@ -95,8 +100,7 @@ async fn main() {
             }
         }
     } else {
-        env::var("DATABASE_URL")
-            .expect("Either DATABASE_URL or DATABASE_URL_WRAPPED must be set")
+        env::var("DATABASE_URL").expect("Either DATABASE_URL or DATABASE_URL_WRAPPED must be set")
     };
 
     // Create database connection pool with timeouts
@@ -151,20 +155,29 @@ async fn run_server(
     metrics: Arc<telemetry::AppMetrics>,
 ) {
     // JWT signing secret
-    let jwt_secret = Arc::new(
-        env::var("JWT_SECRET").expect("JWT_SECRET environment variable must be set"),
-    );
+    let jwt_secret =
+        Arc::new(env::var("JWT_SECRET").expect("JWT_SECRET environment variable must be set"));
     if jwt_secret.len() < crate::constants::JWT_SECRET_MIN_LENGTH {
-        error!("JWT_SECRET must be at least {} characters for security", crate::constants::JWT_SECRET_MIN_LENGTH);
+        error!(
+            "JWT_SECRET must be at least {} characters for security",
+            crate::constants::JWT_SECRET_MIN_LENGTH
+        );
         std::process::exit(1);
     }
 
+    // Admin allowlist: source of the `is_admin` JWT claim, stamped at issuance.
+    let admin_ids: Arc<std::collections::HashSet<String>> =
+        Arc::new(config.admin_account_ids.clone());
+    info!("Admin allowlist: {} account(s) configured", admin_ids.len());
+
     // Stellar network configuration
     let stellar_config = Arc::new(config.stellar_config());
-    info!("Stellar network: {} (horizon={}, rpc={})",
+    info!(
+        "Stellar network: {} (horizon={}, rpc={})",
         stellar_config.network.as_str(),
         stellar_config.horizon_url,
-        stellar_config.rpc_url);
+        stellar_config.rpc_url
+    );
     if let Some(ref cid) = stellar_config.contract_id {
         info!("Soroban contract ID: {}", cid);
     }
@@ -219,7 +232,12 @@ async fn run_server(
         .route("/", get(health::default_route))
         .route("/health", get(health::health_check))
         .route("/version", get(health::get_version))
-        .route("/account", post(account::create_account).get(account::get_account).put(account::update_account))
+        .route(
+            "/account",
+            post(account::create_account)
+                .get(account::get_account)
+                .put(account::update_account),
+        )
         .route("/authenticate", post(authenticate::authenticate))
         .route("/sync", post(sync::sync_account))
         .route("/token", post(token::token))
@@ -228,16 +246,46 @@ async fn run_server(
         .route("/card", post(card::create_card).delete(card::delete_card))
         .route("/mfa", post(mfa::enroll_mfa).get(mfa::get_mfa))
         .route("/mfa/verify", post(mfa::verify_mfa))
-        .route("/notify", get(notify::list_notify).post(notify::create_notify).put(notify::update_notify))
-        .route("/notification/subscriptions", get(notification_subscription::list_subscriptions).post(notification_subscription::create_subscription))
-        .route("/notification/subscriptions/:id", put(notification_subscription::update_subscription).delete(notification_subscription::delete_subscription))
-        .route("/device-token", post(device_token::register_device_token).delete(device_token::delete_device_token))
+        .route(
+            "/notify",
+            get(notify::list_notify)
+                .post(notify::create_notify)
+                .put(notify::update_notify),
+        )
+        .route(
+            "/notification/subscriptions",
+            get(notification_subscription::list_subscriptions)
+                .post(notification_subscription::create_subscription),
+        )
+        .route(
+            "/notification/subscriptions/{id}",
+            put(notification_subscription::update_subscription)
+                .delete(notification_subscription::delete_subscription),
+        )
+        .route(
+            "/device-token",
+            post(device_token::register_device_token).delete(device_token::delete_device_token),
+        )
         .route("/logout", post(logout::logout))
         .route("/auth/okta", post(okta_handler::okta_token_exchange))
         .route("/auth/okta/config", get(okta_handler::okta_config))
         .route("/healthz", get(health::liveness))
         .route("/readyz", get(health::readiness))
         .route("/network", get(network::network_info))
+        // Admin-only webhook event feed (all gated by the AdminUser extractor).
+        .route(
+            "/admin/webhooks",
+            post(admin_webhook::register_webhook).get(admin_webhook::list_webhooks),
+        )
+        .route(
+            "/admin/webhooks/{id}",
+            axum::routing::delete(admin_webhook::delete_webhook),
+        )
+        .route(
+            "/admin/webhooks/{id}/test",
+            post(admin_webhook::test_webhook),
+        )
+        .route("/admin/events", get(admin_webhook::list_events))
         .layer(cors)
         .layer(RequestBodyLimitLayer::new(1_048_576)) // 1 MB body limit
         .layer(CompressionLayer::new())
@@ -273,6 +321,7 @@ async fn run_server(
         .layer(Extension(redis_pool.clone()))
         .layer(Extension(jwt_secret))
         .layer(Extension(stellar_config.clone()))
+        .layer(Extension(admin_ids.clone()))
         .layer(Extension(metrics));
 
     // Add optional SNS client extension
@@ -308,6 +357,19 @@ async fn run_server(
         streams::cron_sync_task(cron_pool, cron_cancel).await;
     });
 
+    // Spawn the admin-webhook delivery worker (outbox fan-out + signed delivery,
+    // retry/backoff, auto-disable). In-process; no SNS/SQS dependency.
+    let wh_pool = pool.clone();
+    let wh_cancel = cancel.clone();
+    let wh_cfg = admin_webhook_delivery::DeliveryConfig {
+        poll_secs: config.admin_webhook_poll_secs,
+        max_attempts: config.admin_webhook_max_attempts,
+        disable_threshold: config.admin_webhook_disable_threshold,
+    };
+    tokio::spawn(async move {
+        admin_webhook_delivery::run(wh_pool, wh_cfg, wh_cancel).await;
+    });
+
     // Run server with graceful shutdown
     info!("Server listening on {}", config.service_address);
     let listener = tokio::net::TcpListener::bind(&config.service_address)
@@ -328,9 +390,8 @@ async fn shutdown_signal(cancel: CancellationToken) {
 
     #[cfg(unix)]
     {
-        let mut sigterm =
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-                .expect("Failed to install SIGTERM handler");
+        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("Failed to install SIGTERM handler");
         tokio::select! {
             _ = ctrl_c => { info!("Received Ctrl+C, shutting down"); }
             _ = sigterm.recv() => { info!("Received SIGTERM, shutting down"); }

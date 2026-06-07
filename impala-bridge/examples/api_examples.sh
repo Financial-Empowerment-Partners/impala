@@ -82,3 +82,42 @@ curl -X PUT "$BASE_URL/account" \
     "first_name": "Test"
   }' | jq .
 echo -e "\n"
+
+# ── Admin webhook event feed ────────────────────────────────────────────────
+# All /admin/* routes require a TEMPORAL token whose subject is in
+# ADMIN_ACCOUNT_IDS (the is_admin claim is stamped server-side at issuance).
+# Obtain one via POST /token, then:
+#   ADMIN_TOKEN="<temporal token for an admin account>"
+
+echo "=== Register an admin webhook (POST /admin/webhooks) ==="
+# Returns {id, url, secret}; the secret is shown ONCE — store it to verify signatures.
+# NOTE: validate_callback_url blocks localhost/private IPs, so use a public URL.
+curl -X POST "$BASE_URL/admin/webhooks" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "url": "https://webhook.example.com/impala",
+    "event_types": ["account.created", "account.updated", "transaction.created"]
+  }' | jq .
+echo -e "\n"
+
+echo "=== List admin webhooks (GET /admin/webhooks) — secret never returned ==="
+curl -X GET "$BASE_URL/admin/webhooks" -H "Authorization: Bearer $ADMIN_TOKEN" | jq .
+echo -e "\n"
+
+echo "=== Send a test event to webhook 1 (POST /admin/webhooks/1/test) ==="
+curl -X POST "$BASE_URL/admin/webhooks/1/test" -H "Authorization: Bearer $ADMIN_TOKEN" | jq .
+echo -e "\n"
+
+echo "=== Pull/replay the event feed (GET /admin/events?since=0&limit=50) ==="
+curl -X GET "$BASE_URL/admin/events?since=0&limit=50" -H "Authorization: Bearer $ADMIN_TOKEN" | jq .
+echo -e "\n"
+
+echo "=== Delete a webhook (DELETE /admin/webhooks/1) ==="
+curl -X DELETE "$BASE_URL/admin/webhooks/1" -H "Authorization: Bearer $ADMIN_TOKEN" | jq .
+echo -e "\n"
+
+# Receiver-side signature verification (pseudocode):
+#   expected = "sha256=" + hex(HMAC_SHA256(secret, X-Impala-Timestamp + "." + raw_body))
+#   reject unless constant_time_eq(expected, X-Impala-Signature)
+#   reject if abs(now - X-Impala-Timestamp) > 300  # replay window

@@ -19,16 +19,14 @@ pub async fn list_notify(
 ) -> Result<Json<PaginatedResponse<NotifyListItem>>, AppError> {
     let (per_page, offset) = pagination.clamped();
 
-    let total: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM notify WHERE account_id = $1",
-    )
-    .bind(&user.account_id)
-    .fetch_one(&pool)
-    .await
-    .map_err(|e| {
-        error!("list_notify: count query error: {}", e);
-        AppError::InternalError("Database error".to_string())
-    })?;
+    let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM notify WHERE account_id = $1")
+        .bind(&user.account_id)
+        .fetch_one(&pool)
+        .await
+        .map_err(|e| {
+            error!("list_notify: count query error: {}", e);
+            AppError::InternalError("Database error".to_string())
+        })?;
 
     let rows = sqlx::query_as::<_, NotifyListItem>(
         r#"

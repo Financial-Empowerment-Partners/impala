@@ -98,7 +98,7 @@ graph TB
 
 ## impala-bridge — REST API Server
 
-The bridge is a Rust server built on Axum 0.4 that serves as the central coordination point for all Impala operations. It runs in three modes: `server` (HTTP API with background tasks), `worker` (SQS message consumer for async jobs), and `migrate` (database schema application). State is shared through Axum extension layers: a PostgreSQL connection pool, a Redis connection pool, JWT signing material, Stellar endpoint URLs, and an OpenTelemetry metrics handle.
+The bridge is a Rust server built on Axum 0.8 that serves as the central coordination point for all Impala operations. It runs in three modes: `server` (HTTP API with background tasks), `worker` (SQS message consumer for async jobs), and `migrate` (database schema application). State is shared through Axum extension layers: a PostgreSQL connection pool, a Redis connection pool, JWT signing material, Stellar endpoint URLs, and an OpenTelemetry metrics handle.
 
 ### API Endpoints
 
@@ -411,7 +411,7 @@ Both NFC and geolocation handlers use a static listener registration pattern. NF
 
 ## impala-android-demo — Reference Android Application
 
-The demo application (package `com.payala.impala.demo`, min SDK 24, target SDK 34) is a full MVVM implementation demonstrating how all Impala components work together. It uses Retrofit and OkHttp for networking, EncryptedSharedPreferences (AES-256-SIV/GCM) for token storage, Jetpack Navigation with bottom tabs, and Firebase Cloud Messaging for push notifications.
+The demo application (package `com.payala.impala.demo`, min SDK 24, target SDK 36) is a full MVVM implementation demonstrating how all Impala components work together. It uses Retrofit and OkHttp for networking, EncryptedSharedPreferences (AES-256-SIV/GCM) for token storage, Jetpack Navigation with bottom tabs, and Firebase Cloud Messaging for push notifications.
 
 ### Authentication Flow
 

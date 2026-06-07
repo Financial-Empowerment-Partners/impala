@@ -30,16 +30,15 @@ pub async fn list_subscriptions(
 ) -> Result<Json<PaginatedResponse<SubscriptionListItem>>, AppError> {
     let (per_page, offset) = pagination.clamped();
 
-    let total: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM notification_subscription WHERE account_id = $1",
-    )
-    .bind(&user.account_id)
-    .fetch_one(&pool)
-    .await
-    .map_err(|e| {
-        error!("list_subscriptions: count query error: {}", e);
-        AppError::InternalError("Database error".to_string())
-    })?;
+    let total: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM notification_subscription WHERE account_id = $1")
+            .bind(&user.account_id)
+            .fetch_one(&pool)
+            .await
+            .map_err(|e| {
+                error!("list_subscriptions: count query error: {}", e);
+                AppError::InternalError("Database error".to_string())
+            })?;
 
     let rows = sqlx::query_as::<_, SubscriptionListItem>(
         r#"
@@ -196,13 +195,12 @@ pub async fn delete_subscription(
         id, user.account_id
     );
 
-    let result = sqlx::query(
-        "DELETE FROM notification_subscription WHERE id = $1 AND account_id = $2",
-    )
-    .bind(id)
-    .bind(&user.account_id)
-    .execute(&pool)
-    .await;
+    let result =
+        sqlx::query("DELETE FROM notification_subscription WHERE id = $1 AND account_id = $2")
+            .bind(id)
+            .bind(&user.account_id)
+            .execute(&pool)
+            .await;
 
     match result {
         Ok(res) => {

@@ -1,4 +1,6 @@
-use crate::constants::{CRON_SYNC_INTERVAL_SECS, DEFAULT_HTTP_CLIENT_TIMEOUT_SECS, MAX_SSE_BUFFER_SIZE};
+use crate::constants::{
+    CRON_SYNC_INTERVAL_SECS, DEFAULT_HTTP_CLIENT_TIMEOUT_SECS, MAX_SSE_BUFFER_SIZE,
+};
 use crate::validate::validate_callback_url;
 use futures::StreamExt;
 use log::{debug, error, info, warn};
@@ -10,14 +12,15 @@ use tokio_util::sync::CancellationToken;
 /// into the `callback_result` column.  Respects cancellation for graceful shutdown.
 pub async fn cron_sync_task(pool: PgPool, cancel: CancellationToken) {
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(DEFAULT_HTTP_CLIENT_TIMEOUT_SECS))
+        .timeout(std::time::Duration::from_secs(
+            DEFAULT_HTTP_CLIENT_TIMEOUT_SECS,
+        ))
         .build()
         .expect("Failed to create HTTP client");
     loop {
-        let rows =
-            sqlx::query_as::<_, (i32, String)>("SELECT id, callback_uri FROM cron_sync")
-                .fetch_all(&pool)
-                .await;
+        let rows = sqlx::query_as::<_, (i32, String)>("SELECT id, callback_uri FROM cron_sync")
+            .fetch_all(&pool)
+            .await;
 
         match rows {
             Ok(rows) => {
@@ -88,7 +91,9 @@ pub async fn stellar_stream(
     redis_pool: &deadpool_redis::Pool,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(DEFAULT_HTTP_CLIENT_TIMEOUT_SECS))
+        .timeout(std::time::Duration::from_secs(
+            DEFAULT_HTTP_CLIENT_TIMEOUT_SECS,
+        ))
         .build()?;
     let response = client
         .get(url)
@@ -150,8 +155,9 @@ pub async fn stellar_stream(
                         )
                         .await;
 
-                        let timestamp =
-                            chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.6fZ").to_string();
+                        let timestamp = chrono::Utc::now()
+                            .format("%Y-%m-%dT%H:%M:%S%.6fZ")
+                            .to_string();
                         let event_key = format!("stellar:ledger:{}", sequence);
                         let _: Result<(), _> =
                             redis::AsyncCommands::set(&mut *conn, &event_key, &timestamp).await;
@@ -211,10 +217,7 @@ pub async fn payala_stream(
                 let raw = String::from_utf8_lossy(&buf[..n]).to_string();
 
                 if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&raw) {
-                    let event_type = parsed["type"]
-                        .as_str()
-                        .unwrap_or("unknown")
-                        .to_string();
+                    let event_type = parsed["type"].as_str().unwrap_or("unknown").to_string();
 
                     info!(
                         "payala_stream: event from {}: type={}",
@@ -222,13 +225,11 @@ pub async fn payala_stream(
                     );
 
                     if let Ok(mut conn) = redis.get().await {
-                        let timestamp =
-                            chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.6fZ").to_string();
-                        let event_key = format!(
-                            "payala:event:{}:{}",
-                            timestamp,
-                            uuid::Uuid::new_v4()
-                        );
+                        let timestamp = chrono::Utc::now()
+                            .format("%Y-%m-%dT%H:%M:%S%.6fZ")
+                            .to_string();
+                        let event_key =
+                            format!("payala:event:{}:{}", timestamp, uuid::Uuid::new_v4());
                         let _: Result<(), _> =
                             redis::AsyncCommands::set(&mut *conn, &event_key, &raw).await;
                         let _: Result<(), _> =

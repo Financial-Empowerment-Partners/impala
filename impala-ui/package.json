@@ -1,0 +1,12 @@
+{
+  "name": "impala-ui",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Impala admin dashboard — static files served by Nginx (no build step). Vitest covers the pure JS modules.",
+  "scripts": {
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "vitest": "^2.1.9"
+  }
+}

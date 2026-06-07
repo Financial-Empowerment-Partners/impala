@@ -12,8 +12,9 @@ in a Payala program with the Stellar network.
 ## Setup
 
 ### Prerequisites
-- Rust toolchain (1.70+)
+- Rust toolchain (1.91+ — the workspace floor; `Cargo.toml` pins `rust-version = "1.91"`)
 - PostgreSQL database
+- Redis
 
 ### Environment Variables
 Copy `.env.example` to `.env` and configure your database connection:

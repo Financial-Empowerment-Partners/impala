@@ -7,6 +7,7 @@ import android.content.IntentFilter
 import android.nfc.NfcAdapter
 import android.nfc.Tag
 import android.nfc.tech.IsoDep
+import android.os.Bundle
 import com.payala.impala.demo.log.AppLogger
 import com.payala.impala.demo.nfc.CardUser
 import com.payala.impala.demo.nfc.ImpalaCardReader
@@ -44,17 +45,16 @@ sealed class NfcCardResult {
 }
 
 /**
- * Manages NFC foreground dispatch and Impala card reading.
+ * Manages NFC discovery and Impala card reading.
  *
- * Uses Android's [NfcAdapter] foreground dispatch system to give the active
- * activity priority over the system's tag dispatch when an IsoDep-compatible
- * smartcard is tapped. The [processTag] method connects to the card,
- * reads identity and public keys, and returns a [NfcCardResult].
+ * The preferred mechanism is **reader mode** ([enableReaderMode]/[disableReaderMode]):
+ * its callback runs on a binder thread (off the main thread), so the blocking
+ * IsoDep exchange in [processTag] never risks an ANR, and it disables NDEF
+ * dispatch + uses a presence-check delay for smoother polling. The legacy
+ * foreground-dispatch API is retained for callers that still route taps through
+ * `onNewIntent`, but new code should use reader mode.
  *
- * Lifecycle: call [enableForegroundDispatch] in `onResume()` and
- * [disableForegroundDispatch] in `onPause()`.
- *
- * @param activity the activity that will receive NFC intents
+ * @param activity the activity that will receive NFC tags
  */
 class NfcCardAuthHelper(private val activity: Activity) {
 
@@ -67,8 +67,40 @@ class NfcCardAuthHelper(private val activity: Activity) {
     val isNfcEnabled: Boolean get() = nfcAdapter?.isEnabled == true
 
     /**
+     * Enables reader mode. The Impala card is read on a binder thread (off the
+     * main thread); [onResult] is then invoked **on the main thread** with the
+     * outcome. Call in `onResume()` and pair with [disableReaderMode] in `onPause()`.
+     */
+    fun enableReaderMode(onResult: (NfcCardResult) -> Unit) {
+        val adapter = nfcAdapter
+        if (adapter == null) {
+            onResult(NfcCardResult.NfcNotAvailable)
+            return
+        }
+        val callback = NfcAdapter.ReaderCallback { tag ->
+            // Runs off the main thread — safe to do the blocking IsoDep exchange here.
+            val result = processTag(tag)
+            activity.runOnUiThread { onResult(result) }
+        }
+        val flags = NfcAdapter.FLAG_READER_NFC_A or
+            NfcAdapter.FLAG_READER_NFC_B or
+            NfcAdapter.FLAG_READER_SKIP_NDEF_CHECK
+        val extras = Bundle().apply {
+            putInt(NfcAdapter.EXTRA_READER_PRESENCE_CHECK_DELAY, PRESENCE_CHECK_DELAY_MS)
+        }
+        adapter.enableReaderMode(activity, callback, flags, extras)
+    }
+
+    /** Disables reader mode. Must be called in `onPause()`. */
+    fun disableReaderMode() {
+        nfcAdapter?.disableReaderMode(activity)
+    }
+
+    /**
      * Enables NFC foreground dispatch so this activity receives tag intents
      * instead of the system tag dispatch.
+     *
+     * Legacy mechanism — prefer [enableReaderMode], whose callback is off-main.
      */
     fun enableForegroundDispatch() {
         val intent = Intent(activity, activity.javaClass).apply {
@@ -104,6 +136,16 @@ class NfcCardAuthHelper(private val activity: Activity) {
         val tag: Tag = intent.getParcelableExtra(NfcAdapter.EXTRA_TAG)
             ?: return NfcCardResult.Error("No NFC tag found")
 
+        return processTag(tag)
+    }
+
+    /**
+     * Connects to [tag] and reads identity, public keys, and a signed timestamp.
+     * Blocking — must NOT be called on the main thread (reader-mode callbacks run
+     * off-main; the [processTag] intent overload is invoked from `onNewIntent`,
+     * whose callers should dispatch it off-main).
+     */
+    fun processTag(tag: Tag): NfcCardResult {
         val isoDep = IsoDep.get(tag)
             ?: return NfcCardResult.Error("Card does not support IsoDep")
 
@@ -111,9 +153,8 @@ class NfcCardAuthHelper(private val activity: Activity) {
 
         return try {
             isoDep.connect()
-            isoDep.timeout = 5000
 
-            val bibo = IsoDepBibo(isoDep)
+            val bibo = IsoDepBibo(isoDep, IsoDepBibo.DEFAULT_TIMEOUT_MS)
             val reader = ImpalaCardReader(bibo)
 
             val user = reader.getUserData()
@@ -132,5 +173,10 @@ class NfcCardAuthHelper(private val activity: Activity) {
         } finally {
             try { isoDep.close() } catch (_: Exception) { }
         }
+    }
+
+    companion object {
+        /** Delay (ms) between presence checks in reader mode; smooths polling. */
+        private const val PRESENCE_CHECK_DELAY_MS = 250
     }
 }

@@ -30,6 +30,13 @@ services:
     build: .
     ports:
       - "8080:8080"
+    # The image already runs as a non-root user (UID 1000) with a HEALTHCHECK.
+    # Production (ECS) runs it with a read-only root filesystem. To mirror that
+    # locally, uncomment the following (a writable tmpfs is provided for scratch
+    # space; the bridge logs to syslog/stdout, not the root fs):
+    # read_only: true
+    # tmpfs:
+    #   - /tmp
     environment:
       DATABASE_URL: postgresql://postgres:password@postgres:5432/impala
       REDIS_URL: redis://redis:6379

@@ -1,5 +1,7 @@
 terraform {
-  required_version = ">= 1.5"
+  # >= 1.9 for cross-variable validation (CIDR-overlap guards in variables.tf)
+  # and `moved {}` blocks used by the module migration (see README.md).
+  required_version = ">= 1.9"
 
   required_providers {
     aws = {

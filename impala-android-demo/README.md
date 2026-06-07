@@ -6,14 +6,22 @@ Android demo application for Payala-Impala, demonstrating authentication (passwo
 
 - Android Studio Hedgehog (2023.1.1) or later
 - JDK 17
-- Android SDK 34 (compileSdk / targetSdk)
+- Android SDK 36 (compileSdk / targetSdk)
 - minSdk 24 (Android 7.0)
 
 ## Quick Start
 
+The app has two product flavors on the `network` dimension — `tnet` (Stellar
+testnet) and `live` (Stellar pubnet) — which install side-by-side (the `tnet`
+build adds the `.testnet` applicationId suffix). The flavor token is `tnet`
+rather than `testnet` because the Android Gradle Plugin forbids flavor names
+that start with `test`.
+
 ```bash
 cd impala-android-demo
-./gradlew assembleDebug
+./gradlew assembleTnetDebug      # testnet APK -> app/build/outputs/apk/tnet/debug/
+./gradlew assembleLiveDebug      # pubnet APK  -> app/build/outputs/apk/live/debug/
+./gradlew testTnetDebugUnitTest testLiveDebugUnitTest   # JVM unit tests
 ```
 
 Or open the project in Android Studio and run on an emulator or device.

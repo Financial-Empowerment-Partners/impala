@@ -67,10 +67,9 @@ pub async fn directory_sync(pool: &PgPool, config: &Config) {
         }
     }
 
-    let accounts =
-        sqlx::query_as::<_, (String,)>("SELECT payala_account_id FROM impala_account")
-            .fetch_all(pool)
-            .await;
+    let accounts = sqlx::query_as::<_, (String,)>("SELECT payala_account_id FROM impala_account")
+        .fetch_all(pool)
+        .await;
 
     let account_ids = match accounts {
         Ok(rows) => rows,

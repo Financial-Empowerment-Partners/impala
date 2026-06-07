@@ -20,6 +20,7 @@ pub struct WorkerContext {
     pub http_client: reqwest::Client,
     pub config: Config,
     pub stellar_rpc_url: String,
+    #[allow(dead_code)] // kept for parity with server config; jobs use stellar_rpc_url
     pub horizon_url: String,
     pub ses_client: Option<aws_sdk_sesv2::Client>,
     pub fcm_project_id: Option<String>,
@@ -63,7 +64,12 @@ impl std::fmt::Display for JobError {
 }
 
 /// Main worker entry point. Polls SQS in a loop with graceful shutdown.
-pub async fn run(pool: PgPool, redis_pool: Arc<deadpool_redis::Pool>, config: Config, metrics: Arc<AppMetrics>) {
+pub async fn run(
+    pool: PgPool,
+    redis_pool: Arc<deadpool_redis::Pool>,
+    config: Config,
+    metrics: Arc<AppMetrics>,
+) {
     let queue_url = config
         .sqs_queue_url
         .as_ref()
@@ -156,8 +162,18 @@ async fn poll_once(
         tokio::spawn(async move {
             let _permit = permit; // held until task completes
             let timeout_duration = Duration::from_secs(visibility_timeout as u64);
-            if tokio::time::timeout(timeout_duration, process_message(&sqs, &queue_url, &ctx, &message)).await.is_err() {
-                error!("worker: message {} timed out after {}s", message.message_id().unwrap_or("unknown"), visibility_timeout);
+            if tokio::time::timeout(
+                timeout_duration,
+                process_message(&sqs, &queue_url, &ctx, &message),
+            )
+            .await
+            .is_err()
+            {
+                error!(
+                    "worker: message {} timed out after {}s",
+                    message.message_id().unwrap_or("unknown"),
+                    visibility_timeout
+                );
             }
         });
     }
@@ -171,10 +187,7 @@ async fn process_message(
     ctx: &WorkerContext,
     message: &aws_sdk_sqs::types::Message,
 ) {
-    let message_id = message
-        .message_id()
-        .unwrap_or("unknown")
-        .to_string();
+    let message_id = message.message_id().unwrap_or("unknown").to_string();
     let receipt_handle = match message.receipt_handle() {
         Some(rh) => rh.to_string(),
         None => {
@@ -211,10 +224,7 @@ async fn process_message(
             match serde_json::from_str::<JobMessage>(&body) {
                 Ok(j) => j,
                 Err(e) => {
-                    error!(
-                        "worker: message {} has invalid JSON: {}",
-                        message_id, e
-                    );
+                    error!("worker: message {} has invalid JSON: {}", message_id, e);
                     return;
                 }
             }
@@ -223,26 +233,22 @@ async fn process_message(
         match serde_json::from_str::<JobMessage>(&body) {
             Ok(j) => j,
             Err(e) => {
-                error!(
-                    "worker: message {} has invalid JSON: {}",
-                    message_id, e
-                );
+                error!("worker: message {} has invalid JSON: {}", message_id, e);
                 return;
             }
         }
     };
 
-    let job_id = job
-        .job_id
-        .as_deref()
-        .unwrap_or("none");
+    let job_id = job.job_id.as_deref().unwrap_or("none");
     info!(
         "worker: dispatching job_type={} job_id={} message_id={}",
         job.job_type, job_id, message_id
     );
 
     let job_type_attr = KeyValue::new("job_type", job.job_type.clone());
-    ctx.metrics.jobs_active.add(1, &[job_type_attr.clone()]);
+    ctx.metrics
+        .jobs_active
+        .add(1, std::slice::from_ref(&job_type_attr));
     let start = std::time::Instant::now();
 
     let result = match job.job_type.as_str() {
@@ -260,20 +266,21 @@ async fn process_message(
     };
 
     let duration = start.elapsed().as_secs_f64();
-    ctx.metrics.jobs_active.add(-1, &[job_type_attr.clone()]);
+    ctx.metrics
+        .jobs_active
+        .add(-1, std::slice::from_ref(&job_type_attr));
     ctx.metrics
         .job_duration
-        .record(duration, &[job_type_attr.clone()]);
+        .record(duration, std::slice::from_ref(&job_type_attr));
 
     let outcome = match &result {
         Ok(()) => "success",
         Err(JobError::Transient(_)) => "transient_error",
         Err(JobError::Permanent(_)) => "permanent_error",
     };
-    ctx.metrics.jobs_processed.add(
-        1,
-        &[job_type_attr, KeyValue::new("outcome", outcome)],
-    );
+    ctx.metrics
+        .jobs_processed
+        .add(1, &[job_type_attr, KeyValue::new("outcome", outcome)]);
 
     match result {
         Ok(()) => {
@@ -301,9 +308,8 @@ async fn shutdown_signal() {
 
     #[cfg(unix)]
     {
-        let mut sigterm =
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-                .expect("Failed to install SIGTERM handler");
+        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("Failed to install SIGTERM handler");
         tokio::select! {
             _ = ctrl_c => {}
             _ = sigterm.recv() => {}

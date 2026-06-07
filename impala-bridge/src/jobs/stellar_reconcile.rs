@@ -14,10 +14,8 @@ struct ReconcilePayload {
 
 /// Reconcile Stellar transactions against the local database.
 pub async fn execute(ctx: &WorkerContext, payload: &serde_json::Value) -> Result<(), JobError> {
-    let parsed: ReconcilePayload =
-        serde_json::from_value(payload.clone()).map_err(|e| {
-            JobError::Permanent(format!("Invalid stellar_reconcile payload: {}", e))
-        })?;
+    let parsed: ReconcilePayload = serde_json::from_value(payload.clone())
+        .map_err(|e| JobError::Permanent(format!("Invalid stellar_reconcile payload: {}", e)))?;
 
     info!(
         "stellar_reconcile: start_ledger={:?} end_ledger={:?}",
@@ -37,13 +35,12 @@ pub async fn execute(ctx: &WorkerContext, payload: &serde_json::Value) -> Result
         .json(&rpc_request)
         .send()
         .await
-        .map_err(|e| {
-            JobError::Transient(format!("Stellar RPC request failed: {}", e))
-        })?;
+        .map_err(|e| JobError::Transient(format!("Stellar RPC request failed: {}", e)))?;
 
-    let body: serde_json::Value = response.json().await.map_err(|e| {
-        JobError::Transient(format!("Failed to parse Stellar RPC response: {}", e))
-    })?;
+    let body: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|e| JobError::Transient(format!("Failed to parse Stellar RPC response: {}", e)))?;
 
     let transactions = body["result"]["transactions"]
         .as_array()
@@ -66,18 +63,20 @@ pub async fn execute(ctx: &WorkerContext, payload: &serde_json::Value) -> Result
             .bind(tx_id)
             .fetch_one(&ctx.pool)
             .await
-            .map_err(|e| {
-                JobError::Transient(format!("Database query failed: {}", e))
-            })?;
+            .map_err(|e| JobError::Transient(format!("Database query failed: {}", e)))?;
 
             if count > 0 {
                 debug!("stellar_reconcile: matched tx {}", tx_id);
                 matched += 1;
-                ctx.metrics.stellar_reconcile_txns.add(1, &[KeyValue::new("status", "matched")]);
+                ctx.metrics
+                    .stellar_reconcile_txns
+                    .add(1, &[KeyValue::new("status", "matched")]);
             } else {
                 warn!("stellar_reconcile: unmatched Stellar tx {}", tx_id);
                 unmatched += 1;
-                ctx.metrics.stellar_reconcile_txns.add(1, &[KeyValue::new("status", "unmatched")]);
+                ctx.metrics
+                    .stellar_reconcile_txns
+                    .add(1, &[KeyValue::new("status", "unmatched")]);
             }
         }
     }

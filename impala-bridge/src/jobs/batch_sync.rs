@@ -12,9 +12,8 @@ struct BatchSyncPayload {
 
 /// Sync multiple accounts by invoking the core sync logic for each account ID.
 pub async fn execute(ctx: &WorkerContext, payload: &serde_json::Value) -> Result<(), JobError> {
-    let parsed: BatchSyncPayload = serde_json::from_value(payload.clone()).map_err(|e| {
-        JobError::Permanent(format!("Invalid batch_sync payload: {}", e))
-    })?;
+    let parsed: BatchSyncPayload = serde_json::from_value(payload.clone())
+        .map_err(|e| JobError::Permanent(format!("Invalid batch_sync payload: {}", e)))?;
 
     if parsed.account_ids.is_empty() {
         info!("batch_sync: empty account_ids list, nothing to do");
@@ -28,21 +27,19 @@ pub async fn execute(ctx: &WorkerContext, payload: &serde_json::Value) -> Result
 
     let mut errors = Vec::new();
     for account_id in &parsed.account_ids {
-        match sync_account_core(
-            &ctx.pool,
-            &ctx.redis_pool,
-            &ctx.stellar_rpc_url,
-            account_id,
-        )
-        .await
+        match sync_account_core(&ctx.pool, &ctx.redis_pool, &ctx.stellar_rpc_url, account_id).await
         {
             Ok(ts) => {
                 info!("batch_sync: synced {} at {}", account_id, ts);
-                ctx.metrics.batch_sync_accounts.add(1, &[KeyValue::new("outcome", "success")]);
+                ctx.metrics
+                    .batch_sync_accounts
+                    .add(1, &[KeyValue::new("outcome", "success")]);
             }
             Err(e) => {
                 error!("batch_sync: failed to sync {}: {}", account_id, e);
-                ctx.metrics.batch_sync_accounts.add(1, &[KeyValue::new("outcome", "failed")]);
+                ctx.metrics
+                    .batch_sync_accounts
+                    .add(1, &[KeyValue::new("outcome", "failed")]);
                 errors.push(format!("{}: {}", account_id, e));
             }
         }

@@ -23,9 +23,11 @@ impala-soroban/
 Requires Rust 1.89.0+ with `wasm32-unknown-unknown` target:
 
 ```bash
-# Build the contract WASM
+# Build the contract WASM. The --target flag is required: the crate is
+# crate-type = ["cdylib"] with no .cargo/config.toml, so a bare
+# `cargo build --release` produces a native .so, not the WASM.
 cd integration-test
-cargo build --release
+cargo build --release --target wasm32-unknown-unknown
 # Output: target/wasm32-unknown-unknown/release/soroban_impala_integration_test.wasm
 
 # Run unit tests (in-process, no network)
@@ -38,7 +40,7 @@ Requires the [Stellar CLI](https://github.com/stellar/stellar-cli) installed and
 
 ```bash
 # First, build the WASM (see above)
-cd integration-test && cargo build --release
+cd integration-test && cargo build --release --target wasm32-unknown-unknown
 
 # Then run testnet tests
 cd ../testnet-tests

@@ -188,6 +188,11 @@ variable "live_vpc_cidr" {
   description = "CIDR block for the live VPC (must not overlap testnet_vpc_cidr)"
   type        = string
   default     = "10.3.0.0/16"
+
+  validation {
+    condition     = var.live_vpc_cidr != var.testnet_vpc_cidr
+    error_message = "live_vpc_cidr must not be identical to testnet_vpc_cidr."
+  }
 }
 
 variable "live_server_desired_count" {
@@ -265,6 +270,11 @@ variable "impala_vpc_cidr" {
   description = "CIDR block for the impala VPC (must not overlap testnet_vpc_cidr or live_vpc_cidr)"
   type        = string
   default     = "10.4.0.0/16"
+
+  validation {
+    condition     = var.impala_vpc_cidr != var.testnet_vpc_cidr && var.impala_vpc_cidr != var.live_vpc_cidr
+    error_message = "impala_vpc_cidr must not be identical to testnet_vpc_cidr or live_vpc_cidr."
+  }
 }
 
 variable "impala_certificate_arn" {

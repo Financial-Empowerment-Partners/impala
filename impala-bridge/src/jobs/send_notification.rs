@@ -23,10 +23,8 @@ struct NotificationPayload {
 
 /// Deliver a notification via webhook or SMS (Twilio).
 pub async fn execute(ctx: &WorkerContext, payload: &serde_json::Value) -> Result<(), JobError> {
-    let parsed: NotificationPayload =
-        serde_json::from_value(payload.clone()).map_err(|e| {
-            JobError::Permanent(format!("Invalid send_notification payload: {}", e))
-        })?;
+    let parsed: NotificationPayload = serde_json::from_value(payload.clone())
+        .map_err(|e| JobError::Permanent(format!("Invalid send_notification payload: {}", e)))?;
 
     info!(
         "send_notification: account={} medium={}",
@@ -52,21 +50,19 @@ pub async fn execute(ctx: &WorkerContext, payload: &serde_json::Value) -> Result
     let medium_attr = KeyValue::new("medium", parsed.medium.clone());
     ctx.metrics
         .notification_delivery_duration
-        .record(duration, &[medium_attr.clone()]);
+        .record(duration, std::slice::from_ref(&medium_attr));
 
     let (service_id, service_response, result) = match delivery_result {
         Ok(tuple) => {
-            ctx.metrics.notifications_delivered.add(1, &[
-                medium_attr,
-                KeyValue::new("outcome", "success"),
-            ]);
+            ctx.metrics
+                .notifications_delivered
+                .add(1, &[medium_attr, KeyValue::new("outcome", "success")]);
             tuple
         }
         Err(e) => {
-            ctx.metrics.notifications_delivered.add(1, &[
-                medium_attr,
-                KeyValue::new("outcome", "error"),
-            ]);
+            ctx.metrics
+                .notifications_delivered
+                .add(1, &[medium_attr, KeyValue::new("outcome", "error")]);
             return Err(e);
         }
     };
@@ -96,13 +92,13 @@ async fn send_webhook(
     ctx: &WorkerContext,
     payload: &NotificationPayload,
 ) -> Result<(String, String, String), JobError> {
-    let url = payload.webhook_url.as_deref().ok_or_else(|| {
-        JobError::Permanent("webhook medium requires webhook_url".to_string())
-    })?;
+    let url = payload
+        .webhook_url
+        .as_deref()
+        .ok_or_else(|| JobError::Permanent("webhook medium requires webhook_url".to_string()))?;
 
-    validate_callback_url(url).map_err(|e| {
-        JobError::Permanent(format!("Invalid webhook URL: {}", e))
-    })?;
+    validate_callback_url(url)
+        .map_err(|e| JobError::Permanent(format!("Invalid webhook URL: {}", e)))?;
 
     let body = serde_json::json!({
         "account_id": payload.account_id,
@@ -115,20 +111,14 @@ async fn send_webhook(
         .json(&body)
         .send()
         .await
-        .map_err(|e| {
-            JobError::Transient(format!("Webhook request failed: {}", e))
-        })?;
+        .map_err(|e| JobError::Transient(format!("Webhook request failed: {}", e)))?;
 
     let status = response.status().as_u16();
     let response_body = response.text().await.unwrap_or_default();
 
-    if status >= 200 && status < 300 {
+    if (200..300).contains(&status) {
         info!("send_notification: webhook to {} returned {}", url, status);
-        Ok((
-            url.to_string(),
-            response_body,
-            "delivered".to_string(),
-        ))
+        Ok((url.to_string(), response_body, "delivered".to_string()))
     } else {
         Err(JobError::Transient(format!(
             "Webhook returned HTTP {}",
@@ -141,15 +131,20 @@ async fn send_sms(
     ctx: &WorkerContext,
     payload: &NotificationPayload,
 ) -> Result<(String, String, String), JobError> {
-    let sid = ctx.config.twilio_sid.as_deref().ok_or_else(|| {
-        JobError::Permanent("SMS delivery requires TWILIO_SID".to_string())
-    })?;
-    let token = ctx.config.twilio_token.as_deref().ok_or_else(|| {
-        JobError::Permanent("SMS delivery requires TWILIO_TOKEN".to_string())
-    })?;
-    let from_number = ctx.config.twilio_number.as_deref().ok_or_else(|| {
-        JobError::Permanent("SMS delivery requires TWILIO_NUMBER".to_string())
-    })?;
+    let sid = ctx
+        .config
+        .twilio_sid
+        .as_deref()
+        .ok_or_else(|| JobError::Permanent("SMS delivery requires TWILIO_SID".to_string()))?;
+    let token = ctx
+        .config
+        .twilio_token
+        .as_deref()
+        .ok_or_else(|| JobError::Permanent("SMS delivery requires TWILIO_TOKEN".to_string()))?;
+    let from_number =
+        ctx.config.twilio_number.as_deref().ok_or_else(|| {
+            JobError::Permanent("SMS delivery requires TWILIO_NUMBER".to_string())
+        })?;
     let to_number = payload.destination.as_deref().ok_or_else(|| {
         JobError::Permanent("SMS medium requires destination phone number".to_string())
     })?;
@@ -170,14 +165,12 @@ async fn send_sms(
         ])
         .send()
         .await
-        .map_err(|e| {
-            JobError::Transient(format!("Twilio request failed: {}", e))
-        })?;
+        .map_err(|e| JobError::Transient(format!("Twilio request failed: {}", e)))?;
 
     let status = response.status().as_u16();
     let response_body = response.text().await.unwrap_or_default();
 
-    if status >= 200 && status < 300 {
+    if (200..300).contains(&status) {
         info!(
             "send_notification: SMS to {} via Twilio returned {}",
             to_number, status
@@ -223,11 +216,7 @@ async fn send_email(
     let result = ses_client
         .send_email()
         .from_email_address(from_address)
-        .destination(
-            Destination::builder()
-                .to_addresses(to_address)
-                .build(),
-        )
+        .destination(Destination::builder().to_addresses(to_address).build())
         .content(
             EmailContent::builder()
                 .simple(
@@ -281,9 +270,10 @@ async fn send_push(
         JobError::Permanent("Push delivery requires FCM_PROJECT_ID to be configured".to_string())
     })?;
 
-    let tokens = payload.device_tokens.as_ref().ok_or_else(|| {
-        JobError::Permanent("Push delivery requires device_tokens".to_string())
-    })?;
+    let tokens = payload
+        .device_tokens
+        .as_ref()
+        .ok_or_else(|| JobError::Permanent("Push delivery requires device_tokens".to_string()))?;
 
     if tokens.is_empty() {
         return Err(JobError::Permanent(
@@ -296,10 +286,7 @@ async fn send_push(
         project_id
     );
 
-    let title = payload
-        .message_title
-        .as_deref()
-        .unwrap_or("Impala Bridge");
+    let title = payload.message_title.as_deref().unwrap_or("Impala Bridge");
 
     let mut sent_count = 0u32;
     let mut last_response = String::new();
@@ -326,14 +313,12 @@ async fn send_push(
             .json(&body)
             .send()
             .await
-            .map_err(|e| {
-                JobError::Transient(format!("FCM request failed: {}", e))
-            })?;
+            .map_err(|e| JobError::Transient(format!("FCM request failed: {}", e)))?;
 
         let status = response.status().as_u16();
         let response_body = response.text().await.unwrap_or_default();
 
-        if status >= 200 && status < 300 {
+        if (200..300).contains(&status) {
             sent_count += 1;
             last_response = response_body;
         } else {

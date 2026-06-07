@@ -1,0 +1,99 @@
+# =============================================================================
+# CI for impala-soroban (Soroban smart contracts).
+#
+# Two independent crates: integration-test/ (the contract, compiles to WASM with
+# in-process unit tests) and testnet-tests/ (end-to-end against Stellar testnet —
+# needs network + stellar-cli + funded accounts, so it's manual-dispatch only).
+# =============================================================================
+name: impala-soroban
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'impala-soroban/**'
+      - '.github/workflows/impala-soroban.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'impala-soroban/**'
+      - '.github/workflows/impala-soroban.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: impala-soroban-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    name: Contract (fmt, clippy, test, WASM)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: impala-soroban/integration-test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+          targets: wasm32-unknown-unknown
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            impala-soroban/integration-test/target
+          key: ${{ runner.os }}-soroban-${{ hashFiles('impala-soroban/integration-test/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-soroban-
+
+      - name: Check formatting
+        run: cargo fmt -- --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Unit tests (in-process, no network)
+        run: cargo test
+
+      - name: Build contract WASM
+        run: cargo build --release --target wasm32-unknown-unknown
+
+      - name: Upload WASM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: soroban-impala-integration-test-wasm-${{ github.sha }}
+          path: impala-soroban/integration-test/target/wasm32-unknown-unknown/release/*.wasm
+          if-no-files-found: error
+          retention-days: 30
+
+  # End-to-end against Stellar testnet. Manual only: slow (ledger latency +
+  # timelock waits) and needs network + the stellar CLI.
+  testnet-tests:
+    name: Testnet e2e (manual)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Install stellar-cli
+        run: cargo install --locked stellar-cli
+
+      - name: Build contract WASM
+        working-directory: impala-soroban/integration-test
+        run: cargo build --release --target wasm32-unknown-unknown
+
+      - name: Run testnet tests
+        working-directory: impala-soroban/testnet-tests
+        run: cargo test

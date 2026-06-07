@@ -1,0 +1,51 @@
+version: 2
+updates:
+  # ---- Rust ----
+  - package-ecosystem: cargo
+    directory: /impala-bridge
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+  - package-ecosystem: cargo
+    directory: /impala-soroban/integration-test
+    schedule:
+      interval: weekly
+  - package-ecosystem: cargo
+    directory: /impala-soroban/testnet-tests
+    schedule:
+      interval: weekly
+
+  # ---- Gradle / Android ----
+  - package-ecosystem: gradle
+    directory: /impala-card
+    schedule:
+      interval: weekly
+  - package-ecosystem: gradle
+    directory: /impala-lib
+    schedule:
+      interval: weekly
+  - package-ecosystem: gradle
+    directory: /impala-android-demo
+    schedule:
+      interval: weekly
+
+  # ---- JavaScript ----
+  - package-ecosystem: npm
+    directory: /impala-ui
+    schedule:
+      interval: weekly
+
+  # ---- Infra / CI ----
+  # Keeps GitHub Actions current (and can pin them to commit SHAs).
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+  - package-ecosystem: docker
+    directory: /impala-bridge
+    schedule:
+      interval: weekly
+  - package-ecosystem: terraform
+    directory: /terraform
+    schedule:
+      interval: weekly

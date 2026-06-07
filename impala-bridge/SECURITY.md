@@ -6,7 +6,7 @@
 
 impala-bridge uses a two-token JWT approach:
 
-- **Refresh token** (30-day TTL): Issued via `POST /token` with username/password. Used only to obtain temporal tokens.
+- **Refresh token** (14-day TTL): Issued via `POST /token` with username/password. Used only to obtain temporal tokens.
 - **Temporal token** (1-hour TTL): Issued via `POST /token` with a valid refresh token. Used for all authenticated API calls.
 
 Both tokens use HS256 with a mandatory 32+ character secret (`JWT_SECRET`), include a unique JTI (JWT ID), and are validated for issuer (`impala-bridge`) and algorithm.
@@ -120,3 +120,43 @@ TLS is terminated at the ALB with an ACM certificate. When `certificate_arn` is 
 ### Dependency Vulnerabilities
 
 `cargo audit` runs in CI to check for known vulnerabilities in dependencies. Address findings promptly.
+
+## Admin role & webhook event feed
+
+### Admin authorization
+
+Admin privilege is carried by an `is_admin` JWT claim. It is **server-derived**
+at every token issuance from the `ADMIN_ACCOUNT_IDS` allowlist (comma-separated
+account IDs) — clients cannot set it because tokens are HS256-signed. It is
+re-derived on each issuance (including refresh→temporal rotation), so adding or
+removing an admin takes effect within one temporal-token lifetime (≤1h) even for
+a long-lived refresh token; for immediate revocation, revoke the token's JTI via
+`POST /logout`.
+
+The `AdminUser` extractor gates every `/admin/*` route plus the `/sync` and
+`/subscribe` endpoints. It applies the same checks as `AuthenticatedUser`
+(temporal token, issuer, fail-closed JTI revocation) and additionally requires
+`is_admin == true`, returning `403 Forbidden` otherwise. Because the gate is an
+extractor, an admin route cannot accidentally omit the check.
+
+### Webhook delivery security
+
+Account/transaction state changes are appended to a durable `event_outbox` (in
+the same DB transaction as the change) and delivered to admin-registered webhooks
+by an in-process worker:
+
+- **Signing**: every POST carries `X-Impala-Signature: sha256=<hex>` where the
+  value is `HMAC_SHA256(secret, "{X-Impala-Timestamp}.{raw_body}")`. The secret is
+  generated server-side and returned **once** at registration. Receivers must
+  recompute the HMAC over the raw body and the `X-Impala-Timestamp` header,
+  compare in **constant time**, and reject timestamps outside a ±5-minute window
+  (replay protection).
+- **SSRF**: webhook URLs are validated (localhost, private/link-local IPs, cloud
+  metadata, non-HTTP schemes blocked) at registration **and** before every
+  delivery (DNS-rebinding defense).
+- **Delivery**: at-least-once with exponential backoff; a delivery is marked
+  `failed` after `ADMIN_WEBHOOK_MAX_ATTEMPTS`, and a webhook is auto-disabled
+  after `ADMIN_WEBHOOK_DISABLE_THRESHOLD` consecutive failures.
+- **Least disclosure**: payloads never include secrets/PII — no MFA secret, no
+  raw device token (platform only). The signing secret is never returned by
+  `GET /admin/webhooks`. Store it in Vault/KMS for production.

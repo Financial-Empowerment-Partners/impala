@@ -25,7 +25,10 @@ pub async fn publish_job(
         .send()
         .await
         .map_err(|e| {
-            error!("sns::publish_job: failed to publish to {}: {}", topic_arn, e);
+            error!(
+                "sns::publish_job: failed to publish to {}: {}",
+                topic_arn, e
+            );
             format!("SNS publish error: {}", e)
         })?;
 

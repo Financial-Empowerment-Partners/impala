@@ -5,7 +5,7 @@ use redis::AsyncCommands;
 use sqlx::PgPool;
 use std::sync::Arc;
 
-use crate::auth::AuthenticatedUser;
+use crate::auth::AdminUser;
 use crate::constants::DEFAULT_HTTP_CLIENT_TIMEOUT_SECS;
 use crate::error::AppError;
 use crate::models::{SyncRequest, SyncResponse};
@@ -36,7 +36,9 @@ pub async fn sync_account_core(
 
     // Call Stellar Soroban RPC getTransactions and check against local DB
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(DEFAULT_HTTP_CLIENT_TIMEOUT_SECS))
+        .timeout(std::time::Duration::from_secs(
+            DEFAULT_HTTP_CLIENT_TIMEOUT_SECS,
+        ))
         .build()
         .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
     let rpc_request = serde_json::json!({
@@ -82,7 +84,7 @@ pub async fn sync_account_core(
 
 /// Record a sync timestamp in Redis and reconcile with Stellar RPC (`POST /sync`).
 pub async fn sync_account(
-    _user: AuthenticatedUser,
+    _user: AdminUser,
     Extension(pool): Extension<PgPool>,
     Extension(redis_pool): Extension<Arc<deadpool_redis::Pool>>,
     Extension(stellar_config): Extension<Arc<crate::config::StellarConfig>>,
@@ -90,10 +92,14 @@ pub async fn sync_account(
 ) -> Result<Json<SyncResponse>, AppError> {
     info!("POST /sync: account_id={}", payload.account_id);
 
-    let timestamp =
-        sync_account_core(&pool, &redis_pool, &stellar_config.rpc_url, &payload.account_id)
-            .await
-            .map_err(AppError::InternalError)?;
+    let timestamp = sync_account_core(
+        &pool,
+        &redis_pool,
+        &stellar_config.rpc_url,
+        &payload.account_id,
+    )
+    .await
+    .map_err(AppError::InternalError)?;
 
     Ok(Json(SyncResponse {
         success: true,

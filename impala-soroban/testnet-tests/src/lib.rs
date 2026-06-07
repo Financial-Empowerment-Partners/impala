@@ -26,9 +26,9 @@ pub fn require_stellar_cli() {
     let output = Command::new("stellar").arg("--version").output();
     match output {
         Ok(o) if o.status.success() => {}
-        _ => panic!(
-            "stellar CLI not found. Install it from https://github.com/stellar/stellar-cli"
-        ),
+        _ => {
+            panic!("stellar CLI not found. Install it from https://github.com/stellar/stellar-cli")
+        }
     }
 }
 
@@ -206,8 +206,6 @@ fn assert_cmd_success(output: &Output, context: &str) {
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);
-        panic!(
-            "stellar {context} failed:\nstdout: {stdout}\nstderr: {stderr}"
-        );
+        panic!("stellar {context} failed:\nstdout: {stdout}\nstderr: {stderr}");
     }
 }

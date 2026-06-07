@@ -35,6 +35,11 @@ kotlin {
             // implementation(files("../build/applet.jar"))
             implementation(project(":applet"))
         }
+
+        // iosMain (shared by iosX64/iosArm64/iosSimulatorArm64 via the default
+        // hierarchy template) holds the CoreNFC transport: CoreNfcBibo + the
+        // optional CoreNfcSessionDriver. CoreNFC/Foundation/darwin are built-in
+        // platform.* interop libraries — no extra dependencies, no cinterop .def.
     }
 
     jvm {

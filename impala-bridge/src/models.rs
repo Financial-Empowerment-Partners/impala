@@ -11,6 +11,11 @@ pub struct Claims {
     pub iat: usize,
     pub jti: String,
     pub iss: String,
+    /// Admin privilege, server-derived from the ADMIN_ACCOUNT_IDS allowlist at
+    /// every token issuance. `#[serde(default)]` so pre-existing tokens (and any
+    /// non-admin path) decode as `false`; clients cannot set it (HS256-signed).
+    #[serde(default)]
+    pub is_admin: bool,
 }
 
 // ── Pagination ─────────────────────────────────────────────────────────
@@ -35,7 +40,7 @@ impl PaginationParams {
     /// Return clamped `(per_page, offset)` suitable for SQL LIMIT/OFFSET.
     /// `per_page` is clamped to `[1, 100]`, `page` to `[1, ..)`.
     pub fn clamped(&self) -> (i64, i64) {
-        let per_page = (self.per_page.max(1).min(100)) as i64;
+        let per_page = self.per_page.clamp(1, 100) as i64;
         let page = self.page.max(1) as i64;
         let offset = (page - 1) * per_page;
         (per_page, offset)
@@ -219,6 +224,7 @@ pub struct DeleteCardRequest {
 pub struct EnrollMfaRequest {
     pub account_id: String,
     pub mfa_type: String,
+    #[allow(dead_code)] // accepted in the request body; TOTP secret is generated server-side
     pub secret: Option<String>,
     pub phone_number: Option<String>,
 }
@@ -413,13 +419,74 @@ pub struct OktaConfigResponse {
     pub scopes: Option<Vec<String>>,
 }
 
+// ── Admin webhook feed ───────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct RegisterWebhookRequest {
+    pub url: String,
+    /// Event types to deliver; omit/empty for all.
+    #[serde(default)]
+    pub event_types: Option<Vec<String>>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RegisterWebhookResponse {
+    pub id: i64,
+    pub url: String,
+    /// HMAC-SHA256 signing secret. Returned ONCE — store it on the receiver to
+    /// verify the `X-Impala-Signature` header.
+    pub secret: String,
+}
+
+#[derive(Debug, Serialize, sqlx::FromRow)]
+pub struct WebhookInfo {
+    pub id: i64,
+    pub url: String,
+    pub event_types: Option<Vec<String>>,
+    pub enabled: bool,
+    pub failure_count: i32,
+    pub last_error: Option<String>,
+    pub last_delivery_at: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Serialize, sqlx::FromRow)]
+pub struct EventFeedItem {
+    pub id: i64,
+    pub event_type: String,
+    pub account_id: String,
+    pub payload: serde_json::Value,
+    pub created_at: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct EventFeedResponse {
+    pub events: Vec<EventFeedItem>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct EventFeedQuery {
+    /// Return events with `id` strictly greater than this cursor.
+    #[serde(default)]
+    pub since: i64,
+    #[serde(default = "default_event_limit")]
+    pub limit: i64,
+}
+
+fn default_event_limit() -> i64 {
+    100
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn test_pagination_defaults() {
-        let p = PaginationParams { page: 1, per_page: 20 };
+        let p = PaginationParams {
+            page: 1,
+            per_page: 20,
+        };
         let (per_page, offset) = p.clamped();
         assert_eq!(per_page, 20);
         assert_eq!(offset, 0);
@@ -427,28 +494,40 @@ mod tests {
 
     #[test]
     fn test_pagination_clamps_per_page_upper() {
-        let p = PaginationParams { page: 1, per_page: 500 };
+        let p = PaginationParams {
+            page: 1,
+            per_page: 500,
+        };
         let (per_page, _) = p.clamped();
         assert_eq!(per_page, 100);
     }
 
     #[test]
     fn test_pagination_clamps_per_page_lower() {
-        let p = PaginationParams { page: 1, per_page: 0 };
+        let p = PaginationParams {
+            page: 1,
+            per_page: 0,
+        };
         let (per_page, _) = p.clamped();
         assert_eq!(per_page, 1);
     }
 
     #[test]
     fn test_pagination_clamps_page_lower() {
-        let p = PaginationParams { page: 0, per_page: 20 };
+        let p = PaginationParams {
+            page: 0,
+            per_page: 20,
+        };
         let (_, offset) = p.clamped();
         assert_eq!(offset, 0);
     }
 
     #[test]
     fn test_pagination_offset_calculation() {
-        let p = PaginationParams { page: 3, per_page: 25 };
+        let p = PaginationParams {
+            page: 3,
+            per_page: 25,
+        };
         let (per_page, offset) = p.clamped();
         assert_eq!(per_page, 25);
         assert_eq!(offset, 50);

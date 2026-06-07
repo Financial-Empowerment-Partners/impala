@@ -1,5 +1,15 @@
+# Build context is impala-bridge/. Keep src/, migrations/, Cargo.*, build.rs;
+# exclude everything not needed by the image build to shrink the context.
 target/
 .env
 .env.*
 *.log
 .git/
+.gitignore
+.dockerignore
+Dockerfile
+docker-compose.yml
+examples/
+*.md
+.vscode/
+.idea/

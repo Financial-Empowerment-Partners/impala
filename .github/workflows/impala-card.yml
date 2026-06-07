@@ -29,11 +29,11 @@
 # The publish job uses the built-in GITHUB_TOKEN with packages:write permission.
 # =============================================================================
 
-name: Impala SmartCard Build
+name: impala-card
 
 on:
   push:
-    branches: [do-not-run]
+    branches: [main]
     tags:
       - 'impala-card-v*'
     paths:

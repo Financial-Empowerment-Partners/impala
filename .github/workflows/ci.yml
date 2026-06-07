@@ -27,11 +27,11 @@
 #   LIVE_ENABLED     - "true" to enable live stack (default false)
 # =============================================================================
 
-name: Impala CI
+name: CI
 
 on:
   push:
-    branches: [do-not-run]
+    branches: [main]
     tags:
       - 'impala-bridge-v*'
     paths:
@@ -84,6 +84,12 @@ env:
 permissions:
   id-token: write
   contents: read
+
+# Avoid racing/duplicate runs on the same ref. PRs cancel in-progress runs;
+# main pushes (which may deploy) are allowed to finish.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   # ===========================================================================
@@ -258,11 +264,69 @@ jobs:
           docker manifest push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
 
   # ===========================================================================
+  # Lint Dockerfile — hadolint (no creds). Advisory.
+  # ===========================================================================
+  lint-docker:
+    name: Lint Dockerfile
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: hadolint
+        run: |
+          docker run --rm -i hadolint/hadolint hadolint - < impala-bridge/Dockerfile \
+            || echo "::warning::hadolint reported issues (non-blocking)"
+
+  # ===========================================================================
+  # Terraform checks — fmt, validate (root + modules + bootstrap), lint, IaC
+  # security scan. No AWS creds needed. Gates deploy. tflint/trivy are warn-first;
+  # flip to failing once the baseline is triaged.
+  # ===========================================================================
+  terraform-checks:
+    name: Terraform checks
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: terraform
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~> 1.9"
+
+      - name: Terraform fmt
+        run: terraform fmt -check -recursive
+
+      - name: Terraform validate (root + modules + bootstrap)
+        run: |
+          terraform init -backend=false
+          terraform validate
+          for d in modules/*/ bootstrap; do
+            if [ -d "$d" ]; then
+              echo "== validate $d =="
+              (cd "$d" && terraform init -backend=false && terraform validate)
+            fi
+          done
+
+      - name: tflint
+        run: |
+          curl -sSL https://raw.githubusercontent.com/terraform-linters/tflint/master/install_linux.sh | bash
+          tflint --recursive --no-color \
+            || echo "::warning::tflint reported issues (non-blocking; triage then enforce)"
+
+      - name: Trivy IaC config scan
+        run: |
+          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
+          # exit-code 0 = warn-first; flip to 1 after triaging intentional findings.
+          trivy config --severity HIGH,CRITICAL --exit-code 0 --no-progress .
+
+  # ===========================================================================
   # Deploy — Terraform plan/apply (optional)
   # ===========================================================================
   deploy:
     name: Terraform ${{ github.event.inputs.terraform_action || 'plan' }}
-    needs: manifest
+    needs: [manifest, terraform-checks]
     runs-on: ubuntu-latest
     if: >
       (github.event_name == 'workflow_dispatch' && github.event.inputs.deploy == 'true') ||
@@ -285,10 +349,16 @@ jobs:
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
-          terraform_version: "~> 1.5"
+          terraform_version: "~> 1.9"
 
       - name: Terraform Init
-        run: terraform init
+        # Backend config (bucket/key/region/lock table) supplied here; see backend.tf.
+        run: |
+          terraform init \
+            -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
+            -backend-config="key=impala/terraform.tfstate" \
+            -backend-config="region=${{ secrets.AWS_REGION }}" \
+            -backend-config="dynamodb_table=${{ vars.TF_LOCK_TABLE }}"
 
       - name: Terraform Plan
         id: plan

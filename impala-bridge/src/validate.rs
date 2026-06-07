@@ -26,14 +26,10 @@ pub fn validate_stellar_account_id(id: &str) -> Result<(), AppError> {
 /// Validate an email address with a basic check.
 pub fn validate_email(email: &str) -> Result<(), AppError> {
     if email.len() > MAX_EMAIL_LENGTH {
-        return Err(AppError::BadRequest(
-            "Email address too long".to_string(),
-        ));
+        return Err(AppError::BadRequest("Email address too long".to_string()));
     }
     if !email.contains('@') {
-        return Err(AppError::BadRequest(
-            "Invalid email address".to_string(),
-        ));
+        return Err(AppError::BadRequest("Invalid email address".to_string()));
     }
     let parts: Vec<&str> = email.splitn(2, '@').collect();
     if parts.len() != 2 || parts[0].is_empty() || parts[1].is_empty() || !parts[1].contains('.') {
@@ -83,7 +79,8 @@ pub fn validate_card_id(id: &str) -> Result<(), AppError> {
 pub fn validate_ec_pubkey(key: &str) -> Result<(), AppError> {
     if key.len() != 66 && key.len() != 130 {
         return Err(AppError::BadRequest(
-            "EC public key must be 66 (compressed) or 130 (uncompressed) hex characters".to_string(),
+            "EC public key must be 66 (compressed) or 130 (uncompressed) hex characters"
+                .to_string(),
         ));
     }
     if !key.chars().all(|c| c.is_ascii_hexdigit()) {
@@ -101,7 +98,10 @@ pub fn validate_rsa_pubkey(key: &str) -> Result<(), AppError> {
             "RSA public key must be between 100 and 2048 characters".to_string(),
         ));
     }
-    if !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '=') {
+    if !key
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '=')
+    {
         return Err(AppError::BadRequest(
             "RSA public key must be Base64-encoded".to_string(),
         ));
@@ -112,9 +112,8 @@ pub fn validate_rsa_pubkey(key: &str) -> Result<(), AppError> {
 /// Validate a callback URL for SSRF prevention.
 /// Blocks localhost, private IPs, link-local, and cloud metadata endpoints.
 pub fn validate_callback_url(url: &str) -> Result<(), AppError> {
-    let parsed = url::Url::parse(url).map_err(|_| {
-        AppError::BadRequest("Invalid URL format".to_string())
-    })?;
+    let parsed =
+        url::Url::parse(url).map_err(|_| AppError::BadRequest("Invalid URL format".to_string()))?;
 
     let scheme = parsed.scheme();
     if scheme != "http" && scheme != "https" {
@@ -128,7 +127,12 @@ pub fn validate_callback_url(url: &str) -> Result<(), AppError> {
         .ok_or_else(|| AppError::BadRequest("URL must have a host".to_string()))?;
 
     // Block localhost
-    if host == "localhost" || host == "127.0.0.1" || host == "::1" || host == "[::1]" || host == "0.0.0.0" {
+    if host == "localhost"
+        || host == "127.0.0.1"
+        || host == "::1"
+        || host == "[::1]"
+        || host == "0.0.0.0"
+    {
         return Err(AppError::BadRequest(
             "Callback URL must not target localhost".to_string(),
         ));

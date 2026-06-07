@@ -36,12 +36,20 @@ pub async fn create_account(
     }
 
     if payload.first_name.len() > MAX_NAME_LENGTH || payload.last_name.len() > MAX_NAME_LENGTH {
-        warn!("create_account: name fields exceed {} characters", MAX_NAME_LENGTH);
+        warn!(
+            "create_account: name fields exceed {} characters",
+            MAX_NAME_LENGTH
+        );
         return Ok(Json(CreateAccountResponse {
             success: false,
             message: format!("Name fields must not exceed {} characters", MAX_NAME_LENGTH),
         }));
     }
+
+    let mut tx = pool.begin().await.map_err(|e| {
+        error!("create_account: begin tx error: {}", e);
+        AppError::InternalError("Database error".to_string())
+    })?;
 
     let result = sqlx::query(
         r#"
@@ -59,11 +67,24 @@ pub async fn create_account(
     .bind(&payload.nickname)
     .bind(&payload.affiliation)
     .bind(&payload.gender)
-    .execute(&pool)
+    .execute(&mut *tx)
     .await;
 
     match result {
         Ok(_) => {
+            // Append the admin-feed event in the same transaction.
+            crate::events::emit_event(
+                &mut tx,
+                &crate::events::AccountEvent::AccountCreated {
+                    account_id: payload.payala_account_id.clone(),
+                    stellar_account_id: payload.stellar_account_id.clone(),
+                },
+            )
+            .await?;
+            tx.commit().await.map_err(|e| {
+                error!("create_account: commit error: {}", e);
+                AppError::InternalError("Database error".to_string())
+            })?;
             info!(
                 "create_account: account created for stellar_id={}",
                 payload.stellar_account_id
@@ -101,7 +122,18 @@ pub async fn get_account(
         "GET /account: lookup stellar_id={}",
         params.stellar_account_id
     );
-    let result = sqlx::query_as::<_, (String, String, Option<String>, String, Option<String>, Option<String>, Option<String>)>(
+    let result = sqlx::query_as::<
+        _,
+        (
+            String,
+            String,
+            Option<String>,
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        ),
+    >(
         r#"
         SELECT payala_account_id, first_name, middle_name, last_name,
                nickname, affiliation, gender
@@ -220,12 +252,24 @@ pub async fn update_account(
 
     // Collect field names for notification
     let mut changed_fields = Vec::new();
-    if payload.first_name.is_some() { changed_fields.push("first_name".to_string()); }
-    if payload.middle_name.is_some() { changed_fields.push("middle_name".to_string()); }
-    if payload.last_name.is_some() { changed_fields.push("last_name".to_string()); }
-    if payload.nickname.is_some() { changed_fields.push("nickname".to_string()); }
-    if payload.affiliation.is_some() { changed_fields.push("affiliation".to_string()); }
-    if payload.gender.is_some() { changed_fields.push("gender".to_string()); }
+    if payload.first_name.is_some() {
+        changed_fields.push("first_name".to_string());
+    }
+    if payload.middle_name.is_some() {
+        changed_fields.push("middle_name".to_string());
+    }
+    if payload.last_name.is_some() {
+        changed_fields.push("last_name".to_string());
+    }
+    if payload.nickname.is_some() {
+        changed_fields.push("nickname".to_string());
+    }
+    if payload.affiliation.is_some() {
+        changed_fields.push("affiliation".to_string());
+    }
+    if payload.gender.is_some() {
+        changed_fields.push("gender".to_string());
+    }
 
     let needs_ownership_bind = where_clause.contains("stellar_account_id");
     let sql = if needs_ownership_bind {
@@ -274,7 +318,12 @@ pub async fn update_account(
         query = query.bind(&user.account_id);
     }
 
-    let result = query.execute(&pool).await;
+    let mut tx = pool.begin().await.map_err(|e| {
+        error!("update_account: begin tx error: {}", e);
+        AppError::InternalError("Database error".to_string())
+    })?;
+
+    let result = query.execute(&mut *tx).await;
 
     match result {
         Ok(res) => {
@@ -289,7 +338,21 @@ pub async fn update_account(
             } else {
                 info!("update_account: updated {} row(s)", rows_affected);
 
-                // Fire-and-forget notification for profile update
+                // Append the admin-feed event in the same transaction.
+                crate::events::emit_event(
+                    &mut tx,
+                    &crate::events::AccountEvent::AccountUpdated {
+                        account_id: where_value.clone(),
+                        fields: changed_fields.clone(),
+                    },
+                )
+                .await?;
+                tx.commit().await.map_err(|e| {
+                    error!("update_account: commit error: {}", e);
+                    AppError::InternalError("Database error".to_string())
+                })?;
+
+                // Fire-and-forget user notification for profile update.
                 let sns_c = sns_client.as_ref().map(|e| &e.0);
                 let sns_a = sns_topic_arn.as_ref().map(|e| &e.0);
                 notifications::dispatch_event(

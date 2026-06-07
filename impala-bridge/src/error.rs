@@ -7,9 +7,12 @@ pub enum AppError {
     Unauthorized,
     BadRequest(String),
     NotFound(String),
-    RateLimited { retry_after: u64 },
+    RateLimited {
+        retry_after: u64,
+    },
     InternalError(String),
     Forbidden,
+    #[allow(dead_code)] // part of the error taxonomy; not yet returned by a handler
     Conflict(String),
 }
 
@@ -50,11 +53,9 @@ impl axum::response::IntoResponse for AppError {
             AppError::BadRequest(msg) => (StatusCode::BAD_REQUEST, "bad_request", msg),
             AppError::NotFound(msg) => (StatusCode::NOT_FOUND, "not_found", msg),
             AppError::RateLimited { .. } => unreachable!(),
-            AppError::InternalError(msg) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "internal_error",
-                msg,
-            ),
+            AppError::InternalError(msg) => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal_error", msg)
+            }
             AppError::Forbidden => (
                 StatusCode::FORBIDDEN,
                 "forbidden",
@@ -80,7 +81,9 @@ impl std::fmt::Display for AppError {
             AppError::Unauthorized => write!(f, "Unauthorized"),
             AppError::BadRequest(msg) => write!(f, "Bad request: {}", msg),
             AppError::NotFound(msg) => write!(f, "Not found: {}", msg),
-            AppError::RateLimited { retry_after } => write!(f, "Rate limited (retry after {}s)", retry_after),
+            AppError::RateLimited { retry_after } => {
+                write!(f, "Rate limited (retry after {}s)", retry_after)
+            }
             AppError::InternalError(msg) => write!(f, "Internal error: {}", msg),
             AppError::Forbidden => write!(f, "Forbidden"),
             AppError::Conflict(msg) => write!(f, "Conflict: {}", msg),

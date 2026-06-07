@@ -6,8 +6,12 @@ import android.os.Bundle
 import android.view.Menu
 import android.view.MenuItem
 import androidx.appcompat.app.AppCompatActivity
+import androidx.lifecycle.lifecycleScope
 import androidx.navigation.fragment.NavHostFragment
 import androidx.navigation.ui.setupWithNavController
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.payala.impala.demo.BuildConfig
 import com.payala.impala.demo.R
@@ -76,9 +80,13 @@ class MainActivity : AppCompatActivity() {
         super.onNewIntent(intent)
         val callback = nfcCallback
         if (callback != null) {
-            // A fragment is actively listening for card taps (e.g. card registration)
-            val result = nfcHelper.processTag(intent)
-            callback(result)
+            // A fragment is actively listening for card taps (e.g. card registration).
+            // The IsoDep exchange is blocking, so run it off the main thread and
+            // deliver the result back on the main thread.
+            lifecycleScope.launch {
+                val result = withContext(Dispatchers.IO) { nfcHelper.processTag(intent) }
+                callback(result)
+            }
         } else {
             // No fragment callback — forward to the background watcher service
             // so NFC events are still processed (mirroring impala-lib behaviour)

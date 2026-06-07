@@ -1,85 +1,57 @@
-name: Build and Deploy Impala Admin UI
+# =============================================================================
+# CI for impala-ui (vanilla JS admin dashboard, served by Nginx).
+# Runs the Vitest unit suite over the pure JS modules. No build step.
+# =============================================================================
+name: impala-ui
 
 on:
   push:
     branches: [main]
-  workflow_dispatch: {}
+    paths:
+      - 'impala-ui/**'
+      - '.github/workflows/impala-ui.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'impala-ui/**'
+      - '.github/workflows/impala-ui.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: impala-ui-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
 
 jobs:
-  build-and-upload:
-    permissions:
-      contents: write
-      checks: write
-
+  test:
+    name: Vitest
     runs-on: ubuntu-latest
-
-    outputs:
-      image: ${{ steps.build-image.outputs.image }}
-
+    defaults:
+      run:
+        working-directory: impala-ui
     steps:
-    - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-    - name: Configure AWS Credentials
-      uses: aws-actions/configure-aws-credentials@v4
-      with:
-        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
-        aws-region: us-west-1
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: impala-ui/package-lock.json
 
-    - name: Login to Amazon ECR
-      id: login-ecr
-      uses: aws-actions/amazon-ecr-login@v2
+      - name: Install dependencies
+        run: npm ci
 
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v4
+      - name: Run unit tests
+        run: npm test
 
-    - name: Cache Docker layers
-      uses: actions/cache@v4
-      id: cache
-      with:
-        path: /tmp/.buildx-cache
-        key: ${{ runner.os }}-buildx-${{ github.sha }}
-        restore-keys: |
-          ${{ runner.os }}-buildx-
-
-    - name: Docker Buildx (build)
-      id: build-image
-      env:
-        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-        ECR_REPOSITORY: impala-ui
-        IMAGE_TAG: ${{ github.sha }}
-      run: |
-        docker buildx build \
-          --cache-from "type=local,src=/tmp/.buildx-cache" \
-          --cache-to "type=local,dest=/tmp/.buildx-cache" \
-          --load \
-          --tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG \
-          --file ./impala-ui/Dockerfile ./impala-ui
-
-    - name: Docker Buildx (push)
-      id: push-image-to-ecr
-      env:
-        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-        ECR_REPOSITORY: impala-ui
-        IMAGE_TAG: ${{ github.sha }}
-      run: |
-        BRANCH=$(echo "${GITHUB_REF#refs/*/}" | sed 's/.*\///')
-        # push with git sha
-        docker buildx build \
-          --cache-from "type=local,src=/tmp/.buildx-cache" \
-          --output "type=image,push=true" \
-          --tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG \
-          --file ./impala-ui/Dockerfile ./impala-ui
-        # push docker tag to indicate branch
-        docker buildx build \
-          --cache-from "type=local,src=/tmp/.buildx-cache" \
-          --output "type=image,push=true" \
-          --tag $ECR_REGISTRY/$ECR_REPOSITORY:$BRANCH \
-          --file ./impala-ui/Dockerfile ./impala-ui
-
-    - name: Reset cache
-      id: reset-cache
-      if: ${{ success() || failure() }}
-      run: |
-        rm -rf /tmp/.buildx-cache
+      - name: Upload test reports on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vitest-reports-${{ github.sha }}
+          path: impala-ui/**/coverage/**
+          if-no-files-found: ignore
+          retention-days: 14

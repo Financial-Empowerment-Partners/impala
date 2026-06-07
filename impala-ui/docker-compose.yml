@@ -6,8 +6,18 @@ services:
     volumes:
       - ./html:/usr/share/nginx/html:ro
       - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost/ || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
 
 networks:
+  # Joins the bridge's compose network so `/api/*` can reach impala-bridge:8080.
+  # Defaults to impala-bridge's default network; override with UI_UPSTREAM_NETWORK
+  # if the bridge stack uses a different network name. The bridge must be up first.
   default:
-    name: impala-bridge_default
+    name: ${UI_UPSTREAM_NETWORK:-impala-bridge_default}
     external: true

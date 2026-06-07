@@ -37,10 +37,10 @@ import kotlinx.coroutines.launch
  * All auth logic is delegated to [LoginViewModel]; this activity only observes
  * [LoginViewModel.loginState] and updates the UI accordingly.
  *
- * NFC foreground dispatch is enabled in [onResume] so that tapping an Impala
- * card while this activity is visible triggers [onNewIntent] instead of the
- * system's tag dispatch. The `android:launchMode="singleTop"` attribute in
- * the manifest ensures `onNewIntent` is called on the existing instance.
+ * NFC reader mode is enabled in [onResume] so that tapping an Impala card while
+ * this activity is visible is read on a background thread (off the main thread);
+ * the result is delivered to [handleCardResult] on the main thread. Taps are
+ * only acted on while [awaitingCardTap] is set (after "Sign in with Card").
  */
 class LoginActivity : AppCompatActivity() {
 
@@ -89,26 +89,29 @@ class LoginActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         if (::nfcHelper.isInitialized) {
-            nfcHelper.enableForegroundDispatch()
+            // Reader mode: the card is read off the main thread; the callback is
+            // delivered on the main thread. Only act on a tap we asked for.
+            nfcHelper.enableReaderMode { result ->
+                if (!awaitingCardTap) return@enableReaderMode
+                awaitingCardTap = false
+                handleCardResult(result)
+            }
         }
     }
 
     override fun onPause() {
         super.onPause()
         if (::nfcHelper.isInitialized) {
-            nfcHelper.disableForegroundDispatch()
+            nfcHelper.disableReaderMode()
         }
     }
 
-    override fun onNewIntent(intent: Intent) {
-        super.onNewIntent(intent)
-        if (!awaitingCardTap) return
-        awaitingCardTap = false
-
+    /** Handles a card read result on the main thread. */
+    private fun handleCardResult(result: NfcCardResult) {
         val tokenManager = (application as ImpalaApp).tokenManager
         val api = ApiClient.getService(BuildConfig.BRIDGE_BASE_URL, tokenManager)
 
-        when (val result = nfcHelper.processTag(intent)) {
+        when (result) {
             is NfcCardResult.Success -> {
                 viewModel.loginWithCard(api, tokenManager, result)
             }

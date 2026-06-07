@@ -97,9 +97,9 @@ fn normalize_path(path: &str) -> String {
         .map(|segment| {
             if segment.is_empty() {
                 segment
-            } else if segment.chars().all(|c| c.is_ascii_digit()) {
-                ":id"
-            } else if uuid::Uuid::parse_str(segment).is_ok() {
+            } else if segment.chars().all(|c| c.is_ascii_digit())
+                || uuid::Uuid::parse_str(segment).is_ok()
+            {
                 ":id"
             } else {
                 segment

@@ -12,6 +12,15 @@ pub struct AuthenticatedUser {
     pub account_id: String,
 }
 
+/// Represents an authenticated **admin** user. Extraction additionally requires
+/// the `is_admin` claim (server-stamped at token issuance from the
+/// `ADMIN_ACCOUNT_IDS` allowlist), so admin-only routes that take this extractor
+/// are gated at the type level — the check cannot be forgotten in a handler.
+#[derive(Debug, Clone)]
+pub struct AdminUser {
+    pub account_id: String,
+}
+
 /// Verify that the authenticated user owns the specified account.
 /// Returns `Err(AppError::Forbidden)` if `user.account_id` does not match.
 pub fn require_owner(user: &AuthenticatedUser, account_id: &str) -> Result<(), AppError> {
@@ -21,6 +30,62 @@ pub fn require_owner(user: &AuthenticatedUser, account_id: &str) -> Result<(), A
     Ok(())
 }
 
+/// Validate a Bearer temporal token from the request and return its claims.
+///
+/// Enforces: HS256 + issuer, temporal token type, and JTI revocation (the
+/// revocation check is fail-closed — Redis unavailable => Unauthorized). Shared
+/// by both [`AuthenticatedUser`] and [`AdminUser`] so the two extractors cannot
+/// diverge in their security checks.
+async fn validate_temporal_claims<S>(parts: &mut Parts, state: &S) -> Result<Claims, AppError>
+where
+    S: Send + Sync,
+{
+    // Extract the JWT secret from extensions
+    let Extension(jwt_secret) = Extension::<Arc<String>>::from_request_parts(parts, state)
+        .await
+        .map_err(|_| AppError::InternalError("JWT secret not configured".to_string()))?;
+
+    // Extract Authorization header
+    let auth_header = parts
+        .headers
+        .get("Authorization")
+        .and_then(|v| v.to_str().ok())
+        .ok_or(AppError::Unauthorized)?;
+
+    // Expect "Bearer <token>"
+    let token = auth_header
+        .strip_prefix("Bearer ")
+        .ok_or(AppError::Unauthorized)?;
+
+    // Decode and validate the JWT with explicit HS256 and issuer check
+    let mut validation = Validation::new(jsonwebtoken::Algorithm::HS256);
+    validation.set_issuer(&[JWT_ISSUER]);
+
+    let token_data = decode::<Claims>(
+        token,
+        &DecodingKey::from_secret(jwt_secret.as_bytes()),
+        &validation,
+    )
+    .map_err(|_| AppError::Unauthorized)?;
+
+    // Must be a temporal token
+    if token_data.claims.token_type != TOKEN_TYPE_TEMPORAL {
+        return Err(AppError::Unauthorized);
+    }
+
+    // Check if token has been revoked (via /logout) — fail-closed.
+    let Extension(redis_pool) =
+        Extension::<Arc<deadpool_redis::Pool>>::from_request_parts(parts, state)
+            .await
+            .map_err(|_| AppError::Unauthorized)?;
+
+    if crate::redis_helpers::is_token_revoked(&redis_pool, &token_data.claims.jti).await? {
+        return Err(AppError::Unauthorized);
+    }
+
+    Ok(token_data.claims)
+}
+
 impl<S> FromRequestParts<S> for AuthenticatedUser
 where
     S: Send + Sync,
@@ -28,54 +93,26 @@ where
     type Rejection = AppError;
 
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
-        // Extract the JWT secret from extensions
-        let Extension(jwt_secret) =
-            Extension::<Arc<String>>::from_request_parts(parts, state)
-                .await
-                .map_err(|_| {
-                    AppError::InternalError("JWT secret not configured".to_string())
-                })?;
-
-        // Extract Authorization header
-        let auth_header = parts
-            .headers
-            .get("Authorization")
-            .and_then(|v| v.to_str().ok())
-            .ok_or(AppError::Unauthorized)?;
-
-        // Expect "Bearer <token>"
-        let token = auth_header
-            .strip_prefix("Bearer ")
-            .ok_or(AppError::Unauthorized)?;
-
-        // Decode and validate the JWT with explicit HS256 and issuer check
-        let mut validation = Validation::new(jsonwebtoken::Algorithm::HS256);
-        validation.set_issuer(&[JWT_ISSUER]);
-
-        let token_data = decode::<Claims>(
-            token,
-            &DecodingKey::from_secret(jwt_secret.as_bytes()),
-            &validation,
-        )
-        .map_err(|_| AppError::Unauthorized)?;
-
-        // Must be a temporal token
-        if token_data.claims.token_type != TOKEN_TYPE_TEMPORAL {
-            return Err(AppError::Unauthorized);
-        }
-
-        // Check if token has been revoked (via /logout)
-        let Extension(redis_pool) =
-            Extension::<Arc<deadpool_redis::Pool>>::from_request_parts(parts, state)
-                .await
-                .map_err(|_| AppError::Unauthorized)?;
-
-        if crate::redis_helpers::is_token_revoked(&redis_pool, &token_data.claims.jti).await? {
-            return Err(AppError::Unauthorized);
-        }
-
+        let claims = validate_temporal_claims(parts, state).await?;
         Ok(AuthenticatedUser {
-            account_id: token_data.claims.sub,
+            account_id: claims.sub,
+        })
+    }
+}
+
+impl<S> FromRequestParts<S> for AdminUser
+where
+    S: Send + Sync,
+{
+    type Rejection = AppError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        let claims = validate_temporal_claims(parts, state).await?;
+        if !claims.is_admin {
+            return Err(AppError::Forbidden);
+        }
+        Ok(AdminUser {
+            account_id: claims.sub,
         })
     }
 }
@@ -98,6 +135,7 @@ mod tests {
             exp: now + TEMPORAL_TOKEN_TTL_SECS,
             jti: uuid::Uuid::new_v4().to_string(),
             iss: JWT_ISSUER.to_string(),
+            is_admin: false,
         };
 
         let token = encode(
@@ -133,6 +171,7 @@ mod tests {
             exp: now + REFRESH_TOKEN_TTL_SECS,
             jti: uuid::Uuid::new_v4().to_string(),
             iss: JWT_ISSUER.to_string(),
+            is_admin: false,
         };
 
         let token = encode(
@@ -165,6 +204,7 @@ mod tests {
             exp: 1001, // Already expired
             jti: uuid::Uuid::new_v4().to_string(),
             iss: JWT_ISSUER.to_string(),
+            is_admin: false,
         };
 
         let token = encode(
@@ -196,6 +236,7 @@ mod tests {
             exp: now + TEMPORAL_TOKEN_TTL_SECS,
             jti: uuid::Uuid::new_v4().to_string(),
             iss: JWT_ISSUER.to_string(),
+            is_admin: false,
         };
 
         let token = encode(
@@ -227,6 +268,7 @@ mod tests {
             exp: now + TEMPORAL_TOKEN_TTL_SECS,
             jti: uuid::Uuid::new_v4().to_string(),
             iss: "wrong-issuer".to_string(),
+            is_admin: false,
         };
 
         let token = encode(

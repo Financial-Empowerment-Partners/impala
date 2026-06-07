@@ -9,7 +9,7 @@ import androidx.security.crypto.MasterKeys
  * Secure token storage backed by [EncryptedSharedPreferences].
  *
  * Manages the two-tier JWT lifecycle used by impala-bridge:
- * - **Refresh token** – valid for 30 days, obtained via username/password login.
+ * - **Refresh token** – valid for 14 days, obtained via username/password login.
  * - **Temporal token** – valid for 1 hour, obtained by presenting the refresh token.
  *
  * Also stores auxiliary session data: account ID, auth provider name, and
@@ -18,19 +18,15 @@ import androidx.security.crypto.MasterKeys
  * Encryption uses AES-256-SIV for keys and AES-256-GCM for values, backed by
  * the Android Keystore master key.
  *
- * @param context Application context used to open EncryptedSharedPreferences
+ * The primary [SharedPreferences] is injectable (internal) so unit tests can
+ * supply a plain in-memory store — `EncryptedSharedPreferences` requires the
+ * AndroidKeyStore, which is unavailable under Robolectric. Production code uses
+ * the public [Context] constructor, which always opens the encrypted store.
  */
-class TokenManager(context: Context) {
+class TokenManager internal constructor(private val prefs: SharedPreferences) {
 
-    private val masterKeyAlias = MasterKeys.getOrCreate(MasterKeys.AES256_GCM_SPEC)
-
-    private val prefs: SharedPreferences = EncryptedSharedPreferences.create(
-        "impala_secure_prefs",
-        masterKeyAlias,
-        context,
-        EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
-        EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
-    )
+    /** @param context Application context used to open [EncryptedSharedPreferences]. */
+    constructor(context: Context) : this(createEncryptedPrefs(context))
 
     companion object {
         private const val KEY_REFRESH_TOKEN = "refresh_token"
@@ -39,6 +35,17 @@ class TokenManager(context: Context) {
         private const val KEY_ACCOUNT_ID = "account_id"
         private const val KEY_AUTH_PROVIDER = "auth_provider"
         private const val KEY_DISPLAY_NAME = "display_name"
+
+        private fun createEncryptedPrefs(context: Context): SharedPreferences {
+            val masterKeyAlias = MasterKeys.getOrCreate(MasterKeys.AES256_GCM_SPEC)
+            return EncryptedSharedPreferences.create(
+                "impala_secure_prefs",
+                masterKeyAlias,
+                context,
+                EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
+                EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
+            )
+        }
     }
 
     fun saveRefreshToken(token: String) {

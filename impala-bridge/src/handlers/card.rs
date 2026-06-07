@@ -21,6 +21,11 @@ pub async fn create_card(
         "POST /card: registering card_id={} for account_id={}",
         payload.card_id, payload.account_id
     );
+    let mut tx = pool.begin().await.map_err(|e| {
+        error!("create_card: begin tx error: {}", e);
+        AppError::InternalError("Database error".to_string())
+    })?;
+
     let result = sqlx::query(
         r#"
         INSERT INTO card (account_id, card_id, ec_pubkey, rsa_pubkey)
@@ -31,11 +36,23 @@ pub async fn create_card(
     .bind(&payload.card_id)
     .bind(&payload.ec_pubkey)
     .bind(&payload.rsa_pubkey)
-    .execute(&pool)
+    .execute(&mut *tx)
     .await;
 
     match result {
         Ok(_) => {
+            crate::events::emit_event(
+                &mut tx,
+                &crate::events::AccountEvent::CardRegistered {
+                    account_id: payload.account_id.clone(),
+                    card_id: payload.card_id.clone(),
+                },
+            )
+            .await?;
+            tx.commit().await.map_err(|e| {
+                error!("create_card: commit error: {}", e);
+                AppError::InternalError("Database error".to_string())
+            })?;
             info!("create_card: card_id={} registered", payload.card_id);
             Ok(Json(CardResponse {
                 success: true,
@@ -56,12 +73,16 @@ pub async fn delete_card(
     Json(payload): Json<DeleteCardRequest>,
 ) -> Result<Json<CardResponse>, AppError> {
     info!("DELETE /card: card_id={}", payload.card_id);
+    let mut tx = pool.begin().await.map_err(|e| {
+        error!("delete_card: begin tx error: {}", e);
+        AppError::InternalError("Database error".to_string())
+    })?;
     let result = sqlx::query(
         "UPDATE card SET is_delete = TRUE, deleted_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE card_id = $1 AND account_id = $2 AND is_delete = FALSE",
     )
     .bind(&payload.card_id)
     .bind(&user.account_id)
-    .execute(&pool)
+    .execute(&mut *tx)
     .await;
 
     match result {
@@ -76,6 +97,18 @@ pub async fn delete_card(
                     message: "Card not found or already deleted".to_string(),
                 }))
             } else {
+                crate::events::emit_event(
+                    &mut tx,
+                    &crate::events::AccountEvent::CardDeleted {
+                        account_id: user.account_id.clone(),
+                        card_id: payload.card_id.clone(),
+                    },
+                )
+                .await?;
+                tx.commit().await.map_err(|e| {
+                    error!("delete_card: commit error: {}", e);
+                    AppError::InternalError("Database error".to_string())
+                })?;
                 info!("delete_card: card_id={} soft-deleted", payload.card_id);
                 Ok(Json(CardResponse {
                     success: true,
