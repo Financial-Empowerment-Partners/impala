@@ -15,7 +15,7 @@
 # Base images are pinned by multi-arch manifest-list digest (supply-chain
 # hardening). To bump: `docker buildx imagetools inspect <image>:<tag>` and copy
 # the top-level "Digest". The :tag is kept alongside the digest for readability.
-FROM --platform=$BUILDPLATFORM rust:1.91-slim@sha256:f75071363e7f4771769d4cf81b1b7b290e607f4d4459e8731f6abdcee9982dc8 AS planner
+FROM --platform=$BUILDPLATFORM rust:1.96-slim@sha256:26abcef3d79b8d890c4ceb17093154573e1f6479cf6dd7c1450043b8458350f6 AS planner
 
 WORKDIR /app
 RUN apt-get update && apt-get install -y pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
@@ -28,7 +28,7 @@ COPY migrations/ migrations/
 # This layer is cached as long as Cargo.toml/Cargo.lock don't change
 RUN cargo fetch
 
-FROM rust:1.91-slim@sha256:f75071363e7f4771769d4cf81b1b7b290e607f4d4459e8731f6abdcee9982dc8 AS builder
+FROM rust:1.96-slim@sha256:26abcef3d79b8d890c4ceb17093154573e1f6479cf6dd7c1450043b8458350f6 AS builder
 
 ARG TARGETARCH
 
