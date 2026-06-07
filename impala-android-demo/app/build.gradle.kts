@@ -119,7 +119,7 @@ dependencies {
     implementation("androidx.recyclerview:recyclerview:1.3.2")
 
     // Material Design 3
-    implementation("com.google.android.material:material:1.12.0")
+    implementation("com.google.android.material:material:1.14.0")
 
     // Navigation
     implementation("androidx.navigation:navigation-fragment-ktx:2.8.4")
