@@ -15,6 +15,14 @@ data class CardUser(
     val cardId: String,
     val fullName: String
 ) {
+    /**
+     * Card id in the bridge's wire format: dash-stripped lowercase 32-hex.
+     * The bridge's `validate_card_id` (impala-bridge/src/validate.rs) accepts
+     * 8-32 hex chars only — dashed UUID strings are rejected. Use this for
+     * every `card_id` field sent to the API; keep [cardId] for display.
+     */
+    val wireCardId: String get() = cardId.replace("-", "").lowercase()
+
     companion object {
         private const val UUID_LENGTH = 16
 
@@ -48,8 +56,8 @@ data class CardUser(
  * Focused card reader for authentication-related APDU operations.
  *
  * A subset of `ImpalaSDK` from `impala-card/sdk`, containing only the methods
- * needed to read card identity, public keys, and signed timestamps for JWT
- * authentication against the impala-bridge.
+ * needed to read card identity, public keys, and signed auth challenges for
+ * JWT authentication against the impala-bridge.
  *
  * Does NOT include SCP03 secure channel — that is only needed for card
  * provisioning, not for reading user data or signing.
@@ -105,17 +113,20 @@ class ImpalaCardReader(apduChannel: BIBO) {
     }
 
     /**
-     * Gets the card to sign a timestamp using its EC private key (INS_SIGN_AUTH).
+     * Gets the card to sign a bridge-issued authentication challenge using its
+     * EC private key (INS_SIGN_AUTH).
      *
-     * @param timestamp Unix epoch seconds
+     * The applet signs ECDSA-SHA256 over the pinned card-auth message
+     * `"IMPALA-AUTH:" || accountId (16B) || challenge` on-card, so only the
+     * raw challenge bytes are sent here. The bridge's `POST /auth/card`
+     * verifier checks exactly those bytes.
+     *
+     * @param challenge the bridge-issued challenge (8 to 64 bytes)
      * @return DER-encoded ECDSA signature
      */
-    fun getSignedTimestamp(timestamp: Long): ByteArray {
-        val bytes = ByteArray(8)
-        for (i in 7 downTo 0) {
-            bytes[7 - i] = (timestamp shr (i * 8)).toByte()
-        }
-        val cmd = CommandAPDU(INS_SIGN_AUTH, bytes)
+    fun signAuthChallenge(challenge: ByteArray): ByteArray {
+        require(challenge.size in 8..64) { "Challenge must be 8-64 bytes" }
+        val cmd = CommandAPDU(INS_SIGN_AUTH, challenge)
         return transmit(cmd).data
     }
 

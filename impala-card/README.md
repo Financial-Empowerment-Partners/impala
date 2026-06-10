@@ -6,6 +6,23 @@ program or the Stellar network using the impala bridge.
 Note that this minimal implementation does not support offline LUKs; only online
 transactions are supported.
 
+## Toolchain: JDK 17
+
+Both Gradle modules (`:sdk`, `:applet`) pin `jvmToolchain(17)`, and **Gradle
+itself must run on JDK 17** (e.g. `JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64`):
+the Ant `<javacard>` task that builds the CAP runs *in the Gradle JVM*, not in
+the Kotlin toolchain JVM. CI pins JDK 17 via setup-java.
+
+Why 17 specifically (and not 21):
+
+- the vendored `ant-javacard` v26.x (see `applet/libs/README.md`) requires
+  Java 17+;
+- the JavaCard 3.1.0b43 converter/verifier kit and jcardsim 3.0.6.0 are
+  validated on 17, not on 21;
+- AGP 9 (used by the `:sdk` Android target) requires 17+.
+
+17 is the single version satisfying all three, so the toolchain stays on 17.
+
 ## Supported APDUs
 
 The following subset of Payala APDUs is provided as part of the Impala compatible

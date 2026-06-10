@@ -30,7 +30,9 @@ pub async fn list_notify(
 
     let rows = sqlx::query_as::<_, NotifyListItem>(
         r#"
-        SELECT id, account_id, medium::text, active, mobile, wa, signal, tel, email, url, app
+        -- NOTE: notify has no `active` column (see migrations/016's header);
+        -- selecting one here used to 500 this endpoint against a real schema.
+        SELECT id, account_id, medium::text, mobile, wa, signal, tel, email, url, app
         FROM notify
         WHERE account_id = $1
         ORDER BY id
@@ -161,43 +163,7 @@ pub async fn update_notify(
         crate::validate::validate_callback_url(url)?;
     }
 
-    let mut set_parts = Vec::new();
-    let mut param_index = 2u32;
-
-    if payload.medium.is_some() {
-        set_parts.push(format!("medium = ${}::notify_medium", param_index));
-        param_index += 1;
-    }
-    if payload.mobile.is_some() {
-        set_parts.push(format!("mobile = ${}", param_index));
-        param_index += 1;
-    }
-    if payload.wa.is_some() {
-        set_parts.push(format!("wa = ${}", param_index));
-        param_index += 1;
-    }
-    if payload.signal.is_some() {
-        set_parts.push(format!("signal = ${}", param_index));
-        param_index += 1;
-    }
-    if payload.tel.is_some() {
-        set_parts.push(format!("tel = ${}", param_index));
-        param_index += 1;
-    }
-    if payload.email.is_some() {
-        set_parts.push(format!("email = ${}", param_index));
-        param_index += 1;
-    }
-    if payload.url.is_some() {
-        set_parts.push(format!("url = ${}", param_index));
-        param_index += 1;
-    }
-    if payload.app.is_some() {
-        set_parts.push(format!("app = ${}", param_index));
-        param_index += 1;
-    }
-
-    if set_parts.is_empty() {
+    let Some(mut qb) = build_notify_update(&payload, &user.account_id) else {
         warn!(
             "update_notify: no fields provided to update for id={}",
             payload.id
@@ -207,44 +173,9 @@ pub async fn update_notify(
             message: "No fields provided to update".to_string(),
             id: None,
         }));
-    }
+    };
 
-    let sql = format!(
-        "UPDATE notify SET {} WHERE id = $1 AND account_id = ${}",
-        set_parts.join(", "),
-        param_index
-    );
-
-    let mut query = sqlx::query(&sql);
-    query = query.bind(payload.id);
-
-    if let Some(ref val) = payload.medium {
-        query = query.bind(val);
-    }
-    if let Some(ref val) = payload.mobile {
-        query = query.bind(val);
-    }
-    if let Some(ref val) = payload.wa {
-        query = query.bind(val);
-    }
-    if let Some(ref val) = payload.signal {
-        query = query.bind(val);
-    }
-    if let Some(ref val) = payload.tel {
-        query = query.bind(val);
-    }
-    if let Some(ref val) = payload.email {
-        query = query.bind(val);
-    }
-    if let Some(ref val) = payload.url {
-        query = query.bind(val);
-    }
-    if let Some(ref val) = payload.app {
-        query = query.bind(val);
-    }
-    query = query.bind(&user.account_id);
-
-    let result = query.execute(&pool).await;
+    let result = qb.build().execute(&pool).await;
 
     match result {
         Ok(res) => {
@@ -267,6 +198,175 @@ pub async fn update_notify(
         Err(e) => {
             error!("update_notify: database error: {}", e);
             Err(AppError::InternalError("Database error".to_string()))
+        }
+    }
+}
+
+/// Build the UPDATE statement for `PUT /notify`. Returns `None` when no SET
+/// fields are present.
+///
+/// INVARIANT (cross-account write protection): the WHERE clause always pins
+/// `account_id` to the authenticated caller alongside the row id.
+fn build_notify_update<'a>(
+    payload: &'a UpdateNotifyRequest,
+    user_account_id: &'a str,
+) -> Option<sqlx::QueryBuilder<'a, sqlx::Postgres>> {
+    let mut qb = sqlx::QueryBuilder::new("UPDATE notify SET ");
+    let mut any_set = false;
+    {
+        let mut sets = qb.separated(", ");
+        if let Some(ref v) = payload.medium {
+            sets.push("medium = ");
+            sets.push_bind_unseparated(v);
+            sets.push_unseparated("::notify_medium");
+            any_set = true;
+        }
+        if let Some(ref v) = payload.mobile {
+            sets.push("mobile = ");
+            sets.push_bind_unseparated(v);
+            any_set = true;
+        }
+        if let Some(ref v) = payload.wa {
+            sets.push("wa = ");
+            sets.push_bind_unseparated(v);
+            any_set = true;
+        }
+        if let Some(ref v) = payload.signal {
+            sets.push("signal = ");
+            sets.push_bind_unseparated(v);
+            any_set = true;
+        }
+        if let Some(ref v) = payload.tel {
+            sets.push("tel = ");
+            sets.push_bind_unseparated(v);
+            any_set = true;
+        }
+        if let Some(ref v) = payload.email {
+            sets.push("email = ");
+            sets.push_bind_unseparated(v);
+            any_set = true;
+        }
+        if let Some(ref v) = payload.url {
+            sets.push("url = ");
+            sets.push_bind_unseparated(v);
+            any_set = true;
+        }
+        if let Some(ref v) = payload.app {
+            sets.push("app = ");
+            sets.push_bind_unseparated(v);
+            any_set = true;
+        }
+    }
+    if !any_set {
+        return None;
+    }
+
+    qb.push(" WHERE id = ");
+    qb.push_bind(payload.id);
+    qb.push(" AND account_id = ");
+    qb.push_bind(user_account_id);
+
+    Some(qb)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn empty_payload() -> UpdateNotifyRequest {
+        UpdateNotifyRequest {
+            id: 7,
+            medium: None,
+            mobile: None,
+            wa: None,
+            signal: None,
+            tel: None,
+            email: None,
+            url: None,
+            app: None,
+        }
+    }
+
+    #[test]
+    fn medium_gets_enum_cast_and_account_pin() {
+        let payload = UpdateNotifyRequest {
+            medium: Some("email".to_string()),
+            url: Some("https://example.com/hook".to_string()),
+            ..empty_payload()
+        };
+        let qb = build_notify_update(&payload, "alice").expect("builder");
+        assert_eq!(
+            qb.sql(),
+            "UPDATE notify SET medium = $1::notify_medium, url = $2 \
+             WHERE id = $3 AND account_id = $4"
+        );
+    }
+
+    #[test]
+    fn single_field_update() {
+        let payload = UpdateNotifyRequest {
+            email: Some("a@b.cd".to_string()),
+            ..empty_payload()
+        };
+        let qb = build_notify_update(&payload, "alice").expect("builder");
+        assert_eq!(
+            qb.sql(),
+            "UPDATE notify SET email = $1 WHERE id = $2 AND account_id = $3"
+        );
+    }
+
+    #[test]
+    fn all_fields_in_legacy_order() {
+        let payload = UpdateNotifyRequest {
+            id: 7,
+            medium: Some("sms".to_string()),
+            mobile: Some("+15550000000".to_string()),
+            wa: Some("w".to_string()),
+            signal: Some("s".to_string()),
+            tel: Some("t".to_string()),
+            email: Some("a@b.cd".to_string()),
+            url: Some("https://example.com".to_string()),
+            app: Some("app".to_string()),
+        };
+        let qb = build_notify_update(&payload, "alice").expect("builder");
+        assert_eq!(
+            qb.sql(),
+            "UPDATE notify SET medium = $1::notify_medium, mobile = $2, wa = $3, signal = $4, \
+             tel = $5, email = $6, url = $7, app = $8 WHERE id = $9 AND account_id = $10"
+        );
+    }
+
+    #[test]
+    fn no_fields_returns_none() {
+        assert!(build_notify_update(&empty_payload(), "alice").is_none());
+    }
+
+    /// Ownership-WHERE invariant: every generated statement pins account_id.
+    #[test]
+    fn every_generated_where_clause_pins_the_account() {
+        let field_setters: Vec<fn(&mut UpdateNotifyRequest)> = vec![
+            |p| p.medium = Some("v".to_string()),
+            |p| p.mobile = Some("v".to_string()),
+            |p| p.wa = Some("v".to_string()),
+            |p| p.signal = Some("v".to_string()),
+            |p| p.tel = Some("v".to_string()),
+            |p| p.email = Some("v".to_string()),
+            |p| p.url = Some("v".to_string()),
+            |p| p.app = Some("v".to_string()),
+        ];
+        for mask in 1u32..(1 << field_setters.len()) {
+            let mut payload = empty_payload();
+            for (i, setter) in field_setters.iter().enumerate() {
+                if mask & (1 << i) != 0 {
+                    setter(&mut payload);
+                }
+            }
+            let qb = build_notify_update(&payload, "alice").expect("non-empty mask");
+            assert!(
+                qb.sql().contains("AND account_id = "),
+                "WHERE must pin the account: {}",
+                qb.sql()
+            );
         }
     }
 }

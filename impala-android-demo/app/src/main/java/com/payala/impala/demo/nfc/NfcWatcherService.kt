@@ -16,6 +16,7 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
+import androidx.core.content.IntentCompat
 import com.payala.impala.demo.R
 import com.payala.impala.demo.log.AppLogger
 import com.payala.impala.demo.ui.main.MainActivity
@@ -45,6 +46,7 @@ class NfcWatcherService : Service() {
         private const val TAG = "NfcWatcher"
         private const val CHANNEL_ID = "nfc_watcher_channel"
         private const val NOTIFICATION_ID = 1001
+        private const val ISO_DEP_TIMEOUT_MS = IsoDepBibo.DEFAULT_TIMEOUT_MS
 
         const val ACTION_PROCESS_TAG = "com.payala.impala.demo.ACTION_PROCESS_TAG"
         const val ACTION_PROCESS_NDEF = "com.payala.impala.demo.ACTION_PROCESS_NDEF"
@@ -62,7 +64,7 @@ class NfcWatcherService : Service() {
                     // Forward the tag and ID extras
                     serviceIntent.putExtra(
                         NfcAdapter.EXTRA_TAG,
-                        intent.getParcelableExtra<Tag>(NfcAdapter.EXTRA_TAG)
+                        IntentCompat.getParcelableExtra(intent, NfcAdapter.EXTRA_TAG, Tag::class.java)
                     )
                     serviceIntent.putExtra(
                         NfcAdapter.EXTRA_ID,
@@ -71,10 +73,11 @@ class NfcWatcherService : Service() {
                 }
                 NfcAdapter.ACTION_NDEF_DISCOVERED -> {
                     serviceIntent.action = ACTION_PROCESS_NDEF
-                    @Suppress("DEPRECATION")
                     serviceIntent.putExtra(
                         NfcAdapter.EXTRA_NDEF_MESSAGES,
-                        intent.getParcelableArrayExtra(NfcAdapter.EXTRA_NDEF_MESSAGES)
+                        IntentCompat.getParcelableArrayExtra(
+                            intent, NfcAdapter.EXTRA_NDEF_MESSAGES, NdefMessage::class.java
+                        )
                     )
                 }
                 else -> return
@@ -138,8 +141,7 @@ class NfcWatcherService : Service() {
     private fun handleTagIntent(intent: Intent) {
         AppLogger.d(TAG, "Processing IsoDep tag event")
 
-        @Suppress("DEPRECATION")
-        val tag: Tag? = intent.getParcelableExtra(NfcAdapter.EXTRA_TAG)
+        val tag: Tag? = IntentCompat.getParcelableExtra(intent, NfcAdapter.EXTRA_TAG, Tag::class.java)
         if (tag == null) {
             AppLogger.w(TAG, "No tag in intent")
             NfcEventHandler.dispatchCardError("No NFC tag found")
@@ -160,10 +162,10 @@ class NfcWatcherService : Service() {
 
         try {
             isoDep.connect()
-            isoDep.timeout = 5000
-            AppLogger.d(TAG, "IsoDep connected (timeout: 5000ms)")
 
-            val bibo = IsoDepBibo(isoDep)
+            // IsoDepBibo sets the transceive timeout in its constructor
+            val bibo = IsoDepBibo(isoDep, ISO_DEP_TIMEOUT_MS)
+            AppLogger.d(TAG, "IsoDep connected (timeout: ${ISO_DEP_TIMEOUT_MS}ms)")
             val reader = ImpalaCardReader(bibo)
 
             // Read card identity and EC public key
@@ -210,8 +212,9 @@ class NfcWatcherService : Service() {
     private fun handleNdefIntent(intent: Intent) {
         AppLogger.d(TAG, "Processing NDEF message event")
 
-        @Suppress("DEPRECATION")
-        val rawMessages = intent.getParcelableArrayExtra(NfcAdapter.EXTRA_NDEF_MESSAGES)
+        val rawMessages = IntentCompat.getParcelableArrayExtra(
+            intent, NfcAdapter.EXTRA_NDEF_MESSAGES, NdefMessage::class.java
+        )
         if (rawMessages == null || rawMessages.isEmpty()) {
             AppLogger.w(TAG, "No NDEF messages in intent")
             stopSelfIfIdle()

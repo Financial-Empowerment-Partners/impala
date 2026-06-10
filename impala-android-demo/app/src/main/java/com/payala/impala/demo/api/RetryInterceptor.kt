@@ -11,14 +11,17 @@ import java.io.IOException
  * - [IOException] (network failures, timeouts)
  * - HTTP 5xx responses for GET requests (server errors)
  *
- * Non-GET requests are never retried to avoid duplicate side effects.
+ * Non-GET requests are never retried to avoid duplicate side effects, and a
+ * cancelled call ([okhttp3.Call.isCanceled]) is never retried — cancellation
+ * is checked before and after each backoff sleep so a cancelled call fails
+ * fast instead of sleeping through the remaining attempts.
  *
- * @param maxRetries Maximum number of retry attempts (default 3)
- * @param initialDelayMs Delay before the first retry in milliseconds (default 1000)
+ * @param maxRetries Maximum number of retry attempts (default 2)
+ * @param initialDelayMs Delay before the first retry in milliseconds (default 250)
  */
 class RetryInterceptor(
-    private val maxRetries: Int = 3,
-    private val initialDelayMs: Long = 1000
+    private val maxRetries: Int = 2,
+    private val initialDelayMs: Long = 250
 ) : Interceptor {
 
     override fun intercept(chain: Interceptor.Chain): Response {
@@ -27,9 +30,15 @@ class RetryInterceptor(
 
         for (attempt in 0..maxRetries) {
             if (attempt > 0) {
+                lastResponse?.close()
+                if (chain.call().isCanceled()) {
+                    throw lastException ?: IOException("Call cancelled; not retrying")
+                }
                 val delay = initialDelayMs * (1L shl (attempt - 1))
                 Thread.sleep(delay)
-                lastResponse?.close()
+                if (chain.call().isCanceled()) {
+                    throw lastException ?: IOException("Call cancelled; not retrying")
+                }
             }
 
             try {
@@ -38,6 +47,11 @@ class RetryInterceptor(
                     return response
                 }
                 if (chain.request().method != "GET") {
+                    return response
+                }
+                if (attempt == maxRetries) {
+                    // Out of retries — surface the last 5xx to the caller
+                    // rather than discarding it
                     return response
                 }
                 lastResponse = response

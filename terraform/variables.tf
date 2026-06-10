@@ -77,6 +77,25 @@ variable "fcm_project_id" {
   default     = ""
 }
 
+# --- Ops alerting (shared SNS topic for stack CloudWatch alarms — ops.tf) ---
+
+variable "ops_alerts_enabled" {
+  description = "Create the ops-alerts SNS topic and route every stack CloudWatch alarm's alarm_actions + ok_actions to it (threaded into the module calls as alarm_sns_topic_arn)."
+  type        = bool
+  default     = false
+}
+
+variable "ops_alert_email" {
+  description = "Email address subscribed to the ops-alerts topic. \"\" skips the subscription. Email endpoints need MANUAL confirmation — see ops.tf."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = var.ops_alert_email == "" || can(regex("^[^@\\s]+@[^@\\s]+$", var.ops_alert_email))
+    error_message = "ops_alert_email must be empty or a valid email address."
+  }
+}
+
 # --- ECR cross-region replication ---
 
 variable "dr_enabled" {

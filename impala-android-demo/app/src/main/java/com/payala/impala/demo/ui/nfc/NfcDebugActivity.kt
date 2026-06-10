@@ -23,6 +23,7 @@ import android.os.Bundle
 import android.provider.Settings
 import android.view.View
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.IntentCompat
 import com.google.android.material.snackbar.Snackbar
 import com.payala.impala.demo.R
 import com.payala.impala.demo.databinding.ActivityNfcDebugBinding
@@ -270,15 +271,16 @@ class NfcDebugActivity : AppCompatActivity() {
         nfcAdapter?.disableForegroundDispatch(this)
     }
 
-    @Suppress("DEPRECATION")
     private fun processDebugTag(intent: Intent) {
         val action = intent.action ?: return
         addEvent("INTENT", "Action: $action")
 
-        val tag: Tag? = intent.getParcelableExtra(NfcAdapter.EXTRA_TAG)
+        val tag: Tag? = IntentCompat.getParcelableExtra(intent, NfcAdapter.EXTRA_TAG, Tag::class.java)
         if (tag == null) {
             // Could be NDEF-only
-            val rawMessages = intent.getParcelableArrayExtra(NfcAdapter.EXTRA_NDEF_MESSAGES)
+            val rawMessages = IntentCompat.getParcelableArrayExtra(
+                intent, NfcAdapter.EXTRA_NDEF_MESSAGES, NdefMessage::class.java
+            )
             if (rawMessages != null && rawMessages.isNotEmpty()) {
                 processDebugNdef(rawMessages)
             } else {
@@ -414,7 +416,6 @@ class NfcDebugActivity : AppCompatActivity() {
         AppLogger.d(TAG, "Debug tag processed: UID=${tagId?.toHexString()}")
     }
 
-    @Suppress("DEPRECATION")
     private fun processDebugNdef(rawMessages: Array<android.os.Parcelable>) {
         val messages = rawMessages.map { it as NdefMessage }.toTypedArray()
         val result = buildString {

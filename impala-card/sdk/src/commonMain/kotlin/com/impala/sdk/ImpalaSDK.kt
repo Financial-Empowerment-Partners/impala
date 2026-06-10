@@ -353,15 +353,13 @@ class ImpalaSDK(
     }
 
     /**
-     * Return an array containing random bytes.
+     * Return an array containing CSPRNG random bytes.
      *
      * @param size of the resulting array.
      * @return
      */
     private fun createRandomByteArray(size: Short): ByteArray {
-        val rand = ByteArray(size.toInt())
-        kotlin.random.Random.nextBytes(rand)
-        return rand
+        return secureRandomBytes(size.toInt())
     }
 
     /**
@@ -378,7 +376,11 @@ class ImpalaSDK(
     }
 
     /**
-     * Gets the nonce signed by the card.
+     * Gets the nonce signed by the card via SIGN_AUTH.
+     *
+     * The applet signs ECDSA-SHA256 over ASCII "IMPALA-AUTH:" (12 bytes) ||
+     * accountId (16 bytes) || nonce, and rejects nonces outside 8..64 bytes
+     * with 0x6700 (the pinned card-auth contract).
      *
      * @param nonce to sign
      * @return signed nonce
@@ -388,6 +390,24 @@ class ImpalaSDK(
         val cmd = CommandAPDU(Constants.INS_SIGN_AUTH, nonce)
         val bArr = tx(cmd).data
         return bArr.toByteString()
+    }
+
+    /**
+     * Signs a bridge-issued authentication challenge with the card's EC key.
+     *
+     * The card signs ECDSA-SHA256 over the pinned card-auth message:
+     * ASCII "IMPALA-AUTH:" (12 bytes) || accountId (16 bytes) || challenge.
+     * The bridge's POST /auth/card verifier checks exactly those bytes
+     * (CARD_AUTH_DOMAIN_PREFIX in impala-bridge/src/constants.rs).
+     *
+     * @param challenge the bridge-issued challenge (8 to 64 bytes)
+     * @return the DER-encoded ECDSA signature
+     * @throws ImpalaException
+     */
+    @Throws(ImpalaException::class)
+    fun signAuthChallenge(challenge: ByteArray): ByteString {
+        require(challenge.size in 8..64) { "Challenge must be 8-64 bytes" }
+        return getSignedNonce(challenge)
     }
 
     fun verifyMasterPin(mPin: String) {

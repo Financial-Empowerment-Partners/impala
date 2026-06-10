@@ -55,12 +55,16 @@ pub async fn enroll_mfa(
     let (secret_value, provisioning_uri) = if payload.mfa_type == "totp" {
         // Generate a TOTP secret
         let secret = Secret::generate_secret();
+        let secret_bytes = secret.to_bytes().map_err(|e| {
+            error!("enroll_mfa: invalid generated TOTP secret: {}", e);
+            AppError::InternalError("Failed to generate TOTP".to_string())
+        })?;
         let totp = TOTP::new(
             Algorithm::SHA1,
             6,
             1,
             30,
-            secret.to_bytes().unwrap(),
+            secret_bytes,
             Some("Impala".to_string()),
             payload.account_id.clone(),
         )
@@ -206,9 +210,31 @@ pub async fn verify_mfa(
                 "verify_mfa: no enrollment found for account_id={} mfa_type={}",
                 payload.account_id, payload.mfa_type
             );
+            // mfa_type is unauthenticated input here — clamp the label to keep
+            // metric cardinality bounded.
+            let mfa_type_label = match payload.mfa_type.as_str() {
+                "totp" | "sms" => payload.mfa_type.clone(),
+                _ => "unknown".to_string(),
+            };
+            metrics.mfa_verifications.add(
+                1,
+                &[
+                    KeyValue::new("mfa_type", mfa_type_label),
+                    KeyValue::new("outcome", "failed"),
+                ],
+            );
+            crate::redis_helpers::increment_mfa_attempts(
+                &redis_pool,
+                &payload.account_id,
+                &payload.mfa_type,
+                crate::constants::LOCKOUT_DURATION_SECS,
+            )
+            .await;
+            // Pre-auth endpoint: same generic message as a wrong code, so
+            // enrollment status cannot be enumerated.
             Ok(Json(MfaResponse {
                 success: false,
-                message: "MFA not enrolled for this account/type".to_string(),
+                message: "Invalid verification code".to_string(),
                 provisioning_uri: None,
             }))
         }
@@ -273,6 +299,10 @@ pub async fn verify_mfa(
                         AppError::InternalError("TOTP verification error".to_string())
                     })?;
 
+                    // Accepted risk: totp-rs compares codes with a plain `==`
+                    // (not constant time). The 6-digit space, 30s step window,
+                    // and the Redis lockout below make a remote timing oracle
+                    // impractical.
                     let is_valid = totp.check_current(&payload.code).map_err(|e| {
                         error!("verify_mfa: TOTP check error: {}", e);
                         AppError::InternalError("TOTP verification error".to_string())

@@ -46,7 +46,9 @@ clone_repo pythonplatform https://github.com/benallard/pythonplatform.git
 # caprunner expects python/, pythoncard/, pythoncardx/ in its root directory
 CAPRUNNER_DIR="$VENDOR_DIR/caprunner"
 
-for module in python pythoncard pythoncardx; do
+# pyDes is vendored inside the pythoncard repo and imported at module-import
+# time by pythoncard.security (any applet touching javacard.security needs it).
+for module in python pythoncard pythoncardx pyDes; do
     target="$CAPRUNNER_DIR/$module"
     source_dir="$VENDOR_DIR/pythoncard/$module"
     if [ -d "$source_dir" ] && [ ! -e "$target" ]; then
@@ -86,6 +88,15 @@ generate_ref() {
 generate_ref "3.0.1" "$APPLET_DIR/libs/sdks/jc303_kit"
 generate_ref "3.0.4" "$APPLET_DIR/libs/sdks/jc304_kit"
 generate_ref "3.0.5" "$APPLET_DIR/libs/sdks/jc305u4_kit"
+
+# CAPRunner's resolver opens "<version>.json" relative to the CWD, and test.sh
+# runs with CWD = this directory (so the scripts' ../applet/... CAP paths
+# resolve). Symlink the generated reference files here so both resolve.
+for version in 3.0.1 3.0.4 3.0.5; do
+    if [ -f "$CAPRUNNER_DIR/$version.json" ] && [ ! -e "$SCRIPT_DIR/$version.json" ]; then
+        ln -s "$CAPRUNNER_DIR/$version.json" "$SCRIPT_DIR/$version.json"
+    fi
+done
 
 # --- Make scripts executable ---
 chmod +x "$SCRIPT_DIR/inspect.sh"

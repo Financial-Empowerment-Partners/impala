@@ -39,6 +39,9 @@ var Router = (function () {
         var username = Auth.getUsername() || 'Unknown';
         var role = Roles.currentUserRole();
         var roleDef = Roles.DEFINITIONS[role] || {};
+        // `role` is interpolated as a CSS class, so whitelist it against the
+        // known role keys rather than escaping.
+        var roleClass = Roles.DEFINITIONS[role] ? role : '';
 
         var links = [
             { href: 'dashboard.html', label: 'Dashboard' },
@@ -63,7 +66,7 @@ var Router = (function () {
         html += '</ul></div>' +
             '<div class="top-bar-right">' +
             '<ul class="menu">' +
-            '<li class="menu-text">' + username + ' <span class="role-badge ' + role + '">' + (roleDef.label || role) + '</span></li>' +
+            '<li class="menu-text">' + EscapeHtml.escape(username) + ' <span class="role-badge ' + roleClass + '">' + EscapeHtml.escape(roleDef.label || role) + '</span></li>' +
             '<li><a href="#" id="logout-btn">Logout</a></li>' +
             '</ul></div>';
 

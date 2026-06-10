@@ -6,6 +6,8 @@ import android.content.Intent;
 import android.location.Location;
 import android.util.Log;
 
+import androidx.core.content.IntentCompat;
+
 /**
  * BroadcastReceiver that listens for geolocation update intents and
  * delegates them to {@link ImpalaGeoHandler} for dispatch to registered listeners.
@@ -34,7 +36,8 @@ public class GeoUpdateReceiver extends BroadcastReceiver {
     @Override
     public void onReceive(Context context, Intent intent) {
         if (ACTION_LOCATION_UPDATE.equals(intent.getAction())) {
-            Location location = intent.getParcelableExtra(EXTRA_LOCATION);
+            Location location =
+                    IntentCompat.getParcelableExtra(intent, EXTRA_LOCATION, Location.class);
             if (location != null) {
                 Log.d(TAG, "Location update: lat=" + location.getLatitude()
                         + ", lon=" + location.getLongitude());

@@ -1,24 +1,62 @@
-use crate::constants::{JWT_ISSUER, TOKEN_TYPE_TEMPORAL};
+use crate::constants::{
+    API_RATE_LIMIT_MAX_REQUESTS, API_RATE_LIMIT_WINDOW_SECS, TOKEN_TYPE_TEMPORAL,
+};
 use crate::error::AppError;
-use crate::models::Claims;
+use crate::jwt::JwtKeys;
+use crate::session::{self, SessionConfig};
+use crate::telemetry::AppMetrics;
 use axum::extract::{Extension, FromRequestParts};
 use axum::http::request::Parts;
-use jsonwebtoken::{decode, DecodingKey, Validation};
 use std::sync::Arc;
 
-/// Represents an authenticated user extracted from a valid JWT temporal token.
+/// How a request authenticated.
+#[derive(Debug, Clone)]
+#[allow(dead_code)] // bearer metadata (jti/fid/exp) carried for future revocation hooks
+pub enum AuthSource {
+    /// Bearer temporal JWT (mobile/SDK/API clients).
+    Bearer {
+        jti: String,
+        fid: String,
+        exp: usize,
+    },
+    /// HttpOnly session cookie (browser clients). `sid_hash` is the Redis key
+    /// component — the raw sid never leaves the request.
+    Session { sid_hash: String },
+}
+
+/// Validated request identity, shared by every auth extractor so the bearer
+/// and session paths cannot diverge in their security checks.
+#[derive(Debug, Clone)]
+pub struct AuthContext {
+    pub account_id: String,
+    pub is_admin: bool,
+    pub source: AuthSource,
+}
+
+/// Represents an authenticated user (bearer JWT or cookie session).
 #[derive(Debug, Clone)]
 pub struct AuthenticatedUser {
     pub account_id: String,
 }
 
-/// Represents an authenticated **admin** user. Extraction additionally requires
-/// the `is_admin` claim (server-stamped at token issuance from the
-/// `ADMIN_ACCOUNT_IDS` allowlist), so admin-only routes that take this extractor
-/// are gated at the type level — the check cannot be forgotten in a handler.
+/// Represents an authenticated **admin** user. Extraction additionally
+/// requires admin privilege — `is_admin` claim on the bearer path (stamped at
+/// issuance from the ADMIN_ACCOUNT_IDS allowlist), live allowlist membership
+/// on the session path — so admin-only routes that take this extractor are
+/// gated at the type level.
 #[derive(Debug, Clone)]
 pub struct AdminUser {
     pub account_id: String,
+}
+
+/// A user authenticated specifically via a cookie session (`/session/*`
+/// endpoints that operate on the session itself).
+#[derive(Debug, Clone)]
+pub struct SessionUser {
+    pub account_id: String,
+    pub is_admin: bool,
+    pub sid_hash: String,
+    pub csrf: String,
 }
 
 /// Verify that the authenticated user owns the specified account.
@@ -30,60 +68,151 @@ pub fn require_owner(user: &AuthenticatedUser, account_id: &str) -> Result<(), A
     Ok(())
 }
 
-/// Validate a Bearer temporal token from the request and return its claims.
+/// Validate a request's authentication and return its [`AuthContext`].
 ///
-/// Enforces: HS256 + issuer, temporal token type, and JTI revocation (the
-/// revocation check is fail-closed — Redis unavailable => Unauthorized). Shared
-/// by both [`AuthenticatedUser`] and [`AdminUser`] so the two extractors cannot
-/// diverge in their security checks.
-async fn validate_temporal_claims<S>(parts: &mut Parts, state: &S) -> Result<Claims, AppError>
+/// Precedence is strict: when an `Authorization` header is present it MUST
+/// validate as a temporal bearer JWT — there is no fallback to the cookie
+/// path on a bad bearer (that would let an attacker downgrade a targeted
+/// bearer check into a cookie check). Only header-less requests take the
+/// session-cookie path.
+///
+/// Both paths are fail-closed on Redis (revocation/epoch/session lookups) and
+/// finish with the per-account API rate limit, so only fully-validated
+/// requests consume quota.
+async fn validate_request_auth<S>(parts: &mut Parts, state: &S) -> Result<AuthContext, AppError>
 where
     S: Send + Sync,
 {
-    // Extract the JWT secret from extensions
-    let Extension(jwt_secret) = Extension::<Arc<String>>::from_request_parts(parts, state)
-        .await
-        .map_err(|_| AppError::InternalError("JWT secret not configured".to_string()))?;
-
-    // Extract Authorization header
-    let auth_header = parts
-        .headers
-        .get("Authorization")
-        .and_then(|v| v.to_str().ok())
-        .ok_or(AppError::Unauthorized)?;
-
-    // Expect "Bearer <token>"
-    let token = auth_header
-        .strip_prefix("Bearer ")
-        .ok_or(AppError::Unauthorized)?;
-
-    // Decode and validate the JWT with explicit HS256 and issuer check
-    let mut validation = Validation::new(jsonwebtoken::Algorithm::HS256);
-    validation.set_issuer(&[JWT_ISSUER]);
-
-    let token_data = decode::<Claims>(
-        token,
-        &DecodingKey::from_secret(jwt_secret.as_bytes()),
-        &validation,
-    )
-    .map_err(|_| AppError::Unauthorized)?;
-
-    // Must be a temporal token
-    if token_data.claims.token_type != TOKEN_TYPE_TEMPORAL {
-        return Err(AppError::Unauthorized);
-    }
-
-    // Check if token has been revoked (via /logout) — fail-closed.
     let Extension(redis_pool) =
         Extension::<Arc<deadpool_redis::Pool>>::from_request_parts(parts, state)
             .await
             .map_err(|_| AppError::Unauthorized)?;
 
-    if crate::redis_helpers::is_token_revoked(&redis_pool, &token_data.claims.jti).await? {
-        return Err(AppError::Unauthorized);
-    }
+    let auth_header = parts
+        .headers
+        .get("Authorization")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
 
-    Ok(token_data.claims)
+    let context = if let Some(auth_header) = auth_header {
+        // ── Bearer path ────────────────────────────────────────────────
+        let Extension(jwt_keys) = Extension::<Arc<JwtKeys>>::from_request_parts(parts, state)
+            .await
+            .map_err(|_| AppError::InternalError("JWT keys not configured".to_string()))?;
+
+        let token = auth_header
+            .strip_prefix("Bearer ")
+            .ok_or(AppError::Unauthorized)?;
+
+        // HS256 + issuer + audience + key selection + temporal type.
+        let claims = crate::jwt::decode_claims(&jwt_keys, token, TOKEN_TYPE_TEMPORAL)?;
+
+        // Revoked JTI (logout), revoked family (refresh reuse), and
+        // logout-everywhere epoch — one pipelined round trip, fail-closed.
+        crate::redis_helpers::check_bearer_token_validity(
+            &redis_pool,
+            &claims.jti,
+            &claims.fid,
+            &claims.sub,
+            claims.iat,
+        )
+        .await?;
+
+        AuthContext {
+            account_id: claims.sub,
+            is_admin: claims.is_admin,
+            source: AuthSource::Bearer {
+                jti: claims.jti,
+                fid: claims.fid,
+                exp: claims.exp,
+            },
+        }
+    } else {
+        // ── Session-cookie path ────────────────────────────────────────
+        let Extension(session_config) =
+            Extension::<Arc<SessionConfig>>::from_request_parts(parts, state)
+                .await
+                .map_err(|_| AppError::Unauthorized)?;
+        let Extension(admin_ids) =
+            Extension::<Arc<std::collections::HashSet<String>>>::from_request_parts(parts, state)
+                .await
+                .map_err(|_| AppError::Unauthorized)?;
+
+        let sid = session::extract_session_cookie(&parts.headers, session_config.cookie_secure)
+            .ok_or(AppError::Unauthorized)?;
+        let sid_hash = session::hash_sid(&sid);
+
+        let record = crate::redis_helpers::get_session(&redis_pool, &sid_hash)
+            .await?
+            .ok_or(AppError::Unauthorized)?;
+
+        let now = chrono::Utc::now().timestamp() as u64;
+        if session::record_expired(record.created_at, now) {
+            return Err(AppError::Unauthorized);
+        }
+
+        // Logout-everywhere kills sessions too: a session created at or
+        // before the epoch bump is dead. Fail-closed read.
+        let epoch = crate::redis_helpers::get_auth_epoch(&redis_pool, &record.account_id).await?;
+        if crate::redis_helpers::is_iat_revoked(record.created_at as usize, epoch) {
+            return Err(AppError::Unauthorized);
+        }
+
+        // CSRF binds to the cookie path only: bearer requests carry no
+        // ambient credential, so the header requirement applies exactly to
+        // requests a cross-site attacker could ride.
+        if let Err(e) = session::check_csrf(&parts.method, &parts.headers, &record.csrf) {
+            if let Ok(Extension(metrics)) =
+                Extension::<Arc<AppMetrics>>::from_request_parts(parts, state).await
+            {
+                metrics.csrf_rejections.add(1, &[]);
+            }
+            return Err(e);
+        }
+
+        // Slide the idle window (fire-and-forget — failure only shortens).
+        crate::redis_helpers::touch_session(
+            &redis_pool,
+            &sid_hash,
+            session::sliding_ttl(record.created_at, now),
+        )
+        .await;
+
+        // Admin is re-derived from the live allowlist on every session
+        // request: removal takes effect immediately (vs ≤1h on the JWT path).
+        let is_admin = admin_ids.contains(&record.account_id);
+
+        AuthContext {
+            account_id: record.account_id,
+            is_admin,
+            source: AuthSource::Session { sid_hash },
+        }
+    };
+
+    // Light per-account rate limit across all authenticated endpoints.
+    // Placed after full validation so only valid credentials consume quota.
+    // Fail-closed like every Redis-backed check.
+    crate::redis_helpers::check_rate_limit(
+        &redis_pool,
+        "api",
+        &context.account_id,
+        API_RATE_LIMIT_MAX_REQUESTS,
+        API_RATE_LIMIT_WINDOW_SECS,
+    )
+    .await?;
+
+    Ok(context)
+}
+
+impl<S> FromRequestParts<S> for AuthContext
+where
+    S: Send + Sync,
+{
+    type Rejection = AppError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        validate_request_auth(parts, state).await
+    }
 }
 
 impl<S> FromRequestParts<S> for AuthenticatedUser
@@ -93,9 +222,9 @@ where
     type Rejection = AppError;
 
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
-        let claims = validate_temporal_claims(parts, state).await?;
+        let context = validate_request_auth(parts, state).await?;
         Ok(AuthenticatedUser {
-            account_id: claims.sub,
+            account_id: context.account_id,
         })
     }
 }
@@ -107,186 +236,133 @@ where
     type Rejection = AppError;
 
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
-        let claims = validate_temporal_claims(parts, state).await?;
-        if !claims.is_admin {
+        let context = validate_request_auth(parts, state).await?;
+        if !context.is_admin {
             return Err(AppError::Forbidden);
         }
         Ok(AdminUser {
-            account_id: claims.sub,
+            account_id: context.account_id,
         })
+    }
+}
+
+impl<S> FromRequestParts<S> for SessionUser
+where
+    S: Send + Sync,
+{
+    type Rejection = AppError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        let context = validate_request_auth(parts, state).await?;
+        match context.source {
+            AuthSource::Session { sid_hash } => {
+                // The CSRF token is needed by /session/me; re-read is avoided
+                // by fetching it from the record during validation — but the
+                // context deliberately doesn't carry secrets, so look it up.
+                let Extension(redis_pool) =
+                    Extension::<Arc<deadpool_redis::Pool>>::from_request_parts(parts, state)
+                        .await
+                        .map_err(|_| AppError::Unauthorized)?;
+                let record = crate::redis_helpers::get_session(&redis_pool, &sid_hash)
+                    .await?
+                    .ok_or(AppError::Unauthorized)?;
+                Ok(SessionUser {
+                    account_id: context.account_id,
+                    is_admin: context.is_admin,
+                    sid_hash,
+                    csrf: record.csrf,
+                })
+            }
+            AuthSource::Bearer { .. } => Err(AppError::Unauthorized),
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::constants::{JWT_ISSUER, REFRESH_TOKEN_TTL_SECS, TEMPORAL_TOKEN_TTL_SECS};
-    use crate::models::Claims;
-    use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
+    use super::*;
+    use crate::jwt::{encode_token_pair, JwtKeys};
+    use axum::http::Request;
 
-    const TEST_SECRET: &str = "test-secret-key-for-unit-tests";
+    const TEST_SECRET: &str = "test-secret-key-for-unit-tests-32ch";
 
-    #[test]
-    fn test_jwt_encode_decode_temporal() {
-        let now = chrono::Utc::now().timestamp() as usize;
-        let claims = Claims {
-            sub: "testuser".to_string(),
-            token_type: "temporal".to_string(),
-            iat: now,
-            exp: now + TEMPORAL_TOKEN_TTL_SECS,
-            jti: uuid::Uuid::new_v4().to_string(),
-            iss: JWT_ISSUER.to_string(),
-            is_admin: false,
-        };
-
-        let token = encode(
-            &Header::default(),
-            &claims,
-            &EncodingKey::from_secret(TEST_SECRET.as_bytes()),
-        )
-        .expect("Failed to encode JWT");
-
-        let mut validation = Validation::new(jsonwebtoken::Algorithm::HS256);
-        validation.set_issuer(&[JWT_ISSUER]);
-
-        let decoded = decode::<Claims>(
-            &token,
-            &DecodingKey::from_secret(TEST_SECRET.as_bytes()),
-            &validation,
-        )
-        .expect("Failed to decode JWT");
-
-        assert_eq!(decoded.claims.sub, "testuser");
-        assert_eq!(decoded.claims.token_type, "temporal");
-        assert_eq!(decoded.claims.iss, JWT_ISSUER);
-        assert!(!decoded.claims.jti.is_empty());
+    fn parts_with_extensions(builder: axum::http::request::Builder) -> Parts {
+        let (mut parts, ()) = builder.body(()).unwrap().into_parts();
+        // A lazily-created pool pointing nowhere: connection acquisition fails,
+        // which must be treated as fail-closed by every auth path.
+        let pool = deadpool_redis::Config::from_url("redis://127.0.0.1:1/")
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("lazy pool creation");
+        parts.extensions.insert(Arc::new(pool));
+        parts.extensions.insert(Arc::new(
+            JwtKeys::new(TEST_SECRET.to_string(), None).unwrap(),
+        ));
+        parts.extensions.insert(Arc::new(SessionConfig {
+            cookie_secure: false,
+        }));
+        parts
+            .extensions
+            .insert(Arc::new(std::collections::HashSet::<String>::new()));
+        parts
     }
 
-    #[test]
-    fn test_jwt_encode_decode_refresh() {
-        let now = chrono::Utc::now().timestamp() as usize;
-        let claims = Claims {
-            sub: "testuser".to_string(),
-            token_type: "refresh".to_string(),
-            iat: now,
-            exp: now + REFRESH_TOKEN_TTL_SECS,
-            jti: uuid::Uuid::new_v4().to_string(),
-            iss: JWT_ISSUER.to_string(),
-            is_admin: false,
-        };
-
-        let token = encode(
-            &Header::default(),
-            &claims,
-            &EncodingKey::from_secret(TEST_SECRET.as_bytes()),
-        )
-        .expect("Failed to encode JWT");
-
-        let mut validation = Validation::new(jsonwebtoken::Algorithm::HS256);
-        validation.set_issuer(&[JWT_ISSUER]);
-
-        let decoded = decode::<Claims>(
-            &token,
-            &DecodingKey::from_secret(TEST_SECRET.as_bytes()),
-            &validation,
-        )
-        .expect("Failed to decode JWT");
-
-        assert_eq!(decoded.claims.sub, "testuser");
-        assert_eq!(decoded.claims.token_type, "refresh");
+    #[tokio::test]
+    async fn no_credentials_is_unauthorized() {
+        let mut parts = parts_with_extensions(Request::builder().uri("/account"));
+        let result = AuthenticatedUser::from_request_parts(&mut parts, &()).await;
+        assert!(matches!(result, Err(AppError::Unauthorized)));
     }
 
-    #[test]
-    fn test_jwt_expired_token_rejected() {
-        let claims = Claims {
-            sub: "testuser".to_string(),
-            token_type: "temporal".to_string(),
-            iat: 1000,
-            exp: 1001, // Already expired
-            jti: uuid::Uuid::new_v4().to_string(),
-            iss: JWT_ISSUER.to_string(),
-            is_admin: false,
-        };
-
-        let token = encode(
-            &Header::default(),
-            &claims,
-            &EncodingKey::from_secret(TEST_SECRET.as_bytes()),
-        )
-        .expect("Failed to encode JWT");
-
-        let mut validation = Validation::new(jsonwebtoken::Algorithm::HS256);
-        validation.set_issuer(&[JWT_ISSUER]);
-
-        let result = decode::<Claims>(
-            &token,
-            &DecodingKey::from_secret(TEST_SECRET.as_bytes()),
-            &validation,
+    #[tokio::test]
+    async fn malformed_bearer_rejected_without_cookie_fallback() {
+        // Even with a session cookie present, a bad Authorization header must
+        // fail the request outright (no downgrade to the cookie path).
+        let mut parts = parts_with_extensions(
+            Request::builder()
+                .uri("/account")
+                .header("Authorization", "Bearer not-a-jwt")
+                .header("Cookie", "impala_session=somesid"),
         );
-
-        assert!(result.is_err());
+        let result = AuthenticatedUser::from_request_parts(&mut parts, &()).await;
+        assert!(matches!(result, Err(AppError::Unauthorized)));
     }
 
-    #[test]
-    fn test_jwt_wrong_secret_rejected() {
-        let now = chrono::Utc::now().timestamp() as usize;
-        let claims = Claims {
-            sub: "testuser".to_string(),
-            token_type: "temporal".to_string(),
-            iat: now,
-            exp: now + TEMPORAL_TOKEN_TTL_SECS,
-            jti: uuid::Uuid::new_v4().to_string(),
-            iss: JWT_ISSUER.to_string(),
-            is_admin: false,
-        };
-
-        let token = encode(
-            &Header::default(),
-            &claims,
-            &EncodingKey::from_secret(TEST_SECRET.as_bytes()),
-        )
-        .expect("Failed to encode JWT");
-
-        let mut validation = Validation::new(jsonwebtoken::Algorithm::HS256);
-        validation.set_issuer(&[JWT_ISSUER]);
-
-        let result = decode::<Claims>(
-            &token,
-            &DecodingKey::from_secret(b"wrong-secret"),
-            &validation,
+    #[tokio::test]
+    async fn valid_bearer_fails_closed_when_redis_unreachable() {
+        // The JWT itself is valid, but the revocation check cannot run — the
+        // request must be rejected, never silently allowed.
+        let keys = JwtKeys::new(TEST_SECRET.to_string(), None).unwrap();
+        let (_refresh, temporal) = encode_token_pair(&keys, "alice", false).unwrap();
+        let mut parts = parts_with_extensions(
+            Request::builder()
+                .uri("/account")
+                .header("Authorization", format!("Bearer {temporal}")),
         );
-
-        assert!(result.is_err());
+        let result = AuthenticatedUser::from_request_parts(&mut parts, &()).await;
+        assert!(matches!(result, Err(AppError::Unauthorized)));
     }
 
-    #[test]
-    fn test_jwt_wrong_issuer_rejected() {
-        let now = chrono::Utc::now().timestamp() as usize;
-        let claims = Claims {
-            sub: "testuser".to_string(),
-            token_type: "temporal".to_string(),
-            iat: now,
-            exp: now + TEMPORAL_TOKEN_TTL_SECS,
-            jti: uuid::Uuid::new_v4().to_string(),
-            iss: "wrong-issuer".to_string(),
-            is_admin: false,
-        };
-
-        let token = encode(
-            &Header::default(),
-            &claims,
-            &EncodingKey::from_secret(TEST_SECRET.as_bytes()),
-        )
-        .expect("Failed to encode JWT");
-
-        let mut validation = Validation::new(jsonwebtoken::Algorithm::HS256);
-        validation.set_issuer(&[JWT_ISSUER]);
-
-        let result = decode::<Claims>(
-            &token,
-            &DecodingKey::from_secret(TEST_SECRET.as_bytes()),
-            &validation,
+    #[tokio::test]
+    async fn refresh_token_rejected_on_protected_route() {
+        let keys = JwtKeys::new(TEST_SECRET.to_string(), None).unwrap();
+        let (refresh, _temporal) = encode_token_pair(&keys, "alice", false).unwrap();
+        let mut parts = parts_with_extensions(
+            Request::builder()
+                .uri("/account")
+                .header("Authorization", format!("Bearer {refresh}")),
         );
+        let result = AuthenticatedUser::from_request_parts(&mut parts, &()).await;
+        assert!(matches!(result, Err(AppError::Unauthorized)));
+    }
 
-        assert!(result.is_err());
+    #[tokio::test]
+    async fn session_cookie_fails_closed_when_redis_unreachable() {
+        let mut parts = parts_with_extensions(
+            Request::builder()
+                .uri("/account")
+                .header("Cookie", "impala_session=somesid"),
+        );
+        let result = AuthenticatedUser::from_request_parts(&mut parts, &()).await;
+        assert!(matches!(result, Err(AppError::Unauthorized)));
     }
 }

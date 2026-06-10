@@ -34,7 +34,7 @@ public class Constants {
     public static final byte INS_IS_CARD_ALIVE = 46;
     public static final byte INS_GET_VERSION = 100;
 
-    // SCP03 instruction codes (dispatched via CLA 0x80)
+    // SCP03 instruction codes (only dispatched via the secured CLA 0x84 path)
     public static final byte INS_SCP03_PROVISION_PIN = (byte) 0x70;
     public static final byte INS_SCP03_APPLET_UPDATE = (byte) 0x71;
 

@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Live flavor network security config: HTTPS only, no cleartext exceptions. -->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false" />
+
+    <!-- Certificate pinning template for the production bridge host.
+         Left commented out because enabling it with placeholder pins would
+         break every TLS connection to the host. To enable:
+
+         1. Generate the primary pin from the host's leaf certificate:
+              openssl s_client -connect api.impala.example.com:443 < /dev/null \
+                | openssl x509 -pubkey -noout \
+                | openssl pkey -pubin -outform der \
+                | openssl dgst -sha256 -binary | openssl enc -base64
+         2. Generate a backup pin the same way from a different CA or
+            intermediate certificate (required: a single pin with no backup
+            bricks the app if the cert rotates).
+         3. Replace the host below with the real bridge host, fill in both
+            pins, set a realistic expiration, and uncomment the block.
+
+         Rotation discipline: add the NEW certificate's pin alongside the old
+         one BEFORE rotating the server certificate, and never ship a pin-set
+         with fewer than 2 pins — a single-pin set bricks every install the
+         moment the cert rotates. CI fails the build if this file contains an
+         active (uncommented) pin-set still holding the placeholder pins.
+
+    <domain-config>
+        <domain includeSubdomains="true">api.impala.example.com</domain>
+        <pin-set expiration="2027-01-01">
+            <pin digest="SHA-256">PRIMARY_PIN_BASE64=</pin>
+            <pin digest="SHA-256">BACKUP_PIN_BASE64=</pin>
+        </pin-set>
+    </domain-config>
+    -->
+</network-security-config>

@@ -1,5 +1,15 @@
 use log::{error, info};
 
+/// Newtype for the SNS topic ARN router extension.
+///
+/// This must NOT be a bare `Arc<String>`: request extensions are keyed by
+/// type, and the JWT secret used to ride the router as `Arc<String>` too —
+/// the inner layer silently overwrote the ARN, handing handlers the JWT
+/// secret as the topic ARN whenever SNS was configured. Distinct newtypes
+/// make that collision unrepresentable.
+#[derive(Debug, Clone)]
+pub struct SnsTopicArn(pub std::sync::Arc<String>);
+
 /// Publish a job message to the SNS topic for background worker processing.
 pub async fn publish_job(
     client: &aws_sdk_sns::Client,

@@ -7,7 +7,7 @@ ant.properties.set("debug", false)
 
 // Forward selected Gradle project properties (-Papplet.aid=..., etc.) to Ant so
 // CI can override the AID + issuer key per network without editing build.xml.
-listOf("applet.aid", "applet.aid.app", "applet.issuerkey").forEach { key ->
+listOf("applet.aid", "applet.aid.app", "applet.issuerkey", "applet.installparams").forEach { key ->
     project.findProperty(key)?.let { ant.properties.set(key, it.toString()) }
 }
 

@@ -27,7 +27,14 @@ pub async fn execute(ctx: &WorkerContext, payload: &serde_json::Value) -> Result
 
     let mut errors = Vec::new();
     for account_id in &parsed.account_ids {
-        match sync_account_core(&ctx.pool, &ctx.redis_pool, &ctx.stellar_rpc_url, account_id).await
+        match sync_account_core(
+            &ctx.pool,
+            &ctx.redis_pool,
+            &ctx.http_client,
+            &ctx.stellar_rpc_url,
+            account_id,
+        )
+        .await
         {
             Ok(ts) => {
                 info!("batch_sync: synced {} at {}", account_id, ts);

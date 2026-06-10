@@ -2,11 +2,27 @@ use impala_testnet_tests::*;
 use std::thread;
 use std::time::Duration;
 
-/// Shared setup: check CLI, create deployer identity, fund it, deploy SAC + contract.
+/// Amount passed to `stellar tx new payment --amount` when funding signer1
+/// with self-issued USDC: 100 USDC in stroops (7 decimals).
+///
+/// CAUTION: the CLI's amount-unit semantics (stroops vs whole units) vary by
+/// stellar-cli version, so `setup` asserts the resulting SAC balance equals
+/// [`USDC_FUNDING_STROOPS`] — if the CLI treats `--amount` as whole units,
+/// that self-check fails loudly and this constant must be adjusted.
+const USDC_FUNDING_AMOUNT: &str = "1000000000";
+
+/// The SAC balance (in stroops) expected after the funding payment.
+const USDC_FUNDING_STROOPS: i128 = 1_000_000_000;
+
+/// Shared setup: check CLI, create identities, fund them, self-issue a test
+/// USDC asset (deploy its SAC, establish trustlines, pay signer1), and deploy
+/// the wrapper contract.
 struct TestFixture {
     deployer: TestIdentity,
+    issuer: TestIdentity,
     contract_id: String,
-    native_sac_id: String,
+    usdc_sac_id: String,
+    usdc_asset: String,
     signer1: TestIdentity,
     signer2: TestIdentity,
 }
@@ -16,31 +32,73 @@ impl TestFixture {
         require_stellar_cli();
 
         let deployer_name = format!("{test_name}-deployer");
+        let issuer_name = format!("{test_name}-issuer");
         let s1_name = format!("{test_name}-signer1");
         let s2_name = format!("{test_name}-signer2");
 
         let deployer = generate_identity(&deployer_name).expect("generate deployer");
+        let issuer = generate_identity(&issuer_name).expect("generate issuer");
         let signer1 = generate_identity(&s1_name).expect("generate signer1");
         let signer2 = generate_identity(&s2_name).expect("generate signer2");
 
         fund_account(&deployer.public_key).expect("fund deployer");
+        fund_account(&issuer.public_key).expect("fund issuer");
         fund_account(&signer1.public_key).expect("fund signer1");
         fund_account(&signer2.public_key).expect("fund signer2");
 
         // Small delay for ledger finality
         thread::sleep(Duration::from_secs(5));
 
-        let native_sac_id = deploy_sac_native(&deployer.name).expect("deploy native SAC");
+        // Self-issued test USDC: the SAC's symbol() returns the asset code,
+        // so the contract's `initialize` USDC validation passes. (No Circle
+        // faucet involved — the issuer is a throwaway testnet account.)
+        let usdc_asset = format!("USDC:{}", issuer.public_key);
+        let usdc_sac_id = deploy_usdc_sac(&issuer).expect("deploy USDC SAC");
+
+        // Accounts (G-addresses) need trustlines to hold USDC; the wrapper
+        // contract itself does not.
+        establish_trustline(&signer1, &usdc_asset).expect("signer1 trustline");
+        establish_trustline(&signer2, &usdc_asset).expect("signer2 trustline");
 
         let contract_id = deploy_contract(&deployer.name).expect("deploy contract");
 
-        TestFixture {
+        let fixture = TestFixture {
             deployer,
+            issuer,
             contract_id,
-            native_sac_id,
+            usdc_sac_id,
+            usdc_asset,
             signer1,
             signer2,
-        }
+        };
+        fixture.fund_signer1_with_usdc();
+        fixture
+    }
+
+    /// Pay 100 self-issued USDC to signer1 and assert the SAC balance matches
+    /// the expected stroops, so a CLI amount-unit mismatch fails loudly here
+    /// rather than corrupting downstream test expectations.
+    fn fund_signer1_with_usdc(&self) {
+        pay_usdc(
+            &self.issuer,
+            &self.signer1.public_key,
+            USDC_FUNDING_AMOUNT,
+            &self.usdc_asset,
+        )
+        .expect("pay USDC to signer1");
+
+        let bal = sac_balance(
+            &self.usdc_sac_id,
+            &self.deployer.name,
+            &self.signer1.public_key,
+        )
+        .expect("query signer1 USDC SAC balance");
+        assert_eq!(
+            bal, USDC_FUNDING_STROOPS,
+            "USDC funding self-check failed: expected {USDC_FUNDING_STROOPS} stroops, got {bal}. \
+             stellar-cli payment amount-unit semantics may differ for this CLI version — \
+             adjust USDC_FUNDING_AMOUNT accordingly."
+        );
     }
 
     fn initialize(&self, threshold: u32, min_lock_duration: u64) {
@@ -58,8 +116,8 @@ impl TestFixture {
                 &signers_json,
                 "--threshold",
                 &threshold.to_string(),
-                "--underlying_token",
-                &self.native_sac_id,
+                "--usdc_token",
+                &self.usdc_sac_id,
                 "--min_lock_duration",
                 &min_lock_duration.to_string(),
             ],
@@ -74,7 +132,14 @@ impl TestFixture {
             &self.contract_id,
             &signer.name,
             "wrap",
-            &["--signers", &signers_json, "--amount", &amount.to_string()],
+            &[
+                "--signers",
+                &signers_json,
+                "--depositor",
+                &signer.public_key,
+                "--amount",
+                &amount.to_string(),
+            ],
         )
         .expect("wrap tokens");
     }
@@ -121,7 +186,7 @@ fn test_wrap_tokens() {
     let f = TestFixture::setup("wrap");
     f.initialize(1, 60);
 
-    let wrap_amount: i128 = 1_000_000; // 0.1 XLM in stroops
+    let wrap_amount: i128 = 1_000_000; // 0.1 USDC in stroops (7 decimals)
     f.wrap_tokens(&f.signer1, wrap_amount);
 
     let bal = f.query_balance(&f.signer1.public_key);
@@ -139,7 +204,7 @@ fn test_schedule_and_execute_unwrap() {
     let f = TestFixture::setup("unwrap");
     f.initialize(1, 5); // 5-second minimum lock for faster test
 
-    let wrap_amount: i128 = 2_000_000;
+    let wrap_amount: i128 = 2_000_000; // 0.2 USDC in stroops (7 decimals)
     f.wrap_tokens(&f.signer1, wrap_amount);
 
     let signers_json = format!(r#"["{}"]"#, f.signer1.public_key);
@@ -199,7 +264,7 @@ fn test_schedule_and_execute_transfer() {
     let f = TestFixture::setup("transfer");
     f.initialize(1, 5);
 
-    let wrap_amount: i128 = 3_000_000;
+    let wrap_amount: i128 = 3_000_000; // 0.3 USDC in stroops (7 decimals)
     f.wrap_tokens(&f.signer1, wrap_amount);
 
     let signers_json = format!(r#"["{}"]"#, f.signer1.public_key);
@@ -229,16 +294,13 @@ fn test_schedule_and_execute_transfer() {
     println!("Waiting for transfer timelock to expire...");
     thread::sleep(Duration::from_secs(10));
 
+    // execute_transfer takes only the timelock ID — sender and recipient
+    // were recorded at schedule time.
     invoke(
         &f.contract_id,
         &f.signer1.name,
         "execute_transfer",
-        &[
-            "--timelock_id",
-            timelock_id,
-            "--from",
-            &f.signer1.public_key,
-        ],
+        &["--timelock_id", timelock_id],
     )
     .expect("execute_transfer");
 
@@ -258,7 +320,7 @@ fn test_cancel_timelock() {
     let f = TestFixture::setup("cancel");
     f.initialize(1, 5);
 
-    let wrap_amount: i128 = 2_000_000;
+    let wrap_amount: i128 = 2_000_000; // 0.2 USDC in stroops (7 decimals)
     f.wrap_tokens(&f.signer1, wrap_amount);
 
     let signers_json = format!(r#"["{}"]"#, f.signer1.public_key);
@@ -302,8 +364,10 @@ fn test_cancel_timelock() {
     )
     .expect("execute_unwrap should return error");
 
+    // Cancelled timelocks are pruned from storage, so execution fails on the
+    // missing entry.
     assert!(
-        err.contains("Already executed") || err.contains("Error") || !err.is_empty(),
+        err.contains("Timelock not found") || err.contains("Error") || !err.is_empty(),
         "Cancelled timelock execution should fail"
     );
 
@@ -328,12 +392,51 @@ fn test_insufficient_signers_rejected() {
         &f.contract_id,
         &f.signer1.name,
         "wrap",
-        &["--signers", &signers_json, "--amount", "1000000"],
+        &[
+            "--signers",
+            &signers_json,
+            "--depositor",
+            &f.signer1.public_key,
+            "--amount",
+            "1000000",
+        ],
     )
     .expect("wrap with insufficient signers should fail");
 
     assert!(
         err.contains("Insufficient signers") || err.contains("Error") || !err.is_empty(),
         "Should reject operation with insufficient signers"
+    );
+}
+
+#[test]
+fn test_initialize_rejects_non_usdc_token() {
+    let f = TestFixture::setup("non-usdc");
+
+    // The native XLM SAC's symbol() is "native", not "USDC".
+    let native_sac_id = deploy_sac_native(&f.deployer.name).expect("deploy native SAC");
+
+    let signers_json = format!(r#"["{}","{}"]"#, f.signer1.public_key, f.signer2.public_key);
+
+    let err = invoke_expect_fail(
+        &f.contract_id,
+        &f.deployer.name,
+        "initialize",
+        &[
+            "--signers",
+            &signers_json,
+            "--threshold",
+            "1",
+            "--usdc_token",
+            &native_sac_id,
+            "--min_lock_duration",
+            "60",
+        ],
+    )
+    .expect("initialize with a non-USDC token should fail");
+
+    assert!(
+        err.contains("Underlying token is not USDC") || err.contains("Error") || !err.is_empty(),
+        "Should reject a non-USDC underlying token"
     );
 }

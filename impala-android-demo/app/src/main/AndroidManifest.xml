@@ -5,6 +5,9 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.NFC" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <!-- API 34+: required to start NfcWatcherService with type connectedDevice
+         (the NFC permission above satisfies the connectedDevice prerequisite) -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <uses-feature android:name="android.hardware.nfc" android:required="false" />
@@ -68,7 +71,8 @@
         <!-- Background NFC event processing service -->
         <service
             android:name=".nfc.NfcWatcherService"
-            android:exported="false" />
+            android:exported="false"
+            android:foregroundServiceType="connectedDevice" />
 
         <!-- Firebase Cloud Messaging service for push notifications -->
         <service

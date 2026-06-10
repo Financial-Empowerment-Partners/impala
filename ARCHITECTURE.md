@@ -6,7 +6,7 @@ Impala is a payment bridge that connects the offline Payala payment network with
 
 What distinguishes this system from a typical blockchain bridge is its hardware root of trust. Every Impala-issued smartcard carries a JavaCard applet with its own elliptic curve key pair, PIN management, and on-card balance ledger. When a cardholder taps their phone to authorize a transfer, the card signs the transaction with a private key that has never left the secure element. The bridge server can verify that signature, register the card's public key, and tie the cardholder's identity to both their Payala account and their Stellar address. This means authentication doesn't rely solely on passwords or tokens stored in software; the physical card is a factor that an attacker would need to possess.
 
-The platform is composed of six components that span from on-chain smart contracts through a REST API server down to the NFC interface on a mobile device. At the top, **impala-soroban** deploys a multisig asset wrapper contract on Stellar's Soroban runtime, enforcing time-locked operations and multi-party authorization for wraps, unwraps, and transfers. In the middle, **impala-bridge** is a Rust/Axum API server that manages accounts, authenticates users (via passwords, Okta SSO, or smartcard signatures), issues JWT tokens, dispatches notifications, streams blockchain events, and reconciles cross-ledger transactions. On the device side, **impala-card** provides both the JavaCard applet (23 APDU commands for authentication, transactions, and provisioning) and a Kotlin Multiplatform SDK that abstracts the smartcard interface across Android, iOS, and JVM. **impala-lib** wraps the SDK in Android-specific NFC and geolocation services, **impala-android-demo** is a full MVVM reference application with five authentication methods, and **impala-ui** is a vanilla JavaScript admin dashboard for operations and account management.
+The platform is composed of six components that span from on-chain smart contracts through a REST API server down to the NFC interface on a mobile device. At the top, **impala-soroban** deploys a multisig USDC wrapper contract on Stellar's Soroban runtime, enforcing time-locked operations and multi-party authorization for wrapping, unwrapping, and transferring USDC. In the middle, **impala-bridge** is a Rust/Axum API server that manages accounts, authenticates users (via passwords, Okta SSO, or smartcard signatures), issues JWT tokens, dispatches notifications, streams blockchain events, and reconciles cross-ledger transactions. On the device side, **impala-card** provides both the JavaCard applet (23 APDU commands for authentication, transactions, and provisioning) and a Kotlin Multiplatform SDK that abstracts the smartcard interface across Android, iOS, and JVM. **impala-lib** wraps the SDK in Android-specific NFC and geolocation services, **impala-android-demo** is a full MVVM reference application with five authentication methods, and **impala-ui** is a vanilla JavaScript admin dashboard for operations and account management.
 
 The infrastructure layer, defined in Terraform, deploys the bridge and its background worker as ECS Fargate tasks behind an ALB with WAF protection, backed by RDS PostgreSQL and ElastiCache Redis, with SNS/SQS for asynchronous job dispatch and optional cross-region disaster recovery.
 
@@ -52,7 +52,7 @@ graph TB
     end
 
     subgraph Contracts["Smart Contracts"]
-        Soroban["MultisigAssetWrapper<br/><i>impala-soroban</i>"]
+        Soroban["MultisigUsdcWrapper<br/><i>impala-soroban</i>"]
     end
 
     subgraph Notifications["Notification Channels"]
@@ -154,8 +154,12 @@ graph LR
 | `/readyz` | GET | Kubernetes readiness probe — returns 200 if both DB and Redis are reachable, 503 otherwise |
 | `/version` | GET | Build metadata: package name, version, build date, rustc version, database schema version |
 | `/authenticate` | POST | Register or authenticate a user with account ID and password (Argon2 hash). Rate-limited to 10 requests per 60 seconds per account, with lockout after 5 failed attempts for 15 minutes |
-| `/token` | POST | JWT token issuance. Accepts either `{username, password}` to obtain a 14-day refresh token, or `{refresh_token}` to obtain a 1-hour temporal token. Checks Redis revocation blacklist before issuing |
-| `/auth/okta` | POST | Exchange a validated Okta access token for Impala JWT tokens. Auto-creates account on first login |
+| `/token` | POST | JWT token issuance. `{username, password}` returns a fresh 14-day refresh + 1-hour temporal pair; `{refresh_token}` rotates (refresh tokens are single-use — the presented token is burned and a replacement pair in the same family is returned; reuse revokes the whole family). Validates issuer/audience and checks all Redis revocation surfaces before issuing |
+| `/session/login` | POST | Browser cookie-session login: same credential checks as `/authenticate`, sets an HttpOnly `SameSite=Strict` session cookie and returns the CSRF token (`X-CSRF-Token` required on cookie-authenticated mutations) |
+| `/session/me` | GET | Current session identity + CSRF token (page-reload rehydration for impala-ui) |
+| `/session/logout` | POST | Destroys the server-side session record and clears the cookie |
+| `/logout/all` | POST | Logout everywhere: bumps the account's auth epoch in Redis, killing every outstanding token and session for the account |
+| `/auth/okta` | POST | Exchange a validated Okta access token for Impala JWT tokens (or a cookie session with `cookie_mode: true`). Auto-creates account on first login |
 | `/auth/okta/config` | GET | Returns the Okta OIDC configuration (issuer, client ID, endpoints, scopes) for client-side flow setup |
 
 #### Client API (JWT Protected)
@@ -341,11 +345,11 @@ The SCP03 implementation in the SDK is a pure-Kotlin AES-128 implementation (no 
 
 ## impala-soroban — Stellar Smart Contracts
 
-The `MultisigAssetWrapper` contract (~1580 lines, `#![no_std]` WASM) runs on Stellar's Soroban runtime (SDK 23.0.1). It implements a time-locked, multisig-protected token wrapping system: users deposit Stellar tokens into the contract, which tracks per-address balances and requires multiple authorized signers plus a time delay before tokens can be withdrawn or transferred.
+The `MultisigUsdcWrapper` contract (~1900 lines incl. inline tests, `#![no_std]` WASM) runs on Stellar's Soroban runtime (SDK 23.5.3). It implements a time-locked, multisig-protected wrapping system for Circle's USDC Stellar asset: users deposit USDC into the contract, which tracks per-address balances and requires multiple authorized signers plus a time delay before tokens can be withdrawn or transferred. The USDC SAC address differs per network (Circle's testnet issuer `GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5`, pubnet issuer `GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN`), so it is passed to `initialize` rather than hardcoded.
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Initialized : initialize(signers, threshold, token, min_duration)
+    [*] --> Initialized : initialize(signers, threshold, usdc_token, min_duration)
 
     state Initialized {
         [*] --> Active
@@ -353,7 +357,7 @@ stateDiagram-v2
         Paused --> Active : unpause(signers)
     }
 
-    Active --> Wrapped : wrap(signers, amount) [immediate]
+    Active --> Wrapped : wrap(signers, depositor, amount) [immediate]
 
     Wrapped --> UnwrapScheduled : schedule_unwrap(signers, recipient, amount, delay)
     UnwrapScheduled --> Unwrapped : execute_unwrap(timelock_id) [after delay]
@@ -366,23 +370,25 @@ stateDiagram-v2
 
 ### Contract Functions
 
-**Initialization**: `initialize(signers, threshold, underlying_token, min_lock_duration)` — one-time setup that records the signer set, minimum quorum, the Stellar token address to wrap, and the minimum time delay for locked operations.
+**Initialization**: `initialize(signers, threshold, usdc_token, min_lock_duration)` — one-time setup that records the signer set, minimum quorum, the network's USDC SAC address, and the minimum time delay for locked operations. Before writing any state it validates the token (`symbol() == "USDC"` and `decimals() == 7` — the issuer is not verifiable on-chain, so this guards misconfiguration, not a malicious deployer), caps the signer set at 20, rejects duplicate signers, and rejects a minimum lock duration above the 365-day maximum (either of the latter two would brick the contract).
 
 **Multisig verification**: Every operation calls `verify_multisig(signers)`, which checks that the number of provided signers meets the threshold and that each signer calls `require_auth()`.
 
 **Token operations**:
-- `wrap(signers, amount)` — Immediate. Transfers tokens from the first signer to the contract. Updates per-address balance and total wrapped amount.
+- `wrap(signers, depositor, amount)` — Immediate. Transfers USDC from the explicit `depositor` (who must also `require_auth()` but need not be a signer) to the contract. Updates per-address balance and total wrapped amount.
 - `schedule_unwrap(signers, recipient, amount, delay)` — Creates a `TimeLock` record with `unlock_time = ledger_time + delay`. Returns a `timelock_id`.
-- `execute_unwrap(timelock_id)` — Transfers tokens from contract to recipient after `unlock_time` has passed. Marks the timelock as executed to prevent replay.
+- `execute_unwrap(timelock_id)` — Transfers USDC from contract to recipient after `unlock_time` has passed. Marks the timelock as executed before the external transfer (reentrancy prevention), then removes the entry from storage.
 - `schedule_transfer(signers, from, to, amount, delay)` — Same time-lock pattern for internal balance transfers between wrapped accounts.
-- `execute_transfer(timelock_id)` — Adjusts balances (`from -= amount`, `to += amount`) after the delay.
-- `cancel_timelock(signers, timelock_id)` — Cancels a pending operation before execution (requires multisig).
+- `execute_transfer(timelock_id)` — Adjusts balances (`from -= amount`, `to += amount`) after the delay, then removes the entry from storage.
+- `cancel_timelock(signers, timelock_id)` — Cancels a pending operation before execution (requires multisig); removes the entry from storage.
 
 **Governance**:
 - `pause(signers)` / `unpause(signers)` — Halts or resumes all operations except `cancel_timelock`.
-- `rotate_signers(current_signers, new_signers, new_threshold)` — Changes the authorized signer set and threshold.
+- `rotate_signers(current_signers, new_signers, new_threshold)` — Changes the authorized signer set and threshold (same ≤20 / no-duplicates bounds as `initialize`).
 
-**Constraints**: threshold must be > 0 and <= signer count; amounts must be > 0; delays capped at 365 days; executed/cancelled timelocks cannot be re-executed. All storage is instance-level for ledger efficiency.
+**Read-only**: `balance(address)`, `total_supply()`, `get_timelock(timelock_id)`, `usdc_token()` (the configured USDC SAC address), `usdc_decimals()` (always 7).
+
+**Constraints**: threshold must be > 0 and <= signer count; at most 20 signers, no duplicates; amounts must be > 0; delays capped at 365 days; executed/cancelled timelock entries are removed from instance storage, so replay attempts fail with "Timelock not found" and storage rent is reclaimed. All storage is instance-level for ledger efficiency.
 
 **Events emitted**: `wrap`, `sched_unw`, `exec_unw`, `sched_tx`, `exec_tx`, `cancel`, `pause`, `unpause`, `rotate`.
 
@@ -705,7 +711,7 @@ graph TB
         Horizon["Horizon API<br/><i>horizon.stellar.org</i>"]
         SorobanRPC["Soroban RPC<br/><i>soroban-testnet.stellar.org</i>"]
         Ledgers["Ledger Stream<br/><i>/ledgers?cursor=now</i>"]
-        SorobanContract["MultisigAssetWrapper<br/><i>Soroban Contract</i>"]
+        SorobanContract["MultisigUsdcWrapper<br/><i>Soroban Contract</i>"]
     end
 
     subgraph Payala["Payala Network"]

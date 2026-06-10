@@ -83,12 +83,38 @@ public class ImpalaApplet extends Applet {
     public static final short SW_ERROR_PIN_REJECTED = 0x6691;
 
     private static final byte USER_PIN_LENGTH = 4;
+    private static final byte MASTER_PIN_LENGTH = 8;
     // In SIGN_TRANSFER, the signable data starts after the 4-byte user PIN
     private static final short OFFSET_SIGNABLE = ISO7816.OFFSET_CDATA + USER_PIN_LENGTH;
 
     private static final short MAX_PINLESS_TRANSFERS = 4; // max consecutive transfers without PIN
     private static final short MAX_FULL_NAME_LENGTH = 128;
     private static final short MAX_GENDER_LENGTH = 16;
+
+    // --- SIGN_AUTH domain separation (pinned cross-stream contract) ---
+    // ASCII "IMPALA-AUTH:" — must match CARD_AUTH_DOMAIN_PREFIX in
+    // impala-bridge/src/constants.rs. The bridge /auth/card verifier checks
+    // ECDSA-SHA256 over AUTH_DOMAIN_TAG || accountId(16) || challenge(8..=64),
+    // so an auth signature can never be replayed as a transfer signature.
+    private static final byte[] AUTH_DOMAIN_TAG = {
+            (byte) 0x49, (byte) 0x4D, (byte) 0x50, (byte) 0x41, // "IMPA"
+            (byte) 0x4C, (byte) 0x41, (byte) 0x2D, (byte) 0x41, // "LA-A"
+            (byte) 0x55, (byte) 0x54, (byte) 0x48, (byte) 0x3A  // "UTH:"
+    };
+    private static final short AUTH_DOMAIN_TAG_LENGTH = 12;
+    private static final short MIN_AUTH_CHALLENGE_LENGTH = 8;
+    private static final short MAX_AUTH_CHALLENGE_LENGTH = 64;
+
+    // --- Install-parameter TLV (the applet data / GP "C9" parameter value) ---
+    // [TAG_INSTALL_PROVISIONING][flags]
+    //   [ENC(16) | MAC(16) | DEK(16)  if flags & FLAG_INSTALL_KEYS]
+    //   [masterPIN(8) | userPIN(4)    if flags & FLAG_INSTALL_PINS]
+    private static final byte TAG_INSTALL_PROVISIONING = (byte) 0x01;
+    private static final byte FLAG_INSTALL_ENFORCE = (byte) 0x01;
+    private static final byte FLAG_INSTALL_KEYS = (byte) 0x02;
+    private static final byte FLAG_INSTALL_PINS = (byte) 0x04;
+    private static final short SCP03_KEY_SET_LENGTH = 48;
+    private static final short INSTALL_PIN_BLOCK_LENGTH = 12;
 
     // DER-encoded zero signature placeholder used for online (non-LUK) transfers
     // where no pubKeySig is needed. Maintains consistent response format.
@@ -135,6 +161,10 @@ public class ImpalaApplet extends Applet {
     private OwnerPIN masterPIN;        // Administrative PIN (10 retries, 8 digits)
     private OwnerPIN userPIN;          // Cardholder PIN (5 retries, 4 digits)
     private byte howManyPINless;       // Counter for consecutive PIN-less transfers
+
+    // --- Install-time provisioning policy ---
+    private boolean provisioningEnforced; // FLAG_INSTALL_ENFORCE: gate signing until a user PIN is provisioned
+    private boolean pinProvisioned;       // set by install-time PIN injection or SCP03 PROVISION_PIN
 
     // --- Transient working buffers (cleared on card reset) ---
     private byte[] scratchpad;         // General-purpose transient buffer (255 bytes)
@@ -187,6 +217,8 @@ public class ImpalaApplet extends Applet {
         userPIN = new OwnerPIN((byte) 5, (byte) 5); // retries:5 and length:5
         userPIN.update(new byte[] { 1, 1, 1, 1 }, ZERO, USER_PIN_LENGTH);
         howManyPINless = 0;
+        provisioningEnforced = false;
+        pinProvisioned = false;
 
         scratchpad = JCSystem.makeTransientByteArray((short) 255, JCSystem.CLEAR_ON_RESET);
         sigBuffer = JCSystem.makeTransientByteArray(MAX_SIG_LENGTH, JCSystem.CLEAR_ON_RESET);
@@ -209,6 +241,11 @@ public class ImpalaApplet extends Applet {
                 (byte) 0x4C, (byte) 0x4D, (byte) 0x4E, (byte) 0x4F
         };
         scp03.setStaticKeys(defaultKey, ZERO, defaultKey, ZERO, defaultKey, ZERO);
+
+        // Install parameters may override the SCP03 keys / PINs and enable the
+        // provisioning gate. Throws on malformed input, failing the install
+        // cleanly before register() — never with partially-applied state.
+        applyInstallParameters(bArray, bOffset, bLength);
 
         register();
     }
@@ -268,10 +305,14 @@ public class ImpalaApplet extends Applet {
      *   <li><b>Master PIN required:</b>
      *       INS_UPDATE_USER_PIN (0x19) — masterPIN.isValidated()</li>
      *   <li><b>User PIN required (or PIN-less within limits):</b>
-     *       INS_SIGN_TRANSFER (0x06) — userPIN verified via validatePIN() or checkPINless()</li>
-     *   <li><b>SCP03 secure channel required (CLA 0x80):</b>
+     *       INS_SIGN_TRANSFER (0x06) — userPIN verified via validatePIN() or isPINlessEligible()</li>
+     *   <li><b>SCP03 secure channel required (CLA 0x84, C-MAC wrapped):</b>
      *       INS_SCP03_PROVISION_PIN (0x70), INS_SCP03_APPLET_UPDATE (0x71)
-     *       — scp03.isAuthenticated()</li>
+     *       — only reachable through scp03.unwrapCommand(); the plain CLA 0x80
+     *       dispatch path was removed (per-command MACs are mandatory)</li>
+     *   <li><b>Provisioning gate (install-time FLAG_INSTALL_ENFORCE):</b>
+     *       INS_SIGN_TRANSFER (0x06), INS_SIGN_AUTH (0x25) answer 0x6985 until
+     *       a user PIN has been provisioned</li>
      * </ul>
      *
      * @param apdu the incoming APDU
@@ -294,8 +335,14 @@ public class ImpalaApplet extends Applet {
             byte cla = buffer[ISO7816.OFFSET_CLA];
             byte ins = buffer[ISO7816.OFFSET_INS];
 
+            scp03.clearSecuredCommand();
+
             if (cla == (byte) 0x80) {
-                // GlobalPlatform commands (unsecured channel setup + SCP03-protected commands)
+                // GlobalPlatform channel setup. PROVISION_PIN / APPLET_UPDATE are
+                // deliberately NOT dispatched here: without per-command C-MACs the
+                // plain CLA 0x80 path would accept unauthenticated payloads on an
+                // open session — they are only reachable via the secured CLA 0x84
+                // path below (scp03.unwrapCommand verifies the MAC per command).
                 switch (ins) {
                     case (byte) 0x50: { // INITIALIZE UPDATE
                         apdu.setIncomingAndReceive();
@@ -309,24 +356,6 @@ public class ImpalaApplet extends Applet {
                                 buffer[ISO7816.OFFSET_P1]);
                         return;
                     }
-                    case INS_SCP03_PROVISION_PIN: {
-                        failIfCardIsTerminated();
-                        if (!scp03.isAuthenticated()) {
-                            ISOException.throwIt(ISO7816.SW_CONDITIONS_NOT_SATISFIED);
-                        }
-                        apdu.setIncomingAndReceive();
-                        processProvisionPIN(buffer, dataLength);
-                        return;
-                    }
-                    case INS_SCP03_APPLET_UPDATE: {
-                        failIfCardIsTerminated();
-                        if (!scp03.isAuthenticated()) {
-                            ISOException.throwIt(ISO7816.SW_CONDITIONS_NOT_SATISFIED);
-                        }
-                        apdu.setIncomingAndReceive();
-                        processAppletUpdate(buffer, dataLength);
-                        return;
-                    }
                     default:
                         ISOException.throwIt(ISO7816.SW_INS_NOT_SUPPORTED);
                         return;
@@ -334,9 +363,26 @@ public class ImpalaApplet extends Applet {
             }
 
             if (cla == (byte) 0x84) {
-                // Secured APDU — unwrap, then fall through to normal dispatch
                 apdu.setIncomingAndReceive();
+                if (ins == (byte) 0x82) {
+                    // EXTERNAL AUTHENTICATE arrives with the secured CLA (its C-MAC
+                    // is verified inside processExternalAuthenticate, not unwrapped)
+                    scp03.processExternalAuthenticate(buffer, ISO7816.OFFSET_CDATA, dataLength,
+                            buffer[ISO7816.OFFSET_P1]);
+                    return;
+                }
+                // Secured APDU — unwrap, then fall through to normal dispatch
                 dataLength = scp03.unwrapCommand(buffer, ISO7816.OFFSET_CDATA, dataLength);
+                if (ins == INS_SCP03_PROVISION_PIN) {
+                    failIfCardIsTerminated();
+                    processProvisionPIN(buffer, dataLength);
+                    return;
+                }
+                if (ins == INS_SCP03_APPLET_UPDATE) {
+                    failIfCardIsTerminated();
+                    processAppletUpdate(buffer, dataLength);
+                    return;
+                }
             }
 
             // --- Standard INS dispatch (CLA 0x00 or unwrapped CLA 0x84) ---
@@ -344,6 +390,12 @@ public class ImpalaApplet extends Applet {
                 case INS_INITIALIZE: {
                     failIfCardIsTerminated();
                     if (!initialized) {
+                        // Host-provided entropy only SUPPLEMENTS this RandomData
+                        // instance (per the JavaCard spec, setSeed on a secure RNG
+                        // mixes seed material in — a malicious host cannot reduce
+                        // its entropy). It influences only cardId generation and
+                        // SCP03 card challenges; EC keypair generation below does
+                        // NOT consume it (see createECKeypair).
                         randomData.setSeed(buffer, ISO7816.OFFSET_CDATA, dataLength);
 
                         randomData.generateData(cardId, ZERO, UUID_LENGTH);
@@ -388,13 +440,16 @@ public class ImpalaApplet extends Applet {
                 }
                 case INS_SIGN_AUTH: {
                     failIfCardIsTerminated();
+                    failIfProvisioningRequired();
                     signAuth(apdu, buffer, dataLength);
                     break;
                 }
                 case INS_SIGN_TRANSFER: {
                     failIfCardIsTerminated();
-                    if (checkPINless(buffer) || validatePIN(buffer, ISO7816.OFFSET_CDATA, USER_PIN_LENGTH)) {
-                        signTransfer(buffer, dataLength);
+                    failIfProvisioningRequired();
+                    boolean pinless = isPINlessEligible(buffer);
+                    if (pinless || validatePIN(buffer, ISO7816.OFFSET_CDATA, USER_PIN_LENGTH)) {
+                        signTransfer(buffer, dataLength, pinless);
                         sendBytes(apdu, scratchpad, ZERO,
                                 (short) (MAX_SIG_LENGTH + PUB_KEY_LENGTH + MAX_SIG_LENGTH));
                     }
@@ -481,6 +536,124 @@ public class ImpalaApplet extends Applet {
     }
 
     /**
+     * Throws 0x6985 when install-time policy (FLAG_INSTALL_ENFORCE) requires a
+     * provisioned user PIN before the card may sign (SIGN_TRANSFER / SIGN_AUTH).
+     * The gate is lifted by install-time PIN injection (FLAG_INSTALL_PINS) or
+     * by provisioning a user PIN over the SCP03 channel.
+     */
+    private void failIfProvisioningRequired() {
+        if (provisioningEnforced && !pinProvisioned) {
+            ISOException.throwIt(ISO7816.SW_CONDITIONS_NOT_SATISFIED);
+        }
+    }
+
+    /**
+     * Parses the JavaCard install parameter array:
+     * [instanceAIDLength][instanceAID][controlInfoLength][controlInfo][appletDataLength][appletData].
+     * The applet data (the GlobalPlatform "C9" parameter value, gp --params)
+     * carries the optional provisioning TLV; absent or empty applet data leaves
+     * all defaults in place. Malformed structures throw (clean install failure)
+     * after defensive bounds checks — never an out-of-bounds access.
+     */
+    private void applyInstallParameters(byte[] bArray, short bOffset, short bLength) {
+        if (bLength == 0) {
+            return; // no install parameters (e.g. jcardsim's parameterless install)
+        }
+        short end = (short) (bOffset + (short) (bLength & 0xFF));
+        short cursor = bOffset;
+
+        // [instanceAIDLength][instanceAID], then [controlInfoLength][controlInfo]
+        cursor = skipLengthPrefixedField(bArray, cursor, end);
+        cursor = skipLengthPrefixedField(bArray, cursor, end);
+
+        // [appletDataLength][appletData]
+        if (cursor >= end) {
+            ISOException.throwIt(ISO7816.SW_WRONG_DATA);
+        }
+        short appletDataLength = (short) (bArray[cursor] & 0xFF);
+        cursor++;
+        if ((short) (cursor + appletDataLength) > end) {
+            ISOException.throwIt(ISO7816.SW_WRONG_DATA);
+        }
+        if (appletDataLength == 0) {
+            return; // empty parameters — defaults
+        }
+        applyProvisioningParameters(bArray, cursor, appletDataLength);
+    }
+
+    /** Skips a length-prefixed install parameter field, with bounds checks. */
+    private short skipLengthPrefixedField(byte[] bArray, short cursor, short end) {
+        if (cursor >= end) {
+            ISOException.throwIt(ISO7816.SW_WRONG_DATA);
+        }
+        short fieldLength = (short) (bArray[cursor] & 0xFF);
+        cursor = (short) (cursor + 1 + fieldLength);
+        if (cursor > end) {
+            ISOException.throwIt(ISO7816.SW_WRONG_DATA);
+        }
+        return cursor;
+    }
+
+    /**
+     * Applies the provisioning TLV from the applet data field:
+     * [0x01][flags] [ENC(16)|MAC(16)|DEK(16) if flags&amp;0x02] [masterPIN(8)|userPIN(4) if flags&amp;0x04].
+     * FLAG_INSTALL_ENFORCE (0x01) gates SIGN_TRANSFER and SIGN_AUTH with 0x6985
+     * until a user PIN is provisioned (here, or later via SCP03 PROVISION_PIN).
+     * The whole TLV is validated before any state is mutated.
+     */
+    private void applyProvisioningParameters(byte[] bArray, short offset, short length) {
+        if (length < 2 || bArray[offset] != TAG_INSTALL_PROVISIONING) {
+            ISOException.throwIt(ISO7816.SW_WRONG_DATA);
+        }
+        byte flags = bArray[(short) (offset + 1)];
+        if ((byte) (flags & ~(FLAG_INSTALL_ENFORCE | FLAG_INSTALL_KEYS | FLAG_INSTALL_PINS)) != 0) {
+            ISOException.throwIt(ISO7816.SW_WRONG_DATA); // unknown flag bits
+        }
+
+        short expectedLength = 2;
+        if ((flags & FLAG_INSTALL_KEYS) != 0) {
+            expectedLength += SCP03_KEY_SET_LENGTH;
+        }
+        if ((flags & FLAG_INSTALL_PINS) != 0) {
+            expectedLength += INSTALL_PIN_BLOCK_LENGTH;
+        }
+        if (length != expectedLength) {
+            ISOException.throwIt(ISO7816.SW_WRONG_DATA);
+        }
+
+        short cursor = (short) (offset + 2);
+        short keysOffset = -1;
+        short pinsOffset = -1;
+        if ((flags & FLAG_INSTALL_KEYS) != 0) {
+            keysOffset = cursor;
+            cursor += SCP03_KEY_SET_LENGTH;
+        }
+        if ((flags & FLAG_INSTALL_PINS) != 0) {
+            pinsOffset = cursor;
+            // The all-zeros user PIN is reserved for PIN-less transfers
+            if (Util.arrayCompare(bArray, (short) (pinsOffset + MASTER_PIN_LENGTH),
+                    FOUR_ZERO_PIN, ZERO, USER_PIN_LENGTH) == 0) {
+                ISOException.throwIt(SW_ERROR_PIN_REJECTED);
+            }
+        }
+
+        // All validation passed — apply
+        if (keysOffset >= 0) {
+            scp03.setStaticKeys(bArray, keysOffset,
+                    bArray, (short) (keysOffset + 16),
+                    bArray, (short) (keysOffset + 32));
+        }
+        if (pinsOffset >= 0) {
+            masterPIN.update(bArray, pinsOffset, MASTER_PIN_LENGTH);
+            userPIN.update(bArray, (short) (pinsOffset + MASTER_PIN_LENGTH), USER_PIN_LENGTH);
+            pinProvisioned = true;
+        }
+        if ((flags & FLAG_INSTALL_ENFORCE) != 0) {
+            provisioningEnforced = true;
+        }
+    }
+
+    /**
      * Processes a PIN provisioning command received over the SCP03 secure channel.
      * Payload: [PIN_TYPE (1B)] [PIN_LENGTH (1B)] [PIN_DATA (var)].
      * PIN_TYPE 0x81 = master PIN (8 digits), 0x82 = user PIN (4 digits).
@@ -512,6 +685,9 @@ public class ImpalaApplet extends Applet {
                     ISOException.throwIt(SW_ERROR_PIN_REJECTED);
                 }
                 userPIN.update(buffer, pinDataOffset, pinLength);
+                // A provisioned user PIN lifts the install-time signing gate
+                // (a master-PIN-only update does not — signing is user-PIN bound)
+                pinProvisioned = true;
                 break;
             default:
                 ISOException.throwIt(ISO7816.SW_INCORRECT_P1P2);
@@ -548,19 +724,20 @@ public class ImpalaApplet extends Applet {
     }
 
     /**
-     * Checks if a transfer can proceed without PIN verification.
-     * Allowed when the PIN field is all zeros, the amount is within the PIN-less limit,
-     * and the number of consecutive PIN-less transfers hasn't been exceeded.
+     * Read-only eligibility check for PIN-less transfers: true when the PIN field
+     * is all zeros, the amount is within the PIN-less limit, and the consecutive
+     * PIN-less counter has headroom. Deliberately does NOT increment the counter —
+     * signTransfer() commits the increment atomically with the balance mutation,
+     * so failed or torn transfers no longer burn PIN-less budget.
      */
-    private boolean checkPINless(byte[] buffer) {
+    private boolean isPINlessEligible(byte[] buffer) {
         if (Util.arrayCompare(buffer, ISO7816.OFFSET_CDATA, FOUR_ZERO_PIN, ZERO, USER_PIN_LENGTH) == 0) {
             TransactionParser.getAmount(buffer, OFFSET_SIGNABLE, tempAmount);
             if (ArrayUtil.unsignedByteArrayCompare(tempAmount, ZERO, PINLESS_LIMIT, ZERO, INT64_LENGTH) <= 0 &&
                     howManyPINless < MAX_PINLESS_TRANSFERS) {
-                howManyPINless++;
                 return true;
             }
-            // if this verification fails, throw an exception
+            // an all-zero PIN field outside the PIN-less limits requires a real PIN
             ISOException.throwIt(SW_ERROR_PIN_REQUIRED);
         }
         return false;
@@ -597,11 +774,24 @@ public class ImpalaApplet extends Applet {
         return true;
     }
 
-    /** Signs an authentication challenge (accountId + challenge data) with the card's EC key. */
+    /**
+     * Signs a bridge-issued authentication challenge with the card's EC key.
+     * The signed message is AUTH_DOMAIN_TAG ("IMPALA-AUTH:", 12 bytes) ||
+     * accountId(16) || challenge(8..=64) — the pinned card-auth contract; the
+     * bridge /auth/card verifier (CARD_AUTH_DOMAIN_PREFIX in
+     * impala-bridge/src/constants.rs) checks exactly those bytes.
+     * Challenges outside 8..=64 bytes are rejected with 0x6700.
+     */
     private void signAuth(APDU apdu, byte[] buffer, short dataLength) {
-        Util.arrayCopyNonAtomic(accountId, ZERO, scratchpad, ZERO, UUID_LENGTH);
-        Util.arrayCopyNonAtomic(buffer, ISO7816.OFFSET_CDATA, scratchpad, UUID_LENGTH, dataLength);
-        short sigLength = signWithMyKey(scratchpad, ZERO, (short) (UUID_LENGTH + dataLength));
+        if (dataLength < MIN_AUTH_CHALLENGE_LENGTH || dataLength > MAX_AUTH_CHALLENGE_LENGTH) {
+            ISOException.throwIt(ISO7816.SW_WRONG_LENGTH);
+        }
+        Util.arrayCopyNonAtomic(AUTH_DOMAIN_TAG, ZERO, scratchpad, ZERO, AUTH_DOMAIN_TAG_LENGTH);
+        Util.arrayCopyNonAtomic(accountId, ZERO, scratchpad, AUTH_DOMAIN_TAG_LENGTH, UUID_LENGTH);
+        Util.arrayCopyNonAtomic(buffer, ISO7816.OFFSET_CDATA, scratchpad,
+                (short) (AUTH_DOMAIN_TAG_LENGTH + UUID_LENGTH), dataLength);
+        short sigLength = signWithMyKey(scratchpad, ZERO,
+                (short) (AUTH_DOMAIN_TAG_LENGTH + UUID_LENGTH + dataLength));
         sendBytes(apdu, sigBuffer, ZERO, sigLength);
     }
 
@@ -609,9 +799,16 @@ public class ImpalaApplet extends Applet {
      * Signs an outgoing transfer transaction. Validates the sender is this card,
      * the recipient is not this card, and sufficient funds exist.
      *
+     * Note: SIGN_TRANSFER is deliberately NOT domain-tagged like SIGN_AUTH —
+     * tagging it would break card-to-card verifyTransfer for already-flashed CAPs.
+     *
      * Response format: [signature (72B) | pubKey (65B) | pubKeySig (72B)]
+     *
+     * @param pinless true when this transfer was authorized PIN-less; the
+     *                PIN-less counter is then incremented atomically with the
+     *                balance mutation (tearing-safe)
      */
-    private void signTransfer(byte[] buffer, short dataLength) {
+    private void signTransfer(byte[] buffer, short dataLength, boolean pinless) {
         if (dataLength != (short) (USER_PIN_LENGTH + SIGNABLE_LENGTH)) {
             ISOException.throwIt(SW_ERROR_WRONG_SIGNABLE_LENGTH);
         }
@@ -662,6 +859,11 @@ public class ImpalaApplet extends Applet {
         JCSystem.beginTransaction();
 
         subtractFromBalance(tempAmount);
+        if (pinless) {
+            // Committed atomically with the balance mutation: a torn or failed
+            // transfer burns no PIN-less budget (see isPINlessEligible)
+            howManyPINless++;
+        }
 
         JCSystem.commitTransaction();
 
@@ -678,6 +880,10 @@ public class ImpalaApplet extends Applet {
      * - P1=0x00: Receives the signable transaction data (60 bytes)
      * - P1=0x01: Receives signature + pubKey + pubKeySig, verifies all cryptographic
      *   proofs, checks the recipient is this card, and credits the amount to the on-card balance.
+     *
+     * NOTE (tracking): verification trusts the public key embedded in the message
+     * tail — the trust chain on that key (pubKeySig) is established off-card, not
+     * by this applet.
      */
     private void verifyTransfer(byte[] buffer, short dataLength) {
         if (buffer[ISO7816.OFFSET_P1] == 0x00) {
@@ -834,7 +1040,15 @@ public class ImpalaApplet extends Applet {
         }
     }
 
-    /** Generates a new secp256r1 EC key pair and stores it as the card's signing key. */
+    /**
+     * Generates a new secp256r1 EC key pair and stores it as the card's signing key.
+     *
+     * Keygen entropy is card-internal: per the JavaCard API, KeyPair.genKeyPair()
+     * draws its randomness from the platform's own secure random source (TRNG/DRBG).
+     * It does not — and cannot — consume the applet's host-seeded {@code randomData}
+     * instance, so the INS_INITIALIZE host seed has no influence over the generated
+     * private key.
+     */
     private void createECKeypair() {
         KeyPair keyPair = SecP256r1.newKeyPair();
         keyPair.genKeyPair();
@@ -863,8 +1077,21 @@ public class ImpalaApplet extends Applet {
         return verifier.verify(inBuff, inOffset, inLength, sig, sigOffset, sigLength);
     }
 
-    /** Sends a byte array as the APDU response. */
+    /**
+     * Sends a byte array as the APDU response. Responses to SCP03-secured
+     * commands (CLA 0x84) are wrapped (R-ENC/R-MAC per the session security
+     * level) in the APDU buffer before sending. The in-buffer wrap needs
+     * roughly 2*paddedLen + 18 bytes of APDU buffer; oversized responses
+     * surface as 0x6689 rather than leaking unwrapped data.
+     */
     private void sendBytes(APDU apdu, byte[] outData, short bOff, short len) {
+        if (scp03.isSecuredCommand()) {
+            byte[] buffer = apdu.getBuffer();
+            Util.arrayCopyNonAtomic(outData, bOff, buffer, ZERO, len);
+            len = scp03.wrapResponse(buffer, ZERO, len, ISO7816.SW_NO_ERROR);
+            outData = buffer;
+            bOff = ZERO;
+        }
         apdu.setOutgoing();
         apdu.setOutgoingLength(len);
         apdu.sendBytesLong(outData, bOff, len);

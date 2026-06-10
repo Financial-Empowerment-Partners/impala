@@ -1,13 +1,16 @@
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
-    id("com.android.library") version "8.13.2"
-    id("org.jetbrains.kotlin.android") version "2.3.20"
+    id("com.android.library") version "9.2.1"
+    // AGP 9 has built-in Kotlin: the kotlin-android plugin must NOT be applied.
+    // It stays on the classpath (apply false) so built-in Kotlin resolves KGP
+    // 2.4.0 instead of the 2.2.x AGP bundles as its floor.
+    id("org.jetbrains.kotlin.android") version "2.4.0" apply false
 }
 
 android {
     namespace = "com.payala.impala"
-    compileSdk = 36
+    compileSdk = 37
 
     defaultConfig {
         minSdk = 24
@@ -42,18 +45,18 @@ kotlin {
 
 dependencies {
     implementation("androidx.appcompat:appcompat:1.7.1")
-    implementation("androidx.core:core-ktx:1.15.0")
+    implementation("androidx.core:core-ktx:1.19.0")
     // Resolved via composite build (settings.gradle.kts includes ../impala-card).
     // Dependency substitution maps this coordinate to the :sdk project.
     implementation("com.impala:sdk:0.0.1-HEAD")
 
     testImplementation("junit:junit:4.13.2")
-    testImplementation("org.mockito:mockito-core:5.15.2")
-    testImplementation("org.robolectric:robolectric:4.16")
-    testImplementation("androidx.test:core:1.6.1")
-    testImplementation("androidx.test.ext:junit:1.2.1")
+    testImplementation("org.mockito:mockito-core:5.23.0")
+    testImplementation("org.robolectric:robolectric:4.16.1")
+    testImplementation("androidx.test:core:1.7.0")
+    testImplementation("androidx.test.ext:junit:1.3.0")
 
-    androidTestImplementation("androidx.test:runner:1.6.2")
-    androidTestImplementation("androidx.test.ext:junit:1.2.1")
-    androidTestImplementation("androidx.test.espresso:espresso-core:3.6.1")
+    androidTestImplementation("androidx.test:runner:1.7.0")
+    androidTestImplementation("androidx.test.ext:junit:1.3.0")
+    androidTestImplementation("androidx.test.espresso:espresso-core:3.7.0")
 }

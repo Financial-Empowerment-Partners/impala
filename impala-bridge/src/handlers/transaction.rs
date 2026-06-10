@@ -17,7 +17,7 @@ pub async fn create_transaction(
     Extension(pool): Extension<PgPool>,
     Extension(metrics): Extension<Arc<AppMetrics>>,
     sns_client: Option<Extension<Arc<aws_sdk_sns::Client>>>,
-    sns_topic_arn: Option<Extension<Arc<String>>>,
+    sns_topic_arn: Option<Extension<crate::sns::SnsTopicArn>>,
     Json(payload): Json<CreateTransactionRequest>,
 ) -> Result<Json<CreateTransactionResponse>, AppError> {
     info!(
@@ -45,8 +45,8 @@ pub async fn create_transaction(
         INSERT INTO transaction
             (stellar_tx_id, payala_tx_id, stellar_hash, source_account,
              stellar_fee, stellar_max_fee, memo, signatures, preconditions,
-             payala_currency, payala_digest)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+             payala_currency, payala_digest, account_id)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
         RETURNING btxid
         "#,
     )
@@ -61,6 +61,7 @@ pub async fn create_transaction(
     .bind(&payload.preconditions)
     .bind(&payload.payala_currency)
     .bind(&payload.payala_digest)
+    .bind(&user.account_id)
     .fetch_one(&mut *tx)
     .await
     .map_err(|e| {
@@ -90,7 +91,7 @@ pub async fn create_transaction(
     // Fire-and-forget user notification for outgoing transfer (separate from the
     // admin event feed above).
     let sns_c = sns_client.as_ref().map(|e| &e.0);
-    let sns_a = sns_topic_arn.as_ref().map(|e| &e.0);
+    let sns_a = sns_topic_arn.as_ref().map(|e| &e.0 .0);
     notifications::dispatch_event(
         &pool,
         sns_c,

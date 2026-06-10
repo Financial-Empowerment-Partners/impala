@@ -11,6 +11,11 @@
                        -Papplet.issuerkey=$LIVE_ISSUER_KEY
                       (sourced from the production-card-keys GitHub Environment)
         testnet build → no overrides; defaults apply.
+      The install target additionally accepts -Papplet.installparams=<hex> — the
+      install-time provisioning TLV forwarded to the applet via the gp.jar
+      "params" install option (see ImpalaApplet.applyProvisioningParameters for
+      the byte layout). When unset, the applet installs with its built-in
+      defaults and no signing gate.
     -->
     <property name="applet.aid" value="0102030405060708"/>
     <property name="applet.aid.app" value="01020304050607080102"/>
@@ -26,8 +31,8 @@
     <property name="sdk.build" value="libs/sdks/jc310b43_kit"/>
     <property name="sdk.target" value="libs/sdks/jc305u4_kit"/>
 
-    <property name="deps.gp.jar" value="libs/gp-master.jar"/>
-    <property name="deps.ant.jar" value="libs/ant-javacard-v24.04.08.jar"/>
+    <property name="deps.gp.jar" value="libs/gp-v25.10.20.jar"/>
+    <property name="deps.ant.jar" value="libs/ant-javacard-v26.05.15.jar"/>
 
     <property name="docs.output" value="docs"/>
     <property name="docs.classpath" value="${sdk.target}/lib/api_classic.jar;${deps.gp.jar}"/>
@@ -44,6 +49,14 @@
             <cap targetsdk="3.0.5" sources="${applet.sources}" aid="${applet.aid}" package="${applet.package}" version="${applet.version}"
                 output="${build.dir}/${build.capfile}" export="${build.dir}" verify="true" strip="true" debug="${debug}">
                 <applet class="${applet.class}" aid="${applet.aid.app}"/>
+                <!-- ant-javacard v26 no longer sets jc.home on the forked JC 3.1.0
+                     converter (v24 did), so when it passes "-target 3.0.5" the
+                     converter cannot locate the kit's own api_export_files_3.0.5
+                     ("export file lang.exp of package java.lang not found").
+                     Passing the directory explicitly appends it to -exportpath.
+                     ${basedir} is required: ant-javacard resolves this value
+                     against the JVM working directory, not the Ant basedir. -->
+                <import exps="${basedir}/${sdk.build}/api_export_files_3.0.5"/>
             </cap>
         </javacard>
     </target>
@@ -96,6 +109,8 @@
             <arg value="${applet.issuerkey}" if:set="applet.issuerkey"/>
             <arg value="--install"/>
             <arg value="${build.dir}/${build.capfile}"/>
+            <arg value="--params" if:set="applet.installparams"/>
+            <arg value="${applet.installparams}" if:set="applet.installparams"/>
             <arg value="--default"/>
         </exec>
     </target>

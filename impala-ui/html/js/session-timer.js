@@ -88,12 +88,18 @@ var SessionTimer = (function () {
         modalElement = null;
     }
 
-    /** Clear localStorage and redirect to the login page. */
+    /** Destroy the server-side session and redirect to the login page. */
     function doLogout() {
         stop();
-        localStorage.removeItem('temporal_token');
-        localStorage.removeItem('refresh_token');
-        window.location.href = 'index.html';
+        if (typeof Auth !== 'undefined' && Auth.logout) {
+            Auth.logout();
+        } else {
+            // Fallback: drop local state and bounce to login.
+            if (typeof API !== 'undefined' && API.clearSession) {
+                API.clearSession();
+            }
+            window.location.href = 'index.html';
+        }
     }
 
     /**

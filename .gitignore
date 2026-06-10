@@ -18,7 +18,9 @@
 #   - .sqlx/                         (offline sqlx query metadata)
 #   - gradle-wrapper.jar             (required for `./gradlew`)
 #   - terraform.tfvars.example       (template — see *.tfvars.example exception)
-#   - impala-card/applet/libs/sdks/  (vendored JC SDK kits, .exp inputs, etc.)
+#   - impala-card/applet/libs/sdks/  (vendored JC SDK kits: .exp inputs, sample
+#                                     keystores, javadoc jquery dist/ bundles —
+#                                     see the negative patterns below)
 # =============================================================================
 
 
@@ -27,7 +29,10 @@
 .DS_Store
 .AppleDouble
 .LSOverride
-Icon
+# The macOS icon file is literally "Icon\r" — a bare "Icon" pattern matches
+# neither it nor anything else useful, so use the single-char wildcard.
+Icon?
+__MACOSX/
 ._*
 .DocumentRevisions-V100
 .fseventsd
@@ -94,6 +99,11 @@ $RECYCLE.BIN/
 .recommenders/
 nbproject/
 
+# Xcode (KMP iOS targets of impala-card/sdk)
+xcuserdata/
+DerivedData/
+*.xcuserstate
+
 # Vim
 *.swp
 *.swo
@@ -123,6 +133,13 @@ cscope.*
 target/
 **/*.rs.bk
 
+# Soroban: stellar-cli writes identity/alias config into the working
+# directory (testnet-tests). NOTE: test_snapshots/ is deliberately NOT
+# ignored — the repo tracks the SDK's per-test ledger snapshots so behaviour
+# changes show up in diffs.
+.stellar/
+.soroban/
+
 # Coverage / profiling
 *.profraw
 *.profdata
@@ -150,6 +167,11 @@ release/
 *.ap_
 *.dex
 *.hprof
+*.class
+
+# JVM crash dumps (the .log variants are also caught by *.log below)
+hs_err_pid*
+replay_pid*
 
 # Per-user signing config / keystores — NEVER COMMIT
 # Vendored test keystores under the JavaCard SDK samples are exempt below.
@@ -191,7 +213,10 @@ override.tf.json
 *_override.tf
 *_override.tf.json
 *.tfvars
+*.tfvars.json
 !*.tfvars.example
+!*.tfvars.json.example
+.terraform.tfstate.lock.info
 .terraformrc
 terraform.rc
 
@@ -200,6 +225,10 @@ terraform.rc
 docker-compose.override.yml
 docker-compose.override.yaml
 .docker/
+
+# Redis snapshot from ad-hoc local `redis-server` runs (compose uses named
+# volumes, so this only appears outside Docker)
+dump.rdb
 
 
 # ── Python (caprunner) ───────────────────────────────────────────────────────
@@ -222,6 +251,9 @@ htmlcov/
 # ── Web / JS ─────────────────────────────────────────────────────────────────
 node_modules/
 dist/
+# The vendored JavaCard SDK javadocs ship jquery/jszip bundles in dirs named
+# dist/ that are tracked — un-ignore them (negation must follow `dist/`).
+!impala-card/applet/libs/sdks/**/dist/
 .parcel-cache/
 .next/
 .nuxt/
@@ -240,13 +272,18 @@ yarn-error.log*
 .env.*
 !.env.example
 !.env.*.example
+.envrc
 *.pem
 *.key
+*.p8
 *.secret
 secrets.tfvars
 **/credentials.json
 **/serviceAccount*.json
 **/firebase-adminsdk-*.json
+
+# Per-developer agent/tool config
+**/.claude/settings.local.json
 
 
 # ── Logs / temp / backup files ───────────────────────────────────────────────

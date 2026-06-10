@@ -1,6 +1,6 @@
 plugins {
     alias(libs.plugins.kotlinMultiplatform)
-    alias(libs.plugins.androidLibrary)
+    alias(libs.plugins.androidKmpLibrary)
     alias(libs.plugins.mavenPublish)
 }
 
@@ -22,16 +22,24 @@ kotlin {
 
     sourceSets {
         commonMain.dependencies {
+            // Removed 2026-06: at.asitplus.crypto:datatypes (+ its kotlinx-datetime
+            // 0.8.0-0.6.x-compat pin) — zero at.asitplus/kotlinx.datetime imports in
+            // any source set. The Signum successor (at.asitplus.signum:indispensable)
+            // was evaluated and is unnecessary: the SDK passes DER signature bytes
+            // through opaquely (see ImpalaSDK.kt doc comments); ASN.1 handling is
+            // applet/bridge behaviour. If SDK-side ASN.1 parsing is ever needed,
+            // adopt at.asitplus.signum:indispensable + plain kotlinx-datetime then.
             implementation(libs.okio) // for ByteString, Buffer, etc (instead of java libs)
-            implementation(libs.kotlinx.datetime) // for Clock.System.now() (instead of platform-specific Instant from threeten)
             implementation(libs.uuid) // for Uuid (instead of java libs)
-            implementation(libs.datatypes) // ASN.1 encoding/decoding (it wraps bouncy castle for its android implementation)
             implementation(libs.bignum) // BigInteger (instead of platform-specific from bouncy castle)
         }
 
         jvmTest.dependencies {
             implementation(libs.kotlin.test)
             implementation(libs.javacard.simulator)
+            // Direct org.bouncycastle.* imports in Scp03CounterIcvTest (CMac reference
+            // impl) — previously a hidden transitive of the removed datatypes dep.
+            implementation(libs.bouncycastle)
             // implementation(files("../build/applet.jar"))
             implementation(project(":applet"))
         }
@@ -53,17 +61,16 @@ kotlin {
         }
     }
 
-    androidTarget {
-        publishLibraryVariants("release", "debug")
-    }
-}
-
-android {
-    // this is the namespace of the shared library in android (note that it differs from the android app's namespace: com.impala.android)
-    namespace = "com.impala.sdk"
-    compileSdk = libs.versions.android.compileSdk.get().toInt()
-
-    defaultConfig {
+    // AGP 9 Android target: com.android.kotlin.multiplatform.library replaces
+    // com.android.library + androidTarget(). The plugin publishes a single
+    // Android variant, so the old publishLibraryVariants("release", "debug")
+    // configuration no longer exists; consumers (impala-lib via composite
+    // build) resolve the unified variant.
+    androidLibrary {
+        // this is the namespace of the shared library in android (note that it
+        // differs from the android app's namespace: com.impala.android)
+        namespace = "com.impala.sdk"
+        compileSdk = libs.versions.android.compileSdk.get().toInt()
         minSdk = libs.versions.android.minSdk.get().toInt()
     }
 }

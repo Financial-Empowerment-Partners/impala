@@ -55,6 +55,20 @@ public class ArrayUtil {
         }
     }
 
+    /**
+     * Constant-time comparison of two byte ranges: accumulates XOR differences
+     * across the full length so timing does not reveal the position of the
+     * first mismatching byte. Use for MAC and cryptogram verification instead
+     * of Util.arrayCompare.
+     */
+    public static boolean ctEquals(byte[] a, short aOff, byte[] b, short bOff, short length) {
+        byte diff = 0;
+        for (short i = 0; i < length; i++) {
+            diff |= (byte) (a[(short) (aOff + i)] ^ b[(short) (bOff + i)]);
+        }
+        return diff == 0;
+    }
+
     /** Returns true if the 4-byte signed integer is negative (MSB sign bit set). */
     public static boolean isNegative(byte[] counter) {
         // ! verifyTransfer().isNegative() | counter: {counter}

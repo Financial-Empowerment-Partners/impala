@@ -61,16 +61,22 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
 
-      - name: Set up JDK 17
-        uses: actions/setup-java@v4
+      # JDK 21, not 17: the unit-test JVM is the Gradle JVM, and Robolectric's
+      # API-36 sandbox (@Config(sdk = [24, 36])) hard-requires Java 21 at test
+      # runtime. Compiled bytecode still targets 17 (compileOptions/jvmTarget),
+      # matching the repo-wide JDK 17 toolchain used by the other jobs.
+      - name: Set up JDK 21
+        uses: actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654 # v5.2.0
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: '21'
 
       - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@50e97c2cd7a37755bbfafc9c5b7cafaece252f6e # v6.1.0
         with:
           cache-read-only: ${{ github.ref != 'refs/heads/main' }}
 
@@ -84,7 +90,7 @@ jobs:
 
       - name: Upload test reports on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: gradle-unit-test-reports-${{ github.sha }}
           path: |
@@ -103,18 +109,36 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
 
+      # JDK 17: repo-wide build toolchain (see impala-card/README.md
+      # "Toolchain: JDK 17"). Only the unit-tests job differs (JDK 21 for the
+      # Robolectric API-36 sandbox).
       - name: Set up JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654 # v5.2.0
         with:
           distribution: temurin
           java-version: '17'
 
       - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@50e97c2cd7a37755bbfafc9c5b7cafaece252f6e # v6.1.0
         with:
           cache-read-only: ${{ github.ref != 'refs/heads/main' }}
+
+      # The live flavor ships a commented-out certificate-pinning template
+      # (no production cert exists yet). Fail fast if the pin-set is ever
+      # activated while it still contains the placeholder pins — shipping
+      # that would brick TLS for every install of the live APK.
+      - name: Guard live cert-pinning config (no active placeholder pins)
+        run: |
+          f=impala-android-demo/app/src/live/res/xml/network_security_config.xml
+          python3 -c "import xml.dom.minidom,sys; xml.dom.minidom.parse(sys.argv[1])" "$f"
+          if ! python3 -c "import re,sys; s=open(sys.argv[1]).read(); s=re.sub(r'<!--.*?-->','',s,flags=re.S); sys.exit(1 if ('<pin-set' in s and '_BASE64=' in s) else 0)" "$f"; then
+            echo "::error::live network_security_config has an active pin-set with placeholder pins"
+            exit 1
+          fi
 
       - name: Assemble demo APKs (tnet + live)
         working-directory: impala-android-demo
@@ -125,7 +149,7 @@ jobs:
         run: ./gradlew assembleDebug --no-daemon --stacktrace
 
       - name: Upload tnet demo APK
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: impala-android-demo-tnet-debug-${{ github.sha }}
           path: impala-android-demo/app/build/outputs/apk/tnet/debug/*.apk
@@ -133,7 +157,7 @@ jobs:
           retention-days: 90
 
       - name: Upload live demo APK
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: impala-android-demo-live-debug-${{ github.sha }}
           path: impala-android-demo/app/build/outputs/apk/live/debug/*.apk
@@ -141,7 +165,7 @@ jobs:
           retention-days: 90
 
       - name: Upload lib AAR
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: impala-lib-debug-${{ github.sha }}
           path: impala-lib/build/outputs/aar/*-debug.aar
@@ -170,16 +194,21 @@ jobs:
             target: google_apis
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
 
+      # JDK 17: repo-wide build toolchain (see impala-card/README.md
+      # "Toolchain: JDK 17"). Only the unit-tests job differs (JDK 21 for the
+      # Robolectric API-36 sandbox).
       - name: Set up JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654 # v5.2.0
         with:
           distribution: temurin
           java-version: '17'
 
       - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@50e97c2cd7a37755bbfafc9c5b7cafaece252f6e # v6.1.0
         with:
           cache-read-only: ${{ github.ref != 'refs/heads/main' }}
 
@@ -190,7 +219,7 @@ jobs:
           sudo udevadm trigger --name-match=kvm
 
       - name: AVD cache
-        uses: actions/cache@v4
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         id: avd-cache
         with:
           path: |
@@ -200,7 +229,7 @@ jobs:
 
       - name: Create AVD snapshot
         if: steps.avd-cache.outputs.cache-hit != 'true'
-        uses: reactivecircus/android-emulator-runner@v2
+        uses: reactivecircus/android-emulator-runner@e89f39f1abbbd05b1113a29cf4db69e7540cae5a # v2.37.0
         with:
           api-level: ${{ matrix.api-level }}
           target: ${{ matrix.target }}
@@ -211,7 +240,7 @@ jobs:
           script: echo "AVD snapshot generated for caching."
 
       - name: Run instrumented tests
-        uses: reactivecircus/android-emulator-runner@v2
+        uses: reactivecircus/android-emulator-runner@e89f39f1abbbd05b1113a29cf4db69e7540cae5a # v2.37.0
         with:
           api-level: ${{ matrix.api-level }}
           target: ${{ matrix.target }}
@@ -225,7 +254,7 @@ jobs:
 
       - name: Upload instrumented test reports on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: instrumented-test-reports-api${{ matrix.api-level }}-${{ github.sha }}
           path: |

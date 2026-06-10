@@ -6,24 +6,126 @@
 
 impala-bridge uses a two-token JWT approach:
 
-- **Refresh token** (14-day TTL): Issued via `POST /token` with username/password. Used only to obtain temporal tokens.
+- **Refresh token** (14-day TTL): Issued via `POST /token` with username/password (the response also includes a temporal token, saving clients a round trip). Used only to obtain temporal tokens, and **single-use** (see Refresh-Token Rotation below).
 - **Temporal token** (1-hour TTL): Issued via `POST /token` with a valid refresh token. Used for all authenticated API calls.
 
-Both tokens use HS256 with a mandatory 32+ character secret (`JWT_SECRET`), include a unique JTI (JWT ID), and are validated for issuer (`impala-bridge`) and algorithm.
+Both tokens use HS256 with a mandatory 32+ character secret (`JWT_SECRET`) and carry: a unique JTI, issuer `impala-bridge` (validated), audience `impala-bridge-api` (validated), a family id `fid` (shared by every token descended from one credential login), and a `kid` header fingerprinting the signing secret. Tokens minted before the aud/fid rollout fail to decode by design (hard cutover — one forced re-login).
+
+### JWT Secret Rotation
+
+`JWT_SECRET` signs and verifies; the optional `JWT_SECRET_PREVIOUS` is **verify-only**. Rotation runbook: set `JWT_SECRET_PREVIOUS` to the old secret and `JWT_SECRET` to the new one, run until tokens signed with the old secret have aged out (≤ 14 days), then unset `JWT_SECRET_PREVIOUS`. Verification selects the key by the token's `kid` header (kid-less legacy tokens fall back to try-primary-then-previous only on an invalid-signature error). Startup validates both secrets (≥ 32 chars, must differ).
+
+### Refresh-Token Rotation & Reuse Detection
+
+Refresh tokens are strictly single-use. Every `POST /token {refresh_token}` exchange:
+
+1. Validates the token (signature, issuer, audience, expiry, type) and checks the revocation surfaces below.
+2. Marks the presented JTI as rotated in Redis (`impala:rotated:{jti}`, fail-closed — if the marker write fails, nothing is minted, so two live refresh tokens can never coexist).
+3. Mints a replacement refresh + temporal pair inside the **same family** (`fid` inherited).
+
+Presenting a rotated-out refresh token again is treated as theft: the entire family is revoked (`impala:revoked_family:{fid}`), the `auth.token_reuse_detected` metric increments, and the request gets a 401. There is deliberately **no grace window** — in-repo clients refresh serially, and a lost race logs the whole family out, which is the safe failure mode.
 
 ### Token Revocation
 
-`POST /logout` revokes the current token by adding its JTI to a Redis blacklist. The blacklist entry expires when the token would have expired naturally. Every authenticated request checks the revocation list before proceeding.
+`POST /logout` revokes the presented token by adding its JTI to a Redis blacklist (strict: a logout that fails to record the revocation returns an error, never a silent success). The blacklist entry expires when the token would have expired naturally. Every authenticated request checks — in one pipelined, fail-closed Redis round trip — the revoked-JTI list, the revoked-family list, and the account's logout-everywhere epoch.
+
+### Logout Everywhere
+
+`POST /logout/all` (authenticated via bearer or cookie session) bumps the account's auth epoch (`impala:auth_epoch:{account_id}`, TTL = the 14-day refresh lifetime). Every JWT with `iat <=` epoch and every session created at or before it is rejected from then on — this retroactively kills all outstanding tokens on all devices. Caveat: the epoch lives in Redis; a Redis flush/failover before the key's TTL re-enables not-yet-expired tokens. Run Redis with `noeviction` (the Terraform ElastiCache parameter group does this) and treat a Redis rebuild as a `JWT_SECRET` rotation event.
+
+### Browser Cookie Sessions & CSRF
+
+Browser clients (the impala-ui dashboard) authenticate with an HttpOnly cookie session instead of bearer tokens, so credentials are out of reach of any script (XSS):
+
+- **`POST /session/login {username, password}`** — same credential check, rate limits, and lockout as `/authenticate`; sets the session cookie and returns `{account_id, is_admin, csrf_token}`. The Okta exchange supports the same via `POST /auth/okta {okta_token, cookie_mode: true}`.
+- **Cookie**: `__Host-impala_session` with `HttpOnly; Secure; SameSite=Strict; Path=/` and no Max-Age (browser-session cookie). `SESSION_COOKIE_SECURE=false` (local plain-HTTP development only) drops `Secure` and the `__Host-` prefix.
+- **Server-side record**: a Redis hash keyed by `sha256(session id)` — a Redis dump never yields usable cookies — holding the account id, CSRF token, creation time, and admin flag. Sliding 30-minute idle TTL, capped at a 12-hour absolute lifetime. `GET /session/me` returns the identity + CSRF token (page-reload rehydration); `POST /session/logout` deletes the record (fail-closed).
+- **CSRF**: a server-stored synchronizer token, required as `X-CSRF-Token` on every cookie-authenticated unsafe-method request and compared in constant time. The check runs inside the shared auth extractor, so no cookie-authenticated route can skip it. Bearer requests are exempt (they carry no ambient credential). Rejections increment `session.csrf_rejected`.
+- **No downgrade**: when an `Authorization` header is present it must validate as a temporal JWT — there is no fallback to the cookie path on a bad bearer token.
+- **Admin freshness**: the session path re-derives `is_admin` from the `ADMIN_ACCOUNT_IDS` allowlist on every request, so admin revocation is immediate for browser sessions (vs ≤ 1 h staleness on the JWT path).
+
+### Federated Token Exchange (Okta / Google / GitHub)
+
+Federated identities are exchanged for local refresh + temporal token pairs —
+the response shape is identical to `POST /token`:
+
+- **`POST /auth/okta {okta_token}`**: the access token is validated against the
+  Okta org's JWKS (RS256, issuer, audience = `OKTA_CLIENT_ID`). Account id:
+  email > `preferred_username` > `okta:{sub}`.
+- **`POST /auth/google {id_token}`**: the ID token is validated against
+  Google's JWKS (RS256, issuer `https://accounts.google.com` or
+  `accounts.google.com`, audience = `GOOGLE_CLIENT_ID`, expiry). Account id:
+  the lowercased email **only when Google asserts `email_verified == true`**,
+  otherwise `google:{sub}` — an unverified attacker-chosen email can never
+  claim an existing email-keyed account. `GET /auth/google/config` exposes
+  `{enabled, client_id}` to clients.
+- **`POST /auth/github`** (gated on `GITHUB_AUTH_ENABLED`) accepts two shapes:
+  `{code, redirect_uri}` — the bridge exchanges the OAuth authorization code
+  at GitHub's token endpoint using `GITHUB_CLIENT_ID`/`GITHUB_CLIENT_SECRET`,
+  so the **client secret never ships in a client binary** — or legacy
+  `{access_token}`. Either way the resulting token is verified by calling
+  `GET {GITHUB_API_URL}/user`; account id is the immutable `github:{id}`
+  (numeric user id — logins can be renamed/reused). Before any outbound
+  GitHub call, a **pre-call rate limit keyed on `hex(sha256(credential))[..16]`**
+  bounds how often any one credential can make the bridge relay requests to
+  GitHub (DoS/relay guard); the raw credential never appears in Redis keys or
+  logs. The response adds optional `login`/`display_name` fields.
+
+All three handlers share okta-pattern auto-provisioning: account + auth rows
+are upserted in one transaction with a **random argon2 hash** (federated users
+have no usable password) and `auth_provider` set to the provider name.
+
+**Legacy migration**: older clients derived a password as
+`SHA-256(token_or_card_id).take(32)` and used the username+password path. The
+first federated login for such an account flips `auth_provider` away from
+`local`, and `/authenticate` rejects password login for non-`local` providers —
+so the derived-password path is disabled **one-way** on first exchange. Do not
+add new consumers of the derived-password scheme.
+
+### Card Challenge-Response Authentication
+
+Physical cards authenticate via a challenge-response exchange
+(`src/handlers/card_auth.rs`):
+
+1. **`POST /auth/card/challenge {card_id}`** → `{success, challenge, expires_in: 60}`.
+   The 32-byte challenge (64 hex chars) is generated from a CSPRNG and stored
+   in Redis under `impala:card_challenge:{card_id}` with a 60s TTL,
+   **fail-closed** (no challenge is issued if Redis is down). Challenges are
+   issued unconditionally — the response never reveals whether a card is
+   registered (no enumeration oracle).
+2. The card signs ECDSA-SHA256 (secp256r1, ASN.1 DER) over exactly
+   `"IMPALA-AUTH:" (12 bytes) || accountId (16 bytes, RFC-4122 big-endian) ||
+   challenge` — the pinned cross-stream contract (`CARD_AUTH_DOMAIN_PREFIX` in
+   `src/constants.rs` ⇄ `AUTH_DOMAIN_TAG` in `ImpalaApplet.java`). The domain
+   prefix guarantees an auth signature can never be replayed as a transfer
+   signature.
+3. **`POST /auth/card {card_id, signature}`**: the challenge is consumed
+   atomically with Redis `GETDEL` (**single-use** — a replayed signature finds
+   no challenge and fails), the active card row supplies the account id and the
+   65-byte uncompressed SEC1 public key, and the signature is verified with
+   aws-lc-rs. Success returns the standard token pair. Every failure mode
+   (unknown card, expired/replayed/missing challenge, bad signature) returns
+   the same generic 401 and counts toward a per-card lockout (5 failures →
+   15 minutes); success clears the counter.
+
+There is **no auto-provisioning** on the card path: a registered card implies
+an existing account (FK from migration 017), and card registration itself
+requires an authenticated session. Card-auth accounts must use UUID account
+ids (the signed message embeds the on-card 16-byte account UUID).
 
 ### Account Lockout
 
-After 5 failed login attempts, the account is locked for 15 minutes. Failed attempts are tracked in Redis per account ID.
+After 5 failed login attempts, the account is locked for 15 minutes. Failed attempts are tracked in Redis per account ID (per card ID for `/auth/card`).
 
 ### Rate Limiting
 
-Authentication endpoints (`/authenticate`, `/token`, `/auth/okta`) enforce per-account rate limits of 10 requests per 60-second window via Redis.
+Authentication endpoints (`/authenticate`, `/token`, `/session/login`, `/auth/okta`, `/auth/google`, `/auth/github`, `/auth/card`, `/auth/card/challenge`) enforce per-identity rate limits of 10 requests per 60-second window via Redis. `/auth/github` additionally rate-limits per credential hash **before** calling the GitHub API.
+
+All authenticated endpoints (GET included) additionally enforce a per-account limit of 100 requests / 60 s, keyed on the validated identity and enforced inside the shared auth-validation path after full validation — only valid credentials consume quota. Rejections return 429 with `Retry-After`.
 
 MFA verification (`/mfa/verify`) enforces brute force protection with a lockout after 5 failed attempts per account/MFA-type pair.
+
+All Redis-backed checks above are **fail-closed**: when Redis is unreachable the request is rejected, never silently allowed.
 
 ## Authorization
 
@@ -34,7 +136,9 @@ All data-modifying endpoints enforce account ownership:
 - **Delete operations**: Card deletion and notify updates include `account_id` in the SQL WHERE clause to prevent cross-account modification.
 - **Notification subscriptions**: All CRUD operations are scoped to `user.account_id`.
 
-The `require_owner()` helper in `auth.rs` provides consistent ownership checks across handlers.
+The `require_owner()` helper in `auth.rs` provides consistent ownership checks across handlers. The dynamic UPDATE statements for `PUT /account` and `PUT /notify` are generated by `sqlx::QueryBuilder` helpers whose ownership-WHERE invariant (every generated statement pins the caller's account id) is pinned by unit tests over every field combination.
+
+`rows_affected` in update responses is deliberately retained: the ownership WHERE invariant scopes every update to the caller's own rows, so the value is always 0 or 1 for the caller's own data and discloses exactly the same bit as the `success` field — it cannot probe other accounts' existence.
 
 ## Input Validation
 
@@ -48,6 +152,7 @@ The `require_owner()` helper in `auth.rs` provides consistent ownership checks a
 ## Request Limits
 
 - **Body size**: 1 MB maximum enforced via `RequestBodyLimitLayer`.
+- **Request timeout**: global 30 s deadline (`REQUEST_TIMEOUT_SECS`), enforced via tower-http's `TimeoutLayer` (408 on expiry). Safe because the bridge serves only request/response JSON — the SSE/TCP streams are outbound consumers, not server-streamed responses.
 - **Rate limiting**: Per-endpoint Redis-backed counters with configurable windows.
 
 ## Transport Security
@@ -64,7 +169,7 @@ All responses include:
 
 ### CORS
 
-CORS is configurable via `CORS_ALLOWED_ORIGINS`. Wildcard (`*`) triggers a startup warning. Production deployments should specify explicit origins.
+CORS is configurable via `CORS_ALLOWED_ORIGINS`. Wildcard (`*`) is a **hard startup error** when `STELLAR_NETWORK=pubnet` (the process exits); it is allowed, with an info log, on testnet. Production deployments must specify explicit origins.
 
 ### TLS
 
@@ -76,8 +181,8 @@ TLS is terminated at the ALB with an ACM certificate. When `certificate_arn` is 
 
 - **VPC**: Private subnets for ECS tasks, RDS, and ElastiCache. NAT gateway per AZ for outbound traffic.
 - **Security groups**: ECS egress restricted to specific ports (5432 for RDS, 6379 for Redis, 443 for HTTPS).
-- **WAF**: AWS WAF on ALB with managed rule groups (Common, Known Bad Inputs, SQLi) and IP-based rate limiting.
-- **VPC Flow Logs**: REJECT traffic logged to CloudWatch for security analysis.
+- **WAF**: AWS WAFv2 web ACL on every ALB (Terraform toggle `waf_enabled`, **default on**) with managed rule groups (Common, Known Bad Inputs, SQLi) and an IP rate-based block rule.
+- **VPC Flow Logs**: REJECT traffic logged to CloudWatch on the testnet/live stacks (Terraform toggle `flow_logs_enabled`, enabled in both stack files); the impala stack logs ALL traffic.
 
 ### Encryption
 
@@ -88,7 +193,8 @@ TLS is terminated at the ALB with an ACM certificate. When `certificate_arn` is 
 
 - JWT secret and database URL stored in AWS Secrets Manager.
 - Optional HashiCorp Vault integration for database credentials (cubbyhole response unwrapping).
-- `JWT_SECRET` requires minimum 32 characters (enforced at startup).
+- `JWT_SECRET` requires minimum 32 characters (enforced at startup); `JWT_SECRET_PREVIOUS` enables zero-downtime rotation (see the rotation runbook under Authentication).
+- `GITHUB_CLIENT_SECRET` (OAuth code exchange) lives only on the bridge — never in client binaries.
 
 ### Container Security
 
@@ -109,8 +215,9 @@ TLS is terminated at the ALB with an ACM certificate. When `certificate_arn` is 
 
 ### Token Compromise
 
-1. User calls `POST /logout` to revoke the compromised token.
-2. If refresh token is compromised, rotate the JWT_SECRET (invalidates all tokens).
+1. User calls `POST /logout` to revoke the compromised token, or `POST /logout/all` to revoke every outstanding token and session for the account at once.
+2. Refresh-token theft is also detected automatically: any reuse of a rotated-out refresh token revokes the whole token family.
+3. For a suspected `JWT_SECRET` compromise, rotate the secret via `JWT_SECRET` + `JWT_SECRET_PREVIOUS` (or rotate without the previous secret to invalidate all tokens immediately).
 
 ### Account Compromise
 

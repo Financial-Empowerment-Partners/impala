@@ -3,7 +3,7 @@
 -- Tests: Initialize with random seed, Get EC Public Key
 
 load: ../applet/build/ImpalaApplet.cap
-install: 0b 01 02 03 04 05 06 07 08 01 02 00 00 00 : 00
+install: 0a 01 02 03 04 05 06 07 08 01 02 00 : 00
 
 -- Select the applet
 ==> 00 A4 04 00 0A 01 02 03 04 05 06 07 08 01 02

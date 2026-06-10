@@ -10,6 +10,7 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
 use crate::config::Config;
+use crate::error::AppError;
 
 /// Application-level metrics covering all interaction points.
 pub struct AppMetrics {
@@ -19,6 +20,12 @@ pub struct AppMetrics {
 
     // Authentication
     pub auth_attempts: Counter<u64>,
+    pub token_exchanges: Counter<u64>,
+    pub token_reuse_detected: Counter<u64>,
+
+    // Browser sessions
+    pub sessions_created: Counter<u64>,
+    pub csrf_rejections: Counter<u64>,
 
     // Transactions
     pub transactions_created: Counter<u64>,
@@ -59,6 +66,23 @@ impl AppMetrics {
             auth_attempts: meter
                 .u64_counter("auth.attempts")
                 .with_description("Authentication attempts by outcome")
+                .build(),
+            token_exchanges: meter
+                .u64_counter("auth.token_exchange")
+                .with_description("Token exchange attempts by provider and outcome")
+                .build(),
+            token_reuse_detected: meter
+                .u64_counter("auth.token_reuse_detected")
+                .with_description("Rotated refresh tokens presented again (theft indicator)")
+                .build(),
+
+            sessions_created: meter
+                .u64_counter("session.created")
+                .with_description("Browser cookie sessions established")
+                .build(),
+            csrf_rejections: meter
+                .u64_counter("session.csrf_rejected")
+                .with_description("Cookie-authenticated requests rejected by the CSRF check")
                 .build(),
 
             transactions_created: meter
@@ -111,6 +135,32 @@ impl AppMetrics {
                 .with_description("Batch sync account outcomes")
                 .build(),
         }
+    }
+}
+
+impl AppMetrics {
+    /// Record a token-exchange attempt on the `auth.token_exchange` counter
+    /// (`provider` = okta|google|github|card, `outcome` from
+    /// [`token_exchange_outcome`]).
+    pub fn record_token_exchange(&self, provider: &'static str, outcome: &'static str) {
+        self.token_exchanges.add(
+            1,
+            &[
+                KeyValue::new("provider", provider),
+                KeyValue::new("outcome", outcome),
+            ],
+        );
+    }
+}
+
+/// Map a token-exchange handler result onto a low-cardinality outcome label.
+pub fn token_exchange_outcome<T>(result: &Result<T, AppError>) -> &'static str {
+    match result {
+        Ok(_) => "success",
+        Err(AppError::Unauthorized) => "unauthorized",
+        Err(AppError::RateLimited { .. }) => "rate_limited",
+        Err(AppError::BadRequest(_)) => "bad_request",
+        Err(_) => "error",
     }
 }
 
@@ -214,8 +264,8 @@ pub fn create_metrics() -> Arc<AppMetrics> {
 
 /// Flush and shut down OpenTelemetry providers.
 ///
-/// In OpenTelemetry 0.31 the global `shutdown_tracer_provider` helper was
-/// removed; shutdown is performed on the provider directly. The bridge does
+/// In OpenTelemetry 0.31+ (current: 0.32) the global `shutdown_tracer_provider`
+/// helper no longer exists; shutdown is performed on the provider directly. The bridge does
 /// not currently retain a handle to the provider it installs, so the global
 /// shutdown is a no-op (the providers will be dropped on process exit).
 pub fn shutdown_otel() {

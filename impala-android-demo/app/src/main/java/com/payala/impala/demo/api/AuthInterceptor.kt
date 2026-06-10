@@ -7,9 +7,11 @@ import okhttp3.Response
 /**
  * OkHttp interceptor that attaches the JWT temporal token to outgoing requests.
  *
- * Requests to `/authenticate` and `/token` are excluded because those endpoints
- * are used to *obtain* tokens in the first place. If no temporal token is stored
- * (or it has expired), the request proceeds without an `Authorization` header.
+ * Requests to `/authenticate`, `/token`, and the `auth/` token-exchange
+ * endpoints (Okta, Google, GitHub, card challenge-response) are excluded
+ * because those endpoints are used to *obtain* tokens in the first place. If
+ * no temporal token is stored (or it has expired), the request proceeds
+ * without an `Authorization` header.
  */
 class AuthInterceptor(private val tokenManager: TokenManager) : Interceptor {
 
@@ -18,7 +20,7 @@ class AuthInterceptor(private val tokenManager: TokenManager) : Interceptor {
         val path = request.url.encodedPath
 
         // Do not attach tokens to auth endpoints
-        if (path.endsWith("/authenticate") || path.endsWith("/token") || path.contains("/auth/okta")) {
+        if (path.endsWith("/authenticate") || path.endsWith("/token") || path.contains("/auth/")) {
             return chain.proceed(request)
         }
 

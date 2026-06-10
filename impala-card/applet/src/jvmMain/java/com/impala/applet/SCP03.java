@@ -43,8 +43,10 @@ public class SCP03 {
     private static final byte[] KEY_DIVERSIFICATION = {
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
     };
-    // Key information (3 bytes): key version, SCP ID, SCP parameter
-    private static final byte[] KEY_INFO = { 0x01, 0x03, 0x70 };
+    // Key information (3 bytes): key version, SCP ID, SCP parameter.
+    // Key version 0x02 = counter-ICV wire format; must match KEY_VERSION in the
+    // SDK's SCP03Constants.kt so hosts can reject old-firmware cards cleanly.
+    private static final byte[] KEY_INFO = { 0x02, 0x03, 0x70 };
 
     // Static keys (persistent, EEPROM)
     private AESKey staticENC;
@@ -63,10 +65,16 @@ public class SCP03 {
     private byte[] derivationData;
     private byte[] tempBuffer;
 
+    // Per-session encryption counter (GP 2.3 Amd D §6.2.6): 16-byte big-endian,
+    // reset at INITIALIZE UPDATE, incremented once per secured command after
+    // EXTERNAL AUTHENTICATE — the first secured command uses counter = 1.
+    private byte[] encCounter;
+
     // Channel state (transient — single byte array for RAM efficiency)
-    private byte[] channelState; // [0]=state, [1]=securityLevel
+    private byte[] channelState; // [0]=state, [1]=securityLevel, [2]=current command arrived secured
     private static final short IDX_STATE = 0;
     private static final short IDX_SEC_LEVEL = 1;
+    private static final short IDX_SECURED_CMD = 2;
 
     private final AESCMAC aesCmac;
     private final Cipher cipherCBC;
@@ -99,9 +107,10 @@ public class SCP03 {
         macChainValue = JCSystem.makeTransientByteArray(BLOCK_SIZE, JCSystem.CLEAR_ON_RESET);
         derivationData = JCSystem.makeTransientByteArray(DERIVATION_DATA_LENGTH, JCSystem.CLEAR_ON_RESET);
         tempBuffer = JCSystem.makeTransientByteArray(DERIVATION_DATA_LENGTH, JCSystem.CLEAR_ON_RESET);
+        encCounter = JCSystem.makeTransientByteArray(BLOCK_SIZE, JCSystem.CLEAR_ON_RESET);
 
         // Channel state in transient memory
-        channelState = JCSystem.makeTransientByteArray((short) 2, JCSystem.CLEAR_ON_RESET);
+        channelState = JCSystem.makeTransientByteArray((short) 3, JCSystem.CLEAR_ON_RESET);
     }
 
     /**
@@ -137,13 +146,32 @@ public class SCP03 {
     }
 
     /**
+     * Returns true if the APDU currently being processed arrived through the
+     * secure channel (CLA 0x84) and passed C-MAC verification — its response
+     * must therefore be wrapped via {@link #wrapResponse}.
+     */
+    public boolean isSecuredCommand() {
+        return channelState[IDX_SECURED_CMD] == 1;
+    }
+
+    /**
+     * Clears the secured-command marker. Called at the start of every APDU
+     * dispatch; {@link #unwrapCommand} re-arms it for secured commands.
+     */
+    public void clearSecuredCommand() {
+        channelState[IDX_SECURED_CMD] = 0;
+    }
+
+    /**
      * Resets the secure channel (tears down the session).
      * Called on applet deselect.
      */
     public void reset() {
         channelState[IDX_STATE] = STATE_NO_SESSION;
         channelState[IDX_SEC_LEVEL] = 0;
+        channelState[IDX_SECURED_CMD] = 0;
         Util.arrayFillNonAtomic(macChainValue, (short) 0, BLOCK_SIZE, (byte) 0);
+        Util.arrayFillNonAtomic(encCounter, (short) 0, BLOCK_SIZE, (byte) 0);
     }
 
     /**
@@ -225,7 +253,7 @@ public class SCP03 {
         computeCryptogram(sessionMAC, DERIV_HOST_CRYPTO, (short) 0x0040,
                 tempBuffer, (short) 0);
 
-        if (Util.arrayCompare(buffer, offset, tempBuffer, (short) 0, CRYPTOGRAM_LENGTH) != 0) {
+        if (!ArrayUtil.ctEquals(buffer, offset, tempBuffer, (short) 0, CRYPTOGRAM_LENGTH)) {
             reset();
             ISOException.throwIt((short) 0x6300); // SW_SCP03_AUTH_FAILED
         }
@@ -258,8 +286,8 @@ public class SCP03 {
                 tempBuffer, (short) 0);
 
         // Compare first 8 bytes of computed MAC with received MAC
-        if (Util.arrayCompare(buffer, (short) (offset + CRYPTOGRAM_LENGTH),
-                tempBuffer, (short) 0, CRYPTOGRAM_LENGTH) != 0) {
+        if (!ArrayUtil.ctEquals(buffer, (short) (offset + CRYPTOGRAM_LENGTH),
+                tempBuffer, (short) 0, CRYPTOGRAM_LENGTH)) {
             reset();
             ISOException.throwIt((short) 0x6300); // SW_SCP03_AUTH_FAILED
         }
@@ -287,6 +315,10 @@ public class SCP03 {
         }
 
         byte secLevel = channelState[IDX_SEC_LEVEL];
+
+        // The encryption counter advances once per secured command, whether or
+        // not the command carries an encrypted payload (mirrored in SCP03Channel.kt)
+        ArrayUtil.incNumber(encCounter);
 
         // C-MAC is always verified if channel is authenticated
         if ((secLevel & SEC_CMAC) != 0) {
@@ -339,7 +371,9 @@ public class SCP03 {
             buffer[(short) (hdrStart + 1)] = buffer[1]; // INS
             buffer[(short) (hdrStart + 2)] = buffer[2]; // P1
             buffer[(short) (hdrStart + 3)] = buffer[3]; // P2
-            buffer[(short) (hdrStart + 4)] = (byte) payloadLen; // Adjusted Lc
+            // Per GP 2.3 Amd D the C-MAC covers the wire Lc, i.e. including the
+            // 8-byte C-MAC itself (host side: SCP03Channel.wrapCommand)
+            buffer[(short) (hdrStart + 4)] = (byte) dataLength;
             if (payloadLen > 0) {
                 Util.arrayCopyNonAtomic(buffer, dataOffset, buffer, (short) (hdrStart + 5), payloadLen);
             }
@@ -349,8 +383,8 @@ public class SCP03 {
                     tempBuffer, (short) 0);
 
             // Verify MAC (first 8 bytes)
-            if (Util.arrayCompare(buffer, (short) (dataOffset + payloadLen),
-                    tempBuffer, (short) 0, CRYPTOGRAM_LENGTH) != 0) {
+            if (!ArrayUtil.ctEquals(buffer, (short) (dataOffset + payloadLen),
+                    tempBuffer, (short) 0, CRYPTOGRAM_LENGTH)) {
                 reset();
                 ISOException.throwIt((short) 0x6688); // MAC verification failed
             }
@@ -368,26 +402,16 @@ public class SCP03 {
                 ISOException.throwIt((short) 0x6700);
             }
 
-            // ICV for C-DEC: AES-ECB(S-ENC, macChainValue)
-            // We use the ECB cipher for generating the ICV from the MAC chaining value
-            // Actually per SCP03 spec, the ICV for command decryption is
-            // AES-ECB(S-ENC, counter) but for simplicity we use a zero IV
-            // and handle the counter-mode ICV derivation
-
-            // Per GP spec: ICV = AES-ECB(S-ENC, MAC_chaining_value)
-            // Actually the C-DEC IV construction in SCP03 uses a counter.
-            // For SCP03 C-DEC, the IV is constructed from an encryption counter.
-            // Simplified approach: use zero IV as the data is already block-aligned
-            // and the MAC verification ensures integrity.
-
-            // Use zero IV for AES-CBC decryption
-            Util.arrayFillNonAtomic(tempBuffer, (short) 0, BLOCK_SIZE, (byte) 0);
+            // Command ICV = AES-ECB(S-ENC, counter) per GP 2.3 Amd D §6.2.6
+            computeIcv(false);
             cipherCBC.init(sessionENC, Cipher.MODE_DECRYPT, tempBuffer, (short) 0, BLOCK_SIZE);
             cipherCBC.doFinal(buffer, dataOffset, dataLength, buffer, dataOffset);
 
             // Remove ISO 9797-1 Method 2 padding (0x80 00...00)
             dataLength = removePadding(buffer, dataOffset, dataLength);
         }
+
+        channelState[IDX_SECURED_CMD] = 1;
 
         return dataLength;
     }
@@ -403,7 +427,8 @@ public class SCP03 {
      * @return total length of wrapped response to send (data + R-MAC), not including SW
      */
     public short wrapResponse(byte[] buffer, short dataOffset, short dataLength, short sw) {
-        if (channelState[IDX_STATE] != STATE_AUTHENTICATED) {
+        if (channelState[IDX_STATE] != STATE_AUTHENTICATED
+                || channelState[IDX_SECURED_CMD] != 1) {
             return dataLength;
         }
 
@@ -416,8 +441,8 @@ public class SCP03 {
             // Pad data with ISO 9797-1 Method 2
             short paddedLen = addPadding(buffer, dataOffset, dataLength);
 
-            // Use zero IV for response encryption
-            Util.arrayFillNonAtomic(tempBuffer, (short) 0, BLOCK_SIZE, (byte) 0);
+            // Response ICV = AES-ECB(S-ENC, counter with first byte 0x80)
+            computeIcv(true);
             cipherCBC.init(sessionENC, Cipher.MODE_ENCRYPT, tempBuffer, (short) 0, BLOCK_SIZE);
             cipherCBC.doFinal(buffer, dataOffset, paddedLen, buffer, dataOffset);
             outLength = paddedLen;
@@ -458,6 +483,27 @@ public class SCP03 {
         }
 
         return outLength;
+    }
+
+    // ---- Encryption counter / ICV (GP 2.3 Amd D §6.2.6) ----
+
+    /**
+     * Computes the C-DEC/R-ENC ICV into tempBuffer[0..15]:
+     * ICV = AES-ECB(S-ENC, counter), with the counter's first byte forced to
+     * 0x80 for response ICVs. A single-block AES-CBC with a zero IV is
+     * equivalent to ECB, so the existing CBC engine is reused.
+     *
+     * @param forResponse true for the response (R-ENC) ICV variant
+     */
+    private void computeIcv(boolean forResponse) {
+        Util.arrayCopyNonAtomic(encCounter, (short) 0, tempBuffer, (short) 0, BLOCK_SIZE);
+        if (forResponse) {
+            tempBuffer[0] = (byte) 0x80;
+        }
+        // Zero IV in tempBuffer[16..31]
+        Util.arrayFillNonAtomic(tempBuffer, BLOCK_SIZE, BLOCK_SIZE, (byte) 0);
+        cipherCBC.init(sessionENC, Cipher.MODE_ENCRYPT, tempBuffer, BLOCK_SIZE, BLOCK_SIZE);
+        cipherCBC.doFinal(tempBuffer, (short) 0, BLOCK_SIZE, tempBuffer, (short) 0);
     }
 
     // ---- Key Derivation ----

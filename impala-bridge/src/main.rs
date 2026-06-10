@@ -4,6 +4,7 @@ mod config;
 mod constants;
 mod error;
 mod events;
+mod google;
 mod handlers;
 mod jobs;
 mod jwt;
@@ -12,7 +13,9 @@ mod middleware;
 mod models;
 mod notifications;
 mod okta;
+mod password;
 mod redis_helpers;
+mod session;
 mod sns;
 mod streams;
 mod telemetry;
@@ -35,16 +38,26 @@ use tower_http::cors::{Any, CorsLayer};
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
 use tower_http::set_header::SetResponseHeaderLayer;
+use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::TraceLayer;
 
 use config::load_config;
 use handlers::{
-    account, admin_webhook, authenticate, card, device_token, health, logout, mfa, network,
-    notification_subscription, notify, okta as okta_handler, subscribe, sync, token, transaction,
+    account, admin_webhook, authenticate, card, card_auth, device_token, github as github_handler,
+    google as google_handler, health, logout, mfa, network, notification_subscription, notify,
+    okta as okta_handler, session as session_handler, subscribe, sync, token, transaction,
 };
 
 #[tokio::main]
 async fn main() {
+    // Install the process-wide rustls CryptoProvider before anything can open
+    // a TLS connection. Multiple provider backends can end up compiled in via
+    // transitive features, in which case rustls refuses to auto-select one and
+    // the first handshake built from the process default — e.g. a rediss://
+    // Redis connection — panics at runtime. Err means a provider was already
+    // installed, which is equally fine.
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
     let config = load_config();
 
     // Initialize OpenTelemetry (replaces syslog when OTEL_EXPORTER_OTLP_ENDPOINT is set)
@@ -106,7 +119,7 @@ async fn main() {
     // Create database connection pool with timeouts
     let pool = PgPoolOptions::new()
         .max_connections(config.db_max_connections)
-        .acquire_timeout(Duration::from_secs(constants::DB_ACQUIRE_TIMEOUT_SECS))
+        .acquire_timeout(Duration::from_secs(config.db_acquire_timeout_secs))
         .idle_timeout(Duration::from_secs(constants::DB_IDLE_TIMEOUT_SECS))
         .max_lifetime(Duration::from_secs(constants::DB_MAX_LIFETIME_SECS))
         .connect(&database_url)
@@ -119,12 +132,16 @@ async fn main() {
 
     // Create Redis connection pool
     let redis_url = env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1/".to_string());
-    let redis_cfg = deadpool_redis::Config::from_url(&redis_url);
+    let mut redis_cfg = deadpool_redis::Config::from_url(&redis_url);
+    redis_cfg.pool = Some(deadpool_redis::PoolConfig::new(config.redis_pool_size));
     let redis_pool = redis_cfg
         .create_pool(Some(deadpool_redis::Runtime::Tokio1))
         .expect("Failed to create Redis connection pool");
     let redis_pool = Arc::new(redis_pool);
-    info!("Redis connection pool created");
+    info!(
+        "Redis connection pool created (max_size={})",
+        config.redis_pool_size
+    );
 
     match run_mode.as_str() {
         "migrate" => {
@@ -154,15 +171,31 @@ async fn run_server(
     config: config::Config,
     metrics: Arc<telemetry::AppMetrics>,
 ) {
-    // JWT signing secret
-    let jwt_secret =
-        Arc::new(env::var("JWT_SECRET").expect("JWT_SECRET environment variable must be set"));
-    if jwt_secret.len() < crate::constants::JWT_SECRET_MIN_LENGTH {
-        error!(
-            "JWT_SECRET must be at least {} characters for security",
-            crate::constants::JWT_SECRET_MIN_LENGTH
+    // JWT signing keys: JWT_SECRET signs and verifies; the optional
+    // JWT_SECRET_PREVIOUS is verify-only, covering a secret-rotation window
+    // (see SECURITY.md for the rotation runbook).
+    let jwt_secret = env::var("JWT_SECRET").expect("JWT_SECRET environment variable must be set");
+    // Empty string == unset (compose passes the var through unconditionally).
+    let jwt_secret_previous = env::var("JWT_SECRET_PREVIOUS")
+        .ok()
+        .filter(|s| !s.is_empty());
+    let jwt_keys = match jwt::JwtKeys::new(jwt_secret, jwt_secret_previous) {
+        Ok(keys) => Arc::new(keys),
+        Err(msg) => {
+            error!("{}", msg);
+            std::process::exit(1);
+        }
+    };
+
+    // Browser cookie-session policy. Warn on the likely misconfiguration:
+    // Secure cookies on a plain-HTTP public endpoint are silently dropped.
+    let session_config = Arc::new(session::SessionConfig {
+        cookie_secure: config.session_cookie_secure,
+    });
+    if session_config.cookie_secure && config.public_endpoint.starts_with("http://") {
+        warn!(
+            "SESSION_COOKIE_SECURE is on but PUBLIC_ENDPOINT is plain HTTP — browsers will drop the session cookie; set SESSION_COOKIE_SECURE=false for local HTTP development"
         );
-        std::process::exit(1);
     }
 
     // Admin allowlist: source of the `is_admin` JWT claim, stamped at issuance.
@@ -185,6 +218,20 @@ async fn run_server(
     // Initialize Okta provider (if configured)
     let okta_provider = okta::init_okta_provider(&config).await;
 
+    // Initialize Google provider (if configured)
+    let google_provider = google::init_google_provider(&config).await;
+
+    // Initialize GitHub provider (if enabled)
+    let github_provider = if config.github_auth_enabled {
+        info!(
+            "github: token exchange enabled (api_url={})",
+            config.github_api_url
+        );
+        Some(Arc::new(github_handler::GitHubProvider::new(&config)))
+    } else {
+        None
+    };
+
     // Initialize SNS client for job dispatch (if configured)
     let sns_client = if config.sns_topic_arn.is_some() {
         let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
@@ -192,15 +239,21 @@ async fn run_server(
     } else {
         None
     };
-    let sns_topic_arn = config.sns_topic_arn.clone().map(Arc::new);
+    let sns_topic_arn = config
+        .sns_topic_arn
+        .clone()
+        .map(|arn| sns::SnsTopicArn(Arc::new(arn)));
 
-    // CORS layer — restrict to configured origins when not wildcard
+    // CORS policy — wildcard is a hard startup error on pubnet, allowed
+    // (with an info log) on testnet.
+    if let Err(msg) =
+        config::validate_cors_policy(&config.stellar_network, &config.cors_allowed_origins)
+    {
+        error!("{}", msg);
+        std::process::exit(1);
+    }
     if config.cors_allowed_origins == "*" {
-        if config.stellar_network == config::StellarNetwork::Testnet {
-            info!("CORS_ALLOWED_ORIGINS is set to wildcard '*' (testnet mode)");
-        } else {
-            warn!("CORS_ALLOWED_ORIGINS is set to wildcard '*' — consider restricting to specific origins in production");
-        }
+        info!("CORS_ALLOWED_ORIGINS is set to wildcard '*' (testnet mode)");
     }
     let cors = if config.cors_allowed_origins == "*" {
         CorsLayer::new()
@@ -210,6 +263,7 @@ async fn run_server(
                 header::AUTHORIZATION,
                 header::CONTENT_TYPE,
                 HeaderName::from_static("x-request-nonce"),
+                HeaderName::from_static("x-csrf-token"),
             ])
     } else {
         let origins: Vec<HeaderValue> = config
@@ -224,8 +278,14 @@ async fn run_server(
                 header::AUTHORIZATION,
                 header::CONTENT_TYPE,
                 HeaderName::from_static("x-request-nonce"),
+                HeaderName::from_static("x-csrf-token"),
             ])
     };
+
+    // Cancellation token for graceful background task shutdown.
+    // Also handed to handlers via Extension so streams spawned from
+    // POST /subscribe participate in graceful shutdown.
+    let cancel = CancellationToken::new();
 
     // Build router with routes
     let app = Router::new()
@@ -267,8 +327,17 @@ async fn run_server(
             post(device_token::register_device_token).delete(device_token::delete_device_token),
         )
         .route("/logout", post(logout::logout))
+        .route("/logout/all", post(logout::logout_all))
+        .route("/session/login", post(session_handler::session_login))
+        .route("/session/me", get(session_handler::session_me))
+        .route("/session/logout", post(session_handler::session_logout))
         .route("/auth/okta", post(okta_handler::okta_token_exchange))
         .route("/auth/okta/config", get(okta_handler::okta_config))
+        .route("/auth/google", post(google_handler::google_token_exchange))
+        .route("/auth/google/config", get(google_handler::google_config))
+        .route("/auth/github", post(github_handler::github_token_exchange))
+        .route("/auth/card/challenge", post(card_auth::card_challenge))
+        .route("/auth/card", post(card_auth::card_token_exchange))
         .route("/healthz", get(health::liveness))
         .route("/readyz", get(health::readiness))
         .route("/network", get(network::network_info))
@@ -288,6 +357,13 @@ async fn run_server(
         .route("/admin/events", get(admin_webhook::list_events))
         .layer(cors)
         .layer(RequestBodyLimitLayer::new(1_048_576)) // 1 MB body limit
+        // Global request deadline (408 on expiry). Safe for this app: the
+        // bridge serves only request/response JSON — the SSE/TCP streams are
+        // outbound consumers, not server-streamed responses.
+        .layer(TimeoutLayer::with_status_code(
+            axum::http::StatusCode::REQUEST_TIMEOUT,
+            Duration::from_secs(config.request_timeout_secs),
+        ))
         .layer(CompressionLayer::new())
         .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
         .layer(PropagateRequestIdLayer::x_request_id())
@@ -319,10 +395,12 @@ async fn run_server(
         ))
         .layer(Extension(pool.clone()))
         .layer(Extension(redis_pool.clone()))
-        .layer(Extension(jwt_secret))
+        .layer(Extension(jwt_keys))
+        .layer(Extension(session_config))
         .layer(Extension(stellar_config.clone()))
         .layer(Extension(admin_ids.clone()))
-        .layer(Extension(metrics));
+        .layer(Extension(metrics))
+        .layer(Extension(cancel.clone()));
 
     // Add optional SNS client extension
     let app = if let (Some(client), Some(arn)) = (sns_client, sns_topic_arn) {
@@ -330,9 +408,6 @@ async fn run_server(
     } else {
         app
     };
-
-    // Cancellation token for graceful background task shutdown
-    let cancel = CancellationToken::new();
 
     // Add Okta provider extension and spawn JWKS refresh task (if configured)
     let app = if let Some(ref provider) = okta_provider {
@@ -342,6 +417,26 @@ async fn run_server(
         tokio::spawn(async move {
             okta::jwks_refresh_task(refresh_provider, refresh_secs, jwks_cancel).await;
         });
+        app.layer(Extension(provider.clone()))
+    } else {
+        app
+    };
+
+    // Add Google provider extension and spawn JWKS refresh task (if configured)
+    let app = if let Some(ref provider) = google_provider {
+        let refresh_provider = provider.clone();
+        let refresh_secs = config.google_jwks_refresh_secs;
+        let jwks_cancel = cancel.clone();
+        tokio::spawn(async move {
+            google::jwks_refresh_task(refresh_provider, refresh_secs, jwks_cancel).await;
+        });
+        app.layer(Extension(provider.clone()))
+    } else {
+        app
+    };
+
+    // Add GitHub provider extension (if enabled)
+    let app = if let Some(ref provider) = github_provider {
         app.layer(Extension(provider.clone()))
     } else {
         app

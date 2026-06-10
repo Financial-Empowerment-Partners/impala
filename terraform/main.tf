@@ -1,12 +1,13 @@
 terraform {
   # >= 1.9 for cross-variable validation (CIDR-overlap guards in variables.tf)
   # and `moved {}` blocks used by the module migration (see README.md).
-  required_version = ">= 1.9"
+  # < 2.0 guards against an unreviewed major-version jump of terraform itself.
+  required_version = ">= 1.9, < 2.0"
 
   required_providers {
     aws = {
       source  = "hashicorp/aws"
-      version = "~> 5.0"
+      version = "~> 6.0"
     }
     random = {
       source  = "hashicorp/random"

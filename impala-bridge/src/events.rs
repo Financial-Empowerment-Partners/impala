@@ -5,7 +5,7 @@
 //! admin webhooks as **HMAC-SHA256-signed** POSTs. Payloads deliberately exclude
 //! secrets/PII (no MFA secret, no raw device token).
 
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use serde_json::{json, Value};
 use sha2::Sha256;
 use sqlx::{Postgres, Transaction};
@@ -200,11 +200,23 @@ mod tests {
 
     #[test]
     fn sign_matches_known_vector() {
-        // HMAC-SHA256(key="key", msg="1.body") — independently reproducible.
-        let sig = sign(b"key", 1, "body");
-        // recompute the expected value the same way to lock determinism
+        // Fixed external vectors (computed independently with Python's hmac +
+        // hashlib). These pin the wire format byte-identically across sha2/hmac
+        // crate upgrades — webhook receivers verify against this exact value.
+        assert_eq!(
+            sign(b"key", 1, "body"),
+            "91b5374b153842ad05b2c4eab9349b8321b14703165bd3fb8b034dfb8be98ae5"
+        );
+        assert_eq!(
+            sign(b"shhh-very-secret", 1_700_000_000, "{\"x\":1}"),
+            "77e18a0dd1a0698c1d963420492966388e474f2cdb2241340e70f1f948fe1de0"
+        );
+        // and the streaming construction matches the concatenated form
         let mut mac = HmacSha256::new_from_slice(b"key").unwrap();
         mac.update(b"1.body");
-        assert_eq!(sig, hex::encode(mac.finalize().into_bytes()));
+        assert_eq!(
+            sign(b"key", 1, "body"),
+            hex::encode(mac.finalize().into_bytes())
+        );
     }
 }

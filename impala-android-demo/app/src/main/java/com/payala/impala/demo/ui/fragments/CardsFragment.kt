@@ -102,7 +102,7 @@ class CardsFragment : Fragment(R.layout.fragment_cards) {
                 val response = api.createCard(
                     CreateCardRequest(
                         account_id = accountId,
-                        card_id = result.user.cardId,
+                        card_id = result.user.wireCardId,
                         ec_pubkey = ecHex,
                         rsa_pubkey = rsaHex
                     )
@@ -112,7 +112,7 @@ class CardsFragment : Fragment(R.layout.fragment_cards) {
                     val fingerprint = ecHex.take(20).chunked(2).joinToString(":")
                     cards.add(
                         CardItem(
-                            result.user.cardId,
+                            result.user.wireCardId,
                             fingerprint,
                             LocalDate.now().toString()
                         )

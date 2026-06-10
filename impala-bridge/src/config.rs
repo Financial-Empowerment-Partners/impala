@@ -55,6 +55,19 @@ pub struct Config {
     pub okta_issuer_url: Option<String>,
     pub okta_client_id: Option<String>,
     pub okta_jwks_refresh_secs: u64,
+    /// OAuth client ID accepted as `aud` on Google ID tokens; enables /auth/google.
+    pub google_client_id: Option<String>,
+    pub google_jwks_refresh_secs: u64,
+    /// Enables /auth/github (GitHub access-token exchange).
+    pub github_auth_enabled: bool,
+    /// GitHub REST API base URL (override for GitHub Enterprise Server).
+    pub github_api_url: String,
+    /// OAuth app client id for the server-side code→token exchange.
+    pub github_client_id: Option<String>,
+    /// OAuth app client secret (server-side only — never ships in clients).
+    pub github_client_secret: Option<String>,
+    /// GitHub OAuth token endpoint (override for GHES/tests).
+    pub github_oauth_token_url: String,
     pub sqs_queue_url: Option<String>,
     pub sns_topic_arn: Option<String>,
     pub worker_concurrency: usize,
@@ -79,6 +92,29 @@ pub struct Config {
     pub admin_webhook_disable_threshold: i64,
     /// Poll interval (seconds) for the admin-webhook delivery worker.
     pub admin_webhook_poll_secs: u64,
+    /// Mark session cookies `Secure` (+ `__Host-` name prefix). Default true;
+    /// the plain-HTTP local compose stack sets SESSION_COOKIE_SECURE=false.
+    pub session_cookie_secure: bool,
+    /// deadpool-redis pool size (REDIS_POOL_SIZE).
+    pub redis_pool_size: usize,
+    /// Global HTTP request timeout in seconds (REQUEST_TIMEOUT_SECS).
+    pub request_timeout_secs: u64,
+    /// Postgres pool acquire timeout in seconds (DB_ACQUIRE_TIMEOUT_SECS).
+    pub db_acquire_timeout_secs: u64,
+}
+
+/// Hard policy gate: wildcard CORS is forbidden on pubnet. `Ok(())` otherwise.
+pub fn validate_cors_policy(
+    network: &StellarNetwork,
+    cors_allowed_origins: &str,
+) -> Result<(), String> {
+    if *network == StellarNetwork::Pubnet && cors_allowed_origins.trim() == "*" {
+        return Err(
+            "CORS_ALLOWED_ORIGINS='*' is not allowed when STELLAR_NETWORK=pubnet; set explicit origins"
+                .to_string(),
+        );
+    }
+    Ok(())
 }
 
 /// Load configuration from a JSON config file (if present) and environment variables.
@@ -180,6 +216,41 @@ pub fn load_config() -> Config {
         .or_else(|| from_file("okta_jwks_refresh_secs"))
         .and_then(|v| v.parse().ok())
         .unwrap_or(crate::constants::DEFAULT_JWKS_REFRESH_SECS);
+
+    let google_client_id = env::var("GOOGLE_CLIENT_ID")
+        .ok()
+        .or_else(|| from_file("google_client_id"));
+
+    let google_jwks_refresh_secs = env::var("GOOGLE_JWKS_REFRESH_SECS")
+        .ok()
+        .or_else(|| from_file("google_jwks_refresh_secs"))
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(crate::constants::DEFAULT_JWKS_REFRESH_SECS);
+
+    let github_auth_enabled = env::var("GITHUB_AUTH_ENABLED")
+        .ok()
+        .or_else(|| from_file("github_auth_enabled"))
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(false);
+
+    let github_client_id = env::var("GITHUB_CLIENT_ID")
+        .ok()
+        .or_else(|| from_file("github_client_id"));
+
+    let github_client_secret = env::var("GITHUB_CLIENT_SECRET")
+        .ok()
+        .or_else(|| from_file("github_client_secret"));
+
+    let github_oauth_token_url = env::var("GITHUB_OAUTH_TOKEN_URL")
+        .ok()
+        .or_else(|| from_file("github_oauth_token_url"))
+        .unwrap_or_else(|| crate::constants::DEFAULT_GITHUB_OAUTH_TOKEN_URL.to_string());
+
+    let github_api_url = env::var("GITHUB_API_URL")
+        .ok()
+        .or_else(|| from_file("github_api_url"))
+        .filter(|v| !v.is_empty()) // compose passes "" when unset
+        .unwrap_or_else(|| crate::constants::DEFAULT_GITHUB_API_URL.to_string());
 
     let sqs_queue_url = env::var("SQS_QUEUE_URL")
         .ok()
@@ -298,6 +369,30 @@ pub fn load_config() -> Config {
         .and_then(|v| v.parse().ok())
         .unwrap_or(DEFAULT_ADMIN_WEBHOOK_POLL_SECS);
 
+    let session_cookie_secure = env::var("SESSION_COOKIE_SECURE")
+        .ok()
+        .or_else(|| from_file("session_cookie_secure"))
+        .map(|v| v != "false" && v != "0")
+        .unwrap_or(true);
+
+    let redis_pool_size = env::var("REDIS_POOL_SIZE")
+        .ok()
+        .or_else(|| from_file("redis_pool_size"))
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(crate::constants::DEFAULT_REDIS_POOL_SIZE);
+
+    let request_timeout_secs = env::var("REQUEST_TIMEOUT_SECS")
+        .ok()
+        .or_else(|| from_file("request_timeout_secs"))
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(crate::constants::REQUEST_TIMEOUT_SECS);
+
+    let db_acquire_timeout_secs = env::var("DB_ACQUIRE_TIMEOUT_SECS")
+        .ok()
+        .or_else(|| from_file("db_acquire_timeout_secs"))
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(crate::constants::DB_ACQUIRE_TIMEOUT_SECS);
+
     Config {
         public_endpoint,
         service_address,
@@ -317,6 +412,13 @@ pub fn load_config() -> Config {
         okta_issuer_url,
         okta_client_id,
         okta_jwks_refresh_secs,
+        google_client_id,
+        google_jwks_refresh_secs,
+        github_auth_enabled,
+        github_api_url,
+        github_client_id,
+        github_client_secret,
+        github_oauth_token_url,
         sqs_queue_url,
         sns_topic_arn,
         worker_concurrency,
@@ -337,6 +439,10 @@ pub fn load_config() -> Config {
         admin_webhook_max_attempts,
         admin_webhook_disable_threshold,
         admin_webhook_poll_secs,
+        session_cookie_secure,
+        redis_pool_size,
+        request_timeout_secs,
+        db_acquire_timeout_secs,
     }
 }
 
@@ -349,5 +455,29 @@ impl Config {
             network_passphrase: self.stellar_network_passphrase.clone(),
             contract_id: self.soroban_contract_id.clone(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cors_wildcard_rejected_on_pubnet() {
+        assert!(validate_cors_policy(&StellarNetwork::Pubnet, "*").is_err());
+        assert!(validate_cors_policy(&StellarNetwork::Pubnet, "  *  ").is_err());
+    }
+
+    #[test]
+    fn cors_wildcard_allowed_on_testnet() {
+        assert!(validate_cors_policy(&StellarNetwork::Testnet, "*").is_ok());
+    }
+
+    #[test]
+    fn cors_explicit_origins_allowed_on_pubnet() {
+        assert!(
+            validate_cors_policy(&StellarNetwork::Pubnet, "https://admin.impala.example.com")
+                .is_ok()
+        );
     }
 }

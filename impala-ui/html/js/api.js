@@ -1,18 +1,22 @@
 /**
  * API client module for the Impala bridge REST API.
  *
- * Handles JWT token storage, automatic token refresh, and authenticated
- * HTTP requests. All methods return Promises. On 401 responses, tokens
- * are cleared and the user is redirected to the login page.
- *
- * Token strategy:
- *  - refresh_token (14-day): obtained via username+password
- *  - temporal_token (1-hour): obtained from refresh_token, used for API calls
+ * Session strategy (cookie-based):
+ *  - POST /session/login sets an HttpOnly session cookie (out of reach of
+ *    any script, including XSS payloads) and returns a CSRF token.
+ *  - The CSRF token lives in memory only (never localStorage) and is sent as
+ *    X-CSRF-Token on every state-changing request; it can be re-fetched at
+ *    any time from GET /session/me (e.g. after a page reload).
+ *  - sessionStorage('impala_user') is a non-authoritative UX cache
+ *    (username / is_admin for nav rendering); the cookie is the security
+ *    boundary, enforced server-side.
  *
  * Features:
- *  - X-Request-Nonce header on all requests (CSRF mitigation)
+ *  - X-Request-Nonce header on all requests (server-side dedup)
  *  - Error message sanitization (strips HTML/SQL, maps status codes)
  *  - Exponential backoff retry (GET: network + 5xx; mutating: network only)
+ *  - One-shot CSRF self-heal: a 403 on a mutation refetches /session/me and
+ *    retries once (covers a rotated/lost in-memory token)
  *
  * @module API
  */
@@ -25,59 +29,103 @@ var API = (function () {
     /** Base delay in milliseconds for exponential backoff. */
     var RETRY_BASE_DELAY = 1000;
 
-    /** @returns {string|null} The stored temporal (short-lived) JWT token. */
-    function getTemporalToken() {
-        return localStorage.getItem('temporal_token');
-    }
+    /** sessionStorage key for the non-authoritative user cache. */
+    var USER_CACHE_KEY = 'impala_user';
 
-    /** @returns {string|null} The stored refresh (long-lived) JWT token. */
-    function getRefreshToken() {
-        return localStorage.getItem('refresh_token');
-    }
+    /** In-memory CSRF token (never persisted). */
+    var csrfToken = null;
+    /** Cached in-flight /session/me Promise (concurrent callers share it). */
+    var csrfPromise = null;
 
     /**
-     * Store JWT tokens in localStorage.
-     * @param {string|null} temporal - Temporal token (1-hour), or null to skip.
-     * @param {string|null} refresh  - Refresh token (14-day), or null to skip.
+     * One-time cleanup of the legacy localStorage bearer tokens (the UI used
+     * to keep JWTs in localStorage; sessions made that storage obsolete).
      */
-    function setTokens(temporal, refresh) {
-        if (temporal) localStorage.setItem('temporal_token', temporal);
-        if (refresh) localStorage.setItem('refresh_token', refresh);
-    }
-
-    /** Remove all stored tokens from localStorage. */
-    function clearTokens() {
-        localStorage.removeItem('temporal_token');
-        localStorage.removeItem('refresh_token');
-    }
-
-    /**
-     * Decode a JWT token's payload without signature verification.
-     * @param {string} token - The JWT string.
-     * @returns {Object|null} Decoded payload, or null on parse failure.
-     */
-    function parseJwt(token) {
+    function clearLegacyTokens() {
         try {
-            var payload = token.split('.')[1];
-            return JSON.parse(atob(payload));
+            localStorage.removeItem('temporal_token');
+            localStorage.removeItem('refresh_token');
+        } catch (e) { /* storage unavailable — nothing to clean */ }
+    }
+    clearLegacyTokens();
+
+    /**
+     * Store the session identity returned by /session/login, /session/me or
+     * a cookie_mode token exchange: CSRF token in memory, identity in the
+     * UX cache.
+     * @param {{account_id: string, is_admin: boolean, csrf_token: string}} data
+     */
+    function setSession(data) {
+        if (data && data.csrf_token) {
+            csrfToken = data.csrf_token;
+        }
+        if (data && data.account_id) {
+            sessionStorage.setItem(USER_CACHE_KEY, JSON.stringify({
+                account_id: data.account_id,
+                is_admin: !!data.is_admin
+            }));
+        }
+    }
+
+    /** Clear the in-memory CSRF token and the UX cache (logout/401). */
+    function clearSession() {
+        csrfToken = null;
+        csrfPromise = null;
+        sessionStorage.removeItem(USER_CACHE_KEY);
+        clearLegacyTokens();
+    }
+
+    /**
+     * @returns {{account_id: string, is_admin: boolean}|null} The cached
+     * session identity (UX only — the server re-checks every request).
+     */
+    function getCachedUser() {
+        try {
+            var raw = sessionStorage.getItem(USER_CACHE_KEY);
+            return raw ? JSON.parse(raw) : null;
         } catch (e) {
             return null;
         }
     }
 
     /**
-     * Check whether a JWT token has expired based on its `exp` claim.
-     * @param {string} token - The JWT string.
-     * @returns {boolean} True if expired or unparseable.
+     * Get the CSRF token, fetching it from GET /session/me when the
+     * in-memory copy is missing (fresh page load). Rejects when there is no
+     * active session.
+     * @returns {Promise<string>}
      */
-    function isTokenExpired(token) {
-        var payload = parseJwt(token);
-        if (!payload || !payload.exp) return true;
-        return Date.now() >= payload.exp * 1000;
+    function getCsrf() {
+        if (csrfToken) {
+            return Promise.resolve(csrfToken);
+        }
+        if (csrfPromise) {
+            return csrfPromise;
+        }
+        csrfPromise = fetch(BASE + '/session/me', {
+            method: 'GET',
+            credentials: 'same-origin',
+            headers: { 'X-Request-Nonce': generateNonce() }
+        }).then(function (res) {
+            csrfPromise = null;
+            if (!res.ok) {
+                throw new Error('Session expired');
+            }
+            return res.json();
+        }).then(function (data) {
+            setSession(data);
+            if (!csrfToken) {
+                throw new Error('Session expired');
+            }
+            return csrfToken;
+        }).catch(function (err) {
+            csrfPromise = null;
+            throw err;
+        });
+        return csrfPromise;
     }
 
     /**
-     * Generate a random nonce hex string for CSRF mitigation.
+     * Generate a random nonce hex string (request dedup).
      * @returns {string} 32-character hex nonce.
      */
     function generateNonce() {
@@ -88,6 +136,24 @@ var API = (function () {
             hex += ('0' + bytes[i].toString(16)).slice(-2);
         }
         return hex;
+    }
+
+    /**
+     * Build the headers for an authenticated request. Pure — unit-tested.
+     * @param {string} method - HTTP method.
+     * @param {string|null} csrf - CSRF token (required for non-GET).
+     * @param {string} nonce - Request nonce.
+     * @returns {Object} Header map.
+     */
+    function buildHeaders(method, csrf, nonce) {
+        var headers = {
+            'Content-Type': 'application/json',
+            'X-Request-Nonce': nonce
+        };
+        if (method !== 'GET' && method !== 'HEAD' && csrf) {
+            headers['X-CSRF-Token'] = csrf;
+        }
+        return headers;
     }
 
     /**
@@ -129,66 +195,6 @@ var API = (function () {
         return sanitized || 'Request failed (' + status + ')';
     }
 
-    /** Cached in-flight refresh Promise to prevent concurrent refresh requests. */
-    var refreshPromise = null;
-
-    /**
-     * Use the stored refresh token to obtain a new temporal token.
-     * Clears all tokens and rejects if the refresh token is missing or expired.
-     * Concurrent callers share a single in-flight request.
-     * @returns {Promise<string>} Resolves with the new temporal token.
-     */
-    function refreshTemporalToken() {
-        if (refreshPromise) {
-            return refreshPromise;
-        }
-
-        var refresh = getRefreshToken();
-        if (!refresh || isTokenExpired(refresh)) {
-            clearTokens();
-            return Promise.reject(new Error('Session expired'));
-        }
-
-        refreshPromise = fetch(BASE + '/token', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'X-Request-Nonce': generateNonce()
-            },
-            body: JSON.stringify({ refresh_token: refresh })
-        }).then(function (res) {
-            if (!res.ok) {
-                clearTokens();
-                throw new Error('Token refresh failed');
-            }
-            return res.json();
-        }).then(function (data) {
-            refreshPromise = null;
-            if (data.temporal_token) {
-                setTokens(data.temporal_token, null);
-                return data.temporal_token;
-            }
-            throw new Error('No temporal token in response');
-        }).catch(function (err) {
-            refreshPromise = null;
-            throw err;
-        });
-
-        return refreshPromise;
-    }
-
-    /**
-     * Get a valid temporal token, refreshing if the current one has expired.
-     * @returns {Promise<string>} Resolves with a non-expired temporal token.
-     */
-    function getValidToken() {
-        var token = getTemporalToken();
-        if (token && !isTokenExpired(token)) {
-            return Promise.resolve(token);
-        }
-        return refreshTemporalToken();
-    }
-
     /**
      * Determine whether a request should be retried.
      * @param {string} method - HTTP method.
@@ -218,25 +224,30 @@ var API = (function () {
 
     /**
      * Make an authenticated HTTP request to the API with retry logic.
-     * Automatically injects the Authorization and X-Request-Nonce headers.
-     * Handles 401 redirects and exponential backoff retries.
+     * The session cookie rides along automatically (same-origin); mutations
+     * additionally carry X-CSRF-Token. Handles 401 redirects, a one-shot
+     * CSRF self-heal on 403, and exponential backoff retries.
      * @param {string} method - HTTP method (GET, POST, PUT, DELETE).
      * @param {string} path   - API path (e.g. '/account').
      * @param {Object} [body] - Request body (will be JSON-serialized).
      * @returns {Promise<Response>} The fetch Response object.
      */
     function request(method, path, body) {
-        return getValidToken().then(function (token) {
+        var needsCsrf = method !== 'GET' && method !== 'HEAD';
+        var csrfHealed = false;
+
+        function obtainCsrf() {
+            return needsCsrf ? getCsrf() : Promise.resolve(null);
+        }
+
+        return obtainCsrf().then(function (csrf) {
             var attempt = 0;
 
-            function doFetch() {
+            function doFetch(currentCsrf) {
                 var opts = {
                     method: method,
-                    headers: {
-                        'Authorization': 'Bearer ' + token,
-                        'Content-Type': 'application/json',
-                        'X-Request-Nonce': generateNonce()
-                    }
+                    credentials: 'same-origin',
+                    headers: buildHeaders(method, currentCsrf, generateNonce())
                 };
                 if (body !== undefined) {
                     opts.body = JSON.stringify(body);
@@ -244,15 +255,25 @@ var API = (function () {
 
                 return fetch(BASE + path, opts).then(function (res) {
                     if (res.status === 401) {
-                        clearTokens();
+                        clearSession();
                         window.location.href = 'index.html';
                         return Promise.reject(new Error('Unauthorized'));
+                    }
+
+                    // Stale in-memory CSRF token (e.g. another tab re-logged
+                    // in): refetch it once and retry the request.
+                    if (res.status === 403 && needsCsrf && !csrfHealed) {
+                        csrfHealed = true;
+                        csrfToken = null;
+                        return getCsrf().then(doFetch);
                     }
 
                     if (attempt < MAX_RETRIES && shouldRetry(method, null, res)) {
                         attempt++;
                         var waitMs = RETRY_BASE_DELAY * Math.pow(2, attempt - 1);
-                        return delay(waitMs).then(doFetch);
+                        return delay(waitMs).then(function () {
+                            return doFetch(currentCsrf);
+                        });
                     }
 
                     return res;
@@ -263,13 +284,15 @@ var API = (function () {
                     if (attempt < MAX_RETRIES && shouldRetry(method, err, null)) {
                         attempt++;
                         var waitMs = RETRY_BASE_DELAY * Math.pow(2, attempt - 1);
-                        return delay(waitMs).then(doFetch);
+                        return delay(waitMs).then(function () {
+                            return doFetch(currentCsrf);
+                        });
                     }
                     throw err;
                 });
             }
 
-            return doFetch();
+            return doFetch(csrf);
         });
     }
 
@@ -286,6 +309,10 @@ var API = (function () {
             return res.text().then(function (t) {
                 throw new Error(sanitizeErrorMessage(status, t));
             });
+        }
+        // A successful API call counts as session activity.
+        if (typeof SessionTimer !== 'undefined') {
+            SessionTimer.reset();
         }
         var ct = res.headers.get('content-type') || '';
         if (ct.indexOf('application/json') !== -1) {
@@ -320,10 +347,10 @@ var API = (function () {
 
     return {
         BASE: BASE,
-        setTokens: setTokens,
-        clearTokens: clearTokens,
-        parseJwt: parseJwt,
-        isTokenExpired: isTokenExpired,
+        setSession: setSession,
+        clearSession: clearSession,
+        getCachedUser: getCachedUser,
+        buildHeaders: buildHeaders,
         sanitizeErrorMessage: sanitizeErrorMessage,
         setButtonLoading: setButtonLoading,
 
@@ -346,8 +373,8 @@ var API = (function () {
 
         /**
          * Unauthenticated POST request for the login flow.
-         * Does not inject Authorization header or handle 401 redirects.
-         * Includes X-Request-Nonce header for CSRF mitigation.
+         * No CSRF header (the endpoints are body-credentialed); cookies are
+         * included so /session/login's Set-Cookie applies.
          * @param {string} path - API path.
          * @param {Object} body - Request body.
          * @returns {Promise<Response>} Raw fetch Response.
@@ -355,6 +382,7 @@ var API = (function () {
         rawPost: function (path, body) {
             return fetch(BASE + path, {
                 method: 'POST',
+                credentials: 'same-origin',
                 headers: {
                     'Content-Type': 'application/json',
                     'X-Request-Nonce': generateNonce()

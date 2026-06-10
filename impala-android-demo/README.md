@@ -6,7 +6,7 @@ Android demo application for Payala-Impala, demonstrating authentication (passwo
 
 - Android Studio Hedgehog (2023.1.1) or later
 - JDK 17
-- Android SDK 36 (compileSdk / targetSdk)
+- Android SDK 37 (compileSdk / targetSdk)
 - minSdk 24 (Android 7.0)
 
 ## Quick Start
@@ -28,15 +28,21 @@ Or open the project in Android Studio and run on an emulator or device.
 
 ## Configuration
 
-Build config fields are defined in `app/build.gradle.kts`. Replace the placeholder values before testing:
+Build config fields are defined in `app/build.gradle.kts` and sourced from
+flavor-prefixed keys in `local.properties` — `TESTNET_*` for the `tnet` flavor,
+`LIVE_*` for the `live` flavor (see `local.properties.example`). Replace the
+placeholder values before testing:
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `BRIDGE_BASE_URL` | `http://10.0.2.2:8080` | Bridge API URL (`10.0.2.2` is the emulator's loopback to the host machine) |
+| `BRIDGE_BASE_URL` | `http://10.0.2.2:8080` (tnet) | Bridge API URL (`10.0.2.2` is the emulator's loopback to the host machine) |
 | `GITHUB_CLIENT_ID` | `YOUR_GITHUB_CLIENT_ID` | GitHub OAuth App client ID |
-| `GITHUB_CLIENT_SECRET` | `YOUR_GITHUB_CLIENT_SECRET` | GitHub OAuth App client secret |
 | `GITHUB_REDIRECT_URI` | `impala://github-callback` | GitHub OAuth redirect URI (must match the OAuth App settings) |
 | `GOOGLE_WEB_CLIENT_ID` | `YOUR_GOOGLE_WEB_CLIENT_ID` | Google Cloud Console Web client ID for Credential Manager |
+
+There is no GitHub client-secret field: the bridge performs the OAuth
+code→token exchange server-side (`POST /auth/github {code, redirect_uri}`),
+so the secret is configured on the bridge and never ships in the APK.
 
 ### Running with impala-bridge
 
@@ -98,9 +104,12 @@ com.payala.impala.demo
 ### GitHub Sign-In
 1. Custom Chrome Tab opens `github.com/login/oauth/authorize`
 2. `GitHubRedirectActivity` catches the `impala://github-callback?code=...` deep link
-3. The authorization code is exchanged for an access token at GitHub's token endpoint
-4. The GitHub user profile is fetched via `GET https://api.github.com/user`
-5. A password is derived from the access token, then the standard bridge auth flow runs
+3. The app posts the authorization code to the bridge: `POST /auth/github {code, redirect_uri}`
+4. The bridge exchanges the code at GitHub's token endpoint **server-side**
+   (it holds the client secret), verifies the user via `GET /user`, and returns
+   bridge JWT tokens plus the profile's `login`/`display_name`
+5. The app stores the tokens; no GitHub access token or client secret ever
+   exists on-device
 
 > **Note:** OAuth password derivation (SHA-256 of the provider token) is a demo shortcut. A production app would add dedicated `/oauth/google` and `/oauth/github` bridge endpoints.
 
@@ -140,6 +149,25 @@ com.payala.impala.demo
 | Browser | Custom Tabs | 1.8.0 |
 | Async | kotlinx-coroutines-android | 1.9.0 |
 | Lifecycle | lifecycle-viewmodel-ktx, lifecycle-livedata-ktx | 2.8.7 |
+
+## Certificate pinning
+
+The live flavor's `app/src/live/res/xml/network_security_config.xml` contains
+a **commented-out** certificate-pinning template for the production bridge
+host. It ships disabled because no production certificate exists yet —
+activating a pin-set with the placeholder pins would break every TLS
+connection to the host.
+
+To enable it, follow the procedure in the XML comment (generate the leaf-cert
+pin plus a backup pin, fill in the real host, set an expiration, uncomment).
+Rotation discipline: add the new certificate's pin alongside the old one
+*before* rotating the server certificate, and never ship a pin-set with fewer
+than two pins.
+
+CI (`.github/workflows/impala-android.yml`) guards against the
+placeholder-bricking failure mode: the assemble job fails if this file ever
+contains an *active* (uncommented) pin-set that still holds the placeholder
+pins.
 
 ## Build Variants
 

@@ -48,20 +48,23 @@
     var username = Auth.getUsername() || 'Unknown';
     var role = Roles.currentUserRole();
     var roleDef = Roles.DEFINITIONS[role] || {};
-    var expiry = Auth.getTokenExpiry();
-    var expiryStr = expiry ? expiry.toLocaleString() : 'Unknown';
+    // `role` is interpolated as a CSS class, so whitelist it against the
+    // known role keys rather than escaping.
+    var roleClass = Roles.DEFINITIONS[role] ? role : '';
+    // Cookie sessions: the HttpOnly cookie's lifetime is server-enforced
+    // (sliding 30-min idle window, 12-hour absolute cap) and not readable
+    // from script — describe the policy instead of an expiry timestamp.
+    var sessionStr = 'Expires after 15 min of inactivity';
 
     document.getElementById('session-info').innerHTML =
         '<table><tbody>' +
         '<tr><td><strong>User</strong></td><td>' + escapeHtml(username) + '</td></tr>' +
-        '<tr><td><strong>Role</strong></td><td><span class="role-badge ' + role + '">' + escapeHtml(roleDef.label || role) + '</span></td></tr>' +
-        '<tr><td><strong>Token Expires</strong></td><td>' + escapeHtml(expiryStr) + '</td></tr>' +
-        '<tr><td><strong>Permissions</strong></td><td>' + (roleDef.permissions || []).join(', ') + '</td></tr>' +
+        '<tr><td><strong>Role</strong></td><td><span class="role-badge ' + roleClass + '">' + escapeHtml(roleDef.label || role) + '</span></td></tr>' +
+        '<tr><td><strong>Session</strong></td><td>' + escapeHtml(sessionStr) + '</td></tr>' +
+        '<tr><td><strong>Permissions</strong></td><td>' + escapeHtml((roleDef.permissions || []).join(', ')) + '</td></tr>' +
         '</tbody></table>';
 
     function escapeHtml(str) {
-        var div = document.createElement('div');
-        div.appendChild(document.createTextNode(str));
-        return div.innerHTML;
+        return EscapeHtml.escape(str);
     }
 })();

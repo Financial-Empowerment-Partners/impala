@@ -1,17 +1,39 @@
 # Local configuration for impala-android-demo.
 # Copy this file to local.properties and fill in real values.
 # NEVER commit local.properties to version control.
+#
+# Keys are flavor-scoped: the tnet flavor reads TESTNET_*-prefixed keys, the
+# live flavor reads LIVE_*-prefixed keys (see app/build.gradle.kts).
+#
+# There is intentionally no GitHub client-secret key: the bridge performs the
+# OAuth code->token exchange server-side, so the secret never ships in the APK.
 
 # Android SDK location (auto-set by Android Studio)
 # sdk.dir=/path/to/android/sdk
 
-# Bridge API base URL (default: emulator loopback to host)
-BRIDGE_BASE_URL=http://10.0.2.2:8080
+# ── tnet flavor (Stellar testnet) ────────────────────────────────────────────
 
-# GitHub OAuth credentials
-GITHUB_CLIENT_ID=YOUR_GITHUB_CLIENT_ID
-GITHUB_CLIENT_SECRET=YOUR_GITHUB_CLIENT_SECRET
-GITHUB_REDIRECT_URI=impala://github-callback
+# Bridge API base URL (default: emulator loopback to host)
+TESTNET_BRIDGE_BASE_URL=http://10.0.2.2:8080
+
+# GitHub OAuth App client ID + redirect URI (must match the OAuth App settings)
+TESTNET_GITHUB_CLIENT_ID=YOUR_GITHUB_CLIENT_ID
+TESTNET_GITHUB_REDIRECT_URI=impala://github-callback
 
 # Google OAuth web client ID (from Google Cloud Console)
-GOOGLE_WEB_CLIENT_ID=YOUR_GOOGLE_WEB_CLIENT_ID
+TESTNET_GOOGLE_WEB_CLIENT_ID=YOUR_GOOGLE_WEB_CLIENT_ID
+
+# Okta (leave unset to hide the Okta button)
+#TESTNET_OKTA_ISSUER_URL=https://your-org.okta.com/oauth2/default
+#TESTNET_OKTA_CLIENT_ID=YOUR_OKTA_CLIENT_ID
+#TESTNET_OKTA_REDIRECT_URI=impala://okta-callback
+
+# ── live flavor (Stellar pubnet) ─────────────────────────────────────────────
+
+LIVE_BRIDGE_BASE_URL=https://api.impala.example.com
+LIVE_GITHUB_CLIENT_ID=YOUR_GITHUB_CLIENT_ID
+LIVE_GITHUB_REDIRECT_URI=impala://github-callback
+LIVE_GOOGLE_WEB_CLIENT_ID=YOUR_GOOGLE_WEB_CLIENT_ID
+#LIVE_OKTA_ISSUER_URL=https://your-org.okta.com/oauth2/default
+#LIVE_OKTA_CLIENT_ID=YOUR_OKTA_CLIENT_ID
+#LIVE_OKTA_REDIRECT_URI=impala://okta-callback

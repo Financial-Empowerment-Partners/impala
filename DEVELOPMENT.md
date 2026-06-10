@@ -16,7 +16,7 @@ local run/test loop for each component. For architecture see
 | Android SDK | compileSdk/targetSdk **36**, build-tools 35.0.0, minSdk 24 | `impala-card`, `impala-lib`, `impala-android-demo` |
 | Docker + Docker Compose | recent | `impala-bridge`, `impala-ui` |
 | PostgreSQL 16 / Redis 7 | (or use the bridge's `docker compose`) | `impala-bridge` |
-| `stellar-cli` | recent | `impala-soroban` testnet tests |
+| `stellar-cli` | recent | `impala-soroban` testnet tests (the fixture self-issues a test USDC asset — throwaway issuer, SAC deploy, trustlines, payment — no Circle faucet needed) |
 | Node.js | LTS | `impala-ui` tests |
 
 Set `ANDROID_HOME` (or `sdk.dir` in each Gradle project's `local.properties`) for

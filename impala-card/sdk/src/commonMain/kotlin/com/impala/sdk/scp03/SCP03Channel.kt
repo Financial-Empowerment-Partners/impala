@@ -5,7 +5,9 @@ import com.impala.sdk.apdu4j.APDUBIBO
 import com.impala.sdk.apdu4j.CommandAPDU
 import com.impala.sdk.apdu4j.ResponseAPDU
 import com.impala.sdk.models.ImpalaException
+import com.impala.sdk.secureRandomBytes
 import com.impala.sdk.scp03.SCP03Constants.BLOCK_SIZE
+import com.impala.sdk.scp03.SCP03Constants.KEY_VERSION
 import com.impala.sdk.scp03.SCP03Constants.CARD_CRYPTO
 import com.impala.sdk.scp03.SCP03Constants.CHALLENGE_LENGTH
 import com.impala.sdk.scp03.SCP03Constants.CLA_GP
@@ -42,6 +44,11 @@ class SCP03Channel(
     private var sessionMAC: ByteArray = ByteArray(0)
     private var sessionRMAC: ByteArray = ByteArray(0)
     private var macChainValue: ByteArray = ByteArray(BLOCK_SIZE)
+
+    // Per-session encryption counter (GP 2.3 Amd D §6.2.6): 16-byte big-endian,
+    // reset at INITIALIZE UPDATE, incremented once per command after EXTERNAL
+    // AUTHENTICATE — the first secured command uses counter = 1.
+    private var encCounter: ByteArray = ByteArray(BLOCK_SIZE)
     private var securityLevel: Byte = 0
     private var isOpen: Boolean = false
 
@@ -54,7 +61,7 @@ class SCP03Channel(
      */
     fun openSecureChannel(secLevel: Byte = 0x33): Boolean {
         // Generate host challenge
-        val hostChallenge = kotlin.random.Random.nextBytes(CHALLENGE_LENGTH)
+        val hostChallenge = secureRandomBytes(CHALLENGE_LENGTH)
 
         // --- INITIALIZE UPDATE ---
         val initCmd = CommandAPDU(
@@ -71,8 +78,17 @@ class SCP03Channel(
         }
 
         // Parse response: keyDiversification(10) + keyInfo(3) + cardChallenge(8) + cardCryptogram(8)
+        val keyVersion = respData[10]
         val cardChallenge = respData.copyOfRange(13, 21)
         val cardCryptogram = respData.copyOfRange(21, 29)
+
+        if (keyVersion != KEY_VERSION) {
+            throw ImpalaException(
+                "Card reports SCP03 key version 0x${(keyVersion.toInt() and 0xFF).toString(16).padStart(2, '0')}, " +
+                    "but this SDK requires 0x${(KEY_VERSION.toInt() and 0xFF).toString(16).padStart(2, '0')} " +
+                    "(counter-ICV wire format). Update the card applet firmware."
+            )
+        }
 
         // Derive session keys
         sessionENC = deriveSessionKey(staticENC, S_ENC, hostChallenge, cardChallenge)
@@ -81,15 +97,16 @@ class SCP03Channel(
 
         // Verify card cryptogram
         val expectedCardCrypto = computeCryptogram(sessionMAC, CARD_CRYPTO, 0x0040, hostChallenge, cardChallenge)
-        if (!cardCryptogram.contentEquals(expectedCardCrypto)) {
+        if (!constantTimeEquals(cardCryptogram, expectedCardCrypto)) {
             throw ImpalaException("Card cryptogram verification failed")
         }
 
         // Compute host cryptogram
         val hostCryptogram = computeCryptogram(sessionMAC, HOST_CRYPTO, 0x0040, hostChallenge, cardChallenge)
 
-        // Reset MAC chaining value
+        // Reset MAC chaining value and encryption counter for the new session
         macChainValue = ByteArray(BLOCK_SIZE)
+        encCounter = ByteArray(BLOCK_SIZE)
 
         // --- EXTERNAL AUTHENTICATE ---
         // Build data: hostCryptogram(8) + C-MAC(8)
@@ -150,6 +167,7 @@ class SCP03Channel(
         sessionMAC = ByteArray(0)
         sessionRMAC = ByteArray(0)
         macChainValue = ByteArray(BLOCK_SIZE)
+        encCounter = ByteArray(BLOCK_SIZE)
         securityLevel = 0
     }
 
@@ -161,13 +179,16 @@ class SCP03Channel(
     // ---- Internal wrapping/unwrapping ----
 
     private fun wrapCommand(cmd: CommandAPDU): CommandAPDU {
+        // The encryption counter advances once per command, whether or not the
+        // command carries an encrypted payload (mirrored in SCP03.java)
+        incrementCounter()
+
         var payload = cmd.data
 
         // C-DECRYPTION (encrypt the payload)
         if (securityLevel.toInt() and C_DEC.toInt() != 0 && payload.isNotEmpty()) {
             payload = padISO9797(payload)
-            val iv = ByteArray(BLOCK_SIZE) // zero IV
-            payload = AES128.encryptCBC(sessionENC, iv, payload)
+            payload = AES128.encryptCBC(sessionENC, commandIcv(), payload)
         }
 
         // C-MAC
@@ -210,7 +231,7 @@ class SCP03Channel(
             macInput[BLOCK_SIZE + respPayload.size + 1] = (sw and 0xFF).toByte()
 
             val expectedMac = AESCMAC.sign(sessionRMAC, macInput)
-            if (!receivedMac.contentEquals(expectedMac.copyOf(CRYPTOGRAM_LENGTH))) {
+            if (!constantTimeEquals(receivedMac, expectedMac.copyOf(CRYPTOGRAM_LENGTH))) {
                 throw ImpalaException("Response MAC verification failed")
             }
 
@@ -220,8 +241,7 @@ class SCP03Channel(
 
         // R-DECRYPTION
         if (securityLevel.toInt() and R_ENC.toInt() != 0 && data.isNotEmpty()) {
-            val iv = ByteArray(BLOCK_SIZE) // zero IV
-            data = AES128.decryptCBC(sessionENC, iv, data)
+            data = AES128.decryptCBC(sessionENC, responseIcv(), data)
             data = removePaddingISO9797(data)
         }
 
@@ -232,6 +252,22 @@ class SCP03Channel(
         result[data.size + 1] = (sw and 0xFF).toByte()
         return ResponseAPDU(result)
     }
+
+    // ---- Encryption counter / ICV (GP 2.3 Amd D §6.2.6) ----
+
+    private fun incrementCounter() {
+        for (i in encCounter.indices.reversed()) {
+            encCounter[i] = (encCounter[i] + 1).toByte()
+            if (encCounter[i] != 0.toByte()) break
+        }
+    }
+
+    /** Command ICV = AES-ECB(S-ENC, counter). */
+    private fun commandIcv(): ByteArray = AES128.encryptBlock(sessionENC, encCounter)
+
+    /** Response ICV = AES-ECB(S-ENC, counter with the first byte set to 0x80). */
+    private fun responseIcv(): ByteArray =
+        AES128.encryptBlock(sessionENC, encCounter.copyOf().also { it[0] = 0x80.toByte() })
 
     // ---- Key derivation ----
 
@@ -301,4 +337,20 @@ class SCP03Channel(
         }
         throw ImpalaException("No padding marker found")
     }
+}
+
+/**
+ * Constant-time byte array comparison: accumulates XOR differences across the
+ * full length so timing does not reveal the first mismatching byte. Use for
+ * MAC and cryptogram verification instead of [ByteArray.contentEquals].
+ */
+internal fun constantTimeEquals(a: ByteArray, b: ByteArray): Boolean {
+    if (a.size != b.size) {
+        return false
+    }
+    var diff = 0
+    for (i in a.indices) {
+        diff = diff or (a[i].toInt() xor b[i].toInt())
+    }
+    return diff == 0
 }

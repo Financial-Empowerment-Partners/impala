@@ -1,4 +1,4 @@
-use crate::constants::{MAX_EMAIL_LENGTH, STELLAR_ACCOUNT_ID_LENGTH};
+use crate::constants::{CARD_SIGNATURE_MAX_BYTES, MAX_EMAIL_LENGTH, STELLAR_ACCOUNT_ID_LENGTH};
 use crate::error::AppError;
 use std::net::IpAddr;
 
@@ -86,6 +86,23 @@ pub fn validate_ec_pubkey(key: &str) -> Result<(), AppError> {
     if !key.chars().all(|c| c.is_ascii_hexdigit()) {
         return Err(AppError::BadRequest(
             "EC public key must be a hexadecimal string".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// Validate a hex-encoded ECDSA signature: even-length hex string decoding to
+/// 8..=72 bytes (an ASN.1 DER P-256 signature is at most 72 bytes).
+pub fn validate_hex_signature(sig: &str) -> Result<(), AppError> {
+    if !sig.len().is_multiple_of(2) || sig.len() < 16 || sig.len() > CARD_SIGNATURE_MAX_BYTES * 2 {
+        return Err(AppError::BadRequest(format!(
+            "Signature must be an even-length hex string of at most {} characters",
+            CARD_SIGNATURE_MAX_BYTES * 2
+        )));
+    }
+    if !sig.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(AppError::BadRequest(
+            "Signature must be a hexadecimal string".to_string(),
         ));
     }
     Ok(())
@@ -412,6 +429,35 @@ mod tests {
     #[test]
     fn test_ec_pubkey_wrong_length() {
         assert!(validate_ec_pubkey("abcdef").is_err());
+    }
+
+    // ── Hex signature ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_valid_hex_signature() {
+        // Typical DER ECDSA P-256 signature: ~70-72 bytes
+        let sig = "30".to_string() + &"44".repeat(70);
+        assert!(validate_hex_signature(&sig).is_ok());
+    }
+
+    #[test]
+    fn test_hex_signature_odd_length() {
+        assert!(validate_hex_signature(&"a".repeat(17)).is_err());
+    }
+
+    #[test]
+    fn test_hex_signature_too_short() {
+        assert!(validate_hex_signature("3044").is_err());
+    }
+
+    #[test]
+    fn test_hex_signature_too_long() {
+        assert!(validate_hex_signature(&"ab".repeat(73)).is_err());
+    }
+
+    #[test]
+    fn test_hex_signature_non_hex() {
+        assert!(validate_hex_signature(&"zz".repeat(35)).is_err());
     }
 
     // ── RSA Public Key ──────────────────────────────────────────────────

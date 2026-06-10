@@ -183,15 +183,18 @@ pub async fn update_account(
     user: AuthenticatedUser,
     Extension(pool): Extension<PgPool>,
     sns_client: Option<Extension<Arc<aws_sdk_sns::Client>>>,
-    sns_topic_arn: Option<Extension<Arc<String>>>,
+    sns_topic_arn: Option<Extension<crate::sns::SnsTopicArn>>,
     Json(payload): Json<UpdateAccountRequest>,
 ) -> Result<Json<UpdateAccountResponse>, AppError> {
     info!("PUT /account: updating account");
-    let (where_clause, where_value) = if let Some(ref stellar_id) = payload.stellar_account_id {
-        ("stellar_account_id = $1", stellar_id.clone())
+    // Identify the row key. Ownership is enforced on both paths: the
+    // payala-keyed path via require_owner here, the stellar-keyed path via
+    // the ownership conjunct the builder appends to the WHERE clause.
+    let where_value = if let Some(ref stellar_id) = payload.stellar_account_id {
+        stellar_id.clone()
     } else if let Some(ref payala_id) = payload.payala_account_id {
         crate::auth::require_owner(&user, payala_id)?;
-        ("payala_account_id = $1", payala_id.clone())
+        payala_id.clone()
     } else {
         warn!("update_account: no identifier provided");
         return Ok(Json(UpdateAccountResponse {
@@ -205,50 +208,14 @@ pub async fn update_account(
         crate::validate::validate_stellar_account_id(stellar_id)?;
     }
 
-    let mut set_parts = Vec::new();
-    let mut param_index = 2;
-
-    if payload.stellar_account_id.is_some() && where_clause.contains("payala_account_id") {
-        set_parts.push(format!("stellar_account_id = ${}", param_index));
-        param_index += 1;
-    }
-    if payload.payala_account_id.is_some() && where_clause.contains("stellar_account_id") {
-        set_parts.push(format!("payala_account_id = ${}", param_index));
-        param_index += 1;
-    }
-    if payload.first_name.is_some() {
-        set_parts.push(format!("first_name = ${}", param_index));
-        param_index += 1;
-    }
-    if payload.middle_name.is_some() {
-        set_parts.push(format!("middle_name = ${}", param_index));
-        param_index += 1;
-    }
-    if payload.last_name.is_some() {
-        set_parts.push(format!("last_name = ${}", param_index));
-        param_index += 1;
-    }
-    if payload.nickname.is_some() {
-        set_parts.push(format!("nickname = ${}", param_index));
-        param_index += 1;
-    }
-    if payload.affiliation.is_some() {
-        set_parts.push(format!("affiliation = ${}", param_index));
-        param_index += 1;
-    }
-    if payload.gender.is_some() {
-        set_parts.push(format!("gender = ${}", param_index));
-        param_index += 1;
-    }
-
-    if set_parts.is_empty() {
+    let Some(mut qb) = build_account_update(&payload, &user.account_id) else {
         warn!("update_account: no fields provided to update");
         return Ok(Json(UpdateAccountResponse {
             success: false,
             message: "No fields provided to update".to_string(),
             rows_affected: 0,
         }));
-    }
+    };
 
     // Collect field names for notification
     let mut changed_fields = Vec::new();
@@ -271,59 +238,12 @@ pub async fn update_account(
         changed_fields.push("gender".to_string());
     }
 
-    let needs_ownership_bind = where_clause.contains("stellar_account_id");
-    let sql = if needs_ownership_bind {
-        format!(
-            "UPDATE impala_account SET {} WHERE {} AND payala_account_id = ${}",
-            set_parts.join(", "),
-            where_clause,
-            param_index
-        )
-    } else {
-        format!(
-            "UPDATE impala_account SET {} WHERE {}",
-            set_parts.join(", "),
-            where_clause
-        )
-    };
-
-    let mut query = sqlx::query(&sql);
-    query = query.bind(&where_value);
-
-    if payload.stellar_account_id.is_some() && where_clause.contains("payala_account_id") {
-        query = query.bind(&payload.stellar_account_id);
-    }
-    if payload.payala_account_id.is_some() && where_clause.contains("stellar_account_id") {
-        query = query.bind(&payload.payala_account_id);
-    }
-    if let Some(ref val) = payload.first_name {
-        query = query.bind(val);
-    }
-    if let Some(ref val) = payload.middle_name {
-        query = query.bind(val);
-    }
-    if let Some(ref val) = payload.last_name {
-        query = query.bind(val);
-    }
-    if let Some(ref val) = payload.nickname {
-        query = query.bind(val);
-    }
-    if let Some(ref val) = payload.affiliation {
-        query = query.bind(val);
-    }
-    if let Some(ref val) = payload.gender {
-        query = query.bind(val);
-    }
-    if needs_ownership_bind {
-        query = query.bind(&user.account_id);
-    }
-
     let mut tx = pool.begin().await.map_err(|e| {
         error!("update_account: begin tx error: {}", e);
         AppError::InternalError("Database error".to_string())
     })?;
 
-    let result = query.execute(&mut *tx).await;
+    let result = qb.build().execute(&mut *tx).await;
 
     match result {
         Ok(res) => {
@@ -354,7 +274,7 @@ pub async fn update_account(
 
                 // Fire-and-forget user notification for profile update.
                 let sns_c = sns_client.as_ref().map(|e| &e.0);
-                let sns_a = sns_topic_arn.as_ref().map(|e| &e.0);
+                let sns_a = sns_topic_arn.as_ref().map(|e| &e.0 .0);
                 notifications::dispatch_event(
                     &pool,
                     sns_c,
@@ -377,6 +297,216 @@ pub async fn update_account(
         Err(e) => {
             error!("update_account: database error: {}", e);
             Err(AppError::InternalError("Database error".to_string()))
+        }
+    }
+}
+
+/// Build the UPDATE statement for `PUT /account`. Returns `None` when no SET
+/// fields are present.
+///
+/// INVARIANT (cross-account write protection): every generated WHERE clause
+/// constrains the caller's account — directly when keyed by
+/// `payala_account_id` (ownership enforced by `require_owner` upstream), or
+/// via the appended `payala_account_id = <caller>` conjunct when keyed by
+/// `stellar_account_id`. The invariant test below pins this shape.
+fn build_account_update<'a>(
+    payload: &'a UpdateAccountRequest,
+    user_account_id: &'a str,
+) -> Option<sqlx::QueryBuilder<'a, sqlx::Postgres>> {
+    let keyed_by_stellar = payload.stellar_account_id.is_some();
+    if !keyed_by_stellar && payload.payala_account_id.is_none() {
+        return None;
+    }
+
+    let mut qb = sqlx::QueryBuilder::new("UPDATE impala_account SET ");
+    let mut any_set = false;
+    {
+        let mut sets = qb.separated(", ");
+        // Same field order as the legacy string generator. A payala id can be
+        // SET only when the row is keyed by stellar id (when keyed by payala,
+        // the payala id *is* the key).
+        if keyed_by_stellar {
+            if let Some(ref v) = payload.payala_account_id {
+                sets.push("payala_account_id = ");
+                sets.push_bind_unseparated(v);
+                any_set = true;
+            }
+        }
+        if let Some(ref v) = payload.first_name {
+            sets.push("first_name = ");
+            sets.push_bind_unseparated(v);
+            any_set = true;
+        }
+        if let Some(ref v) = payload.middle_name {
+            sets.push("middle_name = ");
+            sets.push_bind_unseparated(v);
+            any_set = true;
+        }
+        if let Some(ref v) = payload.last_name {
+            sets.push("last_name = ");
+            sets.push_bind_unseparated(v);
+            any_set = true;
+        }
+        if let Some(ref v) = payload.nickname {
+            sets.push("nickname = ");
+            sets.push_bind_unseparated(v);
+            any_set = true;
+        }
+        if let Some(ref v) = payload.affiliation {
+            sets.push("affiliation = ");
+            sets.push_bind_unseparated(v);
+            any_set = true;
+        }
+        if let Some(ref v) = payload.gender {
+            sets.push("gender = ");
+            sets.push_bind_unseparated(v);
+            any_set = true;
+        }
+    }
+    if !any_set {
+        return None;
+    }
+
+    if keyed_by_stellar {
+        qb.push(" WHERE stellar_account_id = ");
+        qb.push_bind(payload.stellar_account_id.as_ref().unwrap());
+        qb.push(" AND payala_account_id = ");
+        qb.push_bind(user_account_id);
+    } else {
+        qb.push(" WHERE payala_account_id = ");
+        qb.push_bind(payload.payala_account_id.as_ref().unwrap());
+    }
+
+    Some(qb)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn empty_payload() -> UpdateAccountRequest {
+        UpdateAccountRequest {
+            stellar_account_id: None,
+            payala_account_id: None,
+            first_name: None,
+            middle_name: None,
+            last_name: None,
+            nickname: None,
+            affiliation: None,
+            gender: None,
+        }
+    }
+
+    #[test]
+    fn keyed_by_stellar_single_field() {
+        let payload = UpdateAccountRequest {
+            stellar_account_id: Some("GSTELLAR".to_string()),
+            first_name: Some("Ada".to_string()),
+            ..empty_payload()
+        };
+        let qb = build_account_update(&payload, "alice").expect("builder");
+        assert_eq!(
+            qb.sql(),
+            "UPDATE impala_account SET first_name = $1 \
+             WHERE stellar_account_id = $2 AND payala_account_id = $3"
+        );
+    }
+
+    #[test]
+    fn keyed_by_payala_multiple_fields() {
+        let payload = UpdateAccountRequest {
+            payala_account_id: Some("alice".to_string()),
+            nickname: Some("ace".to_string()),
+            gender: Some("x".to_string()),
+            ..empty_payload()
+        };
+        let qb = build_account_update(&payload, "alice").expect("builder");
+        assert_eq!(
+            qb.sql(),
+            "UPDATE impala_account SET nickname = $1, gender = $2 \
+             WHERE payala_account_id = $3"
+        );
+    }
+
+    #[test]
+    fn keyed_by_stellar_sets_payala_id_first() {
+        let payload = UpdateAccountRequest {
+            stellar_account_id: Some("GSTELLAR".to_string()),
+            payala_account_id: Some("newid".to_string()),
+            last_name: Some("Lovelace".to_string()),
+            ..empty_payload()
+        };
+        let qb = build_account_update(&payload, "alice").expect("builder");
+        assert_eq!(
+            qb.sql(),
+            "UPDATE impala_account SET payala_account_id = $1, last_name = $2 \
+             WHERE stellar_account_id = $3 AND payala_account_id = $4"
+        );
+    }
+
+    #[test]
+    fn all_profile_fields_in_legacy_order() {
+        let payload = UpdateAccountRequest {
+            payala_account_id: Some("alice".to_string()),
+            first_name: Some("a".to_string()),
+            middle_name: Some("b".to_string()),
+            last_name: Some("c".to_string()),
+            nickname: Some("d".to_string()),
+            affiliation: Some("e".to_string()),
+            gender: Some("f".to_string()),
+            ..empty_payload()
+        };
+        let qb = build_account_update(&payload, "alice").expect("builder");
+        assert_eq!(
+            qb.sql(),
+            "UPDATE impala_account SET first_name = $1, middle_name = $2, last_name = $3, \
+             nickname = $4, affiliation = $5, gender = $6 WHERE payala_account_id = $7"
+        );
+    }
+
+    #[test]
+    fn no_set_fields_returns_none() {
+        let payload = UpdateAccountRequest {
+            payala_account_id: Some("alice".to_string()),
+            ..empty_payload()
+        };
+        assert!(build_account_update(&payload, "alice").is_none());
+        assert!(build_account_update(&empty_payload(), "alice").is_none());
+    }
+
+    /// Ownership-WHERE invariant (SECURITY.md / CLAUDE.md): every generated
+    /// UPDATE must constrain `payala_account_id` so cross-account writes are
+    /// impossible at the SQL layer, for every non-empty field combination.
+    #[test]
+    fn every_generated_where_clause_pins_the_account() {
+        let field_setters: Vec<fn(&mut UpdateAccountRequest)> = vec![
+            |p| p.first_name = Some("v".to_string()),
+            |p| p.middle_name = Some("v".to_string()),
+            |p| p.last_name = Some("v".to_string()),
+            |p| p.nickname = Some("v".to_string()),
+            |p| p.affiliation = Some("v".to_string()),
+            |p| p.gender = Some("v".to_string()),
+        ];
+        for keyed_by_stellar in [true, false] {
+            for mask in 1u32..(1 << field_setters.len()) {
+                let mut payload = empty_payload();
+                if keyed_by_stellar {
+                    payload.stellar_account_id = Some("GSTELLAR".to_string());
+                } else {
+                    payload.payala_account_id = Some("alice".to_string());
+                }
+                for (i, setter) in field_setters.iter().enumerate() {
+                    if mask & (1 << i) != 0 {
+                        setter(&mut payload);
+                    }
+                }
+                let qb = build_account_update(&payload, "alice").expect("non-empty mask");
+                assert!(
+                    qb.sql().contains("payala_account_id = "),
+                    "WHERE must pin the account: {}",
+                    qb.sql()
+                );
+            }
         }
     }
 }

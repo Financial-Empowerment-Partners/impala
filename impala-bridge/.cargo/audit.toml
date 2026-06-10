@@ -1,0 +1,16 @@
+# cargo-audit configuration (read automatically by `cargo audit`).
+
+[advisories]
+ignore = [
+    # RUSTSEC-2023-0071 — rsa: Marvin Attack timing sidechannel. No fixed
+    # release exists (advisory `patched = []`).
+    #
+    # pinned: rsa 0.9.10 is a Cargo.lock-only entry pulled in via sqlx's
+    # *optional* MySQL driver (sqlx -> sqlx-mysql -> rsa). The bridge enables
+    # only the `postgres` feature, so rsa is never compiled into any artifact:
+    # `cargo tree -i rsa --target all` prints nothing. The entry cannot be
+    # updated (no fix) or pruned (cargo locks optional dep versions), and
+    # sqlx 0.9 still locks an affected rsa pre-release. Revisit 2026-12-09 or
+    # when RustCrypto ships a fixed rsa and sqlx adopts it. (2026-06-09)
+    "RUSTSEC-2023-0071",
+]

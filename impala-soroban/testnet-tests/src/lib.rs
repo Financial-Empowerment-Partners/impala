@@ -8,8 +8,6 @@
 use std::path::PathBuf;
 use std::process::{Command, Output};
 
-const TESTNET_RPC: &str = "https://soroban-testnet.stellar.org";
-const TESTNET_NETWORK_PASSPHRASE: &str = "Test SDF Network ; September 2015";
 const FRIENDBOT_URL: &str = "https://friendbot.stellar.org";
 
 /// Result type for testnet operations.
@@ -75,7 +73,7 @@ pub fn deploy_contract(source_identity: &str) -> TestResult<String> {
     let wasm_path = contract_wasm_path();
     if !wasm_path.exists() {
         return Err(format!(
-            "Contract WASM not found at {}. Run `cargo build --release` in integration-test/ first.",
+            "Contract WASM not found at {}. Run `cargo build --release --target wasm32-unknown-unknown` in integration-test/ first.",
             wasm_path.display()
         )
         .into());
@@ -153,21 +151,102 @@ pub fn invoke_expect_fail(
     Ok(String::from_utf8(output.stderr)?.trim().to_string())
 }
 
+/// Deploy the Stellar Asset Contract for a self-issued test USDC asset
+/// (`USDC:<issuer public key>`) and return its contract ID.
+///
+/// Circle's testnet faucet is not used: any funded account can issue an asset
+/// with code `USDC`, and the SAC's `symbol()` returns the asset code, so the
+/// contract's `initialize` validation passes. This is exactly the on-chain
+/// limitation the contract documents — the issuer is not verifiable.
+pub fn deploy_usdc_sac(issuer: &TestIdentity) -> TestResult<String> {
+    let asset = format!("USDC:{}", issuer.public_key);
+    deploy_sac(&issuer.name, &asset)
+}
+
 /// Deploy the native XLM Stellar Asset Contract and return its contract ID.
+/// Kept for the negative test: the native SAC's `symbol()` is `"native"`,
+/// which `initialize` must reject.
 pub fn deploy_sac_native(source_identity: &str) -> TestResult<String> {
+    deploy_sac(source_identity, "native")
+}
+
+/// Deploy a Stellar Asset Contract for the given asset and return its
+/// contract ID.
+fn deploy_sac(source_identity: &str, asset: &str) -> TestResult<String> {
     let output = stellar_cmd(&[
         "contract",
         "asset",
         "deploy",
         "--asset",
-        "native",
+        asset,
         "--source",
         source_identity,
         "--network",
         "testnet",
     ])?;
+    extract_contract_id(&output)
+}
 
-    // SAC deploy may "fail" if already deployed, but still returns the ID
+/// Establish a trustline from `account` to `asset` (e.g. `USDC:G...`).
+/// Required before an account (G-address) can hold the asset; the wrapper
+/// contract itself needs no trustline (contract addresses hold SAC balances
+/// in contract data).
+pub fn establish_trustline(account: &TestIdentity, asset: &str) -> TestResult<()> {
+    let output = stellar_cmd(&[
+        "tx",
+        "new",
+        "change-trust",
+        "--line",
+        asset,
+        "--source",
+        &account.name,
+        "--network",
+        "testnet",
+    ])?;
+    assert_cmd_success(&output, "tx new change-trust");
+    Ok(())
+}
+
+/// Send `amount` of `asset` (e.g. `USDC:G...`) from the issuer to `dest_pk`.
+///
+/// CAUTION: the amount-unit semantics (stroops vs whole units) of
+/// `stellar tx new payment --amount` vary across stellar-cli versions.
+/// Callers must self-check the resulting balance via [`sac_balance`] so a
+/// unit mismatch fails loudly instead of corrupting test expectations.
+pub fn pay_usdc(issuer: &TestIdentity, dest_pk: &str, amount: &str, asset: &str) -> TestResult<()> {
+    let output = stellar_cmd(&[
+        "tx",
+        "new",
+        "payment",
+        "--destination",
+        dest_pk,
+        "--asset",
+        asset,
+        "--amount",
+        amount,
+        "--source",
+        &issuer.name,
+        "--network",
+        "testnet",
+    ])?;
+    assert_cmd_success(&output, "tx new payment");
+    Ok(())
+}
+
+/// Query an address's balance (in stroops) on a Stellar Asset Contract.
+pub fn sac_balance(sac_id: &str, source_identity: &str, address: &str) -> TestResult<i128> {
+    let result = invoke(sac_id, source_identity, "balance", &["--id", address])?;
+    let parsed = result
+        .trim()
+        .trim_matches('"')
+        .parse::<i128>()
+        .map_err(|e| format!("Could not parse SAC balance from {result:?}: {e}"))?;
+    Ok(parsed)
+}
+
+/// Extract a contract ID from a SAC deploy invocation. The deploy may "fail"
+/// if the SAC is already deployed, but the ID is still printed.
+fn extract_contract_id(output: &Output) -> TestResult<String> {
     let combined = format!(
         "{}{}",
         String::from_utf8_lossy(&output.stdout),
@@ -188,7 +267,7 @@ pub fn deploy_sac_native(source_identity: &str) -> TestResult<String> {
 
     // If the command succeeded, stdout likely IS the contract id
     if output.status.success() {
-        let id = String::from_utf8(output.stdout)?.trim().to_string();
+        let id = String::from_utf8(output.stdout.clone())?.trim().to_string();
         if !id.is_empty() {
             return Ok(id);
         }

@@ -2,30 +2,32 @@
 # minSdk 24 matches the platform floor (impala-lib + impala-android-demo are both
 # minSdk 24). The :sdk android target contains only commonMain Kotlin (no Android
 # API usage), so 24 is safe and avoids a manifest-merge conflict in consumers.
-android-compileSdk = "36"
+android-compileSdk = "37"
 android-minSdk = "24"
-android-targetSdk = "36"
-agp = "8.13.2"
-kotlin = "2.3.20"
-okio = "3.16.1"
+android-targetSdk = "37"
+agp = "9.2.1"
+kotlin = "2.4.0"
+okio = "3.17.0"
 bignum = "0.3.10"
-datatypes = "3.6.0"
-kotlinxDatetime = "0.7.1-0.6.x-compat"
 uuid = "0.8.4"
 
 [libraries]
 kotlin-test = { module = "org.jetbrains.kotlin:kotlin-test", version.ref = "kotlin" }
 javacard-simulator = { module = "com.klinec:jcardsim", version = "3.0.6.0" }
+# jvmTest-only: independent CMac/AES reference implementation in Scp03CounterIcvTest.
+# Was previously satisfied transitively (via at.asitplus.crypto:datatypes, removed
+# 2026-06 as a dead commonMain dep); declared explicitly now that it is the only user.
+bouncycastle = { module = "org.bouncycastle:bcprov-jdk18on", version = "1.84" }
 okio = { module = "com.squareup.okio:okio", version.ref = "okio" }
-kotlinx-datetime = { module = "org.jetbrains.kotlinx:kotlinx-datetime", version.ref = "kotlinxDatetime" }
 uuid = { module = "com.benasher44:uuid", version.ref = "uuid" }
-datatypes = { module = "at.asitplus.crypto:datatypes", version.ref = "datatypes" }
 bignum = { module = "com.ionspin.kotlin:bignum", version.ref = "bignum" }
 
 [plugins]
-androidLibrary = { id = "com.android.library", version.ref = "agp" }
+# AGP 9: KMP modules use the Android KMP library plugin instead of
+# com.android.library (which no longer composes with org.jetbrains.kotlin.multiplatform).
+androidKmpLibrary = { id = "com.android.kotlin.multiplatform.library", version.ref = "agp" }
 kotlinAndroid = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
 kotlinMultiplatform = { id = "org.jetbrains.kotlin.multiplatform", version.ref = "kotlin" }
 kotlinCocoapods = { id = "org.jetbrains.kotlin.native.cocoapods", version.ref = "kotlin" }
 compose-compiler = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
-mavenPublish = { id = "com.vanniktech.maven.publish", version = "0.34.0" }
+mavenPublish = { id = "com.vanniktech.maven.publish", version = "0.36.0" }

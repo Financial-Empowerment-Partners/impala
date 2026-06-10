@@ -93,6 +93,12 @@ object AESCMAC {
 /**
  * Minimal AES-128 ECB implementation (single-block encrypt only).
  * Pure Kotlin — no platform dependencies.
+ *
+ * Timing caveat (characterized, not mitigated): this is a table-based S-box
+ * implementation, so key-dependent table lookups are in principle observable
+ * via CPU cache timing by a co-resident attacker. It protects SCP03 session
+ * traffic on the host side, where the practical exposure is a short-lived
+ * session key; hardware-backed AES is not available in commonMain.
  */
 internal object AES128 {
 

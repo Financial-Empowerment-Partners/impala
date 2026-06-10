@@ -35,6 +35,22 @@ interface BridgeApiService {
     @GET("auth/okta/config")
     suspend fun getOktaConfig(): OktaConfigResponse
 
+    /** Exchange a Google ID token for local JWT tokens. */
+    @POST("auth/google")
+    suspend fun googleTokenExchange(@Body request: GoogleTokenExchangeRequest): TokenResponse
+
+    /** Exchange a GitHub access token for local JWT tokens. */
+    @POST("auth/github")
+    suspend fun gitHubTokenExchange(@Body request: GitHubTokenExchangeRequest): TokenResponse
+
+    /** Request a single-use card-auth challenge (64 hex chars, 60-second TTL). */
+    @POST("auth/card/challenge")
+    suspend fun cardChallenge(@Body request: CardChallengeRequest): CardChallengeResponse
+
+    /** Exchange a signed card-auth challenge for local JWT tokens. */
+    @POST("auth/card")
+    suspend fun cardTokenExchange(@Body request: CardAuthRequest): TokenResponse
+
     // ── Account ─────────────────────────────────────────────────────────
 
     /** Look up an account by its Stellar public key. */

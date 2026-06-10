@@ -16,6 +16,11 @@ object SCP03Constants {
     const val INS_PROVISION_PIN: Byte = 0x70
     const val INS_APPLET_UPDATE: Byte = 0x71
 
+    // Expected SCP03 key version in the INITIALIZE UPDATE key information field.
+    // 0x02 = counter-ICV wire format; must match KEY_INFO[0] in the applet's
+    // SCP03.java. Older cards (0x01, zero-IV format) are rejected with a clear error.
+    const val KEY_VERSION: Byte = 0x02
+
     // Derivation constants (GP 2.3 Amd D, Table 4-1)
     const val S_ENC: Byte = 0x04
     const val S_MAC: Byte = 0x06

@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Impala - Login</title>
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/foundation-sites@6.8.1/dist/css/foundation.min.css" integrity="sha384-2ZAo6d0r9zxtxn7DvMBmpd3hscGP+LkxQ/kMShaUz/TqqsBPtbtZ1K3+3/CgndDu" crossorigin="anonymous">
+    <link rel="stylesheet" href="vendor/foundation.min.css" integrity="sha384-2ZAo6d0r9zxtxn7DvMBmpd3hscGP+LkxQ/kMShaUz/TqqsBPtbtZ1K3+3/CgndDu">
     <link rel="stylesheet" href="css/app.css">
 </head>
 <body>
@@ -38,60 +38,6 @@
     <script src="js/auth.js"></script>
     <script src="js/validate.js"></script>
     <script src="js/okta-auth.js"></script>
-    <script>
-        (function () {
-            // Redirect if already logged in
-            if (Auth.isLoggedIn()) {
-                window.location.href = 'dashboard.html';
-                return;
-            }
-
-            // Display callback errors from sessionStorage
-            var errorDiv = document.getElementById('login-error');
-            var callbackError = sessionStorage.getItem('okta_error');
-            if (callbackError) {
-                errorDiv.textContent = callbackError;
-                errorDiv.classList.remove('hidden');
-                sessionStorage.removeItem('okta_error');
-            }
-
-            // Initialize Okta (shows button if configured)
-            OktaAuth.init();
-
-            var form = document.getElementById('login-form');
-            var loginBtn = document.getElementById('login-btn');
-
-            form.addEventListener('submit', function (e) {
-                e.preventDefault();
-                errorDiv.classList.add('hidden');
-
-                var accountId = document.getElementById('account-id').value.trim();
-                var password = document.getElementById('password').value;
-
-                // Validate required fields
-                var error = Validate.firstError([
-                    Validate.required(accountId),
-                    Validate.required(password)
-                ]);
-                if (error) {
-                    errorDiv.textContent = error;
-                    errorDiv.classList.remove('hidden');
-                    return;
-                }
-
-                API.setButtonLoading(loginBtn, true);
-
-                Auth.login(accountId, password)
-                    .then(function () {
-                        window.location.href = 'dashboard.html';
-                    })
-                    .catch(function (err) {
-                        errorDiv.textContent = err.message || 'Login failed';
-                        errorDiv.classList.remove('hidden');
-                        API.setButtonLoading(loginBtn, false);
-                    });
-            });
-        })();
-    </script>
+    <script src="js/login.js"></script>
 </body>
 </html>

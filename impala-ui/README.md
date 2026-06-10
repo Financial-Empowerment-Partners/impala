@@ -18,7 +18,7 @@ python3 -m http.server 8000 -d html/
 
 ## Architecture
 
-Vanilla JavaScript SPA using Foundation 6.8.1 CSS framework. No build step or transpilation — static HTML/CSS/JS served by Nginx.
+Vanilla JavaScript SPA using Foundation 6.8.1 CSS framework. No build step or transpilation — static HTML/CSS/JS served by Nginx. Foundation 6.8.1 and jQuery 3.7.1 are vendored under `html/vendor/` (no CDN dependency); the `integrity` attributes on their tags carry the upstream SRI sha384 hashes, so replacing a vendored file with anything other than the exact upstream artifact will make browsers refuse to load it.
 
 ### Module Structure
 
@@ -44,6 +44,14 @@ All JS modules use the IIFE (Immediately Invoked Function Expression) pattern fo
 3. `POST /api/token` — obtain 1-hour temporal token (refresh token)
 4. All subsequent requests use `Authorization: Bearer <temporal_token>`
 5. Automatic refresh on expiry or 401 → redirect to login
+
+### Token Storage Trade-off
+
+JWTs (the 14-day refresh token and 1-hour temporal token) are stored in `localStorage`. This is a deliberate trade-off:
+
+- **Risk**: any script that executes in the page's origin can read `localStorage`, so an XSS hole here is token theft.
+- **Mitigations in place**: a strict Content-Security-Policy (`script-src 'self'`, no inline scripts, no third-party origins — see `nginx.conf`), all third-party assets vendored with SRI integrity hashes, and systematic HTML-escaping of every server- or user-derived value rendered via `innerHTML` (`js/escape-html.js` plus per-module helpers).
+- **Why not httpOnly cookies**: the bridge issues tokens in JSON response bodies and authenticates via the `Authorization: Bearer` header; moving to httpOnly session cookies needs bridge-side changes (cookie issuance, CSRF strategy for cookie-authenticated requests). Tracked as a follow-up — until then, localStorage + the mitigations above is the accepted posture.
 
 ### Role-Based Access Control
 

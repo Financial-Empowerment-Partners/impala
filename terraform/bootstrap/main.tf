@@ -13,7 +13,9 @@
 # =============================================================================
 
 terraform {
-  required_version = ">= 1.9"
+  # < 2.0 guards against an unreviewed major-version jump of terraform itself
+  # (matches the main root's constraint).
+  required_version = ">= 1.9, < 2.0"
 
   required_providers {
     aws = {
@@ -55,6 +57,9 @@ resource "aws_s3_bucket_versioning" "tfstate" {
   }
 }
 
+# SSE-S3 is accepted for the bootstrap state bucket: a CMK here would create
+# a chicken-and-egg dependency (the key would live in state this bucket holds).
+#trivy:ignore:AVD-AWS-0132
 resource "aws_s3_bucket_server_side_encryption_configuration" "tfstate" {
   bucket = aws_s3_bucket.tfstate.id
   rule {

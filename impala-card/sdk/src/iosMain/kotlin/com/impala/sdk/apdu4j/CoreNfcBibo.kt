@@ -43,7 +43,10 @@ class CoreNfcBibo(
 
     private var closed = false
 
-    @Throws(BIBOException::class)
+    // No @Throws here: the filter is inherited from BIBO.transceive. Kotlin 2.4's
+    // stricter Native checker rejects re-declared @Throws on overrides during the
+    // shared-iosMain metadata compilation; Obj-C export uses the base declaration's
+    // filter either way (throws BIBOException).
     override fun transceive(bytes: ByteArray?): ByteArray? {
         if (closed) throw BIBOException("CoreNfcBibo is closed")
         if (NSThread.isMainThread()) {

@@ -7,41 +7,60 @@ rust-version = "1.91"
 
 [dependencies]
 axum = "0.8"
-axum-extra = { version = "0.10", features = ["typed-header"] }
+axum-extra = { version = "0.12", features = ["typed-header"] }
 tokio = { version = "1.0", features = ["full"] }
-jsonwebtoken = { version = "10", features = ["aws_lc_rs"] }
+jsonwebtoken = { version = "10.4", features = ["aws_lc_rs"] }
 uuid = { version = "1", features = ["serde", "v4"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls", "postgres", "uuid", "migrate", "chrono", "json"] }
+# tls-rustls-aws-lc-rs (not plain tls-rustls, which is ring-backed) keeps the
+# whole tree on a single rustls CryptoProvider (aws-lc-rs, shared with
+# jsonwebtoken and the AWS SDK); see the install_default() call in main.rs.
+sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls-aws-lc-rs", "postgres", "uuid", "migrate", "chrono", "json"] }
 password-auth = { version = "1.0", features = ["argon2"] }
 reqwest = { version = "0.13", features = ["json", "rustls", "stream", "form", "http2"], default-features = false }
-redis = { version = "1", features = ["tokio-comp"] }
+redis = { version = "1", features = ["tokio-comp", "tokio-rustls-comp"] }
+# Direct dep only for CryptoProvider::install_default() at startup (main.rs) —
+# the redis crate builds its rediss:// TLS config from the process default.
+rustls = "0.23"
 deadpool-redis = "0.23"
 chrono = "0.4"
 futures = "0.3"
-hmac = "0.12"
-sha2 = "0.10"
+hmac = "0.13"
+sha2 = "0.11"
 hex = "0.4"
 log = "0.4"
 syslog = "7"
 ldap3 = "0.12"
 tower = "0.5"
-tower-http = { version = "0.6", features = ["cors", "trace", "request-id", "set-header", "limit", "compression-gzip"] }
+tower-http = { version = "0.6", features = ["cors", "trace", "request-id", "set-header", "limit", "compression-gzip", "timeout"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 subtle = "2"
 totp-rs = { version = "5.7", features = ["gen_secret", "otpauth"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-tracing-opentelemetry = "0.32"
-opentelemetry = { version = "0.31", features = ["metrics"] }
-opentelemetry_sdk = { version = "0.31", features = ["rt-tokio", "metrics"] }
-opentelemetry-otlp = { version = "0.31", features = ["grpc-tonic", "metrics"] }
+tracing-opentelemetry = "0.33"
+opentelemetry = { version = "0.32", features = ["metrics"] }
+opentelemetry_sdk = { version = "0.32", features = ["rt-tokio", "metrics"] }
+opentelemetry-otlp = { version = "0.32", features = ["grpc-tonic", "metrics"] }
 url = "2"
+# Direct dep for card-auth ECDSA verification + challenge CSPRNG; already in
+# the tree as jsonwebtoken's crypto backend and the installed process-wide
+# rustls CryptoProvider (see install_default() in main.rs).
+aws-lc-rs = "1"
 aws-config = { version = "1", features = ["behavior-version-latest"] }
-aws-sdk-sqs = "1"
-aws-sdk-sns = "1"
-aws-sdk-sesv2 = "1"
+aws-sdk-sqs = { version = "1", default-features = false, features = ["default-https-client", "rt-tokio"] }
+aws-sdk-sns = { version = "1", default-features = false, features = ["default-https-client", "rt-tokio"] }
+aws-sdk-sesv2 = { version = "1", default-features = false, features = ["default-https-client", "rt-tokio"] }
+
+[dev-dependencies]
+tokio = { version = "1.0", features = ["full", "test-util"] }
 
 [build-dependencies]
 chrono = "0.4"
+
+[profile.release]
+strip = "symbols"
+# Latency-sensitive API: trade compile time for cross-crate optimization.
+lto = "thin"
+codegen-units = 1

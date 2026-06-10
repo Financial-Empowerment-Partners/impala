@@ -11,9 +11,17 @@ pub struct Claims {
     pub iat: usize,
     pub jti: String,
     pub iss: String,
+    /// Audience, always `JWT_AUDIENCE`. Deliberately NOT serde-defaulted:
+    /// tokens minted before the aud/fid rollout fail to decode (hard cutover,
+    /// one forced re-login) rather than bypassing audience validation.
+    pub aud: String,
+    /// Refresh-token family id. Minted at credential login and inherited across
+    /// refresh rotations, so reuse of a rotated-out refresh token can revoke
+    /// every descendant token in one operation. NOT serde-defaulted (see `aud`).
+    pub fid: String,
     /// Admin privilege, server-derived from the ADMIN_ACCOUNT_IDS allowlist at
-    /// every token issuance. `#[serde(default)]` so pre-existing tokens (and any
-    /// non-admin path) decode as `false`; clients cannot set it (HS256-signed).
+    /// every token issuance. `#[serde(default)]` so any non-admin path decodes
+    /// as `false`; clients cannot set it (HS256-signed).
     #[serde(default)]
     pub is_admin: bool,
 }
@@ -354,7 +362,6 @@ pub struct NotifyListItem {
     pub id: i32,
     pub account_id: String,
     pub medium: String,
-    pub active: bool,
     pub mobile: Option<String>,
     pub wa: Option<String>,
     pub signal: Option<String>,
@@ -402,6 +409,10 @@ pub struct NetworkInfoResponse {
 #[derive(Deserialize)]
 pub struct OktaTokenExchangeRequest {
     pub okta_token: String,
+    /// Browser clients set this to receive an HttpOnly cookie session (plus
+    /// CSRF token) instead of bearer tokens. Defaults off for API clients.
+    #[serde(default)]
+    pub cookie_mode: bool,
 }
 
 #[derive(Serialize)]
@@ -417,6 +428,62 @@ pub struct OktaConfigResponse {
     pub token_endpoint: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scopes: Option<Vec<String>>,
+}
+
+// ── Google ─────────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct GoogleTokenExchangeRequest {
+    pub id_token: String,
+}
+
+#[derive(Serialize)]
+pub struct GoogleConfigResponse {
+    pub enabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<String>,
+}
+
+// ── GitHub ─────────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct GitHubTokenExchangeRequest {
+    /// Direct access-token exchange (legacy clients; the token was obtained
+    /// on-device). Mutually exclusive with `code`.
+    #[serde(default)]
+    pub access_token: Option<String>,
+    /// OAuth authorization code — the bridge performs the code→token
+    /// exchange server-side so the GitHub client secret never ships in a
+    /// client binary.
+    #[serde(default)]
+    pub code: Option<String>,
+    /// Redirect URI used in the authorization request (forwarded to GitHub
+    /// during the code exchange).
+    #[serde(default)]
+    pub redirect_uri: Option<String>,
+}
+
+// ── Card auth ──────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct CardChallengeRequest {
+    pub card_id: String,
+}
+
+#[derive(Serialize)]
+pub struct CardChallengeResponse {
+    pub success: bool,
+    /// 32 random bytes, hex-encoded (64 chars). The card signs the raw bytes.
+    pub challenge: String,
+    /// Challenge TTL in seconds.
+    pub expires_in: u64,
+}
+
+#[derive(Deserialize)]
+pub struct CardTokenExchangeRequest {
+    pub card_id: String,
+    /// Hex-encoded ASN.1 DER ECDSA-SHA256 signature from the card (INS_SIGN_AUTH).
+    pub signature: String,
 }
 
 // ── Admin webhook feed ───────────────────────────────────────────────────

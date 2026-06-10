@@ -57,6 +57,9 @@ pub async fn execute(ctx: &WorkerContext, payload: &serde_json::Value) -> Result
 
     for tx in &transactions {
         if let Some(tx_id) = tx["id"].as_str() {
+            // Deliberately global (worker reconciliation): matches by
+            // stellar_tx_id across all accounts, not scoped to
+            // transaction.account_id.
             let count = sqlx::query_scalar::<_, i64>(
                 "SELECT COUNT(*) FROM transaction WHERE stellar_tx_id = $1",
             )

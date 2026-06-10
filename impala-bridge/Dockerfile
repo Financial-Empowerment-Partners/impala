@@ -9,42 +9,34 @@
 # =============================================================================
 
 # --- Builder stage ---
-# Uses the native platform for the builder when cross-compiling via buildx.
 # For arm64 targets on x86 hosts, QEMU emulation handles the Rust compilation.
 #
 # Base images are pinned by multi-arch manifest-list digest (supply-chain
 # hardening). To bump: `docker buildx imagetools inspect <image>:<tag>` and copy
 # the top-level "Digest". The :tag is kept alongside the digest for readability.
-FROM --platform=$BUILDPLATFORM rust:1.91-slim@sha256:f75071363e7f4771769d4cf81b1b7b290e607f4d4459e8731f6abdcee9982dc8 AS planner
-
-WORKDIR /app
-RUN apt-get update && apt-get install -y pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
-
-COPY Cargo.toml Cargo.lock* build.rs ./
-COPY src/ src/
-COPY migrations/ migrations/
-
-# Compute a recipe of dependencies for caching (cargo-chef pattern without the tool)
-# This layer is cached as long as Cargo.toml/Cargo.lock don't change
-RUN cargo fetch
-
-FROM rust:1.91-slim@sha256:f75071363e7f4771769d4cf81b1b7b290e607f4d4459e8731f6abdcee9982dc8 AS builder
+FROM rust:1.96-slim@sha256:26abcef3d79b8d890c4ceb17093154573e1f6479cf6dd7c1450043b8458350f6 AS builder
 
 ARG TARGETARCH
 
 WORKDIR /app
-RUN apt-get update && apt-get install -y pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
+# Unpinned by design: Debian point releases shift package versions and would
+# break the build on every release; the digest-pinned base image bounds the drift.
+# hadolint ignore=DL3008
+RUN apt-get update && apt-get install -y --no-install-recommends pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
 
-COPY Cargo.toml Cargo.lock* build.rs ./
+COPY Cargo.toml Cargo.lock build.rs ./
 COPY src/ src/
 COPY migrations/ migrations/
 
-RUN cargo build --release
+RUN cargo build --release --locked
 
 # --- Runtime stage ---
-FROM debian:bookworm-slim@sha256:0104b334637a5f19aa9c983a91b54c89887c0984081f2068983107a6f6c21eeb
+FROM debian:trixie-slim@sha256:b6e2a152f22a40ff69d92cb397223c906017e1391a73c952b588e51af8883bf8
 
-RUN apt-get update && apt-get install -y ca-certificates curl && rm -rf /var/lib/apt/lists/* \
+# Unpinned by design: Debian point releases shift package versions and would
+# break the build on every release; the digest-pinned base image bounds the drift.
+# hadolint ignore=DL3008
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl && rm -rf /var/lib/apt/lists/* \
     && groupadd -r appuser && useradd -r -g appuser -u 1000 appuser
 
 COPY --from=builder /app/target/release/impala-bridge /usr/local/bin/impala-bridge

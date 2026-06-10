@@ -1,51 +1,53 @@
 /**
  * Authentication module handling login, logout, and session state.
  *
- * Login is a 3-step process:
+ * Login is a 2-step process:
  *  1. POST /authenticate — validate credentials and register if first login
- *  2. POST /token (username+password) — obtain a 14-day refresh token
- *  3. POST /token (refresh_token) — obtain a 1-hour temporal token
+ *  2. POST /session/login — establish an HttpOnly cookie session; the
+ *     response carries the CSRF token (kept in memory by API) and the
+ *     session identity (cached in sessionStorage for nav rendering)
  *
- * The first user to log in is automatically bootstrapped as admin via Roles.bootstrap().
+ * The cookie is the security boundary: it is HttpOnly (invisible to script)
+ * and validated server-side on every request. No tokens are kept in
+ * localStorage.
+ *
+ * The first user to log in is automatically bootstrapped as admin via
+ * Roles.bootstrap().
  *
  * @module Auth
  */
 var Auth = (function () {
     /**
-     * Check whether the user has an active (non-expired) session.
-     * @returns {boolean} True if a valid refresh token exists.
+     * Check whether the user has an active session, per the local UX cache.
+     * Non-authoritative — the server is the actual gate (a stale cache just
+     * means one redirected request).
+     * @returns {boolean}
      */
     function isLoggedIn() {
-        var refresh = localStorage.getItem('refresh_token');
-        if (!refresh) return false;
-        return !API.isTokenExpired(refresh);
+        return !!API.getCachedUser();
     }
 
     /**
-     * Extract the username from the stored JWT token's `sub` claim.
-     * @returns {string|null} The username, or null if no token exists.
+     * Get the logged-in username from the session cache.
+     * @returns {string|null}
      */
     function getUsername() {
-        var token = localStorage.getItem('refresh_token') || localStorage.getItem('temporal_token');
-        if (!token) return null;
-        var payload = API.parseJwt(token);
-        return payload ? (payload.sub || payload.username || null) : null;
+        var user = API.getCachedUser();
+        return user ? user.account_id : null;
     }
 
     /**
-     * Get the expiration time of the current temporal token.
-     * @returns {Date|null} Expiry date, or null if no temporal token exists.
+     * Whether the session belongs to a bridge admin (from the server-issued
+     * session identity; display only — the server enforces it per request).
+     * @returns {boolean}
      */
-    function getTokenExpiry() {
-        var token = localStorage.getItem('temporal_token');
-        if (!token) return null;
-        var payload = API.parseJwt(token);
-        if (!payload || !payload.exp) return null;
-        return new Date(payload.exp * 1000);
+    function isAdmin() {
+        var user = API.getCachedUser();
+        return !!(user && user.is_admin);
     }
 
     /**
-     * Authenticate with the backend and obtain JWT tokens.
+     * Authenticate with the backend and establish a cookie session.
      * @param {string} accountId - The user's Payala account ID.
      * @param {string} password  - The user's password (min 8 characters).
      * @returns {Promise<{success: boolean, username: string}>}
@@ -63,36 +65,22 @@ var Auth = (function () {
             }
             return res.json();
         }).then(function () {
-            // Step 2: obtain long-lived refresh token
-            return API.rawPost('/token', {
+            // Step 2: establish the cookie session (sets the HttpOnly
+            // cookie; the JSON body carries the CSRF token + identity)
+            return API.rawPost('/session/login', {
                 username: accountId,
                 password: password
             });
         }).then(function (res) {
             if (!res.ok) {
                 return res.text().then(function (t) {
-                    throw new Error(t || 'Token request failed');
+                    throw new Error(t || 'Login failed');
                 });
             }
             return res.json();
         }).then(function (data) {
-            if (!data.refresh_token) throw new Error('No refresh token received');
-            API.setTokens(null, data.refresh_token);
-
-            // Step 3: exchange refresh token for short-lived temporal token
-            return API.rawPost('/token', {
-                refresh_token: data.refresh_token
-            });
-        }).then(function (res) {
-            if (!res.ok) {
-                return res.text().then(function (t) {
-                    throw new Error(t || 'Temporal token request failed');
-                });
-            }
-            return res.json();
-        }).then(function (data) {
-            if (!data.temporal_token) throw new Error('No temporal token received');
-            API.setTokens(data.temporal_token, null);
+            if (!data.success) throw new Error(data.message || 'Login failed');
+            API.setSession(data);
 
             // Bootstrap roles — first user becomes admin
             Roles.bootstrap(accountId);
@@ -101,13 +89,21 @@ var Auth = (function () {
         });
     }
 
-    /** Stop session timer, clear tokens, and redirect to the login page. */
+    /**
+     * Destroy the server-side session, clear local caches, and redirect to
+     * the login page. Local cleanup + redirect happen even if the server
+     * call fails (best effort — the cookie still dies with the session TTL).
+     */
     function logout() {
         if (typeof SessionTimer !== 'undefined') {
             SessionTimer.stop();
         }
-        API.clearTokens();
-        window.location.href = 'index.html';
+        return API.post('/session/logout').catch(function () {
+            // Network/permission failure: still drop local state below.
+        }).then(function () {
+            API.clearSession();
+            window.location.href = 'index.html';
+        });
     }
 
     /**
@@ -125,7 +121,7 @@ var Auth = (function () {
     return {
         isLoggedIn: isLoggedIn,
         getUsername: getUsername,
-        getTokenExpiry: getTokenExpiry,
+        isAdmin: isAdmin,
         login: login,
         logout: logout,
         requireAuth: requireAuth

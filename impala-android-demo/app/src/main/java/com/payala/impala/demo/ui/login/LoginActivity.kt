@@ -22,6 +22,7 @@ import com.payala.impala.demo.auth.OktaSignInResult
 import com.payala.impala.demo.databinding.ActivityLoginBinding
 import com.payala.impala.demo.ui.main.MainActivity
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 
 /**
  * Launcher activity presenting four authentication methods.
@@ -40,7 +41,9 @@ import kotlinx.coroutines.launch
  * NFC reader mode is enabled in [onResume] so that tapping an Impala card while
  * this activity is visible is read on a background thread (off the main thread);
  * the result is delivered to [handleCardResult] on the main thread. Taps are
- * only acted on while [awaitingCardTap] is set (after "Sign in with Card").
+ * only acted on while [awaitingCardTap] is set (after "Sign in with Card"), in
+ * which case a bridge-issued challenge is fetched mid-read ([fetchCardChallenge])
+ * and signed on-card for the `POST /auth/card` exchange.
  */
 class LoginActivity : AppCompatActivity() {
 
@@ -91,12 +94,26 @@ class LoginActivity : AppCompatActivity() {
         if (::nfcHelper.isInitialized) {
             // Reader mode: the card is read off the main thread; the callback is
             // delivered on the main thread. Only act on a tap we asked for.
-            nfcHelper.enableReaderMode { result ->
+            nfcHelper.enableReaderMode(challengeFetcher = ::fetchCardChallenge) { result ->
                 if (!awaitingCardTap) return@enableReaderMode
                 awaitingCardTap = false
                 handleCardResult(result)
             }
         }
+    }
+
+    /**
+     * Fetches a single-use card-auth challenge from the bridge. Runs on the
+     * NFC binder thread while IsoDep is still connected, so the blocking
+     * network call is safe here — and required: the challenge must be signed
+     * on-card before its 60-second TTL expires. Returns `null` (skipping the
+     * challenge exchange) when the user hasn't asked to sign in with a card.
+     */
+    private fun fetchCardChallenge(cardId: String): ByteArray? {
+        if (!awaitingCardTap) return null
+        val tokenManager = (application as ImpalaApp).tokenManager
+        val api = ApiClient.getService(BuildConfig.BRIDGE_BASE_URL, tokenManager)
+        return runBlocking { viewModel.fetchCardChallenge(api, cardId) }
     }
 
     override fun onPause() {
@@ -209,18 +226,9 @@ class LoginActivity : AppCompatActivity() {
             gitHubAuthHelper.startSignIn { result ->
                 when (result) {
                     is GitHubSignInResult.CodeReceived -> {
-                        lifecycleScope.launch {
-                            val user = gitHubAuthHelper.exchangeCodeForUser(result.code)
-                            if (user != null) {
-                                viewModel.loginWithGitHub(
-                                    api, tokenManager,
-                                    user.login, result.code, user.name
-                                )
-                            } else {
-                                binding.tvError.text = "Failed to get GitHub user info"
-                                binding.tvError.visibility = View.VISIBLE
-                            }
-                        }
+                        // The bridge exchanges the code server-side; no
+                        // on-device code→token exchange (and no client secret).
+                        viewModel.loginWithGitHub(api, tokenManager, result.code)
                     }
                     is GitHubSignInResult.Error -> {
                         runOnUiThread {
@@ -293,6 +301,7 @@ class LoginActivity : AppCompatActivity() {
             LoginViewModel.ErrorType.AUTH_FAILED -> getString(R.string.error_auth_failed)
             LoginViewModel.ErrorType.TOKEN_FAILED -> getString(R.string.error_token_refresh_failed)
             LoginViewModel.ErrorType.SERVER_ERROR -> getString(R.string.error_server)
+            LoginViewModel.ErrorType.TIMEOUT -> getString(R.string.error_timeout)
             LoginViewModel.ErrorType.VALIDATION -> error.message
             LoginViewModel.ErrorType.UNKNOWN -> getString(R.string.error_unknown)
         }

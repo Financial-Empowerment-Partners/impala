@@ -8,6 +8,7 @@ import android.nfc.NfcAdapter
 import android.nfc.Tag
 import android.nfc.tech.IsoDep
 import android.os.Bundle
+import androidx.core.content.IntentCompat
 import com.payala.impala.demo.log.AppLogger
 import com.payala.impala.demo.nfc.CardUser
 import com.payala.impala.demo.nfc.ImpalaCardReader
@@ -26,15 +27,16 @@ sealed class NfcCardResult {
      * @param user       card-stored identity (account ID, card ID, full name)
      * @param ecPubKey   EC (secp256r1) public key bytes (65B uncompressed)
      * @param rsaPubKey  RSA public key modulus bytes
-     * @param signedTimestamp DER-encoded ECDSA signature of [timestamp]
-     * @param timestamp  Unix epoch seconds that was signed
+     * @param authSignature DER-encoded ECDSA signature over the bridge-issued
+     *   auth challenge (signed on-card with the `"IMPALA-AUTH:"` domain
+     *   prefix), or `null` when no challenge was requested — e.g. a card
+     *   registration read, where only identity and public keys are needed
      */
     data class Success(
         val user: CardUser,
         val ecPubKey: ByteArray,
         val rsaPubKey: ByteArray,
-        val signedTimestamp: ByteArray,
-        val timestamp: Long
+        val authSignature: ByteArray? = null
     ) : NfcCardResult()
 
     /** Card read failed with an error message. */
@@ -70,8 +72,18 @@ class NfcCardAuthHelper(private val activity: Activity) {
      * Enables reader mode. The Impala card is read on a binder thread (off the
      * main thread); [onResult] is then invoked **on the main thread** with the
      * outcome. Call in `onResume()` and pair with [disableReaderMode] in `onPause()`.
+     *
+     * @param challengeFetcher optional blocking callback that fetches a
+     *   bridge-issued auth challenge for the given card ID. Invoked on the
+     *   binder thread **while IsoDep is still connected**, so the challenge
+     *   can be signed on-card within its 60-second TTL. Return `null` to skip
+     *   challenge signing for this tap; throw to fail the read with the
+     *   exception's message.
      */
-    fun enableReaderMode(onResult: (NfcCardResult) -> Unit) {
+    fun enableReaderMode(
+        challengeFetcher: ((cardId: String) -> ByteArray?)? = null,
+        onResult: (NfcCardResult) -> Unit
+    ) {
         val adapter = nfcAdapter
         if (adapter == null) {
             onResult(NfcCardResult.NfcNotAvailable)
@@ -79,7 +91,7 @@ class NfcCardAuthHelper(private val activity: Activity) {
         }
         val callback = NfcAdapter.ReaderCallback { tag ->
             // Runs off the main thread — safe to do the blocking IsoDep exchange here.
-            val result = processTag(tag)
+            val result = processTag(tag, challengeFetcher)
             activity.runOnUiThread { onResult(result) }
         }
         val flags = NfcAdapter.FLAG_READER_NFC_A or
@@ -124,7 +136,7 @@ class NfcCardAuthHelper(private val activity: Activity) {
 
     /**
      * Processes an NFC tag intent by connecting to the card and reading
-     * identity, public keys, and a signed timestamp.
+     * identity and public keys (no auth-challenge signing).
      *
      * @param intent the intent from [Activity.onNewIntent] or [Activity.getIntent]
      * @return [NfcCardResult.Success] with card data, or an error result
@@ -132,20 +144,24 @@ class NfcCardAuthHelper(private val activity: Activity) {
     fun processTag(intent: Intent): NfcCardResult {
         if (nfcAdapter == null) return NfcCardResult.NfcNotAvailable
 
-        @Suppress("DEPRECATION")
-        val tag: Tag = intent.getParcelableExtra(NfcAdapter.EXTRA_TAG)
+        val tag: Tag = IntentCompat.getParcelableExtra(intent, NfcAdapter.EXTRA_TAG, Tag::class.java)
             ?: return NfcCardResult.Error("No NFC tag found")
 
         return processTag(tag)
     }
 
     /**
-     * Connects to [tag] and reads identity, public keys, and a signed timestamp.
+     * Connects to [tag] and reads identity and public keys; when
+     * [challengeFetcher] is supplied (and returns non-null), additionally has
+     * the card sign the bridge-issued auth challenge while still connected.
      * Blocking — must NOT be called on the main thread (reader-mode callbacks run
      * off-main; the [processTag] intent overload is invoked from `onNewIntent`,
      * whose callers should dispatch it off-main).
      */
-    fun processTag(tag: Tag): NfcCardResult {
+    fun processTag(
+        tag: Tag,
+        challengeFetcher: ((cardId: String) -> ByteArray?)? = null
+    ): NfcCardResult {
         val isoDep = IsoDep.get(tag)
             ?: return NfcCardResult.Error("Card does not support IsoDep")
 
@@ -162,11 +178,18 @@ class NfcCardAuthHelper(private val activity: Activity) {
             val ecPubKey = reader.getECPubKey()
             AppLogger.d("NFC", "EC pubkey read: ${ecPubKey.size} bytes")
             val rsaPubKey = try { reader.getRSAPubKey() } catch (_: Exception) { byteArrayOf() }
-            val timestamp = System.currentTimeMillis() / 1000
-            val signedTimestamp = reader.getSignedTimestamp(timestamp)
+
+            // Challenge-response auth: fetch the bridge challenge while the
+            // card is still connected so it can be signed on-card within the
+            // challenge's 60-second TTL.
+            val authSignature = challengeFetcher?.invoke(user.wireCardId)?.let { challenge ->
+                reader.signAuthChallenge(challenge).also {
+                    AppLogger.i("NFC", "Auth challenge signed (${it.size}-byte DER signature)")
+                }
+            }
             AppLogger.i("NFC", "Card read successful: ${user.cardId}")
 
-            NfcCardResult.Success(user, ecPubKey, rsaPubKey, signedTimestamp, timestamp)
+            NfcCardResult.Success(user, ecPubKey, rsaPubKey, authSignature)
         } catch (e: Exception) {
             AppLogger.e("NFC", "Card read failed: ${e.message}")
             NfcCardResult.Error(e.message ?: "Card read failed")
