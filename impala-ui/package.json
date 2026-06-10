@@ -8,6 +8,6 @@
   },
   "//": "vitest pinned: ^4 requires Node >=20 (rolldown uses util.styleText); dev environment runs Node 18 (2026-06-09)",
   "devDependencies": {
-    "vitest": "^3"
+    "vitest": "^4"
   }
 }
