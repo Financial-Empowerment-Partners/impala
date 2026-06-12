@@ -15,10 +15,10 @@ doctest = false
 # which CI, docs, and testnet-tests all standardize against. cargo test passed
 # on 26.1.0 and env.events().publish still exists (deprecated), so retrying
 # only needs the coordinated wasm32v1-none target migration. (2026-06-09)
-soroban-sdk = { version = "23.5.3" }
+soroban-sdk = { version = "26.1.0" }
 
 [dev-dependencies]
-soroban-sdk = { version = "23.5.3", features = ["testutils"] }
+soroban-sdk = { version = "26.1.0", features = ["testutils"] }
 
 [profile.release]
 debug = 0
