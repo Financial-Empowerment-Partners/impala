@@ -1,0 +1,16 @@
+# Compiled binary
+/lumencli
+*.exe
+*.test
+*.out
+coverage.*
+
+# Secrets — NEVER commit key material
+*.key
+*.seed
+*.secret
+*.keystore
+secrets/
+keystore/
+.env
+.env.*
