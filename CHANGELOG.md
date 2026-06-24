@@ -8,6 +8,7 @@ first tagged release exists.
 ## [Unreleased]
 
 ### Added
+- **Custodial Stellar accounts in impala-bridge.** The bridge can now generate or import a Stellar secret seed, protect it at rest behind a pluggable backend, and sign + submit payments server-side. New endpoints: `POST /managed-account/generate`, `POST /managed-account/import`, `POST /managed-account/sign` (all `require_owner`-gated; the sign endpoint is rate-limited and server-only). New `seed_protect` module (`SeedProtector` trait + AWS KMS envelope-encryption and Vault Transit backends; seeds held only in zeroizing `SecretBytes`, fail-closed), `stellar` module (`StellarSigner` on `stellar-base 0.7`), migration `018_create_managed_seed.sql`, and `SEED_PROTECTION_BACKEND` / `KMS_SEED_KEY_ID` / `VAULT_ADDR` / `VAULT_TRANSIT_KEY` config. Terraform `seeds.tf` provisions the seed CMK (multi-Region for DR), scoped IAM grants, and injects the env into all task definitions.
 - Root `CONTRIBUTING.md` with per-sub-project dev workflows, testing expectations, and commit style.
 - Root `CHANGELOG.md` seeded.
 - `terraform/README.md` covering init → plan → apply, secrets injection, migration task invocation, and rollback.

@@ -11,7 +11,9 @@ mod models;
 mod notifications;
 mod okta;
 mod redis_helpers;
+mod seed_protect;
 mod sns;
+mod stellar;
 mod streams;
 mod telemetry;
 mod validate;
@@ -40,7 +42,7 @@ use tower_http::trace::TraceLayer;
 
 use config::load_config;
 use handlers::{
-    account, authenticate, card, device_token, health, logout, mfa, network,
+    account, authenticate, card, device_token, health, logout, managed_seed, mfa, network,
     notification_subscription, notify, okta as okta_handler, subscribe, sync, token, transaction,
 };
 
@@ -204,6 +206,20 @@ async fn run_server(
     };
     let sns_topic_arn = config.sns_topic_arn.clone().map(Arc::new);
 
+    // Custodial Stellar seed protector + signer. Built once and injected like
+    // other shared state. Fail closed at boot if the backend is misconfigured.
+    let seed_protector = seed_protect::build_protector(&config)
+        .await
+        .unwrap_or_else(|e| {
+            error!("Failed to initialize seed protector: {}", e);
+            std::process::exit(1);
+        });
+    info!(
+        "Custodial seed protection backend: {}",
+        config.seed_protection_backend
+    );
+    let stellar_signer = stellar::build_signer(&stellar_config);
+
     // CORS layer — restrict to configured origins when not wildcard
     if config.cors_allowed_origins == "*" {
         if config.stellar_network == config::StellarNetwork::Testnet {
@@ -253,6 +269,15 @@ async fn run_server(
         .route("/token", post(token::token))
         .route("/subscribe", post(subscribe::subscribe))
         .route("/transaction", post(transaction::create_transaction))
+        .route(
+            "/managed-account/generate",
+            post(managed_seed::generate_managed_account),
+        )
+        .route(
+            "/managed-account/import",
+            post(managed_seed::import_managed_account),
+        )
+        .route("/managed-account/sign", post(managed_seed::sign_and_submit))
         .route("/card", post(card::create_card).delete(card::delete_card))
         .route("/mfa", post(mfa::enroll_mfa).get(mfa::get_mfa))
         .route("/mfa/verify", post(mfa::verify_mfa))
@@ -317,6 +342,8 @@ async fn run_server(
         .layer(Extension(redis_pool.clone()))
         .layer(Extension(jwt_secret))
         .layer(Extension(stellar_config.clone()))
+        .layer(Extension(seed_protector))
+        .layer(Extension(stellar_signer))
         .layer(Extension(metrics));
 
     // Add optional SNS client extension

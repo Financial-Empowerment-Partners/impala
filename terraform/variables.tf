@@ -248,6 +248,36 @@ variable "signoz_access_token" {
   sensitive   = true
 }
 
+# --- Custodial Stellar seed protection ---
+
+variable "seed_protection_backend" {
+  description = "Backend protecting custodial Stellar seeds: none | kms | vault"
+  type        = string
+  default     = "none"
+  validation {
+    condition     = contains(["none", "kms", "vault"], var.seed_protection_backend)
+    error_message = "seed_protection_backend must be one of: none, kms, vault."
+  }
+}
+
+variable "kms_seed_key" {
+  description = "Optional externally-managed KMS key ARN for seed envelope encryption. Empty = create a dedicated key in this stack."
+  type        = string
+  default     = ""
+}
+
+variable "vault_addr" {
+  description = "Vault address for the vault seed-protection backend (e.g. https://vault.internal:8200)."
+  type        = string
+  default     = ""
+}
+
+variable "vault_transit_key" {
+  description = "Vault Transit key name used to encrypt/decrypt seeds (vault backend)."
+  type        = string
+  default     = ""
+}
+
 # --- Disaster Recovery ---
 
 variable "dr_enabled" {

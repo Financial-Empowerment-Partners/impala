@@ -62,6 +62,16 @@ jwt_secret = "CHANGE_ME_to_a_secure_random_string"
 # stellar_horizon_url = "https://horizon.stellar.org"
 # stellar_rpc_url     = "https://soroban-testnet.stellar.org"
 
+# Custodial Stellar seed protection (impala-bridge holds + signs with seeds)
+# seed_protection_backend = "kms"   # none (default) | kms | vault
+#   kms backend: a dedicated CMK is created automatically (or set kms_seed_key to
+#   reuse an external key). When dr_enabled, the CMK is multi-Region.
+# kms_seed_key = ""                  # optional: external CMK ARN to reuse
+#   vault backend: point at a Vault Transit key; auth secrets (VAULT_TOKEN or
+#   VAULT_ROLE_ID/VAULT_SECRET_ID) are supplied to the container out-of-band.
+# vault_addr        = "https://vault.internal:8200"
+# vault_transit_key = "impala-seeds"
+
 # Testnet cluster (deploys separate ECS/ALB/RDS/Redis for Stellar testnet)
 # testnet_enabled              = true
 # testnet_jwt_secret           = "CHANGE_ME_testnet_jwt_secret"

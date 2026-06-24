@@ -47,6 +47,14 @@ pub const RATE_LIMIT_MAX_REQUESTS: u64 = 10;
 /// Rate limit: window duration in seconds.
 pub const RATE_LIMIT_WINDOW_SECS: usize = 60;
 
+/// Rate limit for the custodial sign+submit endpoint: max requests per window.
+/// Deliberately tighter than the default `RATE_LIMIT_MAX_REQUESTS` because each
+/// call decrypts a seed and moves real funds.
+pub const SIGN_RATE_LIMIT_MAX_REQUESTS: u64 = 5;
+
+/// Rate-limit window (seconds) for the custodial sign+submit endpoint.
+pub const SIGN_RATE_LIMIT_WINDOW_SECS: usize = 60;
+
 /// Account lockout: number of failed login attempts before lockout.
 pub const LOCKOUT_THRESHOLD: u64 = 5;
 

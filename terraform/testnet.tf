@@ -738,7 +738,7 @@ resource "aws_ecs_task_definition" "testnet_server" {
         }
       ]
 
-      environment = [
+      environment = concat([
         { name = "RUN_MODE", value = "server" },
         { name = "SERVICE_ADDRESS", value = "0.0.0.0:8080" },
         { name = "REDIS_URL", value = "rediss://${aws_elasticache_replication_group.testnet[0].primary_endpoint_address}:6379" },
@@ -751,7 +751,7 @@ resource "aws_ecs_task_definition" "testnet_server" {
         { name = "AWS_REGION", value = var.aws_region },
         { name = "SES_FROM_ADDRESS", value = var.ses_from_address },
         { name = "FCM_PROJECT_ID", value = var.fcm_project_id },
-      ]
+      ], local.seed_protection_env_testnet)
 
       secrets = [
         {
@@ -802,7 +802,7 @@ resource "aws_ecs_task_definition" "testnet_worker" {
       readonlyRootFilesystem = true
       user                   = "1000:1000"
 
-      environment = [
+      environment = concat([
         { name = "RUN_MODE", value = "worker" },
         { name = "SQS_QUEUE_URL", value = aws_sqs_queue.testnet_worker[0].url },
         { name = "REDIS_URL", value = "rediss://${aws_elasticache_replication_group.testnet[0].primary_endpoint_address}:6379" },
@@ -814,7 +814,7 @@ resource "aws_ecs_task_definition" "testnet_worker" {
         { name = "AWS_REGION", value = var.aws_region },
         { name = "SES_FROM_ADDRESS", value = var.ses_from_address },
         { name = "FCM_PROJECT_ID", value = var.fcm_project_id },
-      ]
+      ], local.seed_protection_env_testnet)
 
       secrets = [
         {

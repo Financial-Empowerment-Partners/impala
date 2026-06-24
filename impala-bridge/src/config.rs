@@ -69,6 +69,13 @@ pub struct Config {
     pub stellar_rpc_url: String,
     pub stellar_network_passphrase: String,
     pub soroban_contract_id: Option<String>,
+    // Custodial Stellar seed protection. Non-secret config only — auth secrets
+    // (VAULT_TOKEN / VAULT_SECRET_ID) are read directly from the environment so
+    // they never land in this `Debug`-logged struct.
+    pub seed_protection_backend: String,
+    pub kms_seed_key_id: Option<String>,
+    pub vault_addr: Option<String>,
+    pub vault_transit_key: Option<String>,
 }
 
 /// Load configuration from a JSON config file (if present) and environment variables.
@@ -259,6 +266,23 @@ pub fn load_config() -> Config {
         .ok()
         .or_else(|| from_file("soroban_contract_id"));
 
+    let seed_protection_backend = env::var("SEED_PROTECTION_BACKEND")
+        .ok()
+        .or_else(|| from_file("seed_protection_backend"))
+        .unwrap_or_else(|| "none".to_string());
+
+    let kms_seed_key_id = env::var("KMS_SEED_KEY_ID")
+        .ok()
+        .or_else(|| from_file("kms_seed_key_id"));
+
+    let vault_addr = env::var("VAULT_ADDR")
+        .ok()
+        .or_else(|| from_file("vault_addr"));
+
+    let vault_transit_key = env::var("VAULT_TRANSIT_KEY")
+        .ok()
+        .or_else(|| from_file("vault_transit_key"));
+
     Config {
         public_endpoint,
         service_address,
@@ -294,6 +318,10 @@ pub fn load_config() -> Config {
         stellar_rpc_url,
         stellar_network_passphrase,
         soroban_contract_id,
+        seed_protection_backend,
+        kms_seed_key_id,
+        vault_addr,
+        vault_transit_key,
     }
 }
 
@@ -397,6 +425,10 @@ mod tests {
             stellar_rpc_url: "https://soroban-testnet.stellar.org".to_string(),
             stellar_network_passphrase: "Test SDF Network ; September 2015".to_string(),
             soroban_contract_id: Some("CONTRACT123".to_string()),
+            seed_protection_backend: "none".to_string(),
+            kms_seed_key_id: None,
+            vault_addr: None,
+            vault_transit_key: None,
         };
         let sc = config.stellar_config();
         assert_eq!(sc.network, StellarNetwork::Testnet);

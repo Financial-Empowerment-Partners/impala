@@ -38,6 +38,14 @@ aws-config = { version = "1", features = ["behavior-version-latest"] }
 aws-sdk-sqs = "1"
 aws-sdk-sns = "1"
 aws-sdk-sesv2 = "1"
+aws-sdk-kms = "1"
+# Custodial Stellar seed support: envelope encryption + classic tx signing.
+aes-gcm = "0.10"
+zeroize = { version = "1", features = ["derive"] }
+rand = "0.8"
+base64 = "0.22"
+stellar-base = "0.7"
+async-trait = "0.1"
 
 [build-dependencies]
 chrono = "0.4"

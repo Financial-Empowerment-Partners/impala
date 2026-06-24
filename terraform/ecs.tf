@@ -71,6 +71,7 @@ resource "aws_ecs_task_definition" "server" {
             { name = "FCM_PROJECT_ID", value = var.fcm_project_id },
           ],
           local.otel_app_env,
+          local.seed_protection_env,
         )
 
         secrets = [
@@ -136,6 +137,7 @@ resource "aws_ecs_task_definition" "worker" {
             { name = "FCM_PROJECT_ID", value = var.fcm_project_id },
           ],
           local.otel_app_env,
+          local.seed_protection_env,
         )
 
         secrets = [

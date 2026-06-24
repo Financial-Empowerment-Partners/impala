@@ -13,6 +13,11 @@ output "rds_endpoint" {
   value       = aws_db_instance.main.endpoint
 }
 
+output "stellar_seeds_kms_key_arn" {
+  description = "ARN of the KMS CMK protecting custodial Stellar seeds (empty unless the kms backend is enabled)."
+  value       = local.seed_kms_key_arn
+}
+
 output "redis_endpoint" {
   description = "ElastiCache Redis primary endpoint"
   value       = aws_elasticache_replication_group.main.primary_endpoint_address

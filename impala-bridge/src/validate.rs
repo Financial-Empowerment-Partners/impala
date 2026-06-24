@@ -23,6 +23,30 @@ pub fn validate_stellar_account_id(id: &str) -> Result<(), AppError> {
     Ok(())
 }
 
+/// Validate a Stellar secret seed format: must start with 'S', be 56 chars, Base32.
+///
+/// This is the cheap structural gate; strkey checksum validation happens when the
+/// seed is decoded into a keypair (`StellarSigner::seed_from_strkey`).
+pub fn validate_stellar_secret_seed(seed: &str) -> Result<(), AppError> {
+    if seed.len() != STELLAR_ACCOUNT_ID_LENGTH {
+        return Err(AppError::BadRequest(format!(
+            "Stellar secret seed must be {} characters",
+            STELLAR_ACCOUNT_ID_LENGTH
+        )));
+    }
+    if !seed.starts_with('S') {
+        return Err(AppError::BadRequest(
+            "Stellar secret seed must start with 'S'".to_string(),
+        ));
+    }
+    if !seed.chars().all(|c| matches!(c, 'A'..='Z' | '2'..='7')) {
+        return Err(AppError::BadRequest(
+            "Stellar secret seed must contain only Base32 characters (A-Z, 2-7)".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 /// Validate an email address with a basic check.
 pub fn validate_email(email: &str) -> Result<(), AppError> {
     if email.len() > MAX_EMAIL_LENGTH {
@@ -287,6 +311,38 @@ mod tests {
     fn test_stellar_id_non_alphanumeric() {
         let id = "GABC234567890123456789012345678901234567890123456789012!";
         assert!(validate_stellar_account_id(id).is_err());
+    }
+
+    // ── Stellar secret seed ────────────────────────────────────────────
+
+    #[test]
+    fn test_valid_stellar_secret_seed() {
+        let seed = "SABCDEFGHIJKLMNOPQRSTUVWXYZ234567ABCDEFGHIJKLMNOPQRSTUVW";
+        assert!(validate_stellar_secret_seed(seed).is_ok());
+    }
+
+    #[test]
+    fn test_secret_seed_wrong_prefix() {
+        // A G-address must not pass as a secret seed.
+        let id = "GABCDEFGHIJKLMNOPQRSTUVWXYZ234567ABCDEFGHIJKLMNOPQRSTUVW";
+        assert!(validate_stellar_secret_seed(id).is_err());
+    }
+
+    #[test]
+    fn test_secret_seed_too_short() {
+        assert!(validate_stellar_secret_seed("SABC").is_err());
+    }
+
+    #[test]
+    fn test_secret_seed_rejects_lowercase() {
+        let seed = "Sabc2345678901234567890123456789012345678901234567890123";
+        assert!(validate_stellar_secret_seed(seed).is_err());
+    }
+
+    #[test]
+    fn test_secret_seed_rejects_invalid_base32_digit() {
+        let seed = "S0BC2345678901234567890123456789012345678901234567890123";
+        assert!(validate_stellar_secret_seed(seed).is_err());
     }
 
     // ── Email ──────────────────────────────────────────────────────────

@@ -105,6 +105,60 @@ pub struct UpdateAccountResponse {
     pub rows_affected: u64,
 }
 
+// ── Managed Seed (custodial Stellar accounts) ──────────────────────────
+// NB: request types carrying a `secret_seed` are Deserialize-only and never
+// derive Debug, so seed material cannot be echoed or accidentally logged.
+
+#[derive(Deserialize)]
+pub struct GenerateManagedAccountRequest {
+    pub payala_account_id: String,
+    pub first_name: String,
+    pub middle_name: Option<String>,
+    pub last_name: String,
+    pub nickname: Option<String>,
+    pub affiliation: Option<String>,
+    pub gender: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct ImportManagedAccountRequest {
+    pub payala_account_id: String,
+    pub secret_seed: String,
+    pub first_name: String,
+    pub middle_name: Option<String>,
+    pub last_name: String,
+    pub nickname: Option<String>,
+    pub affiliation: Option<String>,
+    pub gender: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct ManagedAccountResponse {
+    pub success: bool,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stellar_account_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct SignSubmitRequest {
+    pub payala_account_id: String,
+    pub destination: String,
+    pub amount: String,
+    pub memo: Option<String>,
+    pub fee: Option<u32>,
+}
+
+#[derive(Serialize)]
+pub struct SignSubmitResponse {
+    pub success: bool,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stellar_hash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub btxid: Option<Uuid>,
+}
+
 // ── Authenticate ───────────────────────────────────────────────────────
 
 #[derive(Deserialize)]

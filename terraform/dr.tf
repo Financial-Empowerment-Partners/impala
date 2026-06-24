@@ -677,7 +677,7 @@ resource "aws_ecs_task_definition" "dr_server" {
         }
       ]
 
-      environment = [
+      environment = concat([
         { name = "RUN_MODE", value = "server" },
         { name = "SERVICE_ADDRESS", value = "0.0.0.0:8080" },
         { name = "REDIS_URL", value = "rediss://${aws_elasticache_replication_group.dr[0].primary_endpoint_address}:6379" },
@@ -687,7 +687,7 @@ resource "aws_ecs_task_definition" "dr_server" {
         { name = "AWS_REGION", value = var.dr_region },
         { name = "SES_FROM_ADDRESS", value = var.ses_from_address },
         { name = "FCM_PROJECT_ID", value = var.fcm_project_id },
-      ]
+      ], local.seed_protection_env_dr)
 
       secrets = [
         {
@@ -736,7 +736,7 @@ resource "aws_ecs_task_definition" "dr_worker" {
       image     = "${data.aws_caller_identity.current.account_id}.dkr.ecr.${var.dr_region}.amazonaws.com/${var.project_name}:${var.container_image_tag}"
       essential = true
 
-      environment = [
+      environment = concat([
         { name = "RUN_MODE", value = "worker" },
         { name = "SQS_QUEUE_URL", value = aws_sqs_queue.dr_worker[0].url },
         { name = "REDIS_URL", value = "rediss://${aws_elasticache_replication_group.dr[0].primary_endpoint_address}:6379" },
@@ -745,7 +745,7 @@ resource "aws_ecs_task_definition" "dr_worker" {
         { name = "AWS_REGION", value = var.dr_region },
         { name = "SES_FROM_ADDRESS", value = var.ses_from_address },
         { name = "FCM_PROJECT_ID", value = var.fcm_project_id },
-      ]
+      ], local.seed_protection_env_dr)
 
       secrets = [
         {
