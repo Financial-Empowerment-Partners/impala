@@ -87,7 +87,7 @@ TLS is terminated at the ALB with an ACM certificate. When `certificate_arn` is 
 ### Secrets Management
 
 - JWT secret and database URL stored in AWS Secrets Manager.
-- Optional HashiCorp Vault integration for database credentials (cubbyhole response unwrapping).
+- Optional HashiCorp Vault / OpenBao integration for database credentials (cubbyhole response unwrapping) and custodial-seed Transit encryption. OpenBao is an API-compatible Vault fork; `BAO_*` env names are accepted alongside `VAULT_*`.
 - `JWT_SECRET` requires minimum 32 characters (enforced at startup).
 
 ### Container Security

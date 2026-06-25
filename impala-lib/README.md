@@ -32,6 +32,8 @@ ACTION_TECH_DISCOVERED intent
     → ImpalaSDK.tx(CommandAPDU)
 ```
 
+> **Platform note:** this IsoDep/NDEF NFC transport is **Android-only**. iOS has no native NFC transport yet — native iOS NFC is deferred. See [`docs/ios-nfc.md`](../docs/ios-nfc.md) for the rationale (Apple NFC & SE Platform constraints) and the recommended external-reader path.
+
 **NDEF (Data Tags)** — for reading NFC data payloads:
 
 ```

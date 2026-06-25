@@ -88,7 +88,7 @@ graph TB
     subgraph Storage["Data Layer"]
         Postgres[("PostgreSQL 16<br/><i>17 migrations, slow query logs</i>")]
         Redis[("Redis 7<br/><i>TLS in transit, connection pool</i>")]
-        Vault["HashiCorp Vault"]
+        Vault["HashiCorp Vault / OpenBao"]
     end
 
     subgraph Networks["Blockchain Networks"]
@@ -382,15 +382,21 @@ The applet implements GlobalPlatform 2.3 Amendment D Secure Channel Protocol 03 
 
 ### Kotlin Multiplatform SDK
 
-The SDK (`ImpalaSDK`) provides a typed, cross-platform API that runs on JVM, iOS (x64, ARM64, simulator), and Android. It communicates with the applet through a `BIBO` (Byte-In, Byte-Out) interface — a single-method abstraction (`transceive(ByteArray): ByteArray`) that each platform implements:
+The SDK (`ImpalaSDK`) provides a typed, cross-platform API. Its **logic** (APDU encoding, SCP03, signatures) compiles for JVM, iOS (x64, ARM64, simulator), and Android, but the **transport** is platform-specific. It communicates with the applet through a `BIBO` (Byte-In, Byte-Out) interface — a single-method abstraction (`transceive(ByteArray): ByteArray`) that each platform supplies:
 
 - **Android**: `IsoDepBibo` wraps `android.nfc.tech.IsoDep` (ISO 14443-4)
 - **JVM tests**: `jcardsim` simulator provides a BIBO-compatible interface
-- **iOS**: Platform adaptor via CoreNFC
+- **iOS**: no NFC transport yet — **deferred** (the iOS framework builds the shared logic only). See [iOS NFC support (deferred)](#ios-nfc-support-deferred) below and [`docs/ios-nfc.md`](docs/ios-nfc.md).
 
 The APDU layer (`com.impala.sdk.apdu4j`) handles ISO 7816-4 command encoding and response parsing. `CommandAPDU` constructs the binary command from class, instruction, parameters, and data fields. `ResponseAPDU` parses the response and extracts the status word (`SW1`, `SW2`). The SDK auto-throws `ImpalaException` on any non-`0x9000` status.
 
 The SCP03 implementation in the SDK is a pure-Kotlin AES-128 implementation (no `javax.crypto` dependency) for cross-platform compatibility. It manages the secure channel lifecycle: key derivation, session establishment, MAC computation, and encrypted command wrapping.
+
+### iOS NFC support (deferred)
+
+Native iOS NFC is **not implemented**: there is no `iosMain` source set and no CoreNFC code, so the iOS framework ships the SDK's logic without a way to reach a card. It is deferred because Apple gates NFC heavily. Reading a card via CoreNFC (`NFCTagReaderSession`/`NFCISO7816Tag`) needs a paid developer account, the `com.apple.developer.nfc.readersession.formats` entitlement, and pre-declared applet AIDs, all within foreground-only, modal, time-limited sessions. Any Secure Element / card-emulation ("payments") flow additionally requires Apple's **NFC & SE Platform** program — an entitlement plus a commercial agreement, regulatory eligibility (e.g. PCI DSS), and region/iOS-version limits.
+
+The intended path is an **external proximity reader** (a Lightning/USB-C MFi accessory via the External Accessory framework, or a Bluetooth LE CCID reader) that implements the same `BIBO` interface and plugs into `ImpalaSDK` with no changes to the crypto/APDU logic. Full rationale, Apple requirements, and an integration sketch live in **[`docs/ios-nfc.md`](docs/ios-nfc.md)**.
 
 ---
 
@@ -863,7 +869,7 @@ graph TB
         Horizon["Stellar Horizon<br/><i>SSE ledger stream</i>"]
         SorobanRPC["Soroban RPC<br/><i>Transaction queries</i>"]
         PayalaTCP["Payala Network<br/><i>TCP events</i>"]
-        VaultServer["HashiCorp Vault<br/><i>Secret management</i>"]
+        VaultServer["HashiCorp Vault / OpenBao<br/><i>Secret management</i>"]
     end
 
     subgraph Notifications["Notification Providers"]

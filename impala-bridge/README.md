@@ -26,38 +26,44 @@ Edit `.env` with your database credentials:
 DATABASE_URL=postgresql://username:password@localhost:5432/impala
 ```
 
-#### HashiCorp Vault Integration (Optional)
-Impala supports unwrapping secrets protected by Vault's cubbyhole response wrapping.
+#### Vault / OpenBao Integration (Optional)
+Impala works with **HashiCorp Vault** or **OpenBao** (an OSS, API-compatible Vault
+fork). The same endpoints, `X-Vault-Token` header, and `vault:vN:` Transit ciphertext
+work against either. Each `VAULT_*` env var has a `BAO_*` alias that takes precedence:
+`BAO_ADDR`→`VAULT_ADDR`, `BAO_TOKEN`→`VAULT_TOKEN`, `BAO_TRANSIT_KEY`→`VAULT_TRANSIT_KEY`,
+`BAO_ROLE_ID`/`BAO_SECRET_ID`→`VAULT_ROLE_ID`/`VAULT_SECRET_ID`.
 
-**Environment Variables for Vault:**
+Two independent features use it:
+
+1. **DATABASE_URL unwrapping** — wrap the DB URL behind a one-time token.
+2. **Custodial-seed protection** via the Transit engine
+   (`SEED_PROTECTION_BACKEND=vault|openbao`, with `BAO_ADDR`/`BAO_TOKEN`/`BAO_TRANSIT_KEY`).
+
+> **Local development:** `docker compose up` (or `just up`) starts a local **OpenBao**
+> dev server and wires the bridge to it as the default seed-protection backend — no AWS
+> KMS needed. Dev mode is in-memory, unsealed, and uses a well-known root token: **local
+> use only.** Set `SEED_PROTECTION_BACKEND=none` to run without it.
+
+**DATABASE_URL unwrapping:**
 ```
-VAULT_ADDR=https://vault.example.com:8200
-DATABASE_URL_WRAPPED=s.bad1234567890abc  # Example wrapping token
+BAO_ADDR=https://openbao.example.com:8200    # or VAULT_ADDR
+DATABASE_URL_WRAPPED=s.bad1234567890abc      # one-time wrapping token
 ```
+- If `DATABASE_URL_WRAPPED` is set, the app unwraps the secret at startup (via
+  `box_unwrap` → `POST /v1/sys/wrapping/unwrap`); the unwrapped payload must contain a
+  `database_url` field. Unwrap failure is fatal (the app exits).
+- If unset, the app uses `DATABASE_URL` directly.
 
-**Usage:**
-- If `DATABASE_URL_WRAPPED` is set, application will automatically unwrap the secret from Vault during initialization
-- The unwrapped secret should contain a `database_url` field with db connection string
-- If unwrapping fails, the application will exit with an error
-- If `DATABASE_URL_WRAPPED` is not set, the application falls back to using `DATABASE_URL` directly
-
-**Creating a Wrapped Secret in Vault:**
+**Creating a wrapped secret** (CLI is `vault` or `bao` — interchangeable):
 ```bash
-# Write your database URL to Vault and wrap the response
+# Vault
 vault kv put -wrap-ttl=60s secret/database database_url="postgresql://user:pass@localhost/impala"
+# OpenBao
+bao kv put -wrap-ttl=60s secret/database database_url="postgresql://user:pass@localhost/impala"
 
-# Use the wrapping token in your environment
 export DATABASE_URL_WRAPPED="s.bad1234567890abc"
-export VAULT_ADDR="https://vault.example.com:8200"
+export BAO_ADDR="https://openbao.example.com:8200"   # or VAULT_ADDR
 ```
-
-**The `box_unwrap` Function:**
-The `box_unwrap(wrapping_token: &str)` function encapsulates the unwrapping process:
-- Takes a one-time wrapping token as input
-- Connects to Vault using the `VAULT_ADDR` environment variable
-- Makes a POST request to `/v1/sys/wrapping/unwrap`
-- Returns the unwrapped secret data as `serde_json::Value`
-- Handles errors gracefully with detailed error messages
 
 ### Database Setup
 Run the SQL migrations to create the required tables:

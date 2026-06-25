@@ -51,7 +51,7 @@ pub async fn execute(ctx: &WorkerContext, payload: &serde_json::Value) -> Result
     let medium_attr = KeyValue::new("medium", parsed.medium.clone());
     ctx.metrics
         .notification_delivery_duration
-        .record(duration, &[medium_attr.clone()]);
+        .record(duration, std::slice::from_ref(&medium_attr));
 
     let (service_id, service_response, result) = match delivery_result {
         Ok(tuple) => {
@@ -117,7 +117,7 @@ async fn send_webhook(
     let status = response.status().as_u16();
     let response_body = response.text().await.unwrap_or_default();
 
-    if status >= 200 && status < 300 {
+    if (200..300).contains(&status) {
         info!("send_notification: webhook to {} returned {}", url, status);
         Ok((url.to_string(), response_body, "delivered".to_string()))
     } else {
@@ -171,7 +171,7 @@ async fn send_sms(
     let status = response.status().as_u16();
     let response_body = response.text().await.unwrap_or_default();
 
-    if status >= 200 && status < 300 {
+    if (200..300).contains(&status) {
         info!(
             "send_notification: SMS to {} via Twilio returned {}",
             to_number, status
@@ -326,7 +326,7 @@ async fn send_push(
         let status = response.status().as_u16();
         let response_body = response.text().await.unwrap_or_default();
 
-        if status >= 200 && status < 300 {
+        if (200..300).contains(&status) {
             sent_count += 1;
             last_response = response_body;
         } else {

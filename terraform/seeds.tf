@@ -3,8 +3,8 @@
 # Provisions the KMS CMK(s) used by impala-bridge to envelope-encrypt custodial
 # Stellar secret seeds, the IAM grants for the ECS task roles, and the env vars
 # injected into the task definitions. Everything is gated on
-# var.seed_protection_backend, so a "none"/"vault" deployment creates no KMS
-# resources. Consuming code: impala-bridge/src/seed_protect.
+# var.seed_protection_backend, so a "none"/"vault"/"openbao" deployment creates no
+# KMS resources. Consuming code: impala-bridge/src/seed_protect.
 
 locals {
   seed_kms_enabled = var.seed_protection_backend == "kms"
@@ -21,7 +21,11 @@ locals {
   seed_kms_key_arn_testnet = (local.seed_kms_enabled && var.testnet_enabled) ? aws_kms_key.stellar_seeds_testnet[0].arn : ""
 
   _seed_env_base = [{ name = "SEED_PROTECTION_BACKEND", value = var.seed_protection_backend }]
-  _seed_env_vault = var.seed_protection_backend == "vault" ? [
+  # vault and openbao share one API-compatible Transit backend; the bridge accepts
+  # VAULT_* env names for either (BAO_* names also work and take precedence). Auth
+  # secrets (VAULT_TOKEN/BAO_TOKEN or AppRole role/secret id) are supplied to the
+  # container out-of-band, never in plan/state.
+  _seed_env_vault = contains(["vault", "openbao"], var.seed_protection_backend) ? [
     { name = "VAULT_ADDR", value = var.vault_addr },
     { name = "VAULT_TRANSIT_KEY", value = var.vault_transit_key },
   ] : []

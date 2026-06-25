@@ -14,9 +14,11 @@ pub enum NotificationEvent {
     LoginFailure {
         account_id: String,
     },
+    #[allow(dead_code)] // event taxonomy; emitted by paths not yet wired
     PasswordChange {
         account_id: String,
     },
+    #[allow(dead_code)] // event taxonomy; emitted by paths not yet wired
     TransferIncoming {
         account_id: String,
         amount: String,
@@ -108,126 +110,6 @@ struct SubscriptionTarget {
     mobile: Option<String>,
     email: Option<String>,
     url: Option<String>,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_event_account_id_login_success() {
-        let event = NotificationEvent::LoginSuccess {
-            account_id: "acc123".to_string(),
-        };
-        assert_eq!(event.account_id(), "acc123");
-    }
-
-    #[test]
-    fn test_event_account_id_transfer_outgoing() {
-        let event = NotificationEvent::TransferOutgoing {
-            account_id: "acc456".to_string(),
-            amount: "100".to_string(),
-            to: "dest".to_string(),
-        };
-        assert_eq!(event.account_id(), "acc456");
-    }
-
-    #[test]
-    fn test_event_type_str_all_variants() {
-        let cases: Vec<(NotificationEvent, &str)> = vec![
-            (
-                NotificationEvent::LoginSuccess {
-                    account_id: "a".into(),
-                },
-                "login_success",
-            ),
-            (
-                NotificationEvent::LoginFailure {
-                    account_id: "a".into(),
-                },
-                "login_failure",
-            ),
-            (
-                NotificationEvent::PasswordChange {
-                    account_id: "a".into(),
-                },
-                "password_change",
-            ),
-            (
-                NotificationEvent::TransferIncoming {
-                    account_id: "a".into(),
-                    amount: "0".into(),
-                    from: "b".into(),
-                },
-                "transfer_incoming",
-            ),
-            (
-                NotificationEvent::TransferOutgoing {
-                    account_id: "a".into(),
-                    amount: "0".into(),
-                    to: "b".into(),
-                },
-                "transfer_outgoing",
-            ),
-            (
-                NotificationEvent::ProfileUpdated {
-                    account_id: "a".into(),
-                    fields: vec![],
-                },
-                "profile_updated",
-            ),
-        ];
-        for (event, expected) in cases {
-            assert_eq!(event.event_type_str(), expected);
-        }
-    }
-
-    #[test]
-    fn test_format_message_login_success() {
-        let event = NotificationEvent::LoginSuccess {
-            account_id: "user1".to_string(),
-        };
-        let (subject, body) = event.format_message();
-        assert_eq!(subject, "Login Successful");
-        assert!(body.contains("user1"));
-    }
-
-    #[test]
-    fn test_format_message_transfer_outgoing() {
-        let event = NotificationEvent::TransferOutgoing {
-            account_id: "user1".to_string(),
-            amount: "500 XLM".to_string(),
-            to: "GDEST".to_string(),
-        };
-        let (subject, body) = event.format_message();
-        assert_eq!(subject, "Outgoing Transfer");
-        assert!(body.contains("500 XLM"));
-        assert!(body.contains("GDEST"));
-    }
-
-    #[test]
-    fn test_format_message_profile_updated() {
-        let event = NotificationEvent::ProfileUpdated {
-            account_id: "user1".to_string(),
-            fields: vec!["first_name".to_string(), "email".to_string()],
-        };
-        let (subject, body) = event.format_message();
-        assert_eq!(subject, "Profile Updated");
-        assert!(body.contains("first_name, email"));
-    }
-
-    #[test]
-    fn test_format_message_transfer_incoming() {
-        let event = NotificationEvent::TransferIncoming {
-            account_id: "user1".to_string(),
-            amount: "250 XLM".to_string(),
-            from: "GSRC".to_string(),
-        };
-        let (subject, body) = event.format_message();
-        assert_eq!(subject, "Incoming Transfer");
-        assert!(body.contains("250 XLM"));
-        assert!(body.contains("GSRC"));
-    }
 }
 
 /// Dispatch notification jobs for a given event.
@@ -387,5 +269,125 @@ pub async fn dispatch_event(
                 ],
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_event_account_id_login_success() {
+        let event = NotificationEvent::LoginSuccess {
+            account_id: "acc123".to_string(),
+        };
+        assert_eq!(event.account_id(), "acc123");
+    }
+
+    #[test]
+    fn test_event_account_id_transfer_outgoing() {
+        let event = NotificationEvent::TransferOutgoing {
+            account_id: "acc456".to_string(),
+            amount: "100".to_string(),
+            to: "dest".to_string(),
+        };
+        assert_eq!(event.account_id(), "acc456");
+    }
+
+    #[test]
+    fn test_event_type_str_all_variants() {
+        let cases: Vec<(NotificationEvent, &str)> = vec![
+            (
+                NotificationEvent::LoginSuccess {
+                    account_id: "a".into(),
+                },
+                "login_success",
+            ),
+            (
+                NotificationEvent::LoginFailure {
+                    account_id: "a".into(),
+                },
+                "login_failure",
+            ),
+            (
+                NotificationEvent::PasswordChange {
+                    account_id: "a".into(),
+                },
+                "password_change",
+            ),
+            (
+                NotificationEvent::TransferIncoming {
+                    account_id: "a".into(),
+                    amount: "0".into(),
+                    from: "b".into(),
+                },
+                "transfer_incoming",
+            ),
+            (
+                NotificationEvent::TransferOutgoing {
+                    account_id: "a".into(),
+                    amount: "0".into(),
+                    to: "b".into(),
+                },
+                "transfer_outgoing",
+            ),
+            (
+                NotificationEvent::ProfileUpdated {
+                    account_id: "a".into(),
+                    fields: vec![],
+                },
+                "profile_updated",
+            ),
+        ];
+        for (event, expected) in cases {
+            assert_eq!(event.event_type_str(), expected);
+        }
+    }
+
+    #[test]
+    fn test_format_message_login_success() {
+        let event = NotificationEvent::LoginSuccess {
+            account_id: "user1".to_string(),
+        };
+        let (subject, body) = event.format_message();
+        assert_eq!(subject, "Login Successful");
+        assert!(body.contains("user1"));
+    }
+
+    #[test]
+    fn test_format_message_transfer_outgoing() {
+        let event = NotificationEvent::TransferOutgoing {
+            account_id: "user1".to_string(),
+            amount: "500 XLM".to_string(),
+            to: "GDEST".to_string(),
+        };
+        let (subject, body) = event.format_message();
+        assert_eq!(subject, "Outgoing Transfer");
+        assert!(body.contains("500 XLM"));
+        assert!(body.contains("GDEST"));
+    }
+
+    #[test]
+    fn test_format_message_profile_updated() {
+        let event = NotificationEvent::ProfileUpdated {
+            account_id: "user1".to_string(),
+            fields: vec!["first_name".to_string(), "email".to_string()],
+        };
+        let (subject, body) = event.format_message();
+        assert_eq!(subject, "Profile Updated");
+        assert!(body.contains("first_name, email"));
+    }
+
+    #[test]
+    fn test_format_message_transfer_incoming() {
+        let event = NotificationEvent::TransferIncoming {
+            account_id: "user1".to_string(),
+            amount: "250 XLM".to_string(),
+            from: "GSRC".to_string(),
+        };
+        let (subject, body) = event.format_message();
+        assert_eq!(subject, "Incoming Transfer");
+        assert!(body.contains("250 XLM"));
+        assert!(body.contains("GSRC"));
     }
 }

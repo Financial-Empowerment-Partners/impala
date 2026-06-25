@@ -86,19 +86,19 @@ async fn main() {
     info!("impala-bridge starting up (mode={})", run_mode);
     debug!("Config: {:?}", config);
 
-    // Resolve database URL (Vault unwrap or direct env var)
+    // Resolve database URL (Vault/OpenBao unwrap or direct env var)
     let database_url = if let Ok(wrapped_token) = env::var("DATABASE_URL_WRAPPED") {
-        info!("Unwrapping DATABASE_URL from Vault");
+        info!("Unwrapping DATABASE_URL from Vault/OpenBao");
         match vault::box_unwrap(&wrapped_token).await {
             Ok(secret_data) => {
-                info!("Vault secret unwrapped successfully");
+                info!("Secret unwrapped successfully");
                 secret_data["database_url"]
                     .as_str()
                     .expect("database_url field not found in unwrapped secret")
                     .to_string()
             }
             Err(e) => {
-                error!("Failed to unwrap DATABASE_URL from Vault: {}", e);
+                error!("Failed to unwrap DATABASE_URL from Vault/OpenBao: {}", e);
                 std::process::exit(1);
             }
         }

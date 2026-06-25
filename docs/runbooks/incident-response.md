@@ -96,8 +96,8 @@ Treat as Sev 1 regardless of impact.
 2. **Rotate `JWT_SECRET`** (see `rotate-secrets.md`) — this invalidates all
    existing tokens and forces every user to re-authenticate.
 3. **Rotate all other secrets** that may have been reachable from the same
-   blast radius: DB URL, Vault wrapping tokens, Twilio, SES, FCM, Okta
-   client secret.
+   blast radius: DB URL, Vault/OpenBao wrapping & Transit tokens, Twilio, SES,
+   FCM, Okta client secret.
 4. **Review access logs.** ALB access logs are in the S3 bucket wired by
    `terraform/alb.tf`.
 5. **Open a security issue** (private) with the forensic snapshot and

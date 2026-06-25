@@ -35,8 +35,10 @@ pub struct StellarConfig {
 
 #[derive(Debug, Clone)]
 pub struct Config {
+    #[allow(dead_code)] // loaded config, not currently read in code paths
     pub public_endpoint: String,
     pub service_address: String,
+    #[allow(dead_code)] // loaded config, not currently read in code paths
     pub log_file: String,
     pub debug_mode: bool,
     pub twilio_sid: Option<String>,
@@ -60,6 +62,7 @@ pub struct Config {
     pub sqs_visibility_timeout: i32,
     pub ses_from_address: Option<String>,
     pub fcm_project_id: Option<String>,
+    #[allow(dead_code)] // loaded config, not currently read in code paths
     pub fcm_service_account_key: Option<String>,
     pub otel_exporter_endpoint: Option<String>,
     pub otel_service_name: Option<String>,
@@ -76,6 +79,14 @@ pub struct Config {
     pub kms_seed_key_id: Option<String>,
     pub vault_addr: Option<String>,
     pub vault_transit_key: Option<String>,
+}
+
+/// Return the first environment variable that is set among `keys`, in order.
+///
+/// Used to accept OpenBao-native `BAO_*` names while falling back to the
+/// historical `VAULT_*` names (OpenBao is an API-compatible Vault fork).
+pub fn env_any(keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|k| env::var(k).ok())
 }
 
 /// Load configuration from a JSON config file (if present) and environment variables.
@@ -275,12 +286,11 @@ pub fn load_config() -> Config {
         .ok()
         .or_else(|| from_file("kms_seed_key_id"));
 
-    let vault_addr = env::var("VAULT_ADDR")
-        .ok()
-        .or_else(|| from_file("vault_addr"));
+    // Vault/OpenBao: accept the OpenBao-native name first, then the Vault name,
+    // then the config file. The internal field names stay `vault_*`.
+    let vault_addr = env_any(&["BAO_ADDR", "VAULT_ADDR"]).or_else(|| from_file("vault_addr"));
 
-    let vault_transit_key = env::var("VAULT_TRANSIT_KEY")
-        .ok()
+    let vault_transit_key = env_any(&["BAO_TRANSIT_KEY", "VAULT_TRANSIT_KEY"])
         .or_else(|| from_file("vault_transit_key"));
 
     Config {
@@ -322,6 +332,52 @@ pub fn load_config() -> Config {
         kms_seed_key_id,
         vault_addr,
         vault_transit_key,
+    }
+}
+
+/// Minimal `Config` for unit tests (all integrations off, testnet defaults).
+/// Tests mutate only the fields they exercise.
+#[cfg(test)]
+pub(crate) fn test_config() -> Config {
+    Config {
+        public_endpoint: String::new(),
+        service_address: String::new(),
+        log_file: String::new(),
+        debug_mode: false,
+        twilio_sid: None,
+        twilio_token: None,
+        twilio_number: None,
+        ldap_url: None,
+        ldap_bind_dn: None,
+        ldap_bind_password: None,
+        ldap_base_dn: None,
+        ldap_search_filter: None,
+        db_max_connections: 5,
+        cors_allowed_origins: String::new(),
+        http_client_timeout_secs: 30,
+        okta_issuer_url: None,
+        okta_client_id: None,
+        okta_jwks_refresh_secs: 3600,
+        sqs_queue_url: None,
+        sns_topic_arn: None,
+        worker_concurrency: 10,
+        sqs_wait_time_seconds: 20,
+        sqs_visibility_timeout: 300,
+        ses_from_address: None,
+        fcm_project_id: None,
+        fcm_service_account_key: None,
+        otel_exporter_endpoint: None,
+        otel_service_name: None,
+        otel_environment: None,
+        stellar_network: StellarNetwork::Testnet,
+        stellar_horizon_url: "https://horizon-testnet.stellar.org".to_string(),
+        stellar_rpc_url: "https://soroban-testnet.stellar.org".to_string(),
+        stellar_network_passphrase: "Test SDF Network ; September 2015".to_string(),
+        soroban_contract_id: None,
+        seed_protection_backend: "none".to_string(),
+        kms_seed_key_id: None,
+        vault_addr: None,
+        vault_transit_key: None,
     }
 }
 
@@ -390,46 +446,8 @@ mod tests {
         // Verify stellar_config() correctly copies fields
         // Note: we can't easily test load_config() since it reads env vars,
         // but we can test the Config -> StellarConfig conversion
-        let config = Config {
-            public_endpoint: String::new(),
-            service_address: String::new(),
-            log_file: String::new(),
-            debug_mode: false,
-            twilio_sid: None,
-            twilio_token: None,
-            twilio_number: None,
-            ldap_url: None,
-            ldap_bind_dn: None,
-            ldap_bind_password: None,
-            ldap_base_dn: None,
-            ldap_search_filter: None,
-            db_max_connections: 5,
-            cors_allowed_origins: String::new(),
-            http_client_timeout_secs: 30,
-            okta_issuer_url: None,
-            okta_client_id: None,
-            okta_jwks_refresh_secs: 3600,
-            sqs_queue_url: None,
-            sns_topic_arn: None,
-            worker_concurrency: 10,
-            sqs_wait_time_seconds: 20,
-            sqs_visibility_timeout: 300,
-            ses_from_address: None,
-            fcm_project_id: None,
-            fcm_service_account_key: None,
-            otel_exporter_endpoint: None,
-            otel_service_name: None,
-            otel_environment: None,
-            stellar_network: StellarNetwork::Testnet,
-            stellar_horizon_url: "https://horizon-testnet.stellar.org".to_string(),
-            stellar_rpc_url: "https://soroban-testnet.stellar.org".to_string(),
-            stellar_network_passphrase: "Test SDF Network ; September 2015".to_string(),
-            soroban_contract_id: Some("CONTRACT123".to_string()),
-            seed_protection_backend: "none".to_string(),
-            kms_seed_key_id: None,
-            vault_addr: None,
-            vault_transit_key: None,
-        };
+        let mut config = test_config();
+        config.soroban_contract_id = Some("CONTRACT123".to_string());
         let sc = config.stellar_config();
         assert_eq!(sc.network, StellarNetwork::Testnet);
         assert_eq!(sc.horizon_url, "https://horizon-testnet.stellar.org");

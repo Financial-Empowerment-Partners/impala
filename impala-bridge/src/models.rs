@@ -35,7 +35,7 @@ impl PaginationParams {
     /// Return clamped `(per_page, offset)` suitable for SQL LIMIT/OFFSET.
     /// `per_page` is clamped to `[1, 100]`, `page` to `[1, ..)`.
     pub fn clamped(&self) -> (i64, i64) {
-        let per_page = (self.per_page.max(1).min(100)) as i64;
+        let per_page = self.per_page.clamp(1, 100) as i64;
         let page = self.page.max(1) as i64;
         let offset = (page - 1) * per_page;
         (per_page, offset)
@@ -273,6 +273,7 @@ pub struct DeleteCardRequest {
 pub struct EnrollMfaRequest {
     pub account_id: String,
     pub mfa_type: String,
+    #[allow(dead_code)] // part of the request wire format; not read server-side
     pub secret: Option<String>,
     pub phone_number: Option<String>,
 }

@@ -225,22 +225,30 @@ pub async fn clear_mfa_attempts(pool: &RedisPool, account_id: &str, mfa_type: &s
     }
 }
 
+// Canonical Redis key builders. Currently exercised only by the unit tests below
+// (the live call sites format keys inline); retained as the single source of truth
+// for the key formats.
+
 /// Construct a rate-limit Redis key for the given scope and identity.
+#[allow(dead_code)]
 pub(crate) fn rate_limit_key(scope: &str, id: &str) -> String {
     format!("impala:rate:{scope}:{id}")
 }
 
 /// Construct a lockout Redis key for the given identity.
+#[allow(dead_code)]
 pub(crate) fn lockout_key(id: &str) -> String {
     format!("impala:lockout:{id}")
 }
 
 /// Construct a token revocation Redis key for the given JTI.
+#[allow(dead_code)]
 pub(crate) fn revoked_key(jti: &str) -> String {
     format!("impala:revoked:{jti}")
 }
 
 /// Construct an MFA attempts Redis key for the given account and MFA type.
+#[allow(dead_code)]
 pub(crate) fn mfa_attempts_key(account_id: &str, mfa_type: &str) -> String {
     format!("impala:mfa_attempts:{account_id}:{mfa_type}")
 }

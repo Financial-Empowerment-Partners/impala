@@ -30,6 +30,7 @@ pub const DB_IDLE_TIMEOUT_SECS: u64 = 600;
 pub const DB_MAX_LIFETIME_SECS: u64 = 1800;
 
 /// Default Redis connection pool size.
+#[allow(dead_code)] // documents the default; pool size is configured elsewhere
 pub const DEFAULT_REDIS_POOL_SIZE: usize = 16;
 
 /// Request timeout in seconds (applied globally via middleware).

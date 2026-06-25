@@ -251,12 +251,12 @@ variable "signoz_access_token" {
 # --- Custodial Stellar seed protection ---
 
 variable "seed_protection_backend" {
-  description = "Backend protecting custodial Stellar seeds: none | kms | vault"
+  description = "Backend protecting custodial Stellar seeds: none | kms | vault | openbao. 'vault' and 'openbao' share one API-compatible Transit backend."
   type        = string
   default     = "none"
   validation {
-    condition     = contains(["none", "kms", "vault"], var.seed_protection_backend)
-    error_message = "seed_protection_backend must be one of: none, kms, vault."
+    condition     = contains(["none", "kms", "vault", "openbao"], var.seed_protection_backend)
+    error_message = "seed_protection_backend must be one of: none, kms, vault, openbao."
   }
 }
 
@@ -267,13 +267,13 @@ variable "kms_seed_key" {
 }
 
 variable "vault_addr" {
-  description = "Vault address for the vault seed-protection backend (e.g. https://vault.internal:8200)."
+  description = "Vault/OpenBao address for the vault|openbao seed-protection backend (e.g. https://vault.internal:8200). The server is external — Terraform does not provision it."
   type        = string
   default     = ""
 }
 
 variable "vault_transit_key" {
-  description = "Vault Transit key name used to encrypt/decrypt seeds (vault backend)."
+  description = "Vault/OpenBao Transit key name used to encrypt/decrypt seeds (vault|openbao backend)."
   type        = string
   default     = ""
 }

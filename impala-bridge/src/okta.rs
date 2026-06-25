@@ -9,6 +9,7 @@ use crate::error::AppError;
 /// OIDC discovery document from the authorization server.
 #[derive(Debug, Clone, Deserialize)]
 pub struct OidcDiscovery {
+    #[allow(dead_code)] // part of the OIDC discovery document; retained for completeness
     pub issuer: String,
     pub authorization_endpoint: String,
     pub token_endpoint: String,
@@ -37,6 +38,7 @@ pub struct Jwk {
 
 /// Claims from a validated Okta access token.
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)] // claims document the token wire format; only some are read
 pub struct OktaAccessTokenClaims {
     pub sub: String,
     pub iss: String,

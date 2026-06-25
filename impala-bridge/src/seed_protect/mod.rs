@@ -5,7 +5,10 @@
 //! backends are selected per-deployment via `SEED_PROTECTION_BACKEND`:
 //!
 //! - **kms**  — AWS KMS envelope encryption (`GenerateDataKey` + local AES-256-GCM).
-//! - **vault** — HashiCorp Vault Transit engine (`transit/encrypt|decrypt`).
+//! - **vault** / **openbao** — HashiCorp Vault or OpenBao Transit engine
+//!   (`transit/encrypt|decrypt`). OpenBao is an API-compatible Vault fork, so both
+//!   values map to the same backend and persist the canonical `vault` tag (the
+//!   ciphertexts are byte-identical and mutually decryptable).
 //!
 //! Security invariants (do not weaken):
 //! - Plaintext seeds live only inside [`SecretBytes`], which zeroizes on drop.
@@ -144,13 +147,17 @@ pub async fn build_protector(config: &Config) -> Result<Arc<dyn SeedProtector>, 
             })?;
             Ok(Arc::new(kms::KmsSeedProtector::new(key_id).await))
         }
-        "vault" => {
+        // OpenBao is an API-compatible Vault fork: same Transit endpoints, header,
+        // and `vault:vN:` ciphertext. Both map to the one Transit protector, whose
+        // `backend()` reports `Vault` so the persisted tag (and the decrypt-time
+        // backend-match check in handlers/managed_seed) stays stable across labels.
+        "vault" | "openbao" => {
             let protector = vault::VaultSeedProtector::from_config(config).await?;
             Ok(Arc::new(protector))
         }
         "none" | "" => Ok(Arc::new(NoneProtector)),
         other => Err(format!(
-            "unknown SEED_PROTECTION_BACKEND '{}' (expected kms|vault|none)",
+            "unknown SEED_PROTECTION_BACKEND '{}' (expected kms|vault|openbao|none)",
             other
         )),
     }
@@ -222,6 +229,29 @@ mod tests {
             key_version: None,
         };
         assert!(protector.decrypt_seed(&dummy).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_openbao_routes_to_vault_backend() {
+        // "openbao" must reach the Transit (vault) arm, not the unknown-backend arm.
+        // With vault_addr unset, from_config returns the addr-required error before
+        // any network/token work, proving routing reached the vault arm.
+        let mut config = crate::config::test_config();
+        config.seed_protection_backend = "openbao".to_string();
+        config.vault_addr = None;
+        // Can't `unwrap_err()` — the Ok type `Arc<dyn SeedProtector>` isn't `Debug`.
+        let err = match build_protector(&config).await {
+            Ok(_) => panic!("openbao backend built without an address"),
+            Err(e) => e,
+        };
+        assert!(
+            err.contains("VAULT_ADDR") || err.contains("BAO_ADDR"),
+            "expected addr-required error, got: {err}"
+        );
+        assert!(
+            !err.contains("unknown SEED_PROTECTION_BACKEND"),
+            "openbao fell through to unknown-backend arm: {err}"
+        );
     }
 
     #[test]

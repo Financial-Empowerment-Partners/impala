@@ -441,6 +441,7 @@ pub async fn verify_mfa(
 }
 
 /// Generate a TOTP enrollment: returns `(secret_base32, provisioning_uri)`.
+#[allow(dead_code)] // exercised by unit tests; retained as the canonical TOTP logic
 pub(crate) fn generate_totp_enrollment(account_id: &str) -> Result<(String, String), AppError> {
     let secret = Secret::generate_secret();
     let totp = TOTP::new(
@@ -462,6 +463,7 @@ pub(crate) fn generate_totp_enrollment(account_id: &str) -> Result<(String, Stri
 }
 
 /// Verify a TOTP code against a base32-encoded secret.
+#[allow(dead_code)] // exercised by unit tests; retained as the canonical TOTP logic
 pub(crate) fn verify_totp_code(
     secret_base32: &str,
     account_id: &str,

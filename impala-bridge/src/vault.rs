@@ -1,5 +1,5 @@
+use crate::config::env_any;
 use serde::Deserialize;
-use std::env;
 
 #[derive(Deserialize, Debug)]
 struct VaultUnwrapResponse {
@@ -17,7 +17,7 @@ impl std::fmt::Display for BoxUnwrapError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             BoxUnwrapError::VaultUrlMissing => {
-                write!(f, "VAULT_ADDR environment variable not set")
+                write!(f, "VAULT_ADDR / BAO_ADDR environment variable not set")
             }
             BoxUnwrapError::RequestFailed(msg) => write!(f, "Vault request failed: {}", msg),
             BoxUnwrapError::InvalidResponse(msg) => write!(f, "Invalid Vault response: {}", msg),
@@ -27,9 +27,13 @@ impl std::fmt::Display for BoxUnwrapError {
 
 impl std::error::Error for BoxUnwrapError {}
 
-/// Unwrap a HashiCorp Vault wrapped secret using a wrapping token.
+/// Unwrap a HashiCorp Vault / OpenBao wrapped secret using a wrapping token.
+///
+/// OpenBao is an API-compatible Vault fork, so the same `/v1/sys/wrapping/unwrap`
+/// endpoint and `X-Vault-Token` header work against either. The server address is
+/// read from `BAO_ADDR`, falling back to `VAULT_ADDR`.
 pub async fn box_unwrap(wrapping_token: &str) -> Result<serde_json::Value, BoxUnwrapError> {
-    let vault_addr = env::var("VAULT_ADDR").map_err(|_| BoxUnwrapError::VaultUrlMissing)?;
+    let vault_addr = env_any(&["BAO_ADDR", "VAULT_ADDR"]).ok_or(BoxUnwrapError::VaultUrlMissing)?;
 
     let unwrap_url = format!(
         "{}/v1/sys/wrapping/unwrap",

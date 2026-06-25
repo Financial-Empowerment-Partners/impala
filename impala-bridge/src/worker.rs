@@ -20,6 +20,7 @@ pub struct WorkerContext {
     pub http_client: reqwest::Client,
     pub config: Config,
     pub stellar_rpc_url: String,
+    #[allow(dead_code)] // wired for job handlers; not read on the current paths
     pub horizon_url: String,
     pub ses_client: Option<aws_sdk_sesv2::Client>,
     pub fcm_project_id: Option<String>,
@@ -245,7 +246,9 @@ async fn process_message(
     );
 
     let job_type_attr = KeyValue::new("job_type", job.job_type.clone());
-    ctx.metrics.jobs_active.add(1, &[job_type_attr.clone()]);
+    ctx.metrics
+        .jobs_active
+        .add(1, std::slice::from_ref(&job_type_attr));
     let start = std::time::Instant::now();
 
     let result = match job.job_type.as_str() {
@@ -263,10 +266,12 @@ async fn process_message(
     };
 
     let duration = start.elapsed().as_secs_f64();
-    ctx.metrics.jobs_active.add(-1, &[job_type_attr.clone()]);
+    ctx.metrics
+        .jobs_active
+        .add(-1, std::slice::from_ref(&job_type_attr));
     ctx.metrics
         .job_duration
-        .record(duration, &[job_type_attr.clone()]);
+        .record(duration, std::slice::from_ref(&job_type_attr));
 
     let outcome = match &result {
         Ok(()) => "success",

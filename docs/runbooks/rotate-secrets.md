@@ -17,7 +17,8 @@ once unless that's the intent.
 | `TWILIO_TOKEN` | Outbound SMS | SMS notifications silently fail until rotated on both ends |
 | `FCM_SERVICE_ACCOUNT_KEY` | Mobile push notifications | Push notifications fail |
 | `SES identity credentials` | Outbound email | Email notifications fail |
-| `VAULT wrapping token` | Unwraps DB URL from Vault on startup | Bridge fails to start on next restart |
+| `Vault/OpenBao wrapping token` | Unwraps DB URL from Vault/OpenBao on startup | Bridge fails to start on next restart |
+| `Vault/OpenBao Transit token` | Seed encrypt/decrypt (`SEED_PROTECTION_BACKEND=vault\|openbao`) | Custodial sign/import fails until rotated |
 
 ## General rotation workflow
 
@@ -65,8 +66,8 @@ be logged out.
    pick up the new value on start.
 4. Confirm via `/healthz`.
 
-If using Vault unwrapping (`DATABASE_URL_WRAPPED`): write the new URL into
-Vault, re-wrap it, set `DATABASE_URL_WRAPPED` env-var on the task to the
+If using Vault/OpenBao unwrapping (`DATABASE_URL_WRAPPED`): write the new URL into
+Vault/OpenBao, re-wrap it, set `DATABASE_URL_WRAPPED` env-var on the task to the
 new wrapping token, redeploy.
 
 ### OKTA_CLIENT_SECRET
@@ -101,7 +102,7 @@ to letting an attacker with stolen credentials continue.
 Order suggested:
 1. `JWT_SECRET` (kills all tokens).
 2. `DATABASE_URL` password.
-3. Okta, Twilio, SES, FCM, Vault.
+3. Okta, Twilio, SES, FCM, Vault/OpenBao.
 4. Rotate IAM keys (if any) for the bridge's task role — AWS console →
    IAM → Roles → impala-bridge-task-role → Security credentials.
 
