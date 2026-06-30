@@ -11,6 +11,15 @@ pub struct Claims {
     pub iat: usize,
     pub jti: String,
     pub iss: String,
+    /// Server-side role claim. Absent in tokens minted before role support was
+    /// added, so it defaults to least privilege (`view-only`) — fail closed.
+    #[serde(default = "default_role")]
+    pub role: String,
+}
+
+/// Default role for tokens/accounts without an explicit role. Least privilege.
+pub(crate) fn default_role() -> String {
+    crate::constants::ROLE_VIEW_ONLY.to_string()
 }
 
 // ── Pagination ─────────────────────────────────────────────────────────
@@ -23,11 +32,11 @@ pub struct PaginationParams {
     pub per_page: u64,
 }
 
-fn default_page() -> u64 {
+pub(crate) fn default_page() -> u64 {
     1
 }
 
-fn default_per_page() -> u64 {
+pub(crate) fn default_per_page() -> u64 {
     20
 }
 
@@ -75,15 +84,76 @@ pub struct GetAccountQuery {
     pub stellar_account_id: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, sqlx::FromRow)]
 pub struct GetAccountResponse {
     pub payala_account_id: String,
+    pub stellar_account_id: String,
     pub first_name: String,
     pub middle_name: Option<String>,
     pub last_name: String,
     pub nickname: Option<String>,
     pub affiliation: Option<String>,
     pub gender: Option<String>,
+    pub role: String,
+    pub profile_source: String,
+    pub profile_synced_at: Option<String>,
+    pub created_at: Option<String>,
+}
+
+// ── Admin: account management ──────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct ListAccountsQuery {
+    #[serde(default = "default_page")]
+    pub page: u64,
+    #[serde(default = "default_per_page")]
+    pub per_page: u64,
+    pub search: Option<String>,
+}
+
+#[derive(Serialize, sqlx::FromRow)]
+pub struct AdminAccountListItem {
+    pub payala_account_id: String,
+    pub stellar_account_id: String,
+    pub first_name: String,
+    pub middle_name: Option<String>,
+    pub last_name: String,
+    pub nickname: Option<String>,
+    pub affiliation: Option<String>,
+    pub gender: Option<String>,
+    pub role: String,
+    pub profile_source: String,
+    pub created_at: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct SetRoleRequest {
+    pub role: String,
+}
+
+#[derive(Serialize)]
+pub struct SetRoleResponse {
+    pub success: bool,
+    pub message: String,
+    pub account_id: String,
+    pub role: String,
+}
+
+#[derive(Serialize)]
+pub struct DeleteAccountResponse {
+    pub success: bool,
+    pub message: String,
+    pub rows_affected: u64,
+}
+
+#[derive(Serialize)]
+pub struct SyncProfileResponse {
+    pub success: bool,
+    pub message: String,
+    pub profile_source: String,
+    pub profile_synced_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile: Option<crate::ldap::SyncedProfile>,
 }
 
 #[derive(Deserialize)]
@@ -244,6 +314,83 @@ pub struct CreateTransactionResponse {
     pub message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub btxid: Option<Uuid>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ListTransactionsQuery {
+    #[serde(default = "default_page")]
+    pub page: u64,
+    #[serde(default = "default_per_page")]
+    pub per_page: u64,
+    /// Review status filter (unreviewed/cleared/flagged/escalated).
+    pub status: Option<String>,
+    /// Flag filter.
+    pub flagged: Option<bool>,
+    /// Exact Stellar G-address (source_account) filter.
+    pub source_account: Option<String>,
+    /// created_at >= this RFC3339 timestamp.
+    pub from: Option<String>,
+    /// created_at < this RFC3339 timestamp.
+    pub to: Option<String>,
+    /// Free-text search over memo / tx ids / hash / source account.
+    pub q: Option<String>,
+}
+
+#[derive(Debug, Serialize, sqlx::FromRow)]
+pub struct TransactionListItem {
+    pub btxid: Uuid,
+    pub stellar_tx_id: Option<String>,
+    pub payala_tx_id: Option<String>,
+    pub stellar_hash: Option<String>,
+    pub source_account: Option<String>,
+    pub stellar_fee: Option<i64>,
+    pub stellar_max_fee: Option<i64>,
+    pub memo: Option<String>,
+    pub payala_currency: Option<String>,
+    pub created_at: String,
+    pub flagged: bool,
+    pub status: String,
+    pub note: Option<String>,
+    pub reviewed_by: Option<String>,
+    pub reviewed_at: Option<String>,
+}
+
+#[derive(Debug, Serialize, sqlx::FromRow)]
+pub struct TransactionDetail {
+    pub btxid: Uuid,
+    pub stellar_tx_id: Option<String>,
+    pub payala_tx_id: Option<String>,
+    pub stellar_hash: Option<String>,
+    pub source_account: Option<String>,
+    pub stellar_fee: Option<i64>,
+    pub stellar_max_fee: Option<i64>,
+    pub memo: Option<String>,
+    pub signatures: Option<String>,
+    pub preconditions: Option<String>,
+    pub payala_currency: Option<String>,
+    pub payala_digest: Option<String>,
+    pub created_at: String,
+    pub flagged: bool,
+    pub status: String,
+    pub note: Option<String>,
+    pub reviewed_by: Option<String>,
+    pub reviewed_at: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ReviewTransactionRequest {
+    pub flagged: Option<bool>,
+    pub status: Option<String>,
+    pub note: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct ReviewTransactionResponse {
+    pub success: bool,
+    pub message: String,
+    pub btxid: Uuid,
+    pub flagged: bool,
+    pub status: String,
 }
 
 // ── Card ───────────────────────────────────────────────────────────────

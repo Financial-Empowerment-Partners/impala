@@ -19,7 +19,11 @@ pub async fn create_account(
     Extension(pool): Extension<PgPool>,
     Json(payload): Json<CreateAccountRequest>,
 ) -> Result<Json<CreateAccountResponse>, AppError> {
-    crate::auth::require_owner(&user, &payload.payala_account_id)?;
+    // Admins may create an account for any payala id (admin console); a regular
+    // caller may only create their own (self-service).
+    if !user.is_admin() {
+        crate::auth::require_owner(&user, &payload.payala_account_id)?;
+    }
     info!(
         "POST /account: creating account for stellar_id={}",
         payload.stellar_account_id
@@ -95,6 +99,8 @@ pub async fn create_account(
 }
 
 /// Look up an account by Stellar account ID (`GET /account?stellar_account_id=...`).
+///
+/// Admins may read any account; a regular caller is scoped to their own row.
 pub async fn get_account(
     user: AuthenticatedUser,
     Extension(pool): Extension<PgPool>,
@@ -104,48 +110,30 @@ pub async fn get_account(
         "GET /account: lookup stellar_id={}",
         params.stellar_account_id
     );
-    let result = sqlx::query_as::<
-        _,
-        (
-            String,
-            String,
-            Option<String>,
-            String,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-        ),
-    >(
+
+    let mut sql = String::from(
         r#"
-        SELECT payala_account_id, first_name, middle_name, last_name,
-               nickname, affiliation, gender
+        SELECT payala_account_id, stellar_account_id, first_name, middle_name, last_name,
+               nickname, affiliation, gender, role, profile_source,
+               to_char(profile_synced_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS profile_synced_at,
+               to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS created_at
         FROM impala_account
-        WHERE stellar_account_id = $1 AND payala_account_id = $2
+        WHERE stellar_account_id = $1
         "#,
-    )
-    .bind(&params.stellar_account_id)
-    .bind(&user.account_id)
-    .fetch_optional(&pool)
-    .await;
+    );
+    if !user.is_admin() {
+        sql.push_str(" AND payala_account_id = $2");
+    }
+
+    let mut query = sqlx::query_as::<_, GetAccountResponse>(&sql).bind(&params.stellar_account_id);
+    if !user.is_admin() {
+        query = query.bind(&user.account_id);
+    }
+
+    let result = query.fetch_optional(&pool).await;
 
     match result {
-        Ok(Some((
-            payala_account_id,
-            first_name,
-            middle_name,
-            last_name,
-            nickname,
-            affiliation,
-            gender,
-        ))) => Ok(Json(GetAccountResponse {
-            payala_account_id,
-            first_name,
-            middle_name,
-            last_name,
-            nickname,
-            affiliation,
-            gender,
-        })),
+        Ok(Some(account)) => Ok(Json(account)),
         Ok(None) => {
             debug!(
                 "get_account: not found for stellar_id={}",
@@ -160,6 +148,44 @@ pub async fn get_account(
     }
 }
 
+/// Fetch live on-chain details for an account from this bridge's configured
+/// network (`GET /account/onchain?stellar_account_id=...`). Owner or admin.
+pub async fn get_account_onchain(
+    user: AuthenticatedUser,
+    Extension(pool): Extension<PgPool>,
+    Extension(stellar_config): Extension<Arc<crate::config::StellarConfig>>,
+    Extension(http): Extension<Arc<reqwest::Client>>,
+    Query(params): Query<GetAccountQuery>,
+) -> Result<Json<crate::stellar::OnchainAccount>, AppError> {
+    crate::validate::validate_stellar_account_id(&params.stellar_account_id)?;
+
+    // Authorize: the owner of this stellar id, or any admin.
+    let owner: Option<String> = sqlx::query_scalar(
+        "SELECT payala_account_id FROM impala_account WHERE stellar_account_id = $1",
+    )
+    .bind(&params.stellar_account_id)
+    .fetch_optional(&pool)
+    .await
+    .map_err(|e| {
+        error!("get_account_onchain: owner lookup error: {}", e);
+        AppError::InternalError("Database error".to_string())
+    })?;
+
+    let is_owner = owner.as_deref() == Some(user.account_id.as_str());
+    if !is_owner && !user.is_admin() {
+        return Err(AppError::Forbidden);
+    }
+
+    let account = crate::stellar::fetch_account_details(
+        &http,
+        &stellar_config.horizon_url,
+        &params.stellar_account_id,
+    )
+    .await?;
+
+    Ok(Json(account))
+}
+
 /// Update account fields (`PUT /account`).
 pub async fn update_account(
     user: AuthenticatedUser,
@@ -169,10 +195,15 @@ pub async fn update_account(
     Json(payload): Json<UpdateAccountRequest>,
 ) -> Result<Json<UpdateAccountResponse>, AppError> {
     info!("PUT /account: updating account");
+    // Admins may update any account (admin console); regular callers are scoped
+    // to their own row via the ownership bind / require_owner below.
+    let is_admin = user.is_admin();
     let (where_clause, where_value) = if let Some(ref stellar_id) = payload.stellar_account_id {
         ("stellar_account_id = $1", stellar_id.clone())
     } else if let Some(ref payala_id) = payload.payala_account_id {
-        crate::auth::require_owner(&user, payala_id)?;
+        if !is_admin {
+            crate::auth::require_owner(&user, payala_id)?;
+        }
         ("payala_account_id = $1", payala_id.clone())
     } else {
         warn!("update_account: no identifier provided");
@@ -253,7 +284,9 @@ pub async fn update_account(
         changed_fields.push("gender".to_string());
     }
 
-    let needs_ownership_bind = where_clause.contains("stellar_account_id");
+    // Non-admin callers updating by stellar id are scoped to their own row via
+    // an extra `AND payala_account_id = $N` bind; admins skip the ownership bind.
+    let needs_ownership_bind = where_clause.contains("stellar_account_id") && !is_admin;
     let sql = if needs_ownership_bind {
         format!(
             "UPDATE impala_account SET {} WHERE {} AND payala_account_id = ${}",

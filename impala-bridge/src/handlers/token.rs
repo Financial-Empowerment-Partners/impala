@@ -61,8 +61,21 @@ pub async fn token(
         let now = chrono::Utc::now().timestamp() as usize;
         let sub = token_data.claims.sub.clone();
 
+        // Re-fetch the current role from the DB so role changes propagate on the
+        // next refresh (rather than waiting out the 14-day refresh-token TTL).
+        // Fall back to the role carried in the presented token if the row is gone.
+        let role = sqlx::query_scalar::<_, String>(
+            "SELECT role FROM impala_account WHERE payala_account_id = $1",
+        )
+        .bind(&sub)
+        .fetch_optional(&pool)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| token_data.claims.role.clone());
+
         // Issue rotated refresh + temporal token pair
-        let (new_refresh_token, temporal_token) = crate::jwt::encode_token_pair(key, &sub)?;
+        let (new_refresh_token, temporal_token) = crate::jwt::encode_token_pair(key, &sub, &role)?;
 
         // Revoke the old refresh token
         let remaining = token_data.claims.exp.saturating_sub(now);
@@ -149,7 +162,18 @@ pub async fn token(
         }));
     }
 
-    let refresh_token = crate::jwt::encode_refresh_token(key, username)?;
+    // Embed the account's server-side role in the token (defaults to view-only).
+    let role = sqlx::query_scalar::<_, String>(
+        "SELECT role FROM impala_account WHERE payala_account_id = $1",
+    )
+    .bind(username)
+    .fetch_optional(&pool)
+    .await
+    .ok()
+    .flatten()
+    .unwrap_or_else(crate::models::default_role);
+
+    let refresh_token = crate::jwt::encode_refresh_token(key, username, &role)?;
 
     info!("token: refresh token issued for username={}", username);
     Ok(Json(TokenResponse {

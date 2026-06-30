@@ -88,11 +88,12 @@ var SessionTimer = (function () {
         modalElement = null;
     }
 
-    /** Clear localStorage and redirect to the login page. */
+    /** Clear the active network's tokens and redirect to the login page. */
     function doLogout() {
         stop();
-        localStorage.removeItem('temporal_token');
-        localStorage.removeItem('refresh_token');
+        if (typeof API !== 'undefined' && typeof API.clearTokens === 'function') {
+            API.clearTokens();
+        }
         window.location.href = 'index.html';
     }
 

@@ -8,8 +8,8 @@ use crate::constants::{
 use crate::error::AppError;
 use crate::models::Claims;
 
-/// Encode a long-lived refresh token for the given subject.
-pub fn encode_refresh_token(secret: &[u8], subject: &str) -> Result<String, AppError> {
+/// Encode a long-lived refresh token for the given subject and role.
+pub fn encode_refresh_token(secret: &[u8], subject: &str, role: &str) -> Result<String, AppError> {
     let now = chrono::Utc::now().timestamp() as usize;
 
     let claims = Claims {
@@ -19,6 +19,7 @@ pub fn encode_refresh_token(secret: &[u8], subject: &str) -> Result<String, AppE
         exp: now + REFRESH_TOKEN_TTL_SECS,
         jti: uuid::Uuid::new_v4().to_string(),
         iss: JWT_ISSUER.to_string(),
+        role: role.to_string(),
     };
 
     encode(
@@ -32,8 +33,8 @@ pub fn encode_refresh_token(secret: &[u8], subject: &str) -> Result<String, AppE
     })
 }
 
-/// Encode a short-lived temporal token for the given subject.
-pub fn encode_temporal_token(secret: &[u8], subject: &str) -> Result<String, AppError> {
+/// Encode a short-lived temporal token for the given subject and role.
+pub fn encode_temporal_token(secret: &[u8], subject: &str, role: &str) -> Result<String, AppError> {
     let now = chrono::Utc::now().timestamp() as usize;
 
     let claims = Claims {
@@ -43,6 +44,7 @@ pub fn encode_temporal_token(secret: &[u8], subject: &str) -> Result<String, App
         exp: now + TEMPORAL_TOKEN_TTL_SECS,
         jti: uuid::Uuid::new_v4().to_string(),
         iss: JWT_ISSUER.to_string(),
+        role: role.to_string(),
     };
 
     encode(
@@ -56,12 +58,16 @@ pub fn encode_temporal_token(secret: &[u8], subject: &str) -> Result<String, App
     })
 }
 
-/// Encode both a refresh and a temporal token for the given subject.
+/// Encode both a refresh and a temporal token for the given subject and role.
 ///
 /// Returns `(refresh_token, temporal_token)`.
-pub fn encode_token_pair(secret: &[u8], subject: &str) -> Result<(String, String), AppError> {
-    let refresh = encode_refresh_token(secret, subject)?;
-    let temporal = encode_temporal_token(secret, subject)?;
+pub fn encode_token_pair(
+    secret: &[u8],
+    subject: &str,
+    role: &str,
+) -> Result<(String, String), AppError> {
+    let refresh = encode_refresh_token(secret, subject, role)?;
+    let temporal = encode_temporal_token(secret, subject, role)?;
     Ok((refresh, temporal))
 }
 
@@ -76,8 +82,8 @@ mod tests {
 
     #[test]
     fn test_encode_token_pair_returns_two_different_tokens() {
-        let (refresh, temporal) =
-            encode_token_pair(TEST_SECRET, "alice").expect("token pair should succeed");
+        let (refresh, temporal) = encode_token_pair(TEST_SECRET, "alice", "view-only")
+            .expect("token pair should succeed");
 
         assert_ne!(refresh, temporal, "refresh and temporal tokens must differ");
         assert!(!refresh.is_empty());
@@ -85,9 +91,24 @@ mod tests {
     }
 
     #[test]
+    fn test_tokens_carry_role_claim() {
+        let (refresh, temporal) =
+            encode_token_pair(TEST_SECRET, "dave", "admin").expect("token pair should succeed");
+
+        let mut validation = Validation::new(jsonwebtoken::Algorithm::HS256);
+        validation.iss = Some(JWT_ISSUER.to_string());
+
+        for token in [&refresh, &temporal] {
+            let data = decode::<Claims>(token, &DecodingKey::from_secret(TEST_SECRET), &validation)
+                .expect("token should decode");
+            assert_eq!(data.claims.role, "admin");
+        }
+    }
+
+    #[test]
     fn test_tokens_decode_with_same_secret() {
         let (refresh, temporal) =
-            encode_token_pair(TEST_SECRET, "bob").expect("token pair should succeed");
+            encode_token_pair(TEST_SECRET, "bob", "view-only").expect("token pair should succeed");
 
         let mut validation = Validation::new(jsonwebtoken::Algorithm::HS256);
         validation.iss = Some(JWT_ISSUER.to_string());
@@ -113,7 +134,7 @@ mod tests {
     #[test]
     fn test_tokens_contain_correct_claims() {
         let (refresh, temporal) =
-            encode_token_pair(TEST_SECRET, "carol").expect("token pair should succeed");
+            encode_token_pair(TEST_SECRET, "carol", "token").expect("token pair should succeed");
 
         let mut validation = Validation::new(jsonwebtoken::Algorithm::HS256);
         validation.iss = Some(JWT_ISSUER.to_string());

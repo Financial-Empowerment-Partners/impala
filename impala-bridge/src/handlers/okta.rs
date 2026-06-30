@@ -90,8 +90,8 @@ pub async fn okta_token_exchange(
     })?;
 
     sqlx::query(
-        "INSERT INTO impala_account (stellar_account_id, payala_account_id, first_name, last_name)
-         VALUES ($1, $2, $3, '')
+        "INSERT INTO impala_account (stellar_account_id, payala_account_id, first_name, last_name, profile_source)
+         VALUES ($1, $2, $3, '', 'okta')
          ON CONFLICT (payala_account_id) DO NOTHING",
     )
     .bind(&placeholder_stellar_id)
@@ -128,9 +128,18 @@ pub async fn okta_token_exchange(
         AppError::InternalError("Database error".to_string())
     })?;
 
-    // Issue local JWT tokens
+    // Issue local JWT tokens, embedding the account's server-side role.
     let key = jwt_secret.as_bytes();
-    let (refresh_token, temporal_token) = crate::jwt::encode_token_pair(key, &account_id)?;
+    let role = sqlx::query_scalar::<_, String>(
+        "SELECT role FROM impala_account WHERE payala_account_id = $1",
+    )
+    .bind(&account_id)
+    .fetch_optional(&pool)
+    .await
+    .ok()
+    .flatten()
+    .unwrap_or_else(crate::models::default_role);
+    let (refresh_token, temporal_token) = crate::jwt::encode_token_pair(key, &account_id, &role)?;
 
     info!("okta: tokens issued for account_id={}", account_id);
 

@@ -10,6 +10,7 @@
     "lint": "eslint html/js"
   },
   "devDependencies": {
+    "@eslint/js": "^9.13.0",
     "vitest": "^2.1.0",
     "eslint": "^9.13.0"
   }

@@ -13,62 +13,32 @@
 
     <div class="grid-container">
         <div class="page-header">
-            <h3>Admin - Role Management</h3>
+            <h3>Roles &amp; Permissions</h3>
         </div>
 
-        <!-- Role Definitions -->
         <div class="card">
             <div class="card-section">
-                <h5>Role Definitions</h5>
+                <h5>Roles</h5>
+                <p class="text-muted">Authorization is enforced server-side from the JWT <code>role</code> claim. Grant roles to individual accounts from the Accounts page (open an account &rarr; Role grant). This page is a read-only reference.</p>
                 <div id="role-definitions"></div>
             </div>
         </div>
 
-        <!-- User-Role Assignments -->
         <div class="card">
             <div class="card-section">
-                <h5>User Role Assignments</h5>
-                <div id="role-assignments"></div>
-            </div>
-        </div>
-
-        <!-- Assign Role -->
-        <div class="card">
-            <div class="card-section">
-                <h5>Assign Role</h5>
-                <form id="assign-form">
-                    <div class="grid-x grid-margin-x">
-                        <div class="cell medium-5">
-                            <label>Account ID
-                                <input type="text" id="assign-account-id" required>
-                            </label>
-                        </div>
-                        <div class="cell medium-5">
-                            <label>Role
-                                <select id="assign-role">
-                                    <option value="view-only">View Only</option>
-                                    <option value="device">Device</option>
-                                    <option value="token">Token</option>
-                                    <option value="admin">Admin</option>
-                                </select>
-                            </label>
-                        </div>
-                        <div class="cell medium-2">
-                            <label>&nbsp;
-                                <button type="submit" class="button expanded">Assign</button>
-                            </label>
-                        </div>
-                    </div>
-                </form>
+                <h5>Permission Matrix</h5>
+                <div id="permission-matrix"></div>
             </div>
         </div>
     </div>
 
+    <script src="config.js"></script>
     <script src="js/api.js"></script>
+    <script src="js/theme.js"></script>
     <script src="js/roles.js"></script>
     <script src="js/auth.js"></script>
-    <script src="js/validate.js"></script>
-    <script src="js/paginate.js"></script>
+    <script src="js/net-config.js"></script>
+    <script src="js/net.js"></script>
     <script src="js/session-timer.js"></script>
     <script src="js/router.js"></script>
     <script src="js/admin.js"></script>

@@ -48,6 +48,8 @@ tags:
     description: Registration, credential verification, token issue/revoke, Okta.
   - name: account
     description: Account CRUD.
+  - name: admin
+    description: Admin-only cross-account management (list/delete/role/profile-sync).
   - name: mfa
     description: TOTP and SMS enrollment + verification.
   - name: card
@@ -242,10 +244,11 @@ paths:
               schema: { $ref: '#/components/schemas/CreateAccountResponse' }
     get:
       tags: [account]
-      summary: Get account details (scoped to the authenticated user).
+      summary: Get account details (owner-scoped; admins may read any account).
       parameters:
         - in: query
-          name: account_id
+          name: stellar_account_id
+          required: true
           schema: { type: string }
       responses:
         '200':
@@ -271,6 +274,115 @@ paths:
               schema: { $ref: '#/components/schemas/UpdateAccountResponse' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+
+  /account/onchain:
+    get:
+      tags: [account]
+      summary: Live on-chain account details from this bridge's network (owner or admin).
+      parameters:
+        - in: query
+          name: stellar_account_id
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: On-chain account state (exists=false when unfunded).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OnchainAccount' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /accounts:
+    get:
+      tags: [admin]
+      summary: List all accounts (admin only).
+      parameters:
+        - in: query
+          name: page
+          schema: { type: integer, default: 1 }
+        - in: query
+          name: per_page
+          schema: { type: integer, default: 20 }
+        - in: query
+          name: search
+          schema: { type: string }
+      responses:
+        '200':
+          description: Paginated account list.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PaginatedAccountList' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /admin/accounts/{account_id}:
+    delete:
+      tags: [admin]
+      summary: Delete an account (admin only). Blocks self/last-admin delete.
+      parameters:
+        - in: path
+          name: account_id
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Account deleted.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DeleteAccountResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /admin/accounts/{account_id}/role:
+    put:
+      tags: [admin]
+      summary: Set an account's role (admin only). Blocks last-admin demotion.
+      parameters:
+        - in: path
+          name: account_id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SetRoleRequest' }
+      responses:
+        '200':
+          description: Role updated.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SetRoleResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /admin/accounts/{account_id}/sync-profile:
+    post:
+      tags: [admin]
+      summary: Force a directory re-pull for the account's profile source (admin only).
+      description: |
+        For `ldap`-sourced accounts, re-pulls name/affiliation from the directory
+        and writes them back. `okta` and `local` sources return 400 (no live
+        server-side re-pull is available).
+      parameters:
+        - in: path
+          name: account_id
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Profile synced.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SyncProfileResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
 
   /sync:
     post:
@@ -304,6 +416,43 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/SubscribeResponse' }
 
+  /transactions:
+    get:
+      tags: [transaction]
+      summary: List transactions with review state (admin=all, owner=own).
+      parameters:
+        - in: query
+          name: page
+          schema: { type: integer, default: 1 }
+        - in: query
+          name: per_page
+          schema: { type: integer, default: 20 }
+        - in: query
+          name: status
+          schema: { type: string, enum: [unreviewed, cleared, flagged, escalated] }
+        - in: query
+          name: flagged
+          schema: { type: boolean }
+        - in: query
+          name: source_account
+          schema: { type: string }
+        - in: query
+          name: from
+          schema: { type: string, format: date-time }
+        - in: query
+          name: to
+          schema: { type: string, format: date-time }
+        - in: query
+          name: q
+          schema: { type: string }
+      responses:
+        '200':
+          description: Paginated transaction list.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PaginatedTransactionList' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
   /transaction:
     post:
       tags: [transaction]
@@ -323,6 +472,48 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/CreateTransactionResponse' }
         '429': { $ref: '#/components/responses/RateLimited' }
+
+  /transaction/{btxid}:
+    get:
+      tags: [transaction]
+      summary: Get a single transaction with review state (admin or owner).
+      parameters:
+        - in: path
+          name: btxid
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Transaction detail.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TransactionDetail' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /transaction/{btxid}/review:
+    put:
+      tags: [transaction]
+      summary: Set a transaction's flag/status/note (admin only; PUT replaces review state).
+      parameters:
+        - in: path
+          name: btxid
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ReviewTransactionRequest' }
+      responses:
+        '200':
+          description: Review updated.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ReviewTransactionResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
 
   /card:
     post:
@@ -555,6 +746,21 @@ components:
       content:
         application/json:
           schema: { $ref: '#/components/schemas/ErrorResponse' }
+    BadRequest:
+      description: Invalid request.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    NotFound:
+      description: Resource not found.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    Conflict:
+      description: Request conflicts with the current state (e.g. last admin).
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
 
   schemas:
     ErrorResponse:
@@ -603,12 +809,15 @@ components:
     CreateAccountRequest:
       type: object
       properties:
-        account_id: { type: string }
+        stellar_account_id: { type: string }
+        payala_account_id: { type: string }
         first_name: { type: string, maxLength: 64 }
+        middle_name: { type: string, nullable: true }
         last_name: { type: string, maxLength: 64 }
-        email: { type: string, format: email }
-        phone_number: { type: string }
-      required: [account_id]
+        nickname: { type: string, nullable: true }
+        affiliation: { type: string, nullable: true }
+        gender: { type: string, nullable: true }
+      required: [stellar_account_id, payala_account_id, first_name, last_name]
 
     CreateAccountResponse:
       type: object
@@ -619,26 +828,131 @@ components:
     GetAccountResponse:
       type: object
       properties:
-        account_id: { type: string }
-        first_name: { type: string, nullable: true }
-        last_name: { type: string, nullable: true }
-        email: { type: string, nullable: true }
-        phone_number: { type: string, nullable: true }
+        payala_account_id: { type: string }
+        stellar_account_id: { type: string }
+        first_name: { type: string }
+        middle_name: { type: string, nullable: true }
+        last_name: { type: string }
+        nickname: { type: string, nullable: true }
+        affiliation: { type: string, nullable: true }
+        gender: { type: string, nullable: true }
+        role: { type: string, enum: [view-only, device, token, admin] }
+        profile_source: { type: string, enum: [local, ldap, okta] }
+        profile_synced_at: { type: string, format: date-time, nullable: true }
+        created_at: { type: string, format: date-time, nullable: true }
 
     UpdateAccountRequest:
       type: object
+      description: Identify the target row by stellar_account_id (or payala_account_id). Admins may update any account.
       properties:
-        account_id: { type: string }
+        stellar_account_id: { type: string, nullable: true }
+        payala_account_id: { type: string, nullable: true }
         first_name: { type: string, nullable: true }
+        middle_name: { type: string, nullable: true }
         last_name: { type: string, nullable: true }
-        email: { type: string, nullable: true }
-        phone_number: { type: string, nullable: true }
+        nickname: { type: string, nullable: true }
+        affiliation: { type: string, nullable: true }
+        gender: { type: string, nullable: true }
 
     UpdateAccountResponse:
       type: object
       properties:
         success: { type: boolean }
         message: { type: string }
+        rows_affected: { type: integer }
+
+    AdminAccountListItem:
+      type: object
+      properties:
+        payala_account_id: { type: string }
+        stellar_account_id: { type: string }
+        first_name: { type: string }
+        middle_name: { type: string, nullable: true }
+        last_name: { type: string }
+        nickname: { type: string, nullable: true }
+        affiliation: { type: string, nullable: true }
+        gender: { type: string, nullable: true }
+        role: { type: string, enum: [view-only, device, token, admin] }
+        profile_source: { type: string, enum: [local, ldap, okta] }
+        created_at: { type: string, format: date-time, nullable: true }
+
+    PaginatedAccountList:
+      type: object
+      properties:
+        data:
+          type: array
+          items: { $ref: '#/components/schemas/AdminAccountListItem' }
+        page: { type: integer }
+        per_page: { type: integer }
+        total: { type: integer }
+
+    SetRoleRequest:
+      type: object
+      properties:
+        role: { type: string, enum: [view-only, device, token, admin] }
+      required: [role]
+
+    SetRoleResponse:
+      type: object
+      properties:
+        success: { type: boolean }
+        message: { type: string }
+        account_id: { type: string }
+        role: { type: string }
+
+    DeleteAccountResponse:
+      type: object
+      properties:
+        success: { type: boolean }
+        message: { type: string }
+        rows_affected: { type: integer }
+
+    SyncedProfile:
+      type: object
+      properties:
+        first_name: { type: string, nullable: true }
+        middle_name: { type: string, nullable: true }
+        last_name: { type: string, nullable: true }
+        affiliation: { type: string, nullable: true }
+
+    SyncProfileResponse:
+      type: object
+      properties:
+        success: { type: boolean }
+        message: { type: string }
+        profile_source: { type: string }
+        profile_synced_at: { type: string, format: date-time, nullable: true }
+        profile: { $ref: '#/components/schemas/SyncedProfile' }
+
+    OnchainBalance:
+      type: object
+      properties:
+        asset_type: { type: string }
+        asset_code: { type: string, nullable: true }
+        asset_issuer: { type: string, nullable: true }
+        balance: { type: string }
+
+    OnchainSigner:
+      type: object
+      properties:
+        key: { type: string }
+        weight: { type: integer }
+        type: { type: string }
+
+    OnchainAccount:
+      type: object
+      properties:
+        stellar_account_id: { type: string }
+        exists: { type: boolean }
+        sequence: { type: string, nullable: true }
+        native_balance: { type: string, nullable: true }
+        balances:
+          type: array
+          items: { $ref: '#/components/schemas/OnchainBalance' }
+        signers:
+          type: array
+          items: { $ref: '#/components/schemas/OnchainSigner' }
+        subentry_count: { type: integer, nullable: true }
 
     SyncRequest:
       type: object
@@ -687,6 +1001,61 @@ components:
         success: { type: boolean }
         message: { type: string }
         btxid: { type: string, format: uuid, nullable: true }
+
+    TransactionListItem:
+      type: object
+      properties:
+        btxid: { type: string, format: uuid }
+        stellar_tx_id: { type: string, nullable: true }
+        payala_tx_id: { type: string, nullable: true }
+        stellar_hash: { type: string, nullable: true }
+        source_account: { type: string, nullable: true }
+        stellar_fee: { type: integer, nullable: true }
+        stellar_max_fee: { type: integer, nullable: true }
+        memo: { type: string, nullable: true }
+        payala_currency: { type: string, nullable: true }
+        created_at: { type: string, format: date-time }
+        flagged: { type: boolean }
+        status: { type: string, enum: [unreviewed, cleared, flagged, escalated] }
+        note: { type: string, nullable: true }
+        reviewed_by: { type: string, nullable: true }
+        reviewed_at: { type: string, format: date-time, nullable: true }
+
+    PaginatedTransactionList:
+      type: object
+      properties:
+        data:
+          type: array
+          items: { $ref: '#/components/schemas/TransactionListItem' }
+        page: { type: integer }
+        per_page: { type: integer }
+        total: { type: integer }
+
+    TransactionDetail:
+      allOf:
+        - $ref: '#/components/schemas/TransactionListItem'
+        - type: object
+          properties:
+            signatures: { type: string, nullable: true }
+            preconditions: { type: string, nullable: true }
+            payala_digest: { type: string, nullable: true }
+
+    ReviewTransactionRequest:
+      type: object
+      description: PUT replaces the full review state; omitted fields reset.
+      properties:
+        flagged: { type: boolean, nullable: true }
+        status: { type: string, enum: [unreviewed, cleared, flagged, escalated], nullable: true }
+        note: { type: string, nullable: true, maxLength: 2000 }
+
+    ReviewTransactionResponse:
+      type: object
+      properties:
+        success: { type: boolean }
+        message: { type: string }
+        btxid: { type: string, format: uuid }
+        flagged: { type: boolean }
+        status: { type: string }
 
     CreateCardRequest:
       type: object

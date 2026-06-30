@@ -209,13 +209,9 @@ var OktaAuth = (function () {
             .then(function (bridgeData) {
                 if (!bridgeData.success) throw new Error(bridgeData.message || 'Authentication failed');
 
-                // Store tokens
+                // Store tokens (namespaced to the active network). Authorization
+                // is server-driven via the token's `role` claim.
                 API.setTokens(bridgeData.temporal_token, bridgeData.refresh_token);
-
-                // Bootstrap roles
-                var payload = API.parseJwt(bridgeData.refresh_token);
-                var username = payload ? payload.sub : 'okta-user';
-                Roles.bootstrap(username);
 
                 if (statusEl) statusEl.textContent = 'Login successful! Redirecting...';
                 window.location.href = 'dashboard.html';

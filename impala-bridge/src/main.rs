@@ -24,7 +24,7 @@ use axum::error_handling::HandleErrorLayer;
 use axum::extract::Extension;
 use axum::http::{header, HeaderName, HeaderValue, Method, StatusCode};
 use axum::response::IntoResponse;
-use axum::routing::{get, post, put};
+use axum::routing::{delete, get, post, put};
 use axum::{BoxError, Json, Router};
 use log::{debug, error, info, warn};
 use sqlx::postgres::PgPoolOptions;
@@ -42,7 +42,7 @@ use tower_http::trace::TraceLayer;
 
 use config::load_config;
 use handlers::{
-    account, authenticate, card, device_token, health, logout, managed_seed, mfa, network,
+    account, admin, authenticate, card, device_token, health, logout, managed_seed, mfa, network,
     notification_subscription, notify, okta as okta_handler, subscribe, sync, token, transaction,
 };
 
@@ -220,6 +220,19 @@ async fn run_server(
     );
     let stellar_signer = stellar::build_signer(&stellar_config);
 
+    // Shared HTTP client for read-only on-chain Horizon lookups
+    // (`GET /account/onchain`).
+    let http_client = Arc::new(
+        reqwest::Client::builder()
+            .timeout(Duration::from_secs(config.http_client_timeout_secs))
+            .build()
+            .expect("failed to build shared HTTP client"),
+    );
+
+    // Narrow LDAP config carried as shared state for the per-account force-sync
+    // endpoint (keeps `ldap_bind_password` out of a broadly-shared `Config`).
+    let ldap_config = Arc::new(ldap::LdapConfig::from_config(&config));
+
     // CORS layer — restrict to configured origins when not wildcard
     if config.cors_allowed_origins == "*" {
         if config.stellar_network == config::StellarNetwork::Testnet {
@@ -264,11 +277,28 @@ async fn run_server(
                 .get(account::get_account)
                 .put(account::update_account),
         )
+        .route("/account/onchain", get(account::get_account_onchain))
+        .route("/accounts", get(admin::list_accounts))
+        .route("/admin/accounts/:account_id", delete(admin::delete_account))
+        .route(
+            "/admin/accounts/:account_id/role",
+            put(admin::set_account_role),
+        )
+        .route(
+            "/admin/accounts/:account_id/sync-profile",
+            post(admin::sync_profile),
+        )
         .route("/authenticate", post(authenticate::authenticate))
         .route("/sync", post(sync::sync_account))
         .route("/token", post(token::token))
         .route("/subscribe", post(subscribe::subscribe))
+        .route("/transactions", get(transaction::list_transactions))
         .route("/transaction", post(transaction::create_transaction))
+        .route("/transaction/:btxid", get(transaction::get_transaction))
+        .route(
+            "/transaction/:btxid/review",
+            put(transaction::review_transaction),
+        )
         .route(
             "/managed-account/generate",
             post(managed_seed::generate_managed_account),
@@ -344,6 +374,8 @@ async fn run_server(
         .layer(Extension(stellar_config.clone()))
         .layer(Extension(seed_protector))
         .layer(Extension(stellar_signer))
+        .layer(Extension(http_client))
+        .layer(Extension(ldap_config))
         .layer(Extension(metrics));
 
     // Add optional SNS client extension

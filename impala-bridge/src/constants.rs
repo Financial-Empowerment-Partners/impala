@@ -92,6 +92,25 @@ pub const AUTH_PROVIDER_OKTA: &str = "okta";
 /// Auth provider identifier for local (password-based) users.
 pub const AUTH_PROVIDER_LOCAL: &str = "local";
 
+/// Account role: read-only access. Default for any account without an explicit role.
+pub const ROLE_VIEW_ONLY: &str = "view-only";
+
+/// Account role: device — can create transactions and manage cards.
+pub const ROLE_DEVICE: &str = "device";
+
+/// Account role: token — can manage accounts and MFA.
+pub const ROLE_TOKEN: &str = "token";
+
+/// Account role: admin — full access including role management and the admin console.
+pub const ROLE_ADMIN: &str = "admin";
+
+/// All valid account roles. The hyphenated `view-only` mirrors the UI's role keys
+/// (`impala-ui/html/js/roles.js`) so the UI can read the role straight from the JWT.
+pub const ALL_ROLES: &[&str] = &[ROLE_VIEW_ONLY, ROLE_DEVICE, ROLE_TOKEN, ROLE_ADMIN];
+
+/// Valid transaction review statuses (mirrors the `chk_review_status` DB CHECK).
+pub const VALID_REVIEW_STATUSES: &[&str] = &["unreviewed", "cleared", "flagged", "escalated"];
+
 /// Minimum length for JWT_SECRET (256 bits).
 pub const JWT_SECRET_MIN_LENGTH: usize = 32;
 

@@ -9,12 +9,30 @@ use std::sync::Arc;
 #[derive(Debug, Clone)]
 pub struct AuthenticatedUser {
     pub account_id: String,
+    pub role: String,
+}
+
+impl AuthenticatedUser {
+    /// True if the user holds the server-side admin role.
+    pub fn is_admin(&self) -> bool {
+        self.role == crate::constants::ROLE_ADMIN
+    }
 }
 
 /// Verify that the authenticated user owns the specified account.
 /// Returns `Err(AppError::Forbidden)` if `user.account_id` does not match.
 pub fn require_owner(user: &AuthenticatedUser, account_id: &str) -> Result<(), AppError> {
     if user.account_id != account_id {
+        return Err(AppError::Forbidden);
+    }
+    Ok(())
+}
+
+/// Verify that the authenticated user holds the admin role.
+/// Returns `Err(AppError::Forbidden)` otherwise. Tokens minted before role
+/// support lack the claim and default to `view-only`, so they fail closed here.
+pub fn require_admin(user: &AuthenticatedUser) -> Result<(), AppError> {
+    if user.role != crate::constants::ROLE_ADMIN {
         return Err(AppError::Forbidden);
     }
     Ok(())
@@ -72,6 +90,7 @@ where
 
         Ok(AuthenticatedUser {
             account_id: token_data.claims.sub,
+            role: token_data.claims.role,
         })
     }
 }
@@ -94,6 +113,7 @@ mod tests {
             exp: now + TEMPORAL_TOKEN_TTL_SECS,
             jti: uuid::Uuid::new_v4().to_string(),
             iss: JWT_ISSUER.to_string(),
+            role: "view-only".to_string(),
         };
 
         let token = encode(
@@ -129,6 +149,7 @@ mod tests {
             exp: now + REFRESH_TOKEN_TTL_SECS,
             jti: uuid::Uuid::new_v4().to_string(),
             iss: JWT_ISSUER.to_string(),
+            role: "view-only".to_string(),
         };
 
         let token = encode(
@@ -161,6 +182,7 @@ mod tests {
             exp: 1001, // Already expired
             jti: uuid::Uuid::new_v4().to_string(),
             iss: JWT_ISSUER.to_string(),
+            role: "view-only".to_string(),
         };
 
         let token = encode(
@@ -192,6 +214,7 @@ mod tests {
             exp: now + TEMPORAL_TOKEN_TTL_SECS,
             jti: uuid::Uuid::new_v4().to_string(),
             iss: JWT_ISSUER.to_string(),
+            role: "view-only".to_string(),
         };
 
         let token = encode(
@@ -223,6 +246,7 @@ mod tests {
             exp: now + TEMPORAL_TOKEN_TTL_SECS,
             jti: uuid::Uuid::new_v4().to_string(),
             iss: "wrong-issuer".to_string(),
+            role: "view-only".to_string(),
         };
 
         let token = encode(
@@ -242,5 +266,47 @@ mod tests {
         );
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_require_admin_allows_admin() {
+        let user = super::AuthenticatedUser {
+            account_id: "alice".to_string(),
+            role: crate::constants::ROLE_ADMIN.to_string(),
+        };
+        assert!(super::require_admin(&user).is_ok());
+        assert!(user.is_admin());
+    }
+
+    #[test]
+    fn test_require_admin_denies_non_admin() {
+        for role in [
+            crate::constants::ROLE_VIEW_ONLY,
+            crate::constants::ROLE_DEVICE,
+            crate::constants::ROLE_TOKEN,
+        ] {
+            let user = super::AuthenticatedUser {
+                account_id: "bob".to_string(),
+                role: role.to_string(),
+            };
+            assert!(super::require_admin(&user).is_err());
+            assert!(!user.is_admin());
+        }
+    }
+
+    #[test]
+    fn test_old_token_without_role_defaults_view_only() {
+        // A token JSON minted before role support omits `role`; serde default
+        // must yield least privilege.
+        let json = serde_json::json!({
+            "sub": "legacy",
+            "token_type": "temporal",
+            "iat": 1000usize,
+            "exp": 9999999999usize,
+            "jti": "abc",
+            "iss": JWT_ISSUER
+        });
+        let claims: Claims = serde_json::from_value(json).expect("should deserialize");
+        assert_eq!(claims.role, crate::constants::ROLE_VIEW_ONLY);
     }
 }

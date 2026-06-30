@@ -5,6 +5,13 @@
 **Prerequisites:** AWS credentials with permission to assume the deploy role;
 `terraform` 1.6+; `gh` CLI; access to the ECR repository.
 
+**See also:** scenario‑specific stand‑up guides (this runbook covers the steady‑state rollout of the
+existing bridge stack):
+- **Staging** — OpenBao (KMS auto‑unseal), admin UI, CloudFlare front end:
+  [`deploy-staging-openbao-kms-cloudflare.md`](./deploy-staging-openbao-kms-cloudflare.md).
+- **Production** — multi‑AZ redundant bridge + admin UI, HashiCorp Vault (KMS auto‑unseal), LDAP
+  account sync: [`deploy-production-vault-kms-ldap.md`](./deploy-production-vault-kms-ldap.md).
+
 ## Deploy checklist (normal change)
 
 1. **Merge to `main`** with CI green. CI publishes two single-arch images to ECR and stitches them into a multi-arch manifest tagged with the commit SHA and `latest`.
@@ -20,6 +27,16 @@
     Review the diff. The only expected changes for a code-only deploy are the ECS task definitions and services (new image reference).
 4. **Apply.** `terraform apply plan.tfplan`. ECS rolls the server + worker services one task at a time with the health check as the gate.
 5. **Run database migrations (if any).** See [Database migrations](#database-migrations) below.
+   - **Server-side roles (migrations 019–021):** these add the account `role`
+     column, a first-account-admin bootstrap trigger + backfill, `profile_source`,
+     and the `transaction_review` table. **After this deploy, every existing
+     session must refresh its token** (or re-login) to obtain the new server-side
+     `role` claim — tokens minted before the deploy lack it and are treated as
+     `view-only`, so admins will lose admin access in the web UI until they
+     refresh. On an existing database the 019 backfill promotes the earliest
+     account to `admin`; confirm at least one admin exists
+     (`SELECT count(*) FROM impala_account WHERE role='admin'`) before relying on
+     the admin console.
 6. **Smoke-test production.**
     - `curl -f https://<alb-dns>/healthz` → 200
     - `curl -sf https://<alb-dns>/readyz` → 200

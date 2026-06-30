@@ -404,6 +404,7 @@ mod tests {
     fn test_require_owner_rejects_mismatch() {
         let user = AuthenticatedUser {
             account_id: "alice".to_string(),
+            role: "view-only".to_string(),
         };
         assert!(crate::auth::require_owner(&user, "bob").is_err());
         assert!(crate::auth::require_owner(&user, "alice").is_ok());

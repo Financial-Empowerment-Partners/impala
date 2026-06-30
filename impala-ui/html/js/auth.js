@@ -6,17 +6,20 @@
  *  2. POST /token (username+password) — obtain a 14-day refresh token
  *  3. POST /token (refresh_token) — obtain a 1-hour temporal token
  *
- * The first user to log in is automatically bootstrapped as admin via Roles.bootstrap().
+ * Tokens are namespaced per Stellar network (see api.js / net-config.js), so all
+ * token access goes through the API module rather than hardcoded storage keys.
+ * Authorization is server-driven: the role comes from the token's `role` claim.
  *
  * @module Auth
  */
 var Auth = (function () {
     /**
-     * Check whether the user has an active (non-expired) session.
+     * Check whether the user has an active (non-expired) session on the active
+     * network.
      * @returns {boolean} True if a valid refresh token exists.
      */
     function isLoggedIn() {
-        var refresh = localStorage.getItem('refresh_token');
+        var refresh = API.getRefreshToken();
         if (!refresh) return false;
         return !API.isTokenExpired(refresh);
     }
@@ -26,7 +29,7 @@ var Auth = (function () {
      * @returns {string|null} The username, or null if no token exists.
      */
     function getUsername() {
-        var token = localStorage.getItem('refresh_token') || localStorage.getItem('temporal_token');
+        var token = API.getRefreshToken() || API.getTemporalToken();
         if (!token) return null;
         var payload = API.parseJwt(token);
         return payload ? (payload.sub || payload.username || null) : null;
@@ -37,7 +40,7 @@ var Auth = (function () {
      * @returns {Date|null} Expiry date, or null if no temporal token exists.
      */
     function getTokenExpiry() {
-        var token = localStorage.getItem('temporal_token');
+        var token = API.getTemporalToken();
         if (!token) return null;
         var payload = API.parseJwt(token);
         if (!payload || !payload.exp) return null;
@@ -94,9 +97,7 @@ var Auth = (function () {
             if (!data.temporal_token) throw new Error('No temporal token received');
             API.setTokens(data.temporal_token, null);
 
-            // Bootstrap roles — first user becomes admin
-            Roles.bootstrap(accountId);
-
+            // Authorization is server-driven: the role rides in the token's claim.
             return { success: true, username: accountId };
         });
     }

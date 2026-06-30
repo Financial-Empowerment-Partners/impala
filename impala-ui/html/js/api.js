@@ -17,38 +17,84 @@
  * @module API
  */
 var API = (function () {
-    /** Base path for all API requests (proxied to impala-bridge by Nginx). */
-    var BASE = '/api';
-
     /** Maximum retry attempts for failed requests. */
     var MAX_RETRIES = 3;
     /** Base delay in milliseconds for exponential backoff. */
     var RETRY_BASE_DELAY = 1000;
 
+    /** @returns {Object|null} The runtime network config, if loaded. */
+    function getConfig() {
+        return (typeof window !== 'undefined' && window.IMPALA_CONFIG) ? window.IMPALA_CONFIG : null;
+    }
+
+    /**
+     * The active network key (e.g. 'testnet'), derived from the persisted
+     * selection in localStorage and validated against the runtime config.
+     * @returns {string|null}
+     */
+    function currentNetworkKey() {
+        var stored = null;
+        try { stored = localStorage.getItem('impala_network'); } catch (e) { /* ignore */ }
+        var cfg = getConfig();
+        if (typeof NetConfig !== 'undefined') {
+            return NetConfig.resolveKey(cfg, stored);
+        }
+        return stored || (cfg && cfg.default) || null;
+    }
+
+    /**
+     * Base path for all API requests on the active network (proxied to the
+     * matching bridge by Nginx). Resolved dynamically so a network switch takes
+     * effect without reloading api.js.
+     * @returns {string}
+     */
+    function base() {
+        var cfg = getConfig();
+        if (typeof NetConfig !== 'undefined') {
+            return NetConfig.resolveBase(cfg, currentNetworkKey());
+        }
+        return '/api';
+    }
+
+    /**
+     * Build the per-network localStorage key for a token name. JWTs are not
+     * portable across bridges, so each network's tokens live under their own key
+     * (e.g. 'temporal_token::mainnet').
+     * @param {string} name
+     * @returns {string}
+     */
+    function tokenStorageKey(name) {
+        var netKey = currentNetworkKey();
+        if (typeof NetConfig !== 'undefined' && NetConfig.tokenKey) {
+            return NetConfig.tokenKey(name, netKey);
+        }
+        return netKey ? name + '::' + netKey : name;
+    }
+
     /** @returns {string|null} The stored temporal (short-lived) JWT token. */
     function getTemporalToken() {
-        return localStorage.getItem('temporal_token');
+        return localStorage.getItem(tokenStorageKey('temporal_token'));
     }
 
     /** @returns {string|null} The stored refresh (long-lived) JWT token. */
     function getRefreshToken() {
-        return localStorage.getItem('refresh_token');
+        return localStorage.getItem(tokenStorageKey('refresh_token'));
     }
 
     /**
-     * Store JWT tokens in localStorage.
+     * Store JWT tokens for the active network in localStorage.
      * @param {string|null} temporal - Temporal token (1-hour), or null to skip.
      * @param {string|null} refresh  - Refresh token (14-day), or null to skip.
      */
     function setTokens(temporal, refresh) {
-        if (temporal) localStorage.setItem('temporal_token', temporal);
-        if (refresh) localStorage.setItem('refresh_token', refresh);
+        if (temporal) localStorage.setItem(tokenStorageKey('temporal_token'), temporal);
+        if (refresh) localStorage.setItem(tokenStorageKey('refresh_token'), refresh);
     }
 
-    /** Remove all stored tokens from localStorage. */
+    /** Remove the active network's stored tokens from localStorage. */
     function clearTokens() {
-        localStorage.removeItem('temporal_token');
-        localStorage.removeItem('refresh_token');
+        localStorage.removeItem(tokenStorageKey('temporal_token'));
+        localStorage.removeItem(tokenStorageKey('refresh_token'));
     }
 
     /**
@@ -95,9 +141,11 @@ var API = (function () {
     }
 
     /**
-     * Sanitize an error message from the server.
-     * Maps known HTTP status codes to user-friendly messages and strips
-     * HTML tags and SQL-like keywords from raw messages.
+     * Fallback sanitizer for NON-enveloped error bodies (see extractErrorMessage,
+     * which prefers a structured `{error:{message}}` body and is what callers hit
+     * first). Maps known HTTP status codes to user-friendly messages and strips
+     * HTML tags + SQL-like keywords from raw messages (leak-defense for
+     * unexpected, non-API responses such as a proxy HTML error page).
      * @param {number} status - HTTP status code.
      * @param {string} rawMessage - Raw error message from server.
      * @returns {string} Sanitized, user-friendly error message.
@@ -107,6 +155,7 @@ var API = (function () {
             401: 'Session expired',
             403: 'Permission denied',
             404: 'Not found',
+            409: 'Conflict',
             429: 'Too many requests, please try again later',
             500: 'Server error',
             502: 'Server unavailable',
@@ -133,6 +182,58 @@ var API = (function () {
         return sanitized || 'Request failed (' + status + ')';
     }
 
+    /**
+     * Strip HTML tags and cap length, WITHOUT the SQL-keyword replacement.
+     * Used for trusted, API-shaped envelope messages (which legitimately contain
+     * words like "delete"/"role"), so guard messages are not mangled. The result
+     * is only ever rendered via textContent or an escapeHtml() sink, so tag
+     * stripping is belt-and-suspenders rather than the sole XSS defense.
+     * @param {string} message
+     * @returns {string}
+     */
+    function stripAndTruncate(message) {
+        var sanitized = String(message).replace(/<[^>]*>/g, '');
+        if (sanitized.length > 200) {
+            sanitized = sanitized.substring(0, 200) + '...';
+        }
+        return sanitized || 'Request failed';
+    }
+
+    /**
+     * Extract the `message` from a bridge error envelope `{error:{message}}`.
+     * @param {string} rawBody - Raw response body text.
+     * @returns {string|null} The envelope message, or null if not enveloped.
+     */
+    function parseEnvelopeMessage(rawBody) {
+        if (!rawBody || typeof rawBody !== 'string') return null;
+        try {
+            var parsed = JSON.parse(rawBody);
+            if (parsed && parsed.error && typeof parsed.error.message === 'string') {
+                return parsed.error.message;
+            }
+        } catch (e) {
+            // Not JSON — fall through to the raw-body fallback.
+        }
+        return null;
+    }
+
+    /**
+     * Turn an error response (status + raw body) into a display message.
+     * Prefers the bridge's structured `{error:{message}}` envelope (lightly
+     * sanitized, NOT SQL-filtered) so guard messages surface cleanly for every
+     * status; otherwise falls back to the status map + raw-body sanitization.
+     * @param {number} status
+     * @param {string} rawBody
+     * @returns {string}
+     */
+    function extractErrorMessage(status, rawBody) {
+        var enveloped = parseEnvelopeMessage(rawBody);
+        if (enveloped !== null) {
+            return stripAndTruncate(enveloped);
+        }
+        return sanitizeErrorMessage(status, rawBody);
+    }
+
     /** Cached in-flight refresh Promise to prevent concurrent refresh requests. */
     var refreshPromise = null;
 
@@ -153,7 +254,7 @@ var API = (function () {
             return Promise.reject(new Error('Session expired'));
         }
 
-        refreshPromise = fetch(BASE + '/token', {
+        refreshPromise = fetch(base() + '/token', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
@@ -246,7 +347,7 @@ var API = (function () {
                     opts.body = JSON.stringify(body);
                 }
 
-                return fetch(BASE + path, opts).then(function (res) {
+                return fetch(base() + path, opts).then(function (res) {
                     if (res.status === 401) {
                         clearTokens();
                         window.location.href = 'index.html';
@@ -288,7 +389,9 @@ var API = (function () {
         if (!res.ok) {
             var status = res.status;
             return res.text().then(function (t) {
-                throw new Error(sanitizeErrorMessage(status, t));
+                var err = new Error(extractErrorMessage(status, t));
+                err.status = status;
+                throw err;
             });
         }
         var ct = res.headers.get('content-type') || '';
@@ -323,12 +426,17 @@ var API = (function () {
     }
 
     return {
-        BASE: BASE,
+        /** Active network's API base path (dynamic getter, e.g. '/api/testnet'). */
+        get BASE() { return base(); },
+        currentNetworkKey: currentNetworkKey,
+        getTemporalToken: getTemporalToken,
+        getRefreshToken: getRefreshToken,
         setTokens: setTokens,
         clearTokens: clearTokens,
         parseJwt: parseJwt,
         isTokenExpired: isTokenExpired,
         sanitizeErrorMessage: sanitizeErrorMessage,
+        extractErrorMessage: extractErrorMessage,
         setButtonLoading: setButtonLoading,
 
         /** Authenticated GET request. Returns parsed JSON or text. */
@@ -357,7 +465,7 @@ var API = (function () {
          * @returns {Promise<Response>} Raw fetch Response.
          */
         rawPost: function (path, body) {
-            return fetch(BASE + path, {
+            return fetch(base() + path, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',

@@ -29,6 +29,9 @@ var Router = (function () {
      */
     function init() {
         if (!Auth.requireAuth()) return;
+        if (typeof Theme !== 'undefined') {
+            Theme.init();
+        }
         buildNav();
         highlightActiveLink();
         enforcePermissions();
@@ -64,15 +67,19 @@ var Router = (function () {
 
         var html = '<div class="top-bar-left">' +
             '<ul class="menu">' +
-            '<li class="menu-text"><strong>Impala</strong></li>';
+            '<li class="menu-text brand"><span class="brand-mark" aria-hidden="true">◆</span><strong>Impala</strong></li>';
 
         links.forEach(function (link) {
             html += '<li><a href="' + link.href + '">' + link.label + '</a></li>';
         });
 
+        var darkActive = (typeof Theme !== 'undefined' && Theme.get() === 'dark');
+
         html += '</ul></div>' +
             '<div class="top-bar-right">' +
             '<ul class="menu">' +
+            '<li class="net-selector-item" id="net-selector"></li>' +
+            '<li><button type="button" class="theme-toggle" id="theme-toggle" aria-label="Toggle dark mode" aria-pressed="' + (darkActive ? 'true' : 'false') + '">' + (darkActive ? '☀' : '☾') + '</button></li>' +
             '<li class="menu-text">' + escapeHtml(username) + ' <span class="role-badge ' + escapeHtml(role) + '">' + escapeHtml(roleDef.label || role) + '</span></li>' +
             '<li><a href="#" id="logout-btn">Logout</a></li>' +
             '</ul></div>';
@@ -89,6 +96,21 @@ var Router = (function () {
                 }
                 Auth.logout();
             });
+        }
+
+        var themeToggle = document.getElementById('theme-toggle');
+        if (themeToggle && typeof Theme !== 'undefined') {
+            themeToggle.addEventListener('click', function () {
+                var next = Theme.toggle();
+                var isDark = next === 'dark';
+                themeToggle.textContent = isDark ? '☀' : '☾';
+                themeToggle.setAttribute('aria-pressed', isDark ? 'true' : 'false');
+            });
+        }
+
+        // Mount the two-bridge network selector into its placeholder.
+        if (typeof Net !== 'undefined') {
+            Net.mount('net-selector');
         }
     }
 

@@ -1,21 +1,24 @@
 /**
- * Client-side role-based access control (RBAC) module.
+ * Server-driven role-based access control (RBAC) module.
  *
- * Manages four roles with hierarchical permissions, persisted in localStorage.
- * The first user to log in is automatically bootstrapped as admin.
+ * The bridge is the source of truth for authorization: the temporal JWT carries
+ * a `role` claim ("view-only" | "device" | "token" | "admin"). This module reads
+ * that claim (via API.parseJwt) and maps roles to permission sets for UI gating.
+ * There is no client-side role store anymore — role grants happen server-side
+ * (PUT /admin/accounts/:id/role) and take effect at the target's next refresh.
+ *
+ * Old tokens without a `role` claim, or an unauthenticated context, resolve to
+ * the least-privileged `view-only` role (fail-closed).
  *
  * Roles (ascending privilege):
  *  - view-only: read access to accounts, MFA, transactions, cards
  *  - device:    + create_transactions, manage_cards
- *  - token:     + manage_accounts, manage_mfa
- *  - admin:     + manage_roles (all permissions)
+ *  - token:     + manage_accounts, manage_mfa, review_transactions
+ *  - admin:     all permissions (manage_roles, delete_accounts, sync_profile)
  *
  * @module Roles
  */
 var Roles = (function () {
-    /** localStorage key for the role assignments map. */
-    var STORAGE_KEY = 'impala_roles';
-
     /**
      * Role definitions mapping role keys to their labels and permission sets.
      * @type {Object.<string, {label: string, permissions: string[]}>}
@@ -31,91 +34,47 @@ var Roles = (function () {
         },
         'token': {
             label: 'Token',
-            permissions: ['view_accounts', 'manage_accounts', 'view_mfa', 'manage_mfa', 'view_transactions', 'create_transactions', 'view_cards']
+            permissions: ['view_accounts', 'manage_accounts', 'view_mfa', 'manage_mfa', 'view_transactions', 'create_transactions', 'review_transactions', 'view_cards']
         },
         'admin': {
             label: 'Admin',
-            permissions: ['view_accounts', 'manage_accounts', 'view_mfa', 'manage_mfa', 'view_transactions', 'create_transactions', 'view_cards', 'manage_cards', 'manage_roles']
+            permissions: ['view_accounts', 'manage_accounts', 'delete_accounts', 'sync_profile', 'view_mfa', 'manage_mfa', 'view_transactions', 'create_transactions', 'review_transactions', 'view_cards', 'manage_cards', 'manage_roles']
         }
     };
 
-    /**
-     * Load the account-to-role mapping from localStorage.
-     * @returns {Object.<string, string>} Map of accountId -> role key.
-     */
-    function loadRoles() {
-        try {
-            return JSON.parse(localStorage.getItem(STORAGE_KEY)) || {};
-        } catch (e) {
-            return {};
-        }
-    }
-
-    /** Persist the role mapping to localStorage. */
-    function saveRoles(roles) {
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(roles));
-    }
+    /** Least-privileged role used when no valid role can be determined. */
+    var DEFAULT_ROLE = 'view-only';
 
     /**
-     * Get the role for an account. Defaults to 'view-only' if not assigned.
-     * @param {string} accountId
-     * @returns {string} Role key (e.g. 'admin', 'device').
-     */
-    function getRole(accountId) {
-        var roles = loadRoles();
-        return roles[accountId] || 'view-only';
-    }
-
-    /**
-     * Assign a role to an account.
-     * @param {string} accountId
-     * @param {string} role - Must be a key in DEFINITIONS.
-     * @returns {boolean} True if the role was valid and set.
-     */
-    function setRole(accountId, role) {
-        if (!DEFINITIONS[role]) return false;
-        var roles = loadRoles();
-        roles[accountId] = role;
-        saveRoles(roles);
-        return true;
-    }
-
-    /** Remove the role assignment for an account (reverts to view-only). */
-    function removeRole(accountId) {
-        var roles = loadRoles();
-        delete roles[accountId];
-        saveRoles(roles);
-    }
-
-    /** @returns {Object.<string, string>} All account-to-role assignments. */
-    function getAllAssignments() {
-        return loadRoles();
-    }
-
-    /**
-     * Check if an account has a specific permission.
-     * @param {string} accountId
+     * Pure permission check for a given role (testable, no globals).
+     * @param {string} role - Role key.
      * @param {string} permission - Permission string (e.g. 'manage_accounts').
      * @returns {boolean}
      */
-    function hasPermission(accountId, permission) {
-        var role = getRole(accountId);
+    function roleHasPermission(role, permission) {
         var def = DEFINITIONS[role];
         return def ? def.permissions.indexOf(permission) !== -1 : false;
     }
 
-    /** Check if the currently logged-in user has a specific permission. */
-    function currentUserHasPermission(permission) {
-        var username = Auth.getUsername();
-        if (!username) return false;
-        return hasPermission(username, permission);
+    /**
+     * The current user's role, read from the temporal token's `role` claim.
+     * Falls back to `view-only` when unauthenticated or for legacy tokens.
+     * @returns {string}
+     */
+    function currentUserRole() {
+        if (typeof API === 'undefined' || typeof API.getTemporalToken !== 'function') {
+            return DEFAULT_ROLE;
+        }
+        var token = API.getTemporalToken();
+        if (!token) return DEFAULT_ROLE;
+        var payload = API.parseJwt(token);
+        if (!payload || !payload.role) return DEFAULT_ROLE;
+        return DEFINITIONS[payload.role] ? payload.role : DEFAULT_ROLE;
     }
 
-    /** @returns {string} The current user's role key. */
-    function currentUserRole() {
-        var username = Auth.getUsername();
-        if (!username) return 'view-only';
-        return getRole(username);
+    /** Check whether the currently logged-in user has a specific permission. */
+    function currentUserHasPermission(permission) {
+        return roleHasPermission(currentUserRole(), permission);
     }
 
     /** @returns {boolean} True if the current user has the admin role. */
@@ -123,33 +82,16 @@ var Roles = (function () {
         return currentUserRole() === 'admin';
     }
 
-    /**
-     * Bootstrap role assignments on first login.
-     * The very first account to log in is automatically granted admin.
-     * Subsequent new accounts default to view-only.
-     * @param {string} accountId - The account that just logged in.
-     */
-    function bootstrap(accountId) {
-        var roles = loadRoles();
-        if (Object.keys(roles).length === 0) {
-            roles[accountId] = 'admin';
-            saveRoles(roles);
-        } else if (!roles[accountId]) {
-            roles[accountId] = 'view-only';
-            saveRoles(roles);
-        }
+    // One-time cleanup: the legacy client-side role store is no longer used.
+    if (typeof localStorage !== 'undefined') {
+        try { localStorage.removeItem('impala_roles'); } catch (e) { /* ignore */ }
     }
 
     return {
         DEFINITIONS: DEFINITIONS,
-        getRole: getRole,
-        setRole: setRole,
-        removeRole: removeRole,
-        getAllAssignments: getAllAssignments,
-        hasPermission: hasPermission,
-        currentUserHasPermission: currentUserHasPermission,
+        roleHasPermission: roleHasPermission,
         currentUserRole: currentUserRole,
-        isAdmin: isAdmin,
-        bootstrap: bootstrap
+        currentUserHasPermission: currentUserHasPermission,
+        isAdmin: isAdmin
     };
 })();

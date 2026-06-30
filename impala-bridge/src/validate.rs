@@ -268,6 +268,27 @@ pub fn validate_listen_endpoint(endpoint: &str) -> Result<(), AppError> {
     Ok(())
 }
 
+/// Validate an account role against the allowed set (`ALL_ROLES`).
+pub fn validate_role(role: &str) -> Result<(), AppError> {
+    if crate::constants::ALL_ROLES.contains(&role) {
+        Ok(())
+    } else {
+        Err(AppError::BadRequest(format!(
+            "Invalid role '{}'. Must be one of: {}",
+            role,
+            crate::constants::ALL_ROLES.join(", ")
+        )))
+    }
+}
+
+/// Validate that `value` is a well-formed RFC 3339 timestamp (e.g. used for
+/// transaction date-range filters). Returns `BadRequest` naming the field.
+pub fn validate_rfc3339_timestamp(value: &str, field: &str) -> Result<(), AppError> {
+    chrono::DateTime::parse_from_rfc3339(value)
+        .map(|_| ())
+        .map_err(|_| AppError::BadRequest(format!("{} must be an RFC 3339 timestamp", field)))
+}
+
 /// Escape special characters in LDAP filter values per RFC 4515.
 pub fn ldap_escape(input: &str) -> String {
     let mut escaped = String::with_capacity(input.len());
@@ -639,5 +660,36 @@ mod tests {
     #[test]
     fn test_listen_endpoint_private_ip() {
         assert!(validate_listen_endpoint("192.168.1.1:8080").is_err());
+    }
+
+    // ── Role ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_validate_role_accepts_all_roles() {
+        for role in ["view-only", "device", "token", "admin"] {
+            assert!(validate_role(role).is_ok(), "role {} should be valid", role);
+        }
+    }
+
+    #[test]
+    fn test_validate_role_rejects_unknown() {
+        assert!(validate_role("superuser").is_err());
+        assert!(validate_role("").is_err());
+        assert!(validate_role("Admin").is_err());
+    }
+
+    // ── RFC 3339 timestamp ─────────────────────────────────────────────
+
+    #[test]
+    fn test_validate_rfc3339_accepts_valid() {
+        assert!(validate_rfc3339_timestamp("2026-06-30T00:00:00Z", "from").is_ok());
+        assert!(validate_rfc3339_timestamp("2026-06-30T12:34:56+02:00", "to").is_ok());
+    }
+
+    #[test]
+    fn test_validate_rfc3339_rejects_invalid() {
+        assert!(validate_rfc3339_timestamp("not-a-date", "from").is_err());
+        assert!(validate_rfc3339_timestamp("2026-13-01T00:00:00Z", "from").is_err());
+        assert!(validate_rfc3339_timestamp("2026-06-30", "from").is_err());
     }
 }
