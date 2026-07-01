@@ -11,6 +11,9 @@ existing bridge stack):
   [`deploy-staging-openbao-kms-cloudflare.md`](./deploy-staging-openbao-kms-cloudflare.md).
 - **Production** — multi‑AZ redundant bridge + admin UI, HashiCorp Vault (KMS auto‑unseal), LDAP
   account sync: [`deploy-production-vault-kms-ldap.md`](./deploy-production-vault-kms-ldap.md).
+- **Okta SSO** — turn on Okta single sign‑on for the admin UI (local + AWS) with an optional
+  CloudFlare Access edge gate:
+  [`deploy-okta-sso-admin-ui-cloudflare.md`](./deploy-okta-sso-admin-ui-cloudflare.md).
 
 ## Deploy checklist (normal change)
 

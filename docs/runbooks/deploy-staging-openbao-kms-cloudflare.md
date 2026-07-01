@@ -357,6 +357,9 @@ CloudFlare settings:
   out and irrelevant for the S3 path).
 - Lock the origin: restrict the ALB SG ingress (80/443) to CloudFlare's published IP ranges so the
   origin can't be reached directly, bypassing the edge.
+- **Okta SSO + CloudFlare Access.** To turn on Okta single sign‑on for the dashboard and gate the
+  admin host with CloudFlare Access (Okta as the IdP, layered on the app login), see
+  [`deploy-okta-sso-admin-ui-cloudflare.md`](./deploy-okta-sso-admin-ui-cloudflare.md).
 
 ---
 

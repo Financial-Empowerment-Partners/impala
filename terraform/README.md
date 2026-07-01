@@ -88,7 +88,7 @@ server/worker services (they will restart naturally on the next deploy).
 |---|---|---|
 | `JWT_SECRET` | `var.jwt_secret` → Secrets Manager | ECS task definition `secrets` block |
 | `DATABASE_URL` | Auto-generated RDS URL → Secrets Manager | ECS task definition `secrets` block |
-| `TWILIO_TOKEN`, `FCM_SERVICE_ACCOUNT_KEY`, `OKTA_CLIENT_SECRET` | Optional — create SM entries and reference via `additional_secrets` map | ECS task definition `secrets` block |
+| `TWILIO_TOKEN`, `FCM_SERVICE_ACCOUNT_KEY`, `DUO_2FA_CLIENT_SECRET` | Optional — **not wired in Terraform today.** `ecs.tf` injects only `database_url` + `jwt_secret`; there is no `additional_secrets` variable. To add one, extend the task-definition `secrets` block plus a Secrets Manager entry and the execution-role policy. | ECS task definition `secrets` block |
 
 Secrets never appear in task-definition plaintext env vars — only in the
 `secrets` block that resolves from Secrets Manager at task start.

@@ -9,7 +9,7 @@ mod ldap;
 mod middleware;
 mod models;
 mod notifications;
-mod okta;
+mod oidc;
 mod redis_helpers;
 mod seed_protect;
 mod sns;
@@ -43,7 +43,7 @@ use tower_http::trace::TraceLayer;
 use config::load_config;
 use handlers::{
     account, admin, authenticate, card, device_token, health, logout, managed_seed, mfa, network,
-    notification_subscription, notify, okta as okta_handler, subscribe, sync, token, transaction,
+    notification_subscription, notify, sso as sso_handler, subscribe, sync, token, transaction,
 };
 
 #[tokio::main]
@@ -194,8 +194,8 @@ async fn run_server(
         info!("Soroban contract ID: {}", cid);
     }
 
-    // Initialize Okta provider (if configured)
-    let okta_provider = okta::init_okta_provider(&config).await;
+    // Initialize the OIDC SSO provider registry (Okta / Auth0 / Duo / …)
+    let sso_registry = Arc::new(oidc::init_registry(&config).await);
 
     // Initialize SNS client for job dispatch (if configured)
     let sns_client = if config.sns_topic_arn.is_some() {
@@ -332,8 +332,9 @@ async fn run_server(
             post(device_token::register_device_token).delete(device_token::delete_device_token),
         )
         .route("/logout", post(logout::logout))
-        .route("/auth/okta", post(okta_handler::okta_token_exchange))
-        .route("/auth/okta/config", get(okta_handler::okta_config))
+        .route("/auth/sso/:provider", post(sso_handler::sso_token_exchange))
+        .route("/auth/sso/:provider/config", get(sso_handler::sso_config))
+        .route("/auth/providers", get(sso_handler::sso_providers))
         .route("/healthz", get(health::liveness))
         .route("/readyz", get(health::readiness))
         .route("/network", get(network::network_info))
@@ -399,18 +400,17 @@ async fn run_server(
     // Cancellation token for graceful background task shutdown
     let cancel = CancellationToken::new();
 
-    // Add Okta provider extension and spawn JWKS refresh task (if configured)
-    let app = if let Some(ref provider) = okta_provider {
+    // Register the SSO provider registry and spawn one JWKS refresh task per
+    // configured provider. The registry is always present (possibly empty).
+    for provider in sso_registry.iter() {
         let refresh_provider = provider.clone();
-        let refresh_secs = config.okta_jwks_refresh_secs;
+        let refresh_secs = provider.jwks_refresh_secs;
         let jwks_cancel = cancel.clone();
         tokio::spawn(async move {
-            okta::jwks_refresh_task(refresh_provider, refresh_secs, jwks_cancel).await;
+            oidc::jwks_refresh_task(refresh_provider, refresh_secs, jwks_cancel).await;
         });
-        app.layer(Extension(provider.clone()))
-    } else {
-        app
-    };
+    }
+    let app = app.layer(Extension(sso_registry.clone()));
 
     // LDAP directory sync
     ldap::directory_sync(&pool, &config).await;

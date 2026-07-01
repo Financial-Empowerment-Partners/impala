@@ -10,7 +10,7 @@ pub mod mfa;
 pub mod network;
 pub mod notification_subscription;
 pub mod notify;
-pub mod okta;
+pub mod sso;
 pub mod subscribe;
 pub mod sync;
 pub mod token;

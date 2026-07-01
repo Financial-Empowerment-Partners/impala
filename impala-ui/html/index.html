@@ -22,12 +22,12 @@
                 </label>
                 <button type="submit" class="button expanded" id="login-btn">Login</button>
             </form>
-            <div id="okta-divider" class="hidden" style="text-align:center;margin:1.2rem 0 0.8rem;">
+            <div id="sso-divider" class="hidden" style="text-align:center;margin:1.2rem 0 0.8rem;">
                 <span style="display:inline-block;width:40%;border-bottom:1px solid #ccc;vertical-align:middle;"></span>
                 <span style="padding:0 0.7rem;color:#888;font-size:0.9rem;">or</span>
                 <span style="display:inline-block;width:40%;border-bottom:1px solid #ccc;vertical-align:middle;"></span>
             </div>
-            <button type="button" class="button expanded secondary hidden" id="okta-login-btn">Sign in with Okta</button>
+            <div id="sso-buttons"></div>
             <p class="text-center" style="margin-top:1rem;font-size:0.85rem;color:#666;">
                 New accounts are registered automatically on first login.
             </p>
@@ -42,7 +42,7 @@
     <script src="js/validate.js"></script>
     <script src="js/net-config.js"></script>
     <script src="js/net.js"></script>
-    <script src="js/okta-auth.js"></script>
+    <script src="js/sso-auth.js"></script>
     <script>
         (function () {
             // Render the network selector so the user picks which bridge to log into.
@@ -58,15 +58,15 @@
 
             // Display callback errors from sessionStorage
             var errorDiv = document.getElementById('login-error');
-            var callbackError = sessionStorage.getItem('okta_error');
+            var callbackError = sessionStorage.getItem('sso_error');
             if (callbackError) {
                 errorDiv.textContent = callbackError;
                 errorDiv.classList.remove('hidden');
-                sessionStorage.removeItem('okta_error');
+                sessionStorage.removeItem('sso_error');
             }
 
-            // Initialize Okta (shows button if configured)
-            OktaAuth.init();
+            // Initialize SSO (renders a button per enabled provider)
+            SsoAuth.init(['okta', 'auth0', 'duo']);
 
             var form = document.getElementById('login-form');
             var loginBtn = document.getElementById('login-btn');

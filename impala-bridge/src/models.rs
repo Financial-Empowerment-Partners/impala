@@ -593,20 +593,29 @@ pub struct NetworkInfoResponse {
     pub soroban_contract_id: Option<String>,
 }
 
-// ── Okta ───────────────────────────────────────────────────────────────
+// ── SSO (OIDC) ──────────────────────────────────────────────────────────
 
 #[derive(Deserialize)]
-pub struct OktaTokenExchangeRequest {
-    pub okta_token: String,
+pub struct SsoTokenExchangeRequest {
+    /// Access token (Okta / Auth0). Legacy clients send it as `okta_token`.
+    #[serde(default, alias = "okta_token")]
+    pub token: Option<String>,
+    /// ID token, for providers configured with `token_kind = id` (e.g. Duo SSO).
+    #[serde(default)]
+    pub id_token: Option<String>,
 }
 
 #[derive(Serialize)]
-pub struct OktaConfigResponse {
+pub struct SsoConfigResponse {
     pub enabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub issuer: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub client_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub audience: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub authorization_endpoint: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -810,11 +819,13 @@ mod tests {
     }
 
     #[test]
-    fn test_okta_config_response_disabled() {
-        let resp = OktaConfigResponse {
+    fn test_sso_config_response_disabled() {
+        let resp = SsoConfigResponse {
             enabled: false,
+            provider: None,
             issuer: None,
             client_id: None,
+            audience: None,
             authorization_endpoint: None,
             token_endpoint: None,
             scopes: None,
@@ -822,5 +833,19 @@ mod tests {
         let json = serde_json::to_string(&resp).unwrap();
         assert!(json.contains("\"enabled\":false"));
         assert!(!json.contains("issuer"));
+    }
+
+    #[test]
+    fn test_sso_token_exchange_request_legacy_alias() {
+        // Legacy clients send `okta_token`; it maps onto the generic `token`.
+        let req: SsoTokenExchangeRequest =
+            serde_json::from_str(r#"{"okta_token":"abc"}"#).unwrap();
+        assert_eq!(req.token.as_deref(), Some("abc"));
+        assert_eq!(req.id_token, None);
+
+        let req2: SsoTokenExchangeRequest =
+            serde_json::from_str(r#"{"id_token":"xyz"}"#).unwrap();
+        assert_eq!(req2.id_token.as_deref(), Some("xyz"));
+        assert_eq!(req2.token, None);
     }
 }

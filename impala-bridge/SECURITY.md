@@ -21,7 +21,7 @@ After 5 failed login attempts, the account is locked for 15 minutes. Failed atte
 
 ### Rate Limiting
 
-Authentication endpoints (`/authenticate`, `/token`, `/auth/okta`) enforce per-account rate limits of 10 requests per 60-second window via Redis.
+Authentication endpoints (`/authenticate`, `/token`, `/auth/sso/:provider`) enforce per-account rate limits of 10 requests per 60-second window via Redis (SSO is rate-limited per provider, lockout is per account across providers).
 
 MFA verification (`/mfa/verify`) enforces brute force protection with a lockout after 5 failed attempts per account/MFA-type pair.
 

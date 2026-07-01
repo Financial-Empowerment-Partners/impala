@@ -61,7 +61,7 @@ No build step or transpilation — static HTML/CSS/JS served by Nginx. All JS mo
 | `cards.js` | Smartcard registration and deactivation |
 | `dashboard.js` | System version/health display and session info |
 | `admin.js` | Read-only Roles & Permissions reference (admin-only) |
-| `okta-auth.js` | Okta OAuth 2.0 (Authorization Code + PKCE) login |
+| `sso-auth.js` | Multi-provider OIDC SSO (Okta / Auth0 / Duo) — Authorization Code + PKCE login, one button per enabled provider |
 
 ### Two-bridge network routing
 

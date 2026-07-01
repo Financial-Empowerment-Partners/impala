@@ -33,6 +33,44 @@ pub struct StellarConfig {
     pub contract_id: Option<String>,
 }
 
+/// Which token the bridge JWKS-validates for an OIDC provider.
+///
+/// Most providers (Okta, Auth0) hand the browser a JWT **access token** that
+/// carries the identity claims. Some (e.g. Duo SSO) reliably carry the identity
+/// only in the **id token**, so those are configured with `TokenKind::Id`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TokenKind {
+    Access,
+    Id,
+}
+
+impl TokenKind {
+    pub fn from_str_opt(s: &str) -> Self {
+        match s.trim().to_lowercase().as_str() {
+            "id" | "id_token" | "idtoken" => TokenKind::Id,
+            _ => TokenKind::Access,
+        }
+    }
+}
+
+/// Configuration for a single OIDC SSO provider (Okta / Auth0 / Duo / …).
+///
+/// Providers are declared via `SSO_PROVIDERS=okta,auth0,duo` (or the
+/// `sso_providers` config-file array) and each is configured through prefixed
+/// env vars: `{NAME}_ISSUER_URL`, `{NAME}_CLIENT_ID`, `{NAME}_AUDIENCE`,
+/// `{NAME}_JWKS_REFRESH_SECS`, `{NAME}_TOKEN_KIND`.
+#[derive(Debug, Clone)]
+pub struct ProviderConfig {
+    pub name: String,
+    pub issuer_url: String,
+    pub client_id: String,
+    /// Validated as the JWT `aud`. Defaults to `client_id` when unset (Okta);
+    /// set to the API identifier for Auth0.
+    pub audience: String,
+    pub jwks_refresh_secs: u64,
+    pub token_kind: TokenKind,
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     #[allow(dead_code)] // loaded config, not currently read in code paths
@@ -52,9 +90,8 @@ pub struct Config {
     pub db_max_connections: u32,
     pub cors_allowed_origins: String,
     pub http_client_timeout_secs: u64,
-    pub okta_issuer_url: Option<String>,
-    pub okta_client_id: Option<String>,
-    pub okta_jwks_refresh_secs: u64,
+    /// Configured OIDC SSO providers (Okta / Auth0 / Duo / …). Empty when SSO is off.
+    pub sso_providers: Vec<ProviderConfig>,
     pub sqs_queue_url: Option<String>,
     pub sns_topic_arn: Option<String>,
     pub worker_concurrency: usize,
@@ -175,19 +212,66 @@ pub fn load_config() -> Config {
         .and_then(|v| v.parse().ok())
         .unwrap_or(crate::constants::DEFAULT_HTTP_CLIENT_TIMEOUT_SECS);
 
-    let okta_issuer_url = env::var("OKTA_ISSUER_URL")
-        .ok()
-        .or_else(|| from_file("okta_issuer_url"));
+    // OIDC SSO providers (multi-provider registry). Declare the set via
+    // `SSO_PROVIDERS=okta,auth0,duo` (or a `sso_providers` array in the config
+    // file); each provider is then configured with prefixed vars. For backward
+    // compatibility, if `SSO_PROVIDERS` is unset but `OKTA_ISSUER_URL` is set we
+    // synthesize a single `okta` provider.
+    let provider_var = |name: &str, key: &str| -> Option<String> {
+        let env_key = format!("{}_{}", name.to_uppercase(), key);
+        let file_key = format!("{}_{}", name.to_lowercase(), key.to_lowercase());
+        env::var(&env_key).ok().or_else(|| from_file(&file_key))
+    };
 
-    let okta_client_id = env::var("OKTA_CLIENT_ID")
+    let provider_names: Vec<String> = match env::var("SSO_PROVIDERS")
         .ok()
-        .or_else(|| from_file("okta_client_id"));
+        .or_else(|| from_file("sso_providers"))
+    {
+        Some(list) if !list.trim().is_empty() => list
+            .split(',')
+            .map(|p| p.trim().to_lowercase())
+            .filter(|p| !p.is_empty())
+            .collect(),
+        _ => {
+            if env::var("OKTA_ISSUER_URL")
+                .ok()
+                .or_else(|| from_file("okta_issuer_url"))
+                .is_some()
+            {
+                vec!["okta".to_string()]
+            } else {
+                Vec::new()
+            }
+        }
+    };
 
-    let okta_jwks_refresh_secs = env::var("OKTA_JWKS_REFRESH_SECS")
-        .ok()
-        .or_else(|| from_file("okta_jwks_refresh_secs"))
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(crate::constants::DEFAULT_JWKS_REFRESH_SECS);
+    let sso_providers: Vec<ProviderConfig> = provider_names
+        .iter()
+        .filter_map(|name| {
+            let issuer_url = provider_var(name, "ISSUER_URL")?;
+            if issuer_url.trim().is_empty() {
+                return None;
+            }
+            let client_id = provider_var(name, "CLIENT_ID").unwrap_or_default();
+            let audience = provider_var(name, "AUDIENCE")
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| client_id.clone());
+            let jwks_refresh_secs = provider_var(name, "JWKS_REFRESH_SECS")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(crate::constants::DEFAULT_JWKS_REFRESH_SECS);
+            let token_kind = provider_var(name, "TOKEN_KIND")
+                .map(|v| TokenKind::from_str_opt(&v))
+                .unwrap_or(TokenKind::Access);
+            Some(ProviderConfig {
+                name: name.clone(),
+                issuer_url,
+                client_id,
+                audience,
+                jwks_refresh_secs,
+                token_kind,
+            })
+        })
+        .collect();
 
     let sqs_queue_url = env::var("SQS_QUEUE_URL")
         .ok()
@@ -309,9 +393,7 @@ pub fn load_config() -> Config {
         db_max_connections,
         cors_allowed_origins,
         http_client_timeout_secs,
-        okta_issuer_url,
-        okta_client_id,
-        okta_jwks_refresh_secs,
+        sso_providers,
         sqs_queue_url,
         sns_topic_arn,
         worker_concurrency,
@@ -355,9 +437,7 @@ pub(crate) fn test_config() -> Config {
         db_max_connections: 5,
         cors_allowed_origins: String::new(),
         http_client_timeout_secs: 30,
-        okta_issuer_url: None,
-        okta_client_id: None,
-        okta_jwks_refresh_secs: 3600,
+        sso_providers: Vec::new(),
         sqs_queue_url: None,
         sns_topic_arn: None,
         worker_concurrency: 10,
@@ -439,6 +519,16 @@ mod tests {
     #[test]
     fn test_stellar_network_as_str_pubnet() {
         assert_eq!(StellarNetwork::Pubnet.as_str(), "pubnet");
+    }
+
+    #[test]
+    fn test_token_kind_from_str() {
+        assert_eq!(TokenKind::from_str_opt("id"), TokenKind::Id);
+        assert_eq!(TokenKind::from_str_opt("id_token"), TokenKind::Id);
+        assert_eq!(TokenKind::from_str_opt("ID"), TokenKind::Id);
+        assert_eq!(TokenKind::from_str_opt("access"), TokenKind::Access);
+        assert_eq!(TokenKind::from_str_opt(""), TokenKind::Access);
+        assert_eq!(TokenKind::from_str_opt("anything"), TokenKind::Access);
     }
 
     #[test]

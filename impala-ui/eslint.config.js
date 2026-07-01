@@ -56,7 +56,7 @@ export default [
                 Validate: 'writable',
                 Paginate: 'writable',
                 SessionTimer: 'writable',
-                OktaAuth: 'writable',
+                SsoAuth: 'writable',
                 NetConfig: 'writable',
                 Net: 'writable',
                 Theme: 'writable',

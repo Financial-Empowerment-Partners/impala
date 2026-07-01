@@ -196,11 +196,23 @@ paths:
         '200': { description: Token revoked. }
         '401': { $ref: '#/components/responses/Unauthorized' }
 
-  /auth/okta:
+  /auth/sso/{provider}:
     post:
       tags: [auth]
-      summary: Exchange an Okta ID token for bridge tokens.
+      summary: Exchange a validated OIDC token for bridge tokens.
+      description: >
+        Exchange a token from the named SSO provider (okta | auth0 | duo | …) for
+        the bridge's refresh + temporal JWT pair. Auto-provisions the account on
+        first login. Send `token` (the OIDC access token; `okta_token` is accepted
+        as a legacy alias) for access-token providers, or `id_token` for providers
+        configured with token_kind=id (e.g. Duo SSO).
       security: []
+      parameters:
+        - name: provider
+          in: path
+          required: true
+          schema: { type: string }
+          description: Provider name (okta | auth0 | duo).
       requestBody:
         required: true
         content:
@@ -208,24 +220,48 @@ paths:
             schema:
               type: object
               properties:
-                id_token: { type: string }
-              required: [id_token]
+                token: { type: string, description: 'OIDC access token (legacy alias: okta_token).' }
+                id_token: { type: string, description: 'OIDC id token (token_kind=id providers, e.g. Duo SSO).' }
       responses:
         '200':
           description: Bridge refresh + temporal tokens.
           content:
             application/json:
               schema: { $ref: '#/components/schemas/TokenResponse' }
+        '400': { description: Provider not configured, or no token supplied. }
         '401': { $ref: '#/components/responses/Unauthorized' }
 
-  /auth/okta/config:
+  /auth/sso/{provider}/config:
     get:
       tags: [auth]
-      summary: Return client-side Okta OIDC configuration.
+      summary: Return client-side OIDC configuration for a provider.
+      security: []
+      parameters:
+        - name: provider
+          in: path
+          required: true
+          schema: { type: string }
+          description: Provider name (okta | auth0 | duo).
+      responses:
+        '200':
+          description: >
+            OIDC config for the UI — { enabled, provider, issuer, client_id,
+            audience, authorization_endpoint, token_endpoint, scopes }. Returns
+            { enabled: false } when the provider is not configured.
+
+  /auth/providers:
+    get:
+      tags: [auth]
+      summary: List the names of all configured SSO providers.
       security: []
       responses:
         '200':
-          description: OIDC config for the UI.
+          description: JSON array of configured provider names.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { type: string }
 
   /account:
     post:

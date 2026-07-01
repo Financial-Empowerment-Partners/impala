@@ -86,8 +86,21 @@ pub const TOKEN_TYPE_TEMPORAL: &str = "temporal";
 /// Default JWKS refresh interval in seconds (1 hour).
 pub const DEFAULT_JWKS_REFRESH_SECS: u64 = 3600;
 
+// Canonical OIDC provider identifiers. Provider names are config-driven
+// (`SSO_PROVIDERS`), so the SSO handler binds the configured name directly;
+// these constants document the well-known vocabulary and are referenced by the
+// Duo 2FA path and docs.
 /// Auth provider identifier for Okta users.
+#[allow(dead_code)]
 pub const AUTH_PROVIDER_OKTA: &str = "okta";
+
+/// Auth provider identifier for Auth0 users.
+#[allow(dead_code)]
+pub const AUTH_PROVIDER_AUTH0: &str = "auth0";
+
+/// Auth provider identifier for Duo (SSO) users.
+#[allow(dead_code)]
+pub const AUTH_PROVIDER_DUO: &str = "duo";
 
 /// Auth provider identifier for local (password-based) users.
 pub const AUTH_PROVIDER_LOCAL: &str = "local";

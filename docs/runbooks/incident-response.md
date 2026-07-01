@@ -74,8 +74,9 @@ Look for patterns:
    invalidated — users need to log in again. This is *expected*, not an
    incident. If a partial rotation left services with mismatched secrets,
    see `rotate-secrets.md`.
-3. **Check Okta provider** via `/auth/okta/config`. If it returns 500, the
-   bridge couldn't refresh the JWKS.
+3. **Check SSO providers** via `/auth/sso/<provider>/config` (e.g. `/auth/sso/okta/config`).
+   If a provider that should be enabled reports `{"enabled":false}`, its discovery/JWKS
+   fetch failed at startup — check the `oidc[<provider>]` logs and issuer/JWKS reachability.
 4. **Check `POST /token` logs** for "invalid refresh token" bursts — could
    indicate a client bug or a scripted login attempt.
 
@@ -97,7 +98,8 @@ Treat as Sev 1 regardless of impact.
    existing tokens and forces every user to re-authenticate.
 3. **Rotate all other secrets** that may have been reachable from the same
    blast radius: DB URL, Vault/OpenBao wrapping & Transit tokens, Twilio, SES,
-   FCM, Okta client secret.
+   FCM, and `DUO_2FA_CLIENT_SECRET` if Duo 2FA is enabled. (The OIDC SSO
+   providers use no bridge-side client secret — public PKCE clients.)
 4. **Review access logs.** ALB access logs are in the S3 bucket wired by
    `terraform/alb.tf`.
 5. **Open a security issue** (private) with the forensic snapshot and

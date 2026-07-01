@@ -162,8 +162,8 @@ graph LR
     subgraph Public["Public &lpar;No Auth&rpar;"]
         Auth["/authenticate POST"]
         Token["/token POST"]
-        OktaExch["/auth/okta POST"]
-        OktaCfg["/auth/okta/config GET"]
+        SsoExch["/auth/sso/:provider POST"]
+        SsoCfg["/auth/sso/:provider/config GET"]
         Ver["/version GET"]
         Health["/ GET"]
         HealthFull["/health GET"]
@@ -210,8 +210,9 @@ graph LR
 | `/version` | GET | Build metadata: package name, version, build date, rustc version, database schema version |
 | `/authenticate` | POST | Register or authenticate a user with account ID and password (Argon2 hash). Rate-limited to 10 requests per 60 seconds per account, with lockout after 5 failed attempts for 15 minutes |
 | `/token` | POST | JWT token issuance. Accepts either `{username, password}` to obtain a 14-day refresh token, or `{refresh_token}` to obtain a 1-hour temporal token. Checks Redis revocation blacklist before issuing |
-| `/auth/okta` | POST | Exchange a validated Okta access token for Impala JWT tokens. Auto-creates account on first login |
-| `/auth/okta/config` | GET | Returns the Okta OIDC configuration (issuer, client ID, endpoints, scopes) for client-side flow setup |
+| `/auth/sso/:provider` | POST | Exchange a validated OIDC token (Okta / Auth0 / Duo / …) for Impala JWT tokens. Auto-creates account on first login. Body `{ token }` (access token; legacy alias `okta_token`) or `{ id_token }` for `token_kind=id` providers |
+| `/auth/sso/:provider/config` | GET | Returns the provider's OIDC configuration (provider, issuer, client ID, audience, endpoints, scopes) for the client-side flow, or `{ enabled: false }` |
+| `/auth/providers` | GET | List the names of all configured SSO providers |
 
 #### Client API (JWT Protected)
 
@@ -578,9 +579,9 @@ graph TB
 
 A vanilla JavaScript single-page application served by Nginx on port 3000, styled with Foundation 6.8.1. It proxies `/api/*` requests to the bridge and provides an operational interface for account management, card registration, transaction viewing, MFA enrollment, and notification configuration.
 
-### Client-Side RBAC
+### Role-Based Access Control (server-driven)
 
-The dashboard enforces four roles via `[data-permission]` HTML attributes:
+The dashboard gates four roles via `[data-permission]` HTML attributes:
 
 | Role | Permissions |
 |------|-------------|
@@ -589,18 +590,18 @@ The dashboard enforces four roles via `[data-permission]` HTML attributes:
 | **token** | All device permissions + `manage_accounts`, `manage_mfa` |
 | **admin** | All permissions including `manage_roles` |
 
-The first user to log in is automatically bootstrapped as admin. Roles persist in `localStorage` and are enforced by filtering DOM elements based on `data-permission` attributes.
+Authorization is **server-driven**: each account's role lives in `impala_account.role` and is embedded in every issued JWT as the `role` claim. `roles.js` only *reads* that claim (via `API.parseJwt`) to gate `[data-permission]` elements — there is no client-side role store (it actively clears the legacy `impala_roles` key). The **first account ever created is bootstrapped to `admin` server-side** by a `BEFORE INSERT` trigger (`impala-bridge/migrations/019_add_account_role.sql`), covering all sign-up paths including SSO auto-provisioning; subsequent grants use `PUT /admin/accounts/:id/role` and take effect at the target's next token refresh.
 
 ### Core Modules
 
 - **`api.js`** — HTTP client with automatic JWT refresh on 401, concurrent request deduplication during refresh, `X-Request-Nonce` header for CSRF mitigation, error sanitization (strips HTML/SQL, truncates at 200 chars), and retry logic with exponential backoff for GET requests
 - **`router.js`** — SPA navigation with toast notifications (Foundation callout styles)
-- **`okta-auth.js`** — OIDC authorization code flow with PKCE (RFC 7636) for Okta SSO
+- **`sso-auth.js`** — multi-provider OIDC authorization code flow with PKCE (RFC 7636); renders one button per enabled SSO provider (Okta / Auth0 / Duo)
 - **`session-timer.js`** — 1-hour inactivity timeout matching temporal token TTL
 
 ### Pages
 
-Login, Dashboard, Accounts, Cards, Transactions, MFA, Admin (role management), and Okta Callback.
+Login, Dashboard, Accounts, Cards, Transactions, MFA, Admin (role management), and SSO Callback.
 
 ---
 

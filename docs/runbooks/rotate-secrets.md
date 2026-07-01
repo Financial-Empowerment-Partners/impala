@@ -13,7 +13,6 @@ once unless that's the intent.
 | `JWT_SECRET` | HMAC-SHA256 key for all bridge-issued JWTs | All refresh + temporal tokens invalidated; every user must re-auth |
 | `DATABASE_URL` (or the password inside it) | Bridge → RDS auth | Bridge tasks restart on refresh |
 | `REDIS_AUTH_TOKEN` (if ElastiCache AUTH is enabled) | Bridge → Redis auth | Same as DB |
-| `OKTA_CLIENT_SECRET` | OIDC client secret for Okta SSO | Okta-authenticated users cannot log in until both sides are aligned |
 | `TWILIO_TOKEN` | Outbound SMS | SMS notifications silently fail until rotated on both ends |
 | `FCM_SERVICE_ACCOUNT_KEY` | Mobile push notifications | Push notifications fail |
 | `SES identity credentials` | Outbound email | Email notifications fail |
@@ -70,15 +69,20 @@ If using Vault/OpenBao unwrapping (`DATABASE_URL_WRAPPED`): write the new URL in
 Vault/OpenBao, re-wrap it, set `DATABASE_URL_WRAPPED` env-var on the task to the
 new wrapping token, redeploy.
 
-### OKTA_CLIENT_SECRET
+### OIDC signing keys (Okta / Auth0 / Duo SSO)
 
-1. In the Okta admin console, **generate** a new client secret for the
-   bridge's OIDC application. Okta retains both for a short overlap.
-2. Update Secrets Manager, redeploy ECS. New logins work immediately with
-   the new secret.
-3. Wait until no existing sessions are using Okta-issued tokens (check
-   `/auth/okta` usage in logs), then **revoke** the old secret in Okta.
-4. Smoke-test: log out, log back in via Okta.
+**Nothing to rotate bridge-side.** The web SSO flow is a **public PKCE client**
+— the bridge holds **no OIDC client secret** (it reads only
+`{PROVIDER}_ISSUER_URL` / `{PROVIDER}_CLIENT_ID` / `{PROVIDER}_AUDIENCE`, all
+non-secret). Token signing keys are owned and rotated by the IdP, and the bridge
+picks up new keys automatically via its JWKS refresh (`{PROVIDER}_JWKS_REFRESH_SECS`,
+plus a one-shot refresh on an unknown `kid`). No redeploy is required when an IdP
+rotates keys.
+
+> Exception: the **Duo 2FA (Universal Prompt / OIDC Auth API)** integration *is* a
+> confidential client with a `DUO_2FA_CLIENT_SECRET`. Rotate it in the Duo Admin
+> Panel, update Secrets Manager, and redeploy — Duo retains the old secret for a
+> short overlap.
 
 ### TWILIO_TOKEN / SES credentials / FCM_SERVICE_ACCOUNT_KEY
 
@@ -102,7 +106,7 @@ to letting an attacker with stolen credentials continue.
 Order suggested:
 1. `JWT_SECRET` (kills all tokens).
 2. `DATABASE_URL` password.
-3. Okta, Twilio, SES, FCM, Vault/OpenBao.
+3. Twilio, SES, FCM, Vault/OpenBao, `DUO_2FA_CLIENT_SECRET` (if Duo 2FA is enabled).
 4. Rotate IAM keys (if any) for the bridge's task role — AWS console →
    IAM → Roles → impala-bridge-task-role → Security credentials.
 

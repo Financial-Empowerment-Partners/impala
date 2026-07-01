@@ -32,16 +32,22 @@ data class TokenResponse(
     val temporal_token: String? = null
 )
 
-/** Request body for `POST /auth/okta`. Exchanges an Okta access token for local JWT tokens. */
+/**
+ * Request body for `POST /auth/sso/okta`. Exchanges an Okta access token for
+ * local JWT tokens. The `okta_token` field is accepted by the bridge as an
+ * alias of the generic `token` field.
+ */
 data class OktaTokenExchangeRequest(
     val okta_token: String
 )
 
-/** Response from `GET /auth/okta/config`. Contains Okta client configuration. */
+/** Response from `GET /auth/sso/okta/config`. Contains the provider's client configuration. */
 data class OktaConfigResponse(
     val enabled: Boolean,
+    val provider: String? = null,
     val issuer: String? = null,
     val client_id: String? = null,
+    val audience: String? = null,
     val authorization_endpoint: String? = null,
     val token_endpoint: String? = null,
     val scopes: List<String>? = null
