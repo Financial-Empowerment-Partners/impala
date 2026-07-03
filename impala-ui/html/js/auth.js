@@ -3,51 +3,42 @@
  *
  * Login is a 2-step process:
  *  1. POST /authenticate — validate credentials and register if first login
- *  2. POST /session/login — establish an HttpOnly cookie session; the
- *     response carries the CSRF token (kept in memory by API) and the
- *     session identity (cached in sessionStorage for nav rendering)
+ *  2. POST /token (username+password) — obtain the 14-day refresh token
+ *     (the response also carries the 1-hour temporal token, so no extra
+ *     refresh round trip is needed)
  *
- * The cookie is the security boundary: it is HttpOnly (invisible to script)
- * and validated server-side on every request. No tokens are kept in
- * localStorage.
- *
- * The first user to log in is automatically bootstrapped as admin via
- * Roles.bootstrap().
+ * Tokens are namespaced per Stellar network (see api.js / net-config.js), so all
+ * token access goes through the API module rather than hardcoded storage keys.
+ * Authorization is server-driven: the role comes from the token's `role` claim.
  *
  * @module Auth
  */
 var Auth = (function () {
     /**
-     * Check whether the user has an active session, per the local UX cache.
-     * Non-authoritative — the server is the actual gate (a stale cache just
-     * means one redirected request).
-     * @returns {boolean}
+     * Check whether the user has an active (non-expired) session on the active
+     * network.
+     * @returns {boolean} True if a valid refresh token exists.
      */
     function isLoggedIn() {
-        return !!API.getCachedUser();
+        var refresh = API.getRefreshToken();
+        if (!refresh) return false;
+        return !API.isTokenExpired(refresh);
     }
 
     /**
-     * Get the logged-in username from the session cache.
+     * Get the logged-in username (JWT `sub`) from the stored tokens.
      * @returns {string|null}
      */
     function getUsername() {
-        var user = API.getCachedUser();
-        return user ? user.account_id : null;
+        var token = API.getRefreshToken() || API.getTemporalToken();
+        if (!token) return null;
+        var payload = API.parseJwt(token);
+        return payload ? (payload.sub || payload.username || null) : null;
     }
 
     /**
-     * Whether the session belongs to a bridge admin (from the server-issued
-     * session identity; display only — the server enforces it per request).
-     * @returns {boolean}
-     */
-    function isAdmin() {
-        var user = API.getCachedUser();
-        return !!(user && user.is_admin);
-    }
-
-    /**
-     * Authenticate with the backend and establish a cookie session.
+     * Authenticate with the backend and store the issued token pair for the
+     * active network.
      * @param {string} accountId - The user's Payala account ID.
      * @param {string} password  - The user's password (min 8 characters).
      * @returns {Promise<{success: boolean, username: string}>}
@@ -65,9 +56,8 @@ var Auth = (function () {
             }
             return res.json();
         }).then(function () {
-            // Step 2: establish the cookie session (sets the HttpOnly
-            // cookie; the JSON body carries the CSRF token + identity)
-            return API.rawPost('/session/login', {
+            // Step 2: obtain the refresh + temporal token pair
+            return API.rawPost('/token', {
                 username: accountId,
                 password: password
             });
@@ -79,29 +69,29 @@ var Auth = (function () {
             }
             return res.json();
         }).then(function (data) {
-            if (!data.success) throw new Error(data.message || 'Login failed');
-            API.setSession(data);
+            if (!data.success || !data.refresh_token) {
+                throw new Error(data.message || 'Login failed');
+            }
+            API.setTokens(data.temporal_token || null, data.refresh_token);
 
-            // Bootstrap roles — first user becomes admin
-            Roles.bootstrap(accountId);
-
+            // Authorization is server-driven: the role rides in the token's claim.
             return { success: true, username: accountId };
         });
     }
 
     /**
-     * Destroy the server-side session, clear local caches, and redirect to
-     * the login page. Local cleanup + redirect happen even if the server
-     * call fails (best effort — the cookie still dies with the session TTL).
+     * Revoke the presented token server-side, clear the active network's
+     * tokens, and redirect to the login page. Local cleanup + redirect happen
+     * even if the server call fails (best effort — the tokens still age out).
      */
     function logout() {
         if (typeof SessionTimer !== 'undefined') {
             SessionTimer.stop();
         }
-        return API.post('/session/logout').catch(function () {
+        return API.post('/logout').catch(function () {
             // Network/permission failure: still drop local state below.
         }).then(function () {
-            API.clearSession();
+            API.clearTokens();
             window.location.href = 'index.html';
         });
     }
@@ -121,7 +111,6 @@ var Auth = (function () {
     return {
         isLoggedIn: isLoggedIn,
         getUsername: getUsername,
-        isAdmin: isAdmin,
         login: login,
         logout: logout,
         requireAuth: requireAuth

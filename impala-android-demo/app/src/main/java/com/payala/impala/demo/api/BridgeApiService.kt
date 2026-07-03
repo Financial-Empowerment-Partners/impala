@@ -21,18 +21,18 @@ interface BridgeApiService {
 
     /**
      * Obtain tokens. Two modes:
-     * - **Login**: send `username` + `password` to receive a 30-day `refresh_token`.
+     * - **Login**: send `username` + `password` to receive a 14-day `refresh_token`.
      * - **Refresh**: send `refresh_token` to receive a 1-hour `temporal_token`.
      */
     @POST("token")
     suspend fun token(@Body request: TokenRequest): TokenResponse
 
-    /** Exchange an Okta access token for local JWT tokens. */
-    @POST("auth/okta")
+    /** Exchange an Okta access token for local JWT tokens (multi-provider SSO). */
+    @POST("auth/sso/okta")
     suspend fun oktaTokenExchange(@Body request: OktaTokenExchangeRequest): TokenResponse
 
     /** Get Okta client configuration (no auth required). */
-    @GET("auth/okta/config")
+    @GET("auth/sso/okta/config")
     suspend fun getOktaConfig(): OktaConfigResponse
 
     /** Exchange a Google ID token for local JWT tokens. */

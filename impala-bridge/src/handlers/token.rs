@@ -130,16 +130,26 @@ pub async fn token(
         crate::redis_helpers::mark_refresh_rotated(&redis_pool, &claims.jti, remaining).await?;
 
         // 5. Mint the replacement pair inside the same token family.
-        // Admin is re-derived from the allowlist (never trusted from the
-        // presented token) so grants/revocations take effect within one
-        // temporal-token lifetime regardless of refresh-token age.
-        let is_admin = admin_ids.contains(&claims.sub);
-        let (new_refresh_token, temporal_token) = crate::jwt::encode_token_pair_with_family(
-            &jwt_keys,
-            &claims.sub,
-            is_admin,
-            &claims.fid,
-        )?;
+        // The role is re-derived at every rotation (never trusted from the
+        // presented token): current DB role, with the ADMIN_ACCOUNT_IDS
+        // allowlist overriding to admin — so grants/revocations take effect
+        // within one temporal-token lifetime regardless of refresh-token age.
+        // Falls back to the presented token's role if the account row is gone.
+        let role = if admin_ids.contains(&claims.sub) {
+            crate::constants::ROLE_ADMIN.to_string()
+        } else {
+            sqlx::query_scalar::<_, String>(
+                "SELECT role FROM impala_account WHERE payala_account_id = $1",
+            )
+            .bind(&claims.sub)
+            .fetch_optional(&pool)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| claims.role.clone())
+        };
+        let (new_refresh_token, temporal_token) =
+            crate::jwt::encode_token_pair_with_family(&jwt_keys, &claims.sub, &role, &claims.fid)?;
 
         info!(
             "token: tokens issued (with refresh rotation) for sub={}",
@@ -193,11 +203,14 @@ pub async fn token(
         Err(e) => return Err(e),
     }
 
-    let is_admin = admin_ids.contains(username);
+    // Embed the account's server-side role in the token (defaults to
+    // view-only), with the ADMIN_ACCOUNT_IDS allowlist overriding to admin.
+    let role = crate::auth::issuance_role(&pool, &admin_ids, username).await;
+
     // Mint a fresh family; also return a temporal token (additive — saves
     // well-behaved clients an immediate refresh round trip).
     let (refresh_token, temporal_token) =
-        crate::jwt::encode_token_pair(&jwt_keys, username, is_admin)?;
+        crate::jwt::encode_token_pair(&jwt_keys, username, &role)?;
 
     info!("token: refresh token issued for username={}", username);
     Ok(Json(TokenResponse {

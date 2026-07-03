@@ -107,3 +107,35 @@ pub async fn execute(ctx: &WorkerContext, payload: &serde_json::Value) -> Result
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_reconcile_payload_deserialize_with_ledgers() {
+        let json = serde_json::json!({
+            "start_ledger": 1000,
+            "end_ledger": 2000
+        });
+        let parsed: ReconcilePayload = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed.start_ledger, Some(1000));
+        assert_eq!(parsed.end_ledger, Some(2000));
+    }
+
+    #[test]
+    fn test_reconcile_payload_deserialize_defaults() {
+        let json = serde_json::json!({});
+        let parsed: ReconcilePayload = serde_json::from_value(json).unwrap();
+        assert!(parsed.start_ledger.is_none());
+        assert!(parsed.end_ledger.is_none());
+    }
+
+    #[test]
+    fn test_reconcile_payload_partial() {
+        let json = serde_json::json!({ "start_ledger": 500 });
+        let parsed: ReconcilePayload = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed.start_ledger, Some(500));
+        assert!(parsed.end_ledger.is_none());
+    }
+}

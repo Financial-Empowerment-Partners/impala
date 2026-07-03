@@ -2,6 +2,10 @@
 # Alert SNS Topic (optional, created only if alert_email is provided)
 # =============================================================================
 
+# Intentionally unencrypted: CloudWatch alarms cannot publish through the
+# AWS-managed SNS key, and a CMK is not worth the key-policy surface for
+# alarm-email delivery.
+#trivy:ignore:AVD-AWS-0095
 resource "aws_sns_topic" "alerts" {
   count = var.alert_email != "" ? 1 : 0
   name  = "${local.name_prefix}-alerts"

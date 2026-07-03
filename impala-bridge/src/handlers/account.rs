@@ -19,7 +19,11 @@ pub async fn create_account(
     Extension(pool): Extension<PgPool>,
     Json(payload): Json<CreateAccountRequest>,
 ) -> Result<Json<CreateAccountResponse>, AppError> {
-    crate::auth::require_owner(&user, &payload.payala_account_id)?;
+    // Admins may create an account for any payala id (admin console); a regular
+    // caller may only create their own (self-service).
+    if !user.is_admin() {
+        crate::auth::require_owner(&user, &payload.payala_account_id)?;
+    }
     info!(
         "POST /account: creating account for stellar_id={}",
         payload.stellar_account_id
@@ -113,6 +117,8 @@ pub async fn create_account(
 }
 
 /// Look up an account by Stellar account ID (`GET /account?stellar_account_id=...`).
+///
+/// Admins may read any account; a regular caller is scoped to their own row.
 pub async fn get_account(
     user: AuthenticatedUser,
     Extension(pool): Extension<PgPool>,
@@ -122,48 +128,30 @@ pub async fn get_account(
         "GET /account: lookup stellar_id={}",
         params.stellar_account_id
     );
-    let result = sqlx::query_as::<
-        _,
-        (
-            String,
-            String,
-            Option<String>,
-            String,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-        ),
-    >(
+
+    let mut sql = String::from(
         r#"
-        SELECT payala_account_id, first_name, middle_name, last_name,
-               nickname, affiliation, gender
+        SELECT payala_account_id, stellar_account_id, first_name, middle_name, last_name,
+               nickname, affiliation, gender, role, sync_mode, profile_source,
+               to_char(profile_synced_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS profile_synced_at,
+               to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS created_at
         FROM impala_account
-        WHERE stellar_account_id = $1 AND payala_account_id = $2
+        WHERE stellar_account_id = $1
         "#,
-    )
-    .bind(&params.stellar_account_id)
-    .bind(&user.account_id)
-    .fetch_optional(&pool)
-    .await;
+    );
+    if !user.is_admin() {
+        sql.push_str(" AND payala_account_id = $2");
+    }
+
+    let mut query = sqlx::query_as::<_, GetAccountResponse>(&sql).bind(&params.stellar_account_id);
+    if !user.is_admin() {
+        query = query.bind(&user.account_id);
+    }
+
+    let result = query.fetch_optional(&pool).await;
 
     match result {
-        Ok(Some((
-            payala_account_id,
-            first_name,
-            middle_name,
-            last_name,
-            nickname,
-            affiliation,
-            gender,
-        ))) => Ok(Json(GetAccountResponse {
-            payala_account_id,
-            first_name,
-            middle_name,
-            last_name,
-            nickname,
-            affiliation,
-            gender,
-        })),
+        Ok(Some(account)) => Ok(Json(account)),
         Ok(None) => {
             debug!(
                 "get_account: not found for stellar_id={}",
@@ -178,6 +166,44 @@ pub async fn get_account(
     }
 }
 
+/// Fetch live on-chain details for an account from this bridge's configured
+/// network (`GET /account/onchain?stellar_account_id=...`). Owner or admin.
+pub async fn get_account_onchain(
+    user: AuthenticatedUser,
+    Extension(pool): Extension<PgPool>,
+    Extension(stellar_config): Extension<Arc<crate::config::StellarConfig>>,
+    Extension(http): Extension<Arc<reqwest::Client>>,
+    Query(params): Query<GetAccountQuery>,
+) -> Result<Json<crate::stellar::OnchainAccount>, AppError> {
+    crate::validate::validate_stellar_account_id(&params.stellar_account_id)?;
+
+    // Authorize: the owner of this stellar id, or any admin.
+    let owner: Option<String> = sqlx::query_scalar(
+        "SELECT payala_account_id FROM impala_account WHERE stellar_account_id = $1",
+    )
+    .bind(&params.stellar_account_id)
+    .fetch_optional(&pool)
+    .await
+    .map_err(|e| {
+        error!("get_account_onchain: owner lookup error: {}", e);
+        AppError::InternalError("Database error".to_string())
+    })?;
+
+    let is_owner = owner.as_deref() == Some(user.account_id.as_str());
+    if !is_owner && !user.is_admin() {
+        return Err(AppError::Forbidden);
+    }
+
+    let account = crate::stellar::fetch_account_details(
+        &http,
+        &stellar_config.horizon_url,
+        &params.stellar_account_id,
+    )
+    .await?;
+
+    Ok(Json(account))
+}
+
 /// Update account fields (`PUT /account`).
 pub async fn update_account(
     user: AuthenticatedUser,
@@ -187,13 +213,17 @@ pub async fn update_account(
     Json(payload): Json<UpdateAccountRequest>,
 ) -> Result<Json<UpdateAccountResponse>, AppError> {
     info!("PUT /account: updating account");
-    // Identify the row key. Ownership is enforced on both paths: the
-    // payala-keyed path via require_owner here, the stellar-keyed path via
-    // the ownership conjunct the builder appends to the WHERE clause.
+    // Admins may update any account (admin console); regular callers are
+    // scoped to their own row — via require_owner here on the payala-keyed
+    // path, or the ownership conjunct build_account_update appends to the
+    // WHERE clause on the stellar-keyed path.
+    let is_admin = user.is_admin();
     let where_value = if let Some(ref stellar_id) = payload.stellar_account_id {
         stellar_id.clone()
     } else if let Some(ref payala_id) = payload.payala_account_id {
-        crate::auth::require_owner(&user, payala_id)?;
+        if !is_admin {
+            crate::auth::require_owner(&user, payala_id)?;
+        }
         payala_id.clone()
     } else {
         warn!("update_account: no identifier provided");
@@ -208,7 +238,7 @@ pub async fn update_account(
         crate::validate::validate_stellar_account_id(stellar_id)?;
     }
 
-    let Some(mut qb) = build_account_update(&payload, &user.account_id) else {
+    let Some(mut qb) = build_account_update(&payload, &user.account_id, is_admin) else {
         warn!("update_account: no fields provided to update");
         return Ok(Json(UpdateAccountResponse {
             success: false,
@@ -304,14 +334,17 @@ pub async fn update_account(
 /// Build the UPDATE statement for `PUT /account`. Returns `None` when no SET
 /// fields are present.
 ///
-/// INVARIANT (cross-account write protection): every generated WHERE clause
-/// constrains the caller's account — directly when keyed by
-/// `payala_account_id` (ownership enforced by `require_owner` upstream), or
-/// via the appended `payala_account_id = <caller>` conjunct when keyed by
-/// `stellar_account_id`. The invariant test below pins this shape.
+/// INVARIANT (cross-account write protection): for non-admin callers every
+/// generated WHERE clause constrains the caller's account — directly when
+/// keyed by `payala_account_id` (ownership enforced by `require_owner`
+/// upstream), or via the appended `payala_account_id = <caller>` conjunct
+/// when keyed by `stellar_account_id`. Admins (server-side `role` claim) skip
+/// the conjunct so the admin console can update any account. The invariant
+/// tests below pin both shapes.
 fn build_account_update<'a>(
     payload: &'a UpdateAccountRequest,
     user_account_id: &'a str,
+    is_admin: bool,
 ) -> Option<sqlx::QueryBuilder<'a, sqlx::Postgres>> {
     let keyed_by_stellar = payload.stellar_account_id.is_some();
     if !keyed_by_stellar && payload.payala_account_id.is_none() {
@@ -370,8 +403,10 @@ fn build_account_update<'a>(
     if keyed_by_stellar {
         qb.push(" WHERE stellar_account_id = ");
         qb.push_bind(payload.stellar_account_id.as_ref().unwrap());
-        qb.push(" AND payala_account_id = ");
-        qb.push_bind(user_account_id);
+        if !is_admin {
+            qb.push(" AND payala_account_id = ");
+            qb.push_bind(user_account_id);
+        }
     } else {
         qb.push(" WHERE payala_account_id = ");
         qb.push_bind(payload.payala_account_id.as_ref().unwrap());
@@ -404,11 +439,26 @@ mod tests {
             first_name: Some("Ada".to_string()),
             ..empty_payload()
         };
-        let qb = build_account_update(&payload, "alice").expect("builder");
+        let qb = build_account_update(&payload, "alice", false).expect("builder");
         assert_eq!(
             qb.sql(),
             "UPDATE impala_account SET first_name = $1 \
              WHERE stellar_account_id = $2 AND payala_account_id = $3"
+        );
+    }
+
+    #[test]
+    fn keyed_by_stellar_admin_skips_ownership_conjunct() {
+        // Admin console path: no `payala_account_id = <caller>` scoping.
+        let payload = UpdateAccountRequest {
+            stellar_account_id: Some("GSTELLAR".to_string()),
+            first_name: Some("Ada".to_string()),
+            ..empty_payload()
+        };
+        let qb = build_account_update(&payload, "alice", true).expect("builder");
+        assert_eq!(
+            qb.sql(),
+            "UPDATE impala_account SET first_name = $1 WHERE stellar_account_id = $2"
         );
     }
 
@@ -420,7 +470,7 @@ mod tests {
             gender: Some("x".to_string()),
             ..empty_payload()
         };
-        let qb = build_account_update(&payload, "alice").expect("builder");
+        let qb = build_account_update(&payload, "alice", false).expect("builder");
         assert_eq!(
             qb.sql(),
             "UPDATE impala_account SET nickname = $1, gender = $2 \
@@ -436,7 +486,7 @@ mod tests {
             last_name: Some("Lovelace".to_string()),
             ..empty_payload()
         };
-        let qb = build_account_update(&payload, "alice").expect("builder");
+        let qb = build_account_update(&payload, "alice", false).expect("builder");
         assert_eq!(
             qb.sql(),
             "UPDATE impala_account SET payala_account_id = $1, last_name = $2 \
@@ -456,7 +506,7 @@ mod tests {
             gender: Some("f".to_string()),
             ..empty_payload()
         };
-        let qb = build_account_update(&payload, "alice").expect("builder");
+        let qb = build_account_update(&payload, "alice", false).expect("builder");
         assert_eq!(
             qb.sql(),
             "UPDATE impala_account SET first_name = $1, middle_name = $2, last_name = $3, \
@@ -470,8 +520,8 @@ mod tests {
             payala_account_id: Some("alice".to_string()),
             ..empty_payload()
         };
-        assert!(build_account_update(&payload, "alice").is_none());
-        assert!(build_account_update(&empty_payload(), "alice").is_none());
+        assert!(build_account_update(&payload, "alice", false).is_none());
+        assert!(build_account_update(&empty_payload(), "alice", false).is_none());
     }
 
     /// Ownership-WHERE invariant (SECURITY.md / CLAUDE.md): every generated
@@ -500,7 +550,7 @@ mod tests {
                         setter(&mut payload);
                     }
                 }
-                let qb = build_account_update(&payload, "alice").expect("non-empty mask");
+                let qb = build_account_update(&payload, "alice", false).expect("non-empty mask");
                 assert!(
                     qb.sql().contains("payala_account_id = "),
                     "WHERE must pin the account: {}",

@@ -1,8 +1,9 @@
 # Contributing to Impala
 
-Impala is a polyglot monorepo with six independently-built sub-projects and no
-top-level build system. `cd` into the relevant sub-project before building or
-testing. See [`DEVELOPMENT.md`](DEVELOPMENT.md) for environment setup and
+Impala is a polyglot monorepo with seven independently-built sub-projects and
+no top-level build system (the root `Justfile` is a convenience wrapper). `cd`
+into the relevant sub-project before building or testing. See
+[`DEVELOPMENT.md`](DEVELOPMENT.md) for environment setup and
 [`ARCHITECTURE.md`](ARCHITECTURE.md) for the system design.
 
 ## Workflow
@@ -20,9 +21,10 @@ testing. See [`DEVELOPMENT.md`](DEVELOPMENT.md) for environment setup and
 | `impala-bridge` | `cargo fmt -- --check` · `cargo clippy -- -D warnings` · `cargo test` · `cargo audit` |
 | `impala-soroban` | `cargo fmt -- --check` · `cargo clippy -- -D warnings` · `cargo test` (per crate) · `cargo build --release --target wasm32-unknown-unknown` (in `integration-test`) |
 | `impala-card` | `./gradlew :sdk:jvmTest` |
-| `impala-lib` | `./gradlew testDebugUnitTest` |
+| `impala-lib` | `./gradlew test` |
 | `impala-android-demo` | `./gradlew testTnetDebugUnitTest testLiveDebugUnitTest` |
-| `impala-ui` | `npm test` (Vitest) |
+| `impala-ui` | `npm test` (Vitest) · `npm run lint` |
+| `lumencli` | `go test ./...` · `go vet ./...` |
 | `terraform` | `terraform fmt -check -recursive` · `terraform validate` |
 
 CI gates `cargo fmt`/`clippy -D warnings` for Rust — warnings fail the build.

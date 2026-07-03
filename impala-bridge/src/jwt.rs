@@ -142,7 +142,7 @@ fn encode_with_claims(keys: &JwtKeys, claims: &Claims, what: &str) -> Result<Str
     })
 }
 
-fn build_claims(subject: &str, token_type: &str, ttl: usize, is_admin: bool, fid: &str) -> Claims {
+fn build_claims(subject: &str, token_type: &str, ttl: usize, role: &str, fid: &str) -> Claims {
     let now = chrono::Utc::now().timestamp() as usize;
     Claims {
         sub: subject.to_string(),
@@ -153,43 +153,46 @@ fn build_claims(subject: &str, token_type: &str, ttl: usize, is_admin: bool, fid
         iss: JWT_ISSUER.to_string(),
         aud: JWT_AUDIENCE.to_string(),
         fid: fid.to_string(),
-        is_admin,
+        role: role.to_string(),
     }
 }
 
-/// Encode a long-lived refresh token for the given subject and token family.
+/// Encode a long-lived refresh token for the given subject, role, and token
+/// family.
 ///
-/// `is_admin` is stamped from the caller's allowlist check at issuance time; it
-/// is re-derived (never trusted from a presented token), bounding admin-grant
-/// staleness to the temporal-token TTL.
+/// `role` is stamped from the caller's DB lookup (with the ADMIN_ACCOUNT_IDS
+/// allowlist overriding to admin) at issuance time; it is re-derived (never
+/// trusted from a presented token), bounding privilege staleness to the
+/// temporal-token TTL.
 pub fn encode_refresh_token(
     keys: &JwtKeys,
     subject: &str,
-    is_admin: bool,
+    role: &str,
     fid: &str,
 ) -> Result<String, AppError> {
     let claims = build_claims(
         subject,
         TOKEN_TYPE_REFRESH,
         REFRESH_TOKEN_TTL_SECS,
-        is_admin,
+        role,
         fid,
     );
     encode_with_claims(keys, &claims, "encode_refresh_token")
 }
 
-/// Encode a short-lived temporal token for the given subject and token family.
+/// Encode a short-lived temporal token for the given subject, role, and token
+/// family.
 pub fn encode_temporal_token(
     keys: &JwtKeys,
     subject: &str,
-    is_admin: bool,
+    role: &str,
     fid: &str,
 ) -> Result<String, AppError> {
     let claims = build_claims(
         subject,
         TOKEN_TYPE_TEMPORAL,
         TEMPORAL_TOKEN_TTL_SECS,
-        is_admin,
+        role,
         fid,
     );
     encode_with_claims(keys, &claims, "encode_temporal_token")
@@ -201,10 +204,10 @@ pub fn encode_temporal_token(
 pub fn encode_token_pair(
     keys: &JwtKeys,
     subject: &str,
-    is_admin: bool,
+    role: &str,
 ) -> Result<(String, String), AppError> {
     let fid = uuid::Uuid::new_v4().to_string();
-    encode_token_pair_with_family(keys, subject, is_admin, &fid)
+    encode_token_pair_with_family(keys, subject, role, &fid)
 }
 
 /// Encode a refresh + temporal token pair inside an existing token family
@@ -213,18 +216,20 @@ pub fn encode_token_pair(
 pub fn encode_token_pair_with_family(
     keys: &JwtKeys,
     subject: &str,
-    is_admin: bool,
+    role: &str,
     fid: &str,
 ) -> Result<(String, String), AppError> {
-    let refresh = encode_refresh_token(keys, subject, is_admin, fid)?;
-    let temporal = encode_temporal_token(keys, subject, is_admin, fid)?;
+    let refresh = encode_refresh_token(keys, subject, role, fid)?;
+    let temporal = encode_temporal_token(keys, subject, role, fid)?;
     Ok((refresh, temporal))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::constants::{JWT_ISSUER, TOKEN_TYPE_REFRESH, TOKEN_TYPE_TEMPORAL};
+    use crate::constants::{
+        JWT_ISSUER, ROLE_ADMIN, ROLE_TOKEN, ROLE_VIEW_ONLY, TOKEN_TYPE_REFRESH, TOKEN_TYPE_TEMPORAL,
+    };
 
     const TEST_SECRET: &str = "test-secret-key-for-jwt-unit-tests";
     const OTHER_SECRET: &str = "other-secret-key-for-jwt-unit-tests";
@@ -240,7 +245,7 @@ mod tests {
     #[test]
     fn test_encode_token_pair_returns_two_different_tokens() {
         let (refresh, temporal) =
-            encode_token_pair(&keys(), "alice", false).expect("token pair should succeed");
+            encode_token_pair(&keys(), "alice", ROLE_VIEW_ONLY).expect("token pair should succeed");
 
         assert_ne!(refresh, temporal, "refresh and temporal tokens must differ");
         assert!(!refresh.is_empty());
@@ -251,7 +256,7 @@ mod tests {
     fn test_tokens_decode_and_carry_correct_claims() {
         let k = keys();
         let (refresh, temporal) =
-            encode_token_pair(&k, "carol", false).expect("token pair should succeed");
+            encode_token_pair(&k, "carol", ROLE_TOKEN).expect("token pair should succeed");
 
         let refresh_claims =
             decode_claims(&k, &refresh, TOKEN_TYPE_REFRESH).expect("refresh should decode");
@@ -266,6 +271,10 @@ mod tests {
         assert_eq!(refresh_claims.aud, JWT_AUDIENCE);
         assert_eq!(temporal_claims.aud, JWT_AUDIENCE);
 
+        // Role stamped into both tokens of the pair.
+        assert_eq!(refresh_claims.role, ROLE_TOKEN);
+        assert_eq!(temporal_claims.role, ROLE_TOKEN);
+
         // JTI unique per token; fid shared across the pair.
         assert!(!refresh_claims.jti.is_empty());
         assert_ne!(refresh_claims.jti, temporal_claims.jti);
@@ -275,15 +284,13 @@ mod tests {
         let now = chrono::Utc::now().timestamp() as usize;
         assert!(refresh_claims.exp > now);
         assert!(temporal_claims.exp > now);
-        assert!(!refresh_claims.is_admin);
-        assert!(!temporal_claims.is_admin);
     }
 
     #[test]
     fn test_pair_with_family_inherits_fid() {
         let k = keys();
         let (refresh, temporal) =
-            encode_token_pair_with_family(&k, "dave", false, "family-1").expect("pair");
+            encode_token_pair_with_family(&k, "dave", ROLE_VIEW_ONLY, "family-1").expect("pair");
         let r = decode_claims(&k, &refresh, TOKEN_TYPE_REFRESH).unwrap();
         let t = decode_claims(&k, &temporal, TOKEN_TYPE_TEMPORAL).unwrap();
         assert_eq!(r.fid, "family-1");
@@ -293,29 +300,32 @@ mod tests {
     #[test]
     fn test_wrong_token_type_rejected() {
         let k = keys();
-        let (refresh, temporal) = encode_token_pair(&k, "erin", false).expect("pair");
+        let (refresh, temporal) = encode_token_pair(&k, "erin", ROLE_VIEW_ONLY).expect("pair");
         assert!(decode_claims(&k, &refresh, TOKEN_TYPE_TEMPORAL).is_err());
         assert!(decode_claims(&k, &temporal, TOKEN_TYPE_REFRESH).is_err());
     }
 
     #[test]
-    fn test_admin_flag_propagates_into_both_tokens() {
+    fn test_admin_role_propagates_into_both_tokens() {
         let k = keys();
         let (refresh, temporal) =
-            encode_token_pair(&k, "root", true).expect("token pair should succeed");
+            encode_token_pair(&k, "root", ROLE_ADMIN).expect("token pair should succeed");
         for (tok, ty) in [
             (&refresh, TOKEN_TYPE_REFRESH),
             (&temporal, TOKEN_TYPE_TEMPORAL),
         ] {
             let claims = decode_claims(&k, tok, ty).expect("token should decode");
-            assert!(claims.is_admin, "is_admin must be stamped when requested");
+            assert_eq!(
+                claims.role, ROLE_ADMIN,
+                "admin role must be stamped when requested"
+            );
         }
     }
 
     #[test]
     fn test_kid_header_present_and_matches_fingerprint() {
         let k = keys();
-        let (refresh, _) = encode_token_pair(&k, "alice", false).expect("pair");
+        let (refresh, _) = encode_token_pair(&k, "alice", ROLE_VIEW_ONLY).expect("pair");
         let header = decode_header(&refresh).expect("header decodes");
         let kid = header.kid.expect("kid header must be stamped");
         assert_eq!(kid.len(), JWT_KID_LEN);
@@ -326,7 +336,7 @@ mod tests {
     fn test_token_signed_with_previous_secret_decodes_during_rotation() {
         // Token minted under the old secret (carrying its kid)...
         let old = keys();
-        let (refresh, _) = encode_token_pair(&old, "alice", false).expect("pair");
+        let (refresh, _) = encode_token_pair(&old, "alice", ROLE_VIEW_ONLY).expect("pair");
         // ...still verifies once the old secret moves to JWT_SECRET_PREVIOUS.
         let rotated = keys_with_previous();
         let claims = decode_claims(&rotated, &refresh, TOKEN_TYPE_REFRESH)
@@ -338,7 +348,7 @@ mod tests {
     fn test_token_with_unknown_kid_rejected() {
         let minted_by =
             JwtKeys::new("a-third-secret-key-no-longer-active!".to_string(), None).expect("keys");
-        let (refresh, _) = encode_token_pair(&minted_by, "alice", false).expect("pair");
+        let (refresh, _) = encode_token_pair(&minted_by, "alice", ROLE_VIEW_ONLY).expect("pair");
         // Verifier knows primary+previous, neither matches the token's kid.
         assert!(decode_claims(&keys_with_previous(), &refresh, TOKEN_TYPE_REFRESH).is_err());
     }
@@ -346,7 +356,7 @@ mod tests {
     #[test]
     fn test_wrong_secret_rejected_without_previous() {
         let minted_by = keys();
-        let (refresh, _) = encode_token_pair(&minted_by, "alice", false).expect("pair");
+        let (refresh, _) = encode_token_pair(&minted_by, "alice", ROLE_VIEW_ONLY).expect("pair");
         let other = JwtKeys::new(OTHER_SECRET.to_string(), None).expect("keys");
         assert!(decode_claims(&other, &refresh, TOKEN_TYPE_REFRESH).is_err());
     }
@@ -408,7 +418,7 @@ mod tests {
             iss: JWT_ISSUER.to_string(),
             aud: JWT_AUDIENCE.to_string(),
             fid: "f".to_string(),
-            is_admin: false,
+            role: ROLE_VIEW_ONLY.to_string(),
         };
         let token = encode(
             &k.signing_header(),

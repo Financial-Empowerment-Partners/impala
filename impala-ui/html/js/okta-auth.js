@@ -193,12 +193,12 @@ var OktaAuth = (function () {
 
                 if (statusEl) statusEl.textContent = 'Authenticating with Impala...';
 
-                // Exchange the Okta access token for a bridge cookie session
-                // (cookie_mode: the response sets the HttpOnly session
-                // cookie and returns the CSRF token instead of JWTs).
+                // Exchange the Okta access token for bridge JWTs (bearer
+                // mode — the dashboard stores tokens per network like every
+                // other login path; the bridge's cookie_mode stays available
+                // for cookie-session clients).
                 return API.rawPost('/auth/okta', {
-                    okta_token: tokenData.access_token,
-                    cookie_mode: true
+                    okta_token: tokenData.access_token
                 });
             })
             .then(function (res) {
@@ -212,12 +212,9 @@ var OktaAuth = (function () {
             .then(function (bridgeData) {
                 if (!bridgeData.success) throw new Error(bridgeData.message || 'Authentication failed');
 
-                // Store the session identity + CSRF token
-                API.setSession(bridgeData);
-
-                // Bootstrap roles
-                var username = bridgeData.account_id || 'okta-user';
-                Roles.bootstrap(username);
+                // Store tokens (namespaced to the active network). Authorization
+                // is server-driven via the token's `role` claim.
+                API.setTokens(bridgeData.temporal_token, bridgeData.refresh_token);
 
                 if (statusEl) statusEl.textContent = 'Login successful! Redirecting...';
                 window.location.href = 'dashboard.html';

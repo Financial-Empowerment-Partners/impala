@@ -63,3 +63,32 @@ pub async fn execute(ctx: &WorkerContext, payload: &serde_json::Value) -> Result
         )))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_batch_sync_payload_deserialize() {
+        let json = serde_json::json!({
+            "account_ids": ["GABCDEF", "GXYZ123"]
+        });
+        let parsed: BatchSyncPayload = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed.account_ids.len(), 2);
+        assert_eq!(parsed.account_ids[0], "GABCDEF");
+    }
+
+    #[test]
+    fn test_batch_sync_payload_empty_ids() {
+        let json = serde_json::json!({ "account_ids": [] });
+        let parsed: BatchSyncPayload = serde_json::from_value(json).unwrap();
+        assert!(parsed.account_ids.is_empty());
+    }
+
+    #[test]
+    fn test_batch_sync_payload_missing_field() {
+        let json = serde_json::json!({});
+        let result: Result<BatchSyncPayload, _> = serde_json::from_value(json);
+        assert!(result.is_err());
+    }
+}

@@ -23,6 +23,30 @@ pub fn validate_stellar_account_id(id: &str) -> Result<(), AppError> {
     Ok(())
 }
 
+/// Validate a Stellar secret seed format: must start with 'S', be 56 chars, Base32.
+///
+/// This is the cheap structural gate; strkey checksum validation happens when the
+/// seed is decoded into a keypair (`StellarSigner::seed_from_strkey`).
+pub fn validate_stellar_secret_seed(seed: &str) -> Result<(), AppError> {
+    if seed.len() != STELLAR_ACCOUNT_ID_LENGTH {
+        return Err(AppError::BadRequest(format!(
+            "Stellar secret seed must be {} characters",
+            STELLAR_ACCOUNT_ID_LENGTH
+        )));
+    }
+    if !seed.starts_with('S') {
+        return Err(AppError::BadRequest(
+            "Stellar secret seed must start with 'S'".to_string(),
+        ));
+    }
+    if !seed.chars().all(|c| matches!(c, 'A'..='Z' | '2'..='7')) {
+        return Err(AppError::BadRequest(
+            "Stellar secret seed must contain only Base32 characters (A-Z, 2-7)".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 /// Validate an email address with a basic check.
 pub fn validate_email(email: &str) -> Result<(), AppError> {
     if email.len() > MAX_EMAIL_LENGTH {
@@ -199,6 +223,123 @@ fn is_private_ip(ip: &IpAddr) -> bool {
     }
 }
 
+/// Validate a transaction ID: non-empty, max 128 chars, alphanumeric/hex.
+pub fn validate_transaction_id(id: &str) -> Result<(), AppError> {
+    if id.is_empty() || id.len() > 128 {
+        return Err(AppError::BadRequest(
+            "Transaction ID must be between 1 and 128 characters".to_string(),
+        ));
+    }
+    if !id.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return Err(AppError::BadRequest(
+            "Transaction ID must be alphanumeric".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// Validate a hex hash string (e.g. Stellar transaction hash).
+pub fn validate_hex_hash(hash: &str, field_name: &str) -> Result<(), AppError> {
+    if hash.is_empty() || hash.len() > 128 {
+        return Err(AppError::BadRequest(format!(
+            "{} must be between 1 and 128 characters",
+            field_name
+        )));
+    }
+    if !hash.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(AppError::BadRequest(format!(
+            "{} must be a hex string",
+            field_name
+        )));
+    }
+    Ok(())
+}
+
+/// Validate a listen endpoint: must be a valid socket address on localhost
+/// with a non-privileged port. Prevents binding on external interfaces.
+pub fn validate_listen_endpoint(endpoint: &str) -> Result<(), AppError> {
+    let addr: std::net::SocketAddr = endpoint.parse().map_err(|_| {
+        AppError::BadRequest(
+            "listen_endpoint must be a valid socket address (e.g. 127.0.0.1:8080)".to_string(),
+        )
+    })?;
+
+    if !addr.ip().is_loopback() {
+        return Err(AppError::BadRequest(
+            "listen_endpoint must bind to localhost (127.0.0.1 or ::1)".to_string(),
+        ));
+    }
+
+    if addr.port() == 0 {
+        return Err(AppError::BadRequest(
+            "listen_endpoint must specify a non-zero port".to_string(),
+        ));
+    }
+
+    if addr.port() < 1024 {
+        return Err(AppError::BadRequest(
+            "listen_endpoint port must be >= 1024".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
+/// Validate an account role against the allowed set (`ALL_ROLES`).
+pub fn validate_role(role: &str) -> Result<(), AppError> {
+    if crate::constants::ALL_ROLES.contains(&role) {
+        Ok(())
+    } else {
+        Err(AppError::BadRequest(format!(
+            "Invalid role '{}'. Must be one of: {}",
+            role,
+            crate::constants::ALL_ROLES.join(", ")
+        )))
+    }
+}
+
+/// Validate a Payala currency code: 1–16 chars, uppercase alphanumeric.
+/// Lowercase is rejected rather than normalized so per-currency reserve keys
+/// stay canonical ("USD" vs "Usd" must not fork into separate balances).
+pub fn validate_payala_currency(currency: &str) -> Result<(), AppError> {
+    if currency.is_empty() || currency.len() > crate::constants::MAX_PAYALA_CURRENCY_LENGTH {
+        return Err(AppError::BadRequest(format!(
+            "currency must be between 1 and {} characters",
+            crate::constants::MAX_PAYALA_CURRENCY_LENGTH
+        )));
+    }
+    if !currency
+        .chars()
+        .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+    {
+        return Err(AppError::BadRequest(
+            "currency must be uppercase alphanumeric (A-Z, 0-9)".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// Validate a Payala sync mode against the allowed set (`VALID_SYNC_MODES`).
+pub fn validate_sync_mode(mode: &str) -> Result<(), AppError> {
+    if crate::constants::VALID_SYNC_MODES.contains(&mode) {
+        Ok(())
+    } else {
+        Err(AppError::BadRequest(format!(
+            "Invalid sync_mode '{}'. Must be one of: {}",
+            mode,
+            crate::constants::VALID_SYNC_MODES.join(", ")
+        )))
+    }
+}
+
+/// Validate that `value` is a well-formed RFC 3339 timestamp (e.g. used for
+/// transaction date-range filters). Returns `BadRequest` naming the field.
+pub fn validate_rfc3339_timestamp(value: &str, field: &str) -> Result<(), AppError> {
+    chrono::DateTime::parse_from_rfc3339(value)
+        .map(|_| ())
+        .map_err(|_| AppError::BadRequest(format!("{} must be an RFC 3339 timestamp", field)))
+}
+
 /// Escape special characters in LDAP filter values per RFC 4515.
 pub fn ldap_escape(input: &str) -> String {
     let mut escaped = String::with_capacity(input.len());
@@ -242,6 +383,38 @@ mod tests {
     fn test_stellar_id_non_alphanumeric() {
         let id = "GABC234567890123456789012345678901234567890123456789012!";
         assert!(validate_stellar_account_id(id).is_err());
+    }
+
+    // ── Stellar secret seed ────────────────────────────────────────────
+
+    #[test]
+    fn test_valid_stellar_secret_seed() {
+        let seed = "SABCDEFGHIJKLMNOPQRSTUVWXYZ234567ABCDEFGHIJKLMNOPQRSTUVW";
+        assert!(validate_stellar_secret_seed(seed).is_ok());
+    }
+
+    #[test]
+    fn test_secret_seed_wrong_prefix() {
+        // A G-address must not pass as a secret seed.
+        let id = "GABCDEFGHIJKLMNOPQRSTUVWXYZ234567ABCDEFGHIJKLMNOPQRSTUVW";
+        assert!(validate_stellar_secret_seed(id).is_err());
+    }
+
+    #[test]
+    fn test_secret_seed_too_short() {
+        assert!(validate_stellar_secret_seed("SABC").is_err());
+    }
+
+    #[test]
+    fn test_secret_seed_rejects_lowercase() {
+        let seed = "Sabc2345678901234567890123456789012345678901234567890123";
+        assert!(validate_stellar_secret_seed(seed).is_err());
+    }
+
+    #[test]
+    fn test_secret_seed_rejects_invalid_base32_digit() {
+        let seed = "S0BC2345678901234567890123456789012345678901234567890123";
+        assert!(validate_stellar_secret_seed(seed).is_err());
     }
 
     // ── Email ──────────────────────────────────────────────────────────
@@ -478,5 +651,176 @@ mod tests {
     fn test_rsa_pubkey_invalid_chars() {
         let key = "!".repeat(200);
         assert!(validate_rsa_pubkey(&key).is_err());
+    }
+
+    // ── Transaction ID ────────────────────────────────────────────────
+
+    #[test]
+    fn test_valid_transaction_id() {
+        assert!(validate_transaction_id("abc123def456").is_ok());
+    }
+
+    #[test]
+    fn test_transaction_id_empty() {
+        assert!(validate_transaction_id("").is_err());
+    }
+
+    #[test]
+    fn test_transaction_id_too_long() {
+        let id = "a".repeat(129);
+        assert!(validate_transaction_id(&id).is_err());
+    }
+
+    #[test]
+    fn test_transaction_id_max_length() {
+        let id = "a".repeat(128);
+        assert!(validate_transaction_id(&id).is_ok());
+    }
+
+    #[test]
+    fn test_transaction_id_special_chars() {
+        assert!(validate_transaction_id("abc-123").is_err());
+    }
+
+    // ── Hex Hash ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_valid_hex_hash() {
+        assert!(validate_hex_hash("abcdef0123456789", "stellar_hash").is_ok());
+    }
+
+    #[test]
+    fn test_hex_hash_empty() {
+        assert!(validate_hex_hash("", "stellar_hash").is_err());
+    }
+
+    #[test]
+    fn test_hex_hash_non_hex() {
+        assert!(validate_hex_hash("xyz123", "stellar_hash").is_err());
+    }
+
+    #[test]
+    fn test_hex_hash_too_long() {
+        let hash = "a".repeat(129);
+        assert!(validate_hex_hash(&hash, "stellar_hash").is_err());
+    }
+
+    // ── Listen Endpoint ───────────────────────────────────────────────
+
+    #[test]
+    fn test_valid_listen_endpoint() {
+        assert!(validate_listen_endpoint("127.0.0.1:8080").is_ok());
+    }
+
+    #[test]
+    fn test_listen_endpoint_ipv6_localhost() {
+        assert!(validate_listen_endpoint("[::1]:8080").is_ok());
+    }
+
+    #[test]
+    fn test_listen_endpoint_external_ip() {
+        assert!(validate_listen_endpoint("0.0.0.0:8080").is_err());
+    }
+
+    #[test]
+    fn test_listen_endpoint_port_zero() {
+        assert!(validate_listen_endpoint("127.0.0.1:0").is_err());
+    }
+
+    #[test]
+    fn test_listen_endpoint_privileged_port() {
+        assert!(validate_listen_endpoint("127.0.0.1:80").is_err());
+    }
+
+    #[test]
+    fn test_listen_endpoint_invalid_format() {
+        assert!(validate_listen_endpoint("not-an-address").is_err());
+    }
+
+    #[test]
+    fn test_listen_endpoint_private_ip() {
+        assert!(validate_listen_endpoint("192.168.1.1:8080").is_err());
+    }
+
+    // ── Role ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_validate_role_accepts_all_roles() {
+        for role in ["view-only", "device", "token", "admin"] {
+            assert!(validate_role(role).is_ok(), "role {} should be valid", role);
+        }
+    }
+
+    #[test]
+    fn test_validate_role_rejects_unknown() {
+        assert!(validate_role("superuser").is_err());
+        assert!(validate_role("").is_err());
+        assert!(validate_role("Admin").is_err());
+    }
+
+    // ── Payala currency / sync mode ────────────────────────────────────
+
+    #[test]
+    fn test_validate_payala_currency_valid() {
+        for c in ["USD", "XLM", "PAYALA1", "A", "0123456789ABCDEF"] {
+            assert!(
+                validate_payala_currency(c).is_ok(),
+                "currency {} should be valid",
+                c
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_payala_currency_rejects_lowercase() {
+        assert!(validate_payala_currency("usd").is_err());
+        assert!(validate_payala_currency("Usd").is_err());
+    }
+
+    #[test]
+    fn test_validate_payala_currency_rejects_empty_and_too_long() {
+        assert!(validate_payala_currency("").is_err());
+        assert!(validate_payala_currency("ABCDEFGHIJKLMNOPQ").is_err()); // 17 chars
+    }
+
+    #[test]
+    fn test_validate_payala_currency_rejects_symbols_and_whitespace() {
+        assert!(validate_payala_currency("US D").is_err());
+        assert!(validate_payala_currency(" USD").is_err());
+        assert!(validate_payala_currency("US-D").is_err());
+    }
+
+    #[test]
+    fn test_validate_sync_mode_accepts_all_modes() {
+        for mode in crate::constants::VALID_SYNC_MODES {
+            assert!(
+                validate_sync_mode(mode).is_ok(),
+                "mode {} should be valid",
+                mode
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_sync_mode_rejects_unknown() {
+        assert!(validate_sync_mode("Reserve").is_err());
+        assert!(validate_sync_mode("MIRROR").is_err());
+        assert!(validate_sync_mode("").is_err());
+        assert!(validate_sync_mode("both").is_err());
+    }
+
+    // ── RFC 3339 timestamp ─────────────────────────────────────────────
+
+    #[test]
+    fn test_validate_rfc3339_accepts_valid() {
+        assert!(validate_rfc3339_timestamp("2026-06-30T00:00:00Z", "from").is_ok());
+        assert!(validate_rfc3339_timestamp("2026-06-30T12:34:56+02:00", "to").is_ok());
+    }
+
+    #[test]
+    fn test_validate_rfc3339_rejects_invalid() {
+        assert!(validate_rfc3339_timestamp("not-a-date", "from").is_err());
+        assert!(validate_rfc3339_timestamp("2026-13-01T00:00:00Z", "from").is_err());
+        assert!(validate_rfc3339_timestamp("2026-06-30", "from").is_err());
     }
 }

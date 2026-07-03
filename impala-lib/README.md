@@ -8,15 +8,25 @@ Impala-lib bridges Android NFC and location services with the [impala-card SDK](
 
 ## Build
 
-Requires Android SDK (min 24, target 34) and JDK 8+.
+Requires Android SDK (min 30, target 34), JDK 17 (Gradle 8.14 cannot run on
+newer JDKs like 26 — set `JAVA_HOME`), and the sibling `impala-card/` checkout.
 
 ```bash
+export JAVA_HOME=$(/usr/libexec/java_home -v 17)   # macOS; or point at any JDK 17
 ./gradlew build                    # Build
 ./gradlew test                     # Unit tests (JUnit 4, runs on host JVM)
 ./gradlew connectedAndroidTest     # Instrumented tests (requires device/emulator)
 ```
 
-Depends on `impala-card:sdk` via `project(":impala-card:sdk")`.
+Depends on the impala-card SDK as `com.impala:sdk`, substituted with the
+sibling build's `:sdk` project via `includeBuild("../impala-card")` in
+`settings.gradle.kts` (composite build — only the SDK's Android variant is
+built, not its iOS/JVM targets). The Android SDK location comes from
+`ANDROID_HOME` or a `local.properties` with `sdk.dir=` (gitignored) in both
+this directory and `impala-card/`.
+
+The min SDK is 30 because the impala-card SDK's Android library declares
+minSdk 30; this module cannot honestly target lower.
 
 ## Architecture
 
@@ -31,6 +41,8 @@ ACTION_TECH_DISCOVERED intent
     → IsoDepBibo (BIBO adapter)
     → ImpalaSDK.tx(CommandAPDU)
 ```
+
+> **Platform note:** this IsoDep/NDEF NFC transport is **Android-only**. iOS has no native NFC transport yet — native iOS NFC is deferred. See [`docs/ios-nfc.md`](../docs/ios-nfc.md) for the rationale (Apple NFC & SE Platform constraints) and the recommended external-reader path.
 
 **NDEF (Data Tags)** — for reading NFC data payloads:
 

@@ -8,7 +8,60 @@ What distinguishes this system from a typical blockchain bridge is its hardware 
 
 The platform is composed of six components that span from on-chain smart contracts through a REST API server down to the NFC interface on a mobile device. At the top, **impala-soroban** deploys a multisig USDC wrapper contract on Stellar's Soroban runtime, enforcing time-locked operations and multi-party authorization for wrapping, unwrapping, and transferring USDC. In the middle, **impala-bridge** is a Rust/Axum API server that manages accounts, authenticates users (via passwords, Okta SSO, or smartcard signatures), issues JWT tokens, dispatches notifications, streams blockchain events, and reconciles cross-ledger transactions. On the device side, **impala-card** provides both the JavaCard applet (23 APDU commands for authentication, transactions, and provisioning) and a Kotlin Multiplatform SDK that abstracts the smartcard interface across Android, iOS, and JVM. **impala-lib** wraps the SDK in Android-specific NFC and geolocation services, **impala-android-demo** is a full MVVM reference application with five authentication methods, and **impala-ui** is a vanilla JavaScript admin dashboard for operations and account management.
 
-The infrastructure layer, defined in Terraform, deploys the bridge and its background worker as ECS Fargate tasks behind an ALB with WAF protection, backed by RDS PostgreSQL and ElastiCache Redis, with SNS/SQS for asynchronous job dispatch and optional cross-region disaster recovery.
+The infrastructure layer, defined in Terraform, deploys the bridge and its background worker as ECS Fargate tasks behind an ALB with WAF protection, backed by RDS PostgreSQL and ElastiCache Redis (with TLS in transit), with SNS/SQS for asynchronous job dispatch, VPC endpoints for private AWS API access, WAF logging for forensic analysis, and optional cross-region disaster recovery.
+
+---
+
+## Narrative Use Cases
+
+Before diving into technical details, here are the core scenarios the platform supports and how the components interact to fulfill them.
+
+### Use Case 1: Offline-to-Online Payment Bridge
+
+Maria uses a Payala account for daily purchases at local shops. She wants to send money to a friend who only has a Stellar wallet. She opens the Impala Android app, taps her smartcard, and initiates a transfer.
+
+**What happens behind the scenes:**
+
+1. The Android app discovers the card via NFC (ISO 14443-4) and sends `GET_USER_DATA` to retrieve Maria's account ID
+2. The app sends `SIGN_AUTH` with the current timestamp — the card signs it with its secp256r1 private key (which has never left the secure element)
+3. The app authenticates with the bridge using the card signature, receives JWT tokens, and stores them in EncryptedSharedPreferences
+4. The app calls `POST /transaction` with both the Payala transaction ID (from the local payment) and the Stellar destination
+5. The bridge records the dual-chain transaction, linking the offline Payala payment to the on-chain Stellar transfer
+6. Maria's friend receives a push notification (via FCM) that the funds have arrived
+
+This flow demonstrates the core value proposition: offline Payala payments become visible and actionable on the Stellar network, with hardware-backed authentication at every step.
+
+### Use Case 2: Custodial Token Management with Timelocks
+
+A treasury team manages a pool of wrapped tokens in the Soroban smart contract. They need to process a large withdrawal, but company policy requires multi-party approval and a 24-hour cooling period.
+
+1. Two of three authorized signers call `schedule_unwrap(signers, recipient, amount, 86400)` on the contract
+2. The contract verifies the multisig threshold (2-of-3) and creates a timelock with `unlock_time = now + 24h`
+3. The bridge's Stellar reconciliation job detects the scheduled operation and logs it
+4. Operations receives a webhook notification about the pending withdrawal
+5. After 24 hours, a routine process calls `execute_unwrap(timelock_id)` — tokens transfer to the recipient
+6. If compliance flags the withdrawal during the 24-hour window, a signer calls `cancel_timelock` to abort
+
+### Use Case 3: Enterprise SSO Onboarding
+
+A company deploys Impala for its employees. IT configures Okta as the identity provider. When an employee logs in for the first time:
+
+1. The admin dashboard redirects to Okta's authorization endpoint (PKCE flow)
+2. Employee authenticates with their corporate credentials
+3. Okta returns an access token; the bridge validates it against Okta's JWKS endpoint
+4. The bridge auto-creates an Impala account (email → account ID derivation)
+5. The employee receives JWT tokens and can immediately manage cards, view transactions, and configure notifications
+6. The admin assigns the employee's role (view-only, device, token, or admin) via the dashboard
+
+### Use Case 4: Operations Monitoring and Alerting
+
+A platform operator wants real-time visibility into the system. They configure:
+
+- **Stellar event streaming** (`POST /subscribe {network: "stellar"}`) — the bridge opens an SSE connection to Horizon and caches ledger events in Redis
+- **Notification subscriptions** — `login_failure` events trigger SMS to the security team; `transfer_outgoing` events above a threshold trigger a webhook to a Slack channel
+- **Health monitoring** — Kubernetes probes hit `/healthz` (liveness) and `/readyz` (readiness, checks DB + Redis); CloudWatch alarms fire on 5xx spikes or DLQ depth
+- **WAF forensics** — blocked requests and rate-limit hits are logged to CloudWatch with authorization headers redacted
+- **Slow query analysis** — PostgreSQL queries exceeding 1 second are logged to CloudWatch for performance investigation
 
 ---
 
@@ -24,17 +77,18 @@ graph TB
 
     subgraph Bridge["impala-bridge &lpar;Rust / Axum&rpar;"]
         direction TB
-        ClientAPI["Client API<br/><i>22 endpoints</i>"]
+        ClientAPI["Client API<br/><i>~30 endpoints</i>"]
         AdminAPI["Admin API"]
         AuthEngine["Auth Engine<br/><i>Argon2 + JWT + Okta</i>"]
+        Validation["Input Validation<br/><i>11 validators, SSRF prevention</i>"]
         Worker["Background Worker<br/><i>SNS/SQS jobs</i>"]
         CronSync["Cron Sync Task<br/><i>60s interval</i>"]
     end
 
     subgraph Storage["Data Layer"]
-        Postgres[("PostgreSQL 16<br/><i>17 migrations</i>")]
-        Redis[("Redis 7<br/><i>deadpool connection pool</i>")]
-        Vault["HashiCorp Vault"]
+        Postgres[("PostgreSQL 16<br/><i>17 migrations, slow query logs</i>")]
+        Redis[("Redis 7<br/><i>TLS in transit, connection pool</i>")]
+        Vault["HashiCorp Vault / OpenBao"]
     end
 
     subgraph Networks["Blockchain Networks"]
@@ -66,6 +120,7 @@ graph TB
     AdminUI -->|"REST / JWT"| AdminAPI
     ExtClient -->|"REST / JWT"| ClientAPI
 
+    ClientAPI --> Validation
     ClientAPI --> AuthEngine
     AdminAPI --> AuthEngine
     AuthEngine --> Postgres
@@ -107,8 +162,8 @@ graph LR
     subgraph Public["Public &lpar;No Auth&rpar;"]
         Auth["/authenticate POST"]
         Token["/token POST"]
-        OktaExch["/auth/okta POST"]
-        OktaCfg["/auth/okta/config GET"]
+        SsoExch["/auth/sso/:provider POST"]
+        SsoCfg["/auth/sso/:provider/config GET"]
         Ver["/version GET"]
         Health["/ GET"]
         HealthFull["/health GET"]
@@ -154,13 +209,16 @@ graph LR
 | `/readyz` | GET | Kubernetes readiness probe — returns 200 if both DB and Redis are reachable, 503 otherwise |
 | `/version` | GET | Build metadata: package name, version, build date, rustc version, database schema version |
 | `/authenticate` | POST | Register or authenticate a user with account ID and password (Argon2 hash). Rate-limited to 10 requests per 60 seconds per account, with lockout after 5 failed attempts for 15 minutes |
-| `/token` | POST | JWT token issuance. `{username, password}` returns a fresh 14-day refresh + 1-hour temporal pair; `{refresh_token}` rotates (refresh tokens are single-use — the presented token is burned and a replacement pair in the same family is returned; reuse revokes the whole family). Validates issuer/audience and checks all Redis revocation surfaces before issuing |
+| `/token` | POST | JWT token issuance. `{username, password}` returns a fresh 14-day refresh + 1-hour temporal pair (the `role` claim is stamped from the account's DB role, with the `ADMIN_ACCOUNT_IDS` allowlist overriding to admin); `{refresh_token}` rotates (refresh tokens are single-use — the presented token is burned and a replacement pair in the same family is returned; reuse revokes the whole family). Validates issuer/audience and checks all Redis revocation surfaces before issuing |
 | `/session/login` | POST | Browser cookie-session login: same credential checks as `/authenticate`, sets an HttpOnly `SameSite=Strict` session cookie and returns the CSRF token (`X-CSRF-Token` required on cookie-authenticated mutations) |
-| `/session/me` | GET | Current session identity + CSRF token (page-reload rehydration for impala-ui) |
+| `/session/me` | GET | Current session identity + CSRF token (page-reload rehydration for cookie-session clients) |
 | `/session/logout` | POST | Destroys the server-side session record and clears the cookie |
 | `/logout/all` | POST | Logout everywhere: bumps the account's auth epoch in Redis, killing every outstanding token and session for the account |
 | `/auth/okta` | POST | Exchange a validated Okta access token for Impala JWT tokens (or a cookie session with `cookie_mode: true`). Auto-creates account on first login |
 | `/auth/okta/config` | GET | Returns the Okta OIDC configuration (issuer, client ID, endpoints, scopes) for client-side flow setup |
+| `/auth/sso/{provider}` | POST | Exchange a validated OIDC token (Okta / Auth0 / Duo / …) for Impala JWT tokens. Auto-creates account on first login. Body `{ token }` (access token; legacy alias `okta_token`) or `{ id_token }` for `token_kind=id` providers |
+| `/auth/sso/{provider}/config` | GET | Returns the provider's OIDC configuration (provider, issuer, client ID, audience, endpoints, scopes) for the client-side flow, or `{ enabled: false }` |
+| `/auth/providers` | GET | List the names of all configured SSO providers |
 
 #### Client API (JWT Protected)
 
@@ -171,7 +229,9 @@ graph LR
 | `/account` | PUT | Update account profile fields. Validates Stellar account ID format (56 chars, Base32) |
 | `/card` | POST | Register a smartcard by storing its card ID, EC public key (secp256r1), and RSA public key. Validates key formats before INSERT |
 | `/card` | DELETE | Soft-delete a card registration (sets `is_delete = TRUE` and `deleted_at` timestamp) |
-| `/transaction` | POST | Create a dual-chain transaction record with Stellar and Payala transaction IDs, hashes, fees, memo, and signatures |
+| `/transaction` | POST | Create a dual-chain transaction record with Stellar and Payala transaction IDs, hashes, fees, memo, and signatures. Non-admin callers may only supply a `source_account` they own |
+| `/sync/payala` | POST | Ingest a batch of offline Payala transactions (owner-only, atomic, idempotent per `(account, payala_tx_id)`). Applied per the account's `sync_mode`: `reserve` nets each batch into per-currency reserve balances; `mirror` inserts each fresh item 1:1 into `transaction` (`origin = 'payala_sync'`) |
+| `/reserves/:account_id` | GET | Read an account's per-currency Payala reserve balances and current `sync_mode` (owner or admin) |
 | `/mfa` | GET | List all MFA enrollments (TOTP and/or SMS) for the authenticated user |
 | `/mfa` | POST | Enroll a new MFA method. TOTP: generates a secret and returns a provisioning URI for QR code display. SMS: requires and validates a phone number (E.164 format) |
 | `/mfa/verify` | POST | Verify an MFA code. TOTP: validates against stored secret using `totp-rs`. SMS: validates against code stored in Redis with constant-time comparison (`subtle::ConstantTimeEq`). Brute force protected: 5 attempts per account/type, then 15-minute lockout |
@@ -192,6 +252,7 @@ graph LR
 |----------|--------|---------|
 | `/subscribe` | POST | Initiate a network event stream — Stellar SSE from Horizon `/ledgers` or Payala TCP listener |
 | `/sync` | POST | Trigger cross-ledger transaction reconciliation against Soroban RPC `getTransactions` |
+| `/admin/accounts/:account_id/sync-mode` | PUT | Set an account's Payala sync mode (`reserve`/`mirror`). Forward-only — history is not migrated; leaving reserve mode with a nonzero balance requires `force: true` |
 
 ### Authentication and Authorization
 
@@ -232,7 +293,7 @@ A **cron sync task** runs every 60 seconds in the server process, querying the `
 ### Connection Management
 
 - **PostgreSQL**: `sqlx::PgPool` with 20 max connections, 5-second acquire timeout, 10-minute idle timeout, 30-minute max connection lifetime
-- **Redis**: `deadpool_redis` connection pool (replacing per-operation connections), with fail-closed policy on all security-critical operations (rate limiting, lockout, token revocation, MFA brute force)
+- **Redis**: `deadpool_redis` connection pool with TLS via `tokio-rustls` (`rediss://` protocol in production). Fail-closed policy on all security-critical operations (rate limiting, lockout, token revocation, MFA brute force). Standardized key format: `impala:{type}:{scope}:{id}`
 - **HTTP clients**: All outbound `reqwest` clients configured with 30-second timeout
 - **Response compression**: gzip via `tower-http::CompressionLayer`
 - **Request IDs**: auto-generated UUID in `x-request-id` header, propagated through the request lifecycle
@@ -331,15 +392,21 @@ The applet implements GlobalPlatform 2.3 Amendment D Secure Channel Protocol 03 
 
 ### Kotlin Multiplatform SDK
 
-The SDK (`ImpalaSDK`) provides a typed, cross-platform API that runs on JVM, iOS (x64, ARM64, simulator), and Android. It communicates with the applet through a `BIBO` (Byte-In, Byte-Out) interface — a single-method abstraction (`transceive(ByteArray): ByteArray`) that each platform implements:
+The SDK (`ImpalaSDK`) provides a typed, cross-platform API. Its **logic** (APDU encoding, SCP03, signatures) compiles for JVM, iOS (x64, ARM64, simulator), and Android, but the **transport** is platform-specific. It communicates with the applet through a `BIBO` (Byte-In, Byte-Out) interface — a single-method abstraction (`transceive(ByteArray): ByteArray`) that each platform supplies:
 
 - **Android**: `IsoDepBibo` wraps `android.nfc.tech.IsoDep` (ISO 14443-4)
 - **JVM tests**: `jcardsim` simulator provides a BIBO-compatible interface
-- **iOS**: Platform adaptor via CoreNFC
+- **iOS**: no NFC transport yet — **deferred** (the iOS framework builds the shared logic only). See [iOS NFC support (deferred)](#ios-nfc-support-deferred) below and [`docs/ios-nfc.md`](docs/ios-nfc.md).
 
 The APDU layer (`com.impala.sdk.apdu4j`) handles ISO 7816-4 command encoding and response parsing. `CommandAPDU` constructs the binary command from class, instruction, parameters, and data fields. `ResponseAPDU` parses the response and extracts the status word (`SW1`, `SW2`). The SDK auto-throws `ImpalaException` on any non-`0x9000` status.
 
 The SCP03 implementation in the SDK is a pure-Kotlin AES-128 implementation (no `javax.crypto` dependency) for cross-platform compatibility. It manages the secure channel lifecycle: key derivation, session establishment, MAC computation, and encrypted command wrapping.
+
+### iOS NFC support (deferred)
+
+Native iOS NFC is **not implemented**: there is no `iosMain` source set and no CoreNFC code, so the iOS framework ships the SDK's logic without a way to reach a card. It is deferred because Apple gates NFC heavily. Reading a card via CoreNFC (`NFCTagReaderSession`/`NFCISO7816Tag`) needs a paid developer account, the `com.apple.developer.nfc.readersession.formats` entitlement, and pre-declared applet AIDs, all within foreground-only, modal, time-limited sessions. Any Secure Element / card-emulation ("payments") flow additionally requires Apple's **NFC & SE Platform** program — an entitlement plus a commercial agreement, regulatory eligibility (e.g. PCI DSS), and region/iOS-version limits.
+
+The intended path is an **external proximity reader** (a Lightning/USB-C MFi accessory via the External Accessory framework, or a Bluetooth LE CCID reader) that implements the same `BIBO` interface and plugs into `ImpalaSDK` with no changes to the crypto/APDU logic. Full rationale, Apple requirements, and an integration sketch live in **[`docs/ios-nfc.md`](docs/ios-nfc.md)**.
 
 ---
 
@@ -396,7 +463,7 @@ stateDiagram-v2
 
 ## impala-lib — Android NFC and Geolocation Library
 
-This Android library (package `com.payala.impala`, min SDK 24) provides two communication channels for integrating Impala into Android applications:
+This Android library (package `com.payala.impala`, min SDK 30) provides two communication channels for integrating Impala into Android applications:
 
 **NFC via IsoDep (ISO 14443-4 smartcard interface)**:
 - `NfcContactActivity` manages foreground dispatch to intercept NFC tag discoveries
@@ -523,9 +590,9 @@ graph TB
 
 A vanilla JavaScript single-page application served by Nginx on port 3000, styled with Foundation 6.8.1. It proxies `/api/*` requests to the bridge and provides an operational interface for account management, card registration, transaction viewing, MFA enrollment, and notification configuration.
 
-### Client-Side RBAC
+### Role-Based Access Control (server-driven)
 
-The dashboard enforces four roles via `[data-permission]` HTML attributes:
+The dashboard gates four roles via `[data-permission]` HTML attributes:
 
 | Role | Permissions |
 |------|-------------|
@@ -534,18 +601,18 @@ The dashboard enforces four roles via `[data-permission]` HTML attributes:
 | **token** | All device permissions + `manage_accounts`, `manage_mfa` |
 | **admin** | All permissions including `manage_roles` |
 
-The first user to log in is automatically bootstrapped as admin. Roles persist in `localStorage` and are enforced by filtering DOM elements based on `data-permission` attributes.
+Authorization is **server-driven**: each account's role lives in `impala_account.role` and is embedded in every issued JWT as the `role` claim. `roles.js` only *reads* that claim (via `API.parseJwt`) to gate `[data-permission]` elements — there is no client-side role store (it actively clears the legacy `impala_roles` key). The **first account ever created is bootstrapped to `admin` server-side** by a `BEFORE INSERT` trigger (`impala-bridge/migrations/019_add_account_role.sql`), covering all sign-up paths including SSO auto-provisioning; subsequent grants use `PUT /admin/accounts/:id/role` and take effect at the target's next token refresh.
 
 ### Core Modules
 
 - **`api.js`** — HTTP client with automatic JWT refresh on 401, concurrent request deduplication during refresh, `X-Request-Nonce` header for CSRF mitigation, error sanitization (strips HTML/SQL, truncates at 200 chars), and retry logic with exponential backoff for GET requests
 - **`router.js`** — SPA navigation with toast notifications (Foundation callout styles)
-- **`okta-auth.js`** — OIDC authorization code flow with PKCE (RFC 7636) for Okta SSO
+- **`sso-auth.js`** — multi-provider OIDC authorization code flow with PKCE (RFC 7636); renders one button per enabled SSO provider (Okta / Auth0 / Duo)
 - **`session-timer.js`** — 1-hour inactivity timeout matching temporal token TTL
 
 ### Pages
 
-Login, Dashboard, Accounts, Cards, Transactions, MFA, Admin (role management), and Okta Callback.
+Login, Dashboard, Accounts, Cards, Transactions, MFA, Admin (role management), and SSO Callback.
 
 ---
 
@@ -561,16 +628,22 @@ Login, Dashboard, Accounts, Cards, Transactions, MFA, Admin (role management), a
 
 ### Input Validation
 
-- Stellar account IDs: 56 characters, starts with 'G', Base32 charset (A-Z, 2-7)
-- Email: RFC-compliant format validation
-- Phone: E.164 format (+country code, 8-16 characters)
-- Card IDs: hex string, 8-32 characters
-- EC public keys: hex string, 66 or 130 characters (compressed/uncompressed P-256)
-- RSA public keys: Base64, 100-2048 characters
-- Callback URLs: SSRF prevention (blocks localhost, private IP ranges, cloud metadata endpoints, non-HTTP schemes)
-- LDAP inputs: RFC 4515 special character escaping
-- Name fields: maximum 64 characters
-- Request body: 1 MB limit
+All user-facing inputs are validated in `src/validate.rs` with dedicated, tested functions:
+
+- **Stellar account IDs** (`validate_stellar_account_id`): 56 characters, starts with 'G', Base32 charset (A-Z, 2-7)
+- **Email** (`validate_email`): RFC-compliant format with domain dot requirement, max 254 characters
+- **Phone** (`validate_phone_number`): E.164 format (+country code, 8-16 digits)
+- **Card IDs** (`validate_card_id`): hex string, 8-32 characters
+- **EC public keys** (`validate_ec_pubkey`): hex string, 66 (compressed) or 130 (uncompressed P-256) characters
+- **RSA public keys** (`validate_rsa_pubkey`): Base64, 100-2048 characters
+- **Callback URLs** (`validate_callback_url`): SSRF prevention — blocks localhost, private IP ranges (10/8, 172.16/12, 192.168/16), IPv6 loopback/link-local, cloud metadata endpoints (169.254.169.254), non-HTTP schemes
+- **Transaction IDs** (`validate_transaction_id`): alphanumeric, 1-128 characters
+- **Hex hashes** (`validate_hex_hash`): hex-only characters, 1-128 characters (for Stellar transaction hashes)
+- **Listen endpoints** (`validate_listen_endpoint`): must be a valid localhost socket address (127.0.0.1 or ::1) with a non-privileged port (>= 1024) — prevents binding on external interfaces
+- **LDAP inputs** (`ldap_escape`): RFC 4515 special character escaping
+- **Name fields**: maximum 64 characters
+- **Memo fields**: maximum 256 characters
+- **Request body**: 1 MB global limit
 
 ### HTTP Security Headers
 
@@ -601,6 +674,8 @@ erDiagram
         varchar nickname
         varchar affiliation
         varchar gender
+        varchar role
+        varchar sync_mode
         timestamptz created_at
         timestamptz updated_at
     }
@@ -636,6 +711,36 @@ erDiagram
         text memo
         varchar payala_currency
         varchar payala_digest
+        bigint payala_amount
+        varchar origin
+        timestamptz created_at
+    }
+
+    payala_reserve {
+        varchar payala_account_id PK
+        varchar currency PK
+        bigint balance
+        timestamptz updated_at
+    }
+
+    payala_sync_batch {
+        uuid batch_id PK
+        varchar payala_account_id FK
+        varchar sync_mode
+        integer item_count
+        integer applied_count
+        integer duplicate_count
+        integer conflicting_count
+        jsonb net_deltas
+        timestamptz created_at
+    }
+
+    payala_sync_item {
+        varchar payala_account_id PK
+        varchar payala_tx_id PK
+        uuid batch_id FK
+        bigint amount
+        varchar currency
         timestamptz created_at
     }
 
@@ -689,9 +794,14 @@ erDiagram
     impala_account ||--o{ notification_subscription : "subscribes"
     impala_account ||--o{ device_token : "registers"
     impala_account ||--o{ transaction : "initiates"
+    impala_account ||--o{ payala_reserve : "holds reserve"
+    impala_account ||--o{ payala_sync_batch : "syncs batches"
+    payala_sync_batch ||--o{ payala_sync_item : "contains"
 ```
 
-The database schema is managed by 17 sequential SQL migrations. Performance indices cover: `card(account_id)` filtered on active cards, `impala_mfa(account_id, mfa_type)`, `notify(account_id)` filtered on active entries, `transaction(created_at)`, and `notification_subscription(account_id, event_type)` filtered on enabled subscriptions.
+Each account carries a `sync_mode` (`reserve` default, or `mirror`) selecting how `POST /sync/payala` applies a batch of offline Payala transactions: reserve mode nets each batch into `payala_reserve` (one balance update per batch, per currency), mirror mode inserts each fresh item 1:1 into `transaction` with `origin = 'payala_sync'`. `payala_sync_item` is the shared idempotency ledger — its `(payala_account_id, payala_tx_id)` primary key makes batch replay a no-op — and `payala_sync_batch` audits every ingestion.
+
+The database schema is managed by 23 sequential SQL migrations. Performance indices cover: `card(account_id)` filtered on active cards, `impala_mfa(account_id, mfa_type)`, `notify(account_id)` filtered on active entries, `transaction(created_at)`, and `notification_subscription(account_id, event_type)` filtered on enabled subscriptions.
 
 ---
 
@@ -808,7 +918,7 @@ graph TB
         Horizon["Stellar Horizon<br/><i>SSE ledger stream</i>"]
         SorobanRPC["Soroban RPC<br/><i>Transaction queries</i>"]
         PayalaTCP["Payala Network<br/><i>TCP events</i>"]
-        VaultServer["HashiCorp Vault<br/><i>Secret management</i>"]
+        VaultServer["HashiCorp Vault / OpenBao<br/><i>Secret management</i>"]
     end
 
     subgraph Notifications["Notification Providers"]
@@ -832,17 +942,88 @@ graph TB
 
 The Terraform configuration deploys a production-grade infrastructure:
 
-- **VPC**: Public subnets (ALB, NAT gateways), private subnets (ECS tasks, RDS, ElastiCache), isolated subnets (RDS replicas)
+```mermaid
+graph TB
+    subgraph VPC["VPC (Multi-AZ)"]
+        subgraph Public["Public Subnets"]
+            ALB["Application Load Balancer<br/><i>WAF + TLS</i>"]
+            NAT["NAT Gateways"]
+        end
+
+        subgraph Private["Private Subnets"]
+            Server["ECS Server<br/><i>Fargate, non-root</i>"]
+            Worker["ECS Worker<br/><i>SQS consumer</i>"]
+            OTel["OTEL Sidecar<br/><i>optional</i>"]
+        end
+
+        subgraph Data["Data Subnets"]
+            RDS[("RDS PostgreSQL 16<br/><i>Multi-AZ, KMS, slow query logs</i>")]
+            ElastiCache[("Redis 7<br/><i>TLS in transit, failover</i>")]
+        end
+
+        subgraph VPCEndpoints["VPC Endpoints"]
+            ECR_EP["ECR"]
+            SM_EP["Secrets Manager"]
+            Logs_EP["CloudWatch Logs"]
+            SQS_EP["SQS"]
+            SNS_EP["SNS"]
+            S3_EP["S3 Gateway"]
+        end
+    end
+
+    subgraph Monitoring["Observability"]
+        CW["CloudWatch<br/><i>Dashboard + Alarms</i>"]
+        WAFLogs["WAF Logs<br/><i>Redacted auth headers</i>"]
+        SigNoz["SigNoz<br/><i>OTLP traces + metrics</i>"]
+    end
+
+    subgraph Jobs["Async Job Pipeline"]
+        SNS["SNS Topic"]
+        SQS["SQS Queue"]
+        DLQ["Dead Letter Queue"]
+    end
+
+    Internet["Internet"] --> ALB
+    ALB --> Server
+    Server --> RDS
+    Server --> ElastiCache
+    Worker --> RDS
+    Worker --> ElastiCache
+    Server --> SNS
+    SNS --> SQS
+    SQS --> Worker
+    SQS -->|"max 3 receives"| DLQ
+    Server -.-> OTel
+    OTel -.-> SigNoz
+    Server --> CW
+    ALB --> WAFLogs
+```
+
+**Compute and networking:**
+- **VPC**: Public subnets (ALB, NAT gateways), private subnets (ECS tasks, RDS, ElastiCache)
+- **VPC Endpoints**: Interface endpoints for ECR, Secrets Manager, CloudWatch Logs, SQS, and SNS, plus a gateway endpoint for S3. AWS API traffic stays within the VPC — reduces NAT costs and removes a potential data exfiltration vector. Gated by `enable_vpc_endpoints` variable.
 - **ECS Fargate**: Server and worker services as separate task definitions (2 vCPU, 4 GB RAM default). Non-root container user (UID 1000), read-only root filesystem. Optional OpenTelemetry Collector sidecar for traces and metrics export to SigNoz
-- **RDS**: PostgreSQL 16, Multi-AZ, KMS encryption at rest, automated backups (30-day retention)
-- **ElastiCache**: Redis 7 replication group with automatic failover, at-rest and in-transit encryption
 - **ALB**: Public load balancer with HTTP-to-HTTPS redirect, health checks against `/healthz` and `/readyz`
-- **WAF**: AWS managed rule groups (Common, Known Bad Inputs, SQLi), IP-based rate limiting (2000 req/5 min), optional geo-blocking
+
+**Data stores:**
+- **RDS**: PostgreSQL 16, Multi-AZ, KMS encryption at rest, automated backups (30-day retention). Custom parameter group enables slow query logging (queries > 1s), DDL statement logging, connection/disconnection tracking, and lock wait logging — all exported to CloudWatch Logs. `skip_final_snapshot` defaults to `false` for production safety.
+- **ElastiCache**: Redis 7 replication group with automatic failover, at-rest encryption (KMS), and **TLS in transit** (`rediss://` protocol). The bridge application connects via `tokio-rustls` for encrypted Redis communication.
+
+**Security:**
+- **WAF**: AWS managed rule groups (Common, Known Bad Inputs, SQLi), IP-based rate limiting (2000 req/5 min). WAF logging enabled to CloudWatch with authorization and cookie headers **redacted** to prevent credential leakage into log storage.
+- **Secrets**: JWT secret and database URL stored in AWS Secrets Manager
+- **Testnet isolation**: When `testnet_enabled = true`, the testnet JWT secret must be at least 32 characters (enforced by Terraform `check` block)
+
+**Reliability:**
 - **SNS/SQS**: Job dispatch pipeline with dead letter queue (3 max receives)
 - **Autoscaling**: Target tracking on CPU (85%) and memory (90%), ALB latency step scaling (250ms threshold)
-- **Disaster Recovery**: Optional cross-region failover with RDS read replica promotion, Route 53 failover DNS, and S3 cross-region replication
-- **Secrets**: JWT secret and database URL stored in AWS Secrets Manager
-- **Monitoring**: CloudWatch dashboard with CPU, memory, request count, error rate, and DLQ depth metrics
+- **Disaster Recovery**: Optional cross-region failover (`dr_enabled = true`) with RDS read replica promotion, Route 53 failover DNS, ElastiCache cross-region replication, and S3 cross-region replication
+
+**Observability:**
+- **CloudWatch**: Dashboard with 6 widgets (CPU, memory, request count, error rate, latency, DLQ depth). SNS alerts for CPU/memory thresholds, 5xx spikes, and DLQ accumulation
+- **WAF Logs**: All blocked and rate-limited requests logged for forensic analysis
+- **PostgreSQL Logs**: Slow queries (> 1s), DDL statements, connections, and lock waits exported to CloudWatch
+- **OpenTelemetry**: Optional OTLP traces and metrics export to SigNoz via collector sidecar
 
 ---
 
@@ -886,3 +1067,137 @@ graph TB
     SysInfo --> EP_Ver
     SysInfo --> EP_Health
 ```
+
+---
+
+## End-to-End Data Flow: Card Payment to On-Chain Settlement
+
+This sequence diagram traces a complete payment from NFC tap through dual-chain recording and notification delivery, showing how all components interact:
+
+```mermaid
+sequenceDiagram
+    participant Card as Smartcard
+    participant App as Android App
+    participant Lib as impala-lib
+    participant SDK as impala-card SDK
+    participant Bridge as impala-bridge
+    participant DB as PostgreSQL
+    participant Redis as Redis
+    participant SNS as SNS/SQS
+    participant Worker as Worker
+    participant Twilio as Twilio SMS
+
+    Note over Card, App: NFC Discovery Phase
+    App->>Lib: startNfcForegroundDispatch()
+    Lib->>Card: SELECT AID 0102030405060708
+    Card-->>Lib: 9000 (success)
+
+    Note over Card, Bridge: Card Authentication Phase
+    App->>SDK: getImpalaAppletVersion()
+    SDK->>Card: [CLA=00 INS=64]
+    Card-->>SDK: version bytes + 9000
+    App->>SDK: getUserData()
+    SDK->>Card: [CLA=00 INS=1E]
+    Card-->>SDK: accountId + cardId + name + 9000
+    App->>SDK: getEcPubKey()
+    SDK->>Card: [CLA=00 INS=24]
+    Card-->>SDK: 65-byte pubkey + 9000
+    App->>SDK: signAuth(timestamp)
+    SDK->>Card: [CLA=00 INS=25 DATA=timestamp]
+    Card-->>SDK: ECDSA signature + 9000
+
+    Note over App, Bridge: Bridge Authentication Phase
+    App->>App: password = SHA-256(cardId).take(32)
+    App->>Bridge: POST /authenticate {account_id, password}
+    Bridge->>Redis: check_rate_limit("auth", account_id)
+    Bridge->>Redis: check_lockout(account_id)
+    Bridge->>DB: SELECT password_hash FROM impala_auth
+    Bridge-->>App: {success: true, action: "login"}
+    App->>Bridge: POST /token {username, password}
+    Bridge-->>App: {refresh_token (14-day)}
+    App->>Bridge: POST /token {refresh_token}
+    Bridge->>Redis: Check JTI not revoked
+    Bridge-->>App: {refresh_token (rotated), temporal_token (1-hour)}
+
+    Note over App, Worker: Transaction Recording Phase
+    App->>Bridge: POST /transaction {stellar_tx_id, payala_tx_id, ...}
+    Bridge->>Bridge: validate_transaction_id(), validate_stellar_account_id()
+    Bridge->>DB: INSERT INTO transaction
+    Bridge->>SNS: publish send_notification job
+    Bridge-->>App: {success: true, btxid: UUID}
+
+    Note over SNS, Twilio: Notification Delivery Phase
+    SNS->>Worker: SQS message (SNS envelope)
+    Worker->>Worker: Parse payload, match medium
+    Worker->>Twilio: POST /Messages.json {To, From, Body}
+    Twilio-->>Worker: {sid, status}
+    Worker->>DB: INSERT INTO notify_log
+```
+
+---
+
+## CI/CD Pipeline
+
+GitHub Actions (`.github/workflows/ci.yml`) automates testing, building, and deployment:
+
+```mermaid
+graph LR
+    subgraph Test["Test Job"]
+        Fmt["cargo fmt --check"]
+        Clippy["cargo clippy"]
+        Tests["cargo test<br/><i>158 tests</i>"]
+        Audit["cargo audit"]
+    end
+
+    subgraph Build["Build Job"]
+        AMD64["Docker Build<br/><i>amd64</i>"]
+        ARM64["Docker Build<br/><i>arm64/Graviton</i>"]
+    end
+
+    subgraph Push["Push Job"]
+        ECR["ECR Push<br/><i>Multi-arch manifest</i>"]
+    end
+
+    subgraph Deploy["Deploy Job (optional)"]
+        TFValidate["terraform validate"]
+        TFFmt["terraform fmt -check"]
+        TFPlan["terraform plan"]
+        TFApply["terraform apply"]
+    end
+
+    Fmt --> Clippy --> Tests --> Audit
+    Audit --> AMD64
+    Audit --> ARM64
+    AMD64 --> ECR
+    ARM64 --> ECR
+    ECR --> TFValidate --> TFFmt --> TFPlan --> TFApply
+```
+
+**Triggers**: Push to `main`, PR against `main`, manual dispatch. Docker images are built natively on both amd64 and arm64 runners (no QEMU emulation). The Terraform deploy step validates HCL syntax and formatting before planning.
+
+---
+
+## Testing Strategy
+
+The bridge has **158 unit tests** covering:
+
+| Area | Tests | What They Cover |
+|------|-------|-----------------|
+| Validation | 45+ | All 11 validation functions with valid, boundary, and invalid inputs |
+| Handlers | 20+ | Network info (direct call), health probes, MFA TOTP round-trip, subscription constants |
+| Models | 16 | Serialization/deserialization for all request/response types, `skip_serializing_if` behavior |
+| Auth/JWT | 8 | Token encoding/decoding, expiry, wrong secret, wrong issuer |
+| Config | 9 | StellarNetwork parsing, case insensitivity, Config-to-StellarConfig conversion |
+| Middleware | 7 | Path normalization for metrics (numeric, UUID, mixed, root) |
+| Notifications | 7 | Event type strings, message formatting for all 6 event variants |
+| Redis helpers | 7 | Key format consistency for rate limit, lockout, revocation, MFA attempts |
+| Worker | 6 | JobMessage/SnsEnvelope deserialization, JobError display |
+| Jobs | 12 | Payload deserialization for send_notification (4 mediums), batch_sync, stellar_reconcile |
+| Error types | 7 | HTTP status code mapping for all AppError variants |
+| Okta | 5 | OIDC discovery, JWKS, claims, JWK key lookup |
+
+Handler tests use a strategy of extracting pure business logic into `pub(crate)` functions that can be tested without database or Redis mocks. Handlers that take only `Extension` layers with no DB dependency (like `network_info` and `liveness`) are tested via direct invocation.
+
+The Soroban contract has **50+ tests** covering initialization, wrap/unwrap/transfer operations, timelock management, multisig verification, pause/unpause, signer rotation, and edge cases (zero amounts, duplicate signers, expired timelocks, insufficient balances, self-transfers).
+
+The JavaCard SDK has **6 test suites** covering APDU encoding/decoding, AES-CMAC with NIST test vectors, response status word mapping, SDK input validation (PIN format, name length, signable data size), and exception mapping for all card error codes.

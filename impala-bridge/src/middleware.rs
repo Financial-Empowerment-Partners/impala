@@ -92,7 +92,7 @@ where
 
 /// Normalize URI path for metrics to avoid high cardinality.
 /// Replaces numeric and UUID path segments with `:id`.
-fn normalize_path(path: &str) -> String {
+pub(crate) fn normalize_path(path: &str) -> String {
     path.split('/')
         .map(|segment| {
             if segment.is_empty() {
@@ -107,4 +107,50 @@ fn normalize_path(path: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join("/")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_normalize_static_path() {
+        assert_eq!(normalize_path("/health"), "/health");
+    }
+
+    #[test]
+    fn test_normalize_numeric_segment() {
+        assert_eq!(normalize_path("/accounts/123"), "/accounts/:id");
+    }
+
+    #[test]
+    fn test_normalize_uuid_segment() {
+        assert_eq!(
+            normalize_path("/transaction/550e8400-e29b-41d4-a716-446655440000"),
+            "/transaction/:id"
+        );
+    }
+
+    #[test]
+    fn test_normalize_mixed_segments() {
+        assert_eq!(
+            normalize_path("/api/v1/accounts/42/mfa"),
+            "/api/v1/accounts/:id/mfa"
+        );
+    }
+
+    #[test]
+    fn test_normalize_root_path() {
+        assert_eq!(normalize_path("/"), "/");
+    }
+
+    #[test]
+    fn test_normalize_preserves_non_numeric() {
+        assert_eq!(normalize_path("/api/health"), "/api/health");
+    }
+
+    #[test]
+    fn test_normalize_multiple_ids() {
+        assert_eq!(normalize_path("/users/99/posts/42"), "/users/:id/posts/:id");
+    }
 }

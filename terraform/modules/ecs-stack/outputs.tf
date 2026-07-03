@@ -17,3 +17,8 @@ output "ecs_cluster_name" {
   description = "Stack ECS cluster name"
   value       = aws_ecs_cluster.this[0].name
 }
+
+output "ecs_task_role_name" {
+  description = "Stack ECS task role name (for attaching extra policies, e.g. the seed-KMS grant in seeds.tf)"
+  value       = aws_iam_role.ecs_task[0].name
+}

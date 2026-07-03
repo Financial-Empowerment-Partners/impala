@@ -52,6 +52,14 @@ aws-config = { version = "1", features = ["behavior-version-latest"] }
 aws-sdk-sqs = { version = "1", default-features = false, features = ["default-https-client", "rt-tokio"] }
 aws-sdk-sns = { version = "1", default-features = false, features = ["default-https-client", "rt-tokio"] }
 aws-sdk-sesv2 = { version = "1", default-features = false, features = ["default-https-client", "rt-tokio"] }
+aws-sdk-kms = { version = "1", default-features = false, features = ["default-https-client", "rt-tokio"] }
+# Custodial Stellar seed support: envelope encryption + classic tx signing.
+aes-gcm = "0.10"
+zeroize = { version = "1", features = ["derive"] }
+rand = "0.8"
+base64 = "0.22"
+stellar-base = "0.7"
+async-trait = "0.1"
 
 [dev-dependencies]
 tokio = { version = "1.0", features = ["full", "test-util"] }

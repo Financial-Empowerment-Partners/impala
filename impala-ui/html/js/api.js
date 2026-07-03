@@ -1,15 +1,13 @@
 /**
  * API client module for the Impala bridge REST API.
  *
- * Session strategy (cookie-based):
- *  - POST /session/login sets an HttpOnly session cookie (out of reach of
- *    any script, including XSS payloads) and returns a CSRF token.
- *  - The CSRF token lives in memory only (never localStorage) and is sent as
- *    X-CSRF-Token on every state-changing request; it can be re-fetched at
- *    any time from GET /session/me (e.g. after a page reload).
- *  - sessionStorage('impala_user') is a non-authoritative UX cache
- *    (username / is_admin for nav rendering); the cookie is the security
- *    boundary, enforced server-side.
+ * Handles JWT token storage, automatic token refresh, and authenticated
+ * HTTP requests. All methods return Promises. On 401 responses, tokens
+ * are cleared and the user is redirected to the login page.
+ *
+ * Token strategy:
+ *  - refresh_token (14-day): obtained via username+password
+ *  - temporal_token (1-hour): obtained from refresh_token, used for API calls
  *
  * Features:
  *  - X-Request-Nonce header on all requests (server-side dedup)
@@ -21,107 +19,117 @@
  * @module API
  */
 var API = (function () {
-    /** Base path for all API requests (proxied to impala-bridge by Nginx). */
-    var BASE = '/api';
-
     /** Maximum retry attempts for failed requests. */
     var MAX_RETRIES = 3;
     /** Base delay in milliseconds for exponential backoff. */
     var RETRY_BASE_DELAY = 1000;
 
-    /** sessionStorage key for the non-authoritative user cache. */
-    var USER_CACHE_KEY = 'impala_user';
-
-    /** In-memory CSRF token (never persisted). */
-    var csrfToken = null;
-    /** Cached in-flight /session/me Promise (concurrent callers share it). */
-    var csrfPromise = null;
-
-    /**
-     * One-time cleanup of the legacy localStorage bearer tokens (the UI used
-     * to keep JWTs in localStorage; sessions made that storage obsolete).
-     */
-    function clearLegacyTokens() {
-        try {
-            localStorage.removeItem('temporal_token');
-            localStorage.removeItem('refresh_token');
-        } catch (e) { /* storage unavailable — nothing to clean */ }
+    /** @returns {Object|null} The runtime network config, if loaded. */
+    function getConfig() {
+        return (typeof window !== 'undefined' && window.IMPALA_CONFIG) ? window.IMPALA_CONFIG : null;
     }
-    clearLegacyTokens();
 
     /**
-     * Store the session identity returned by /session/login, /session/me or
-     * a cookie_mode token exchange: CSRF token in memory, identity in the
-     * UX cache.
-     * @param {{account_id: string, is_admin: boolean, csrf_token: string}} data
+     * The active network key (e.g. 'testnet'), derived from the persisted
+     * selection in localStorage and validated against the runtime config.
+     * @returns {string|null}
      */
-    function setSession(data) {
-        if (data && data.csrf_token) {
-            csrfToken = data.csrf_token;
+    function currentNetworkKey() {
+        var stored = null;
+        try { stored = localStorage.getItem('impala_network'); } catch (e) { /* ignore */ }
+        var cfg = getConfig();
+        if (typeof NetConfig !== 'undefined') {
+            return NetConfig.resolveKey(cfg, stored);
         }
-        if (data && data.account_id) {
-            sessionStorage.setItem(USER_CACHE_KEY, JSON.stringify({
-                account_id: data.account_id,
-                is_admin: !!data.is_admin
-            }));
-        }
-    }
-
-    /** Clear the in-memory CSRF token and the UX cache (logout/401). */
-    function clearSession() {
-        csrfToken = null;
-        csrfPromise = null;
-        sessionStorage.removeItem(USER_CACHE_KEY);
-        clearLegacyTokens();
+        return stored || (cfg && cfg.default) || null;
     }
 
     /**
-     * @returns {{account_id: string, is_admin: boolean}|null} The cached
-     * session identity (UX only — the server re-checks every request).
+     * Base path for all API requests on the active network (proxied to the
+     * matching bridge by Nginx). Resolved dynamically so a network switch takes
+     * effect without reloading api.js.
+     * @returns {string}
      */
-    function getCachedUser() {
+    function base() {
+        var cfg = getConfig();
+        if (typeof NetConfig !== 'undefined') {
+            return NetConfig.resolveBase(cfg, currentNetworkKey());
+        }
+        return '/api';
+    }
+
+    /**
+     * Build the per-network localStorage key for a token name. JWTs are not
+     * portable across bridges, so each network's tokens live under their own key
+     * (e.g. 'temporal_token::mainnet').
+     * @param {string} name
+     * @returns {string}
+     */
+    function tokenStorageKey(name) {
+        var netKey = currentNetworkKey();
+        if (typeof NetConfig !== 'undefined' && NetConfig.tokenKey) {
+            return NetConfig.tokenKey(name, netKey);
+        }
+        return netKey ? name + '::' + netKey : name;
+    }
+
+    /** @returns {string|null} The stored temporal (short-lived) JWT token. */
+    function getTemporalToken() {
+        return localStorage.getItem(tokenStorageKey('temporal_token'));
+    }
+
+    /** @returns {string|null} The stored refresh (long-lived) JWT token. */
+    function getRefreshToken() {
+        return localStorage.getItem(tokenStorageKey('refresh_token'));
+    }
+
+    /**
+     * Store JWT tokens for the active network in localStorage.
+     * @param {string|null} temporal - Temporal token (1-hour), or null to skip.
+     * @param {string|null} refresh  - Refresh token (14-day), or null to skip.
+     */
+    function setTokens(temporal, refresh) {
+        if (temporal) localStorage.setItem(tokenStorageKey('temporal_token'), temporal);
+        if (refresh) localStorage.setItem(tokenStorageKey('refresh_token'), refresh);
+    }
+
+    /** Remove the active network's stored tokens from localStorage. */
+    function clearTokens() {
+        localStorage.removeItem(tokenStorageKey('temporal_token'));
+        localStorage.removeItem(tokenStorageKey('refresh_token'));
+    }
+
+    /**
+     * Decode a JWT token's payload without signature verification.
+     * @param {string} token - The JWT string.
+     * @returns {Object|null} Decoded payload, or null on parse failure.
+     */
+    function parseJwt(token) {
         try {
-            var raw = sessionStorage.getItem(USER_CACHE_KEY);
-            return raw ? JSON.parse(raw) : null;
+            if (!token || typeof token !== 'string') return null;
+            var parts = token.split('.');
+            if (parts.length !== 3) return null;
+            var payload = parts[1];
+            if (!payload) return null;
+            return JSON.parse(atob(payload));
         } catch (e) {
             return null;
         }
     }
 
     /**
-     * Get the CSRF token, fetching it from GET /session/me when the
-     * in-memory copy is missing (fresh page load). Rejects when there is no
-     * active session.
-     * @returns {Promise<string>}
+     * True when a JWT is expired or unreadable (fail closed). A 60-second
+     * early-expiry skew keeps in-flight requests off a token that would die
+     * before the server sees it.
+     * @param {string} token - Encoded JWT.
+     * @returns {boolean}
      */
-    function getCsrf() {
-        if (csrfToken) {
-            return Promise.resolve(csrfToken);
+    function isTokenExpired(token) {
+        var payload = parseJwt(token);
+        if (!payload || typeof payload.exp !== 'number') {
+            return true;
         }
-        if (csrfPromise) {
-            return csrfPromise;
-        }
-        csrfPromise = fetch(BASE + '/session/me', {
-            method: 'GET',
-            credentials: 'same-origin',
-            headers: { 'X-Request-Nonce': generateNonce() }
-        }).then(function (res) {
-            csrfPromise = null;
-            if (!res.ok) {
-                throw new Error('Session expired');
-            }
-            return res.json();
-        }).then(function (data) {
-            setSession(data);
-            if (!csrfToken) {
-                throw new Error('Session expired');
-            }
-            return csrfToken;
-        }).catch(function (err) {
-            csrfPromise = null;
-            throw err;
-        });
-        return csrfPromise;
+        return payload.exp * 1000 <= Date.now() + 60 * 1000;
     }
 
     /**
@@ -139,27 +147,11 @@ var API = (function () {
     }
 
     /**
-     * Build the headers for an authenticated request. Pure — unit-tested.
-     * @param {string} method - HTTP method.
-     * @param {string|null} csrf - CSRF token (required for non-GET).
-     * @param {string} nonce - Request nonce.
-     * @returns {Object} Header map.
-     */
-    function buildHeaders(method, csrf, nonce) {
-        var headers = {
-            'Content-Type': 'application/json',
-            'X-Request-Nonce': nonce
-        };
-        if (method !== 'GET' && method !== 'HEAD' && csrf) {
-            headers['X-CSRF-Token'] = csrf;
-        }
-        return headers;
-    }
-
-    /**
-     * Sanitize an error message from the server.
-     * Maps known HTTP status codes to user-friendly messages and strips
-     * HTML tags and SQL-like keywords from raw messages.
+     * Fallback sanitizer for NON-enveloped error bodies (see extractErrorMessage,
+     * which prefers a structured `{error:{message}}` body and is what callers hit
+     * first). Maps known HTTP status codes to user-friendly messages and strips
+     * HTML tags + SQL-like keywords from raw messages (leak-defense for
+     * unexpected, non-API responses such as a proxy HTML error page).
      * @param {number} status - HTTP status code.
      * @param {string} rawMessage - Raw error message from server.
      * @returns {string} Sanitized, user-friendly error message.
@@ -169,6 +161,7 @@ var API = (function () {
             401: 'Session expired',
             403: 'Permission denied',
             404: 'Not found',
+            409: 'Conflict',
             429: 'Too many requests, please try again later',
             500: 'Server error',
             502: 'Server unavailable',
@@ -193,6 +186,118 @@ var API = (function () {
         }
 
         return sanitized || 'Request failed (' + status + ')';
+    }
+
+    /**
+     * Strip HTML tags and cap length, WITHOUT the SQL-keyword replacement.
+     * Used for trusted, API-shaped envelope messages (which legitimately contain
+     * words like "delete"/"role"), so guard messages are not mangled. The result
+     * is only ever rendered via textContent or an escapeHtml() sink, so tag
+     * stripping is belt-and-suspenders rather than the sole XSS defense.
+     * @param {string} message
+     * @returns {string}
+     */
+    function stripAndTruncate(message) {
+        var sanitized = String(message).replace(/<[^>]*>/g, '');
+        if (sanitized.length > 200) {
+            sanitized = sanitized.substring(0, 200) + '...';
+        }
+        return sanitized || 'Request failed';
+    }
+
+    /**
+     * Extract the `message` from a bridge error envelope `{error:{message}}`.
+     * @param {string} rawBody - Raw response body text.
+     * @returns {string|null} The envelope message, or null if not enveloped.
+     */
+    function parseEnvelopeMessage(rawBody) {
+        if (!rawBody || typeof rawBody !== 'string') return null;
+        try {
+            var parsed = JSON.parse(rawBody);
+            if (parsed && parsed.error && typeof parsed.error.message === 'string') {
+                return parsed.error.message;
+            }
+        } catch (e) {
+            // Not JSON — fall through to the raw-body fallback.
+        }
+        return null;
+    }
+
+    /**
+     * Turn an error response (status + raw body) into a display message.
+     * Prefers the bridge's structured `{error:{message}}` envelope (lightly
+     * sanitized, NOT SQL-filtered) so guard messages surface cleanly for every
+     * status; otherwise falls back to the status map + raw-body sanitization.
+     * @param {number} status
+     * @param {string} rawBody
+     * @returns {string}
+     */
+    function extractErrorMessage(status, rawBody) {
+        var enveloped = parseEnvelopeMessage(rawBody);
+        if (enveloped !== null) {
+            return stripAndTruncate(enveloped);
+        }
+        return sanitizeErrorMessage(status, rawBody);
+    }
+
+    /** Cached in-flight refresh Promise to prevent concurrent refresh requests. */
+    var refreshPromise = null;
+
+    /**
+     * Use the stored refresh token to obtain a new temporal token.
+     * Clears all tokens and rejects if the refresh token is missing or expired.
+     * Concurrent callers share a single in-flight request.
+     * @returns {Promise<string>} Resolves with the new temporal token.
+     */
+    function refreshTemporalToken() {
+        if (refreshPromise) {
+            return refreshPromise;
+        }
+
+        var refresh = getRefreshToken();
+        if (!refresh || isTokenExpired(refresh)) {
+            clearTokens();
+            return Promise.reject(new Error('Session expired'));
+        }
+
+        refreshPromise = fetch(base() + '/token', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-Request-Nonce': generateNonce()
+            },
+            body: JSON.stringify({ refresh_token: refresh })
+        }).then(function (res) {
+            if (!res.ok) {
+                clearTokens();
+                throw new Error('Token refresh failed');
+            }
+            return res.json();
+        }).then(function (data) {
+            refreshPromise = null;
+            if (data.temporal_token) {
+                setTokens(data.temporal_token, null);
+                return data.temporal_token;
+            }
+            throw new Error('No temporal token in response');
+        }).catch(function (err) {
+            refreshPromise = null;
+            throw err;
+        });
+
+        return refreshPromise;
+    }
+
+    /**
+     * Get a valid temporal token, refreshing if the current one has expired.
+     * @returns {Promise<string>} Resolves with a non-expired temporal token.
+     */
+    function getValidToken() {
+        var token = getTemporalToken();
+        if (token && !isTokenExpired(token)) {
+            return Promise.resolve(token);
+        }
+        return refreshTemporalToken();
     }
 
     /**
@@ -224,55 +329,57 @@ var API = (function () {
 
     /**
      * Make an authenticated HTTP request to the API with retry logic.
-     * The session cookie rides along automatically (same-origin); mutations
-     * additionally carry X-CSRF-Token. Handles 401 redirects, a one-shot
-     * CSRF self-heal on 403, and exponential backoff retries.
+     * Attaches a bearer temporal token (refreshed up front when expired, and
+     * self-healed once on a 401 — e.g. a token revoked from another tab),
+     * with exponential backoff retries for idempotent requests. Redirects to
+     * the login page when no session can be established.
      * @param {string} method - HTTP method (GET, POST, PUT, DELETE).
      * @param {string} path   - API path (e.g. '/account').
      * @param {Object} [body] - Request body (will be JSON-serialized).
      * @returns {Promise<Response>} The fetch Response object.
      */
     function request(method, path, body) {
-        var needsCsrf = method !== 'GET' && method !== 'HEAD';
-        var csrfHealed = false;
+        var authHealed = false;
 
-        function obtainCsrf() {
-            return needsCsrf ? getCsrf() : Promise.resolve(null);
-        }
-
-        return obtainCsrf().then(function (csrf) {
+        return getValidToken().then(function (token) {
             var attempt = 0;
 
-            function doFetch(currentCsrf) {
+            function doFetch(currentToken) {
                 var opts = {
                     method: method,
-                    credentials: 'same-origin',
-                    headers: buildHeaders(method, currentCsrf, generateNonce())
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': 'Bearer ' + currentToken,
+                        'X-Request-Nonce': generateNonce()
+                    }
                 };
                 if (body !== undefined) {
                     opts.body = JSON.stringify(body);
                 }
 
-                return fetch(BASE + path, opts).then(function (res) {
+                return fetch(base() + path, opts).then(function (res) {
                     if (res.status === 401) {
-                        clearSession();
+                        // Stale temporal token (revoked, or rotated by another
+                        // tab): refresh once and retry; a second 401 means the
+                        // session is over.
+                        if (!authHealed) {
+                            authHealed = true;
+                            return refreshTemporalToken().then(doFetch).catch(function () {
+                                clearTokens();
+                                window.location.href = 'index.html';
+                                return Promise.reject(new Error('Unauthorized'));
+                            });
+                        }
+                        clearTokens();
                         window.location.href = 'index.html';
                         return Promise.reject(new Error('Unauthorized'));
-                    }
-
-                    // Stale in-memory CSRF token (e.g. another tab re-logged
-                    // in): refetch it once and retry the request.
-                    if (res.status === 403 && needsCsrf && !csrfHealed) {
-                        csrfHealed = true;
-                        csrfToken = null;
-                        return getCsrf().then(doFetch);
                     }
 
                     if (attempt < MAX_RETRIES && shouldRetry(method, null, res)) {
                         attempt++;
                         var waitMs = RETRY_BASE_DELAY * Math.pow(2, attempt - 1);
                         return delay(waitMs).then(function () {
-                            return doFetch(currentCsrf);
+                            return doFetch(currentToken);
                         });
                     }
 
@@ -285,14 +392,20 @@ var API = (function () {
                         attempt++;
                         var waitMs = RETRY_BASE_DELAY * Math.pow(2, attempt - 1);
                         return delay(waitMs).then(function () {
-                            return doFetch(currentCsrf);
+                            return doFetch(currentToken);
                         });
                     }
                     throw err;
                 });
             }
 
-            return doFetch(csrf);
+            return doFetch(token);
+        }).catch(function (err) {
+            // No refresh token / refresh failed: bounce to login.
+            if (err && err.message === 'Session expired') {
+                window.location.href = 'index.html';
+            }
+            throw err;
         });
     }
 
@@ -307,7 +420,9 @@ var API = (function () {
         if (!res.ok) {
             var status = res.status;
             return res.text().then(function (t) {
-                throw new Error(sanitizeErrorMessage(status, t));
+                var err = new Error(extractErrorMessage(status, t));
+                err.status = status;
+                throw err;
             });
         }
         // A successful API call counts as session activity.
@@ -346,12 +461,17 @@ var API = (function () {
     }
 
     return {
-        BASE: BASE,
-        setSession: setSession,
-        clearSession: clearSession,
-        getCachedUser: getCachedUser,
-        buildHeaders: buildHeaders,
+        /** Active network's API base path (dynamic getter, e.g. '/api/testnet'). */
+        get BASE() { return base(); },
+        currentNetworkKey: currentNetworkKey,
+        getTemporalToken: getTemporalToken,
+        getRefreshToken: getRefreshToken,
+        setTokens: setTokens,
+        clearTokens: clearTokens,
+        parseJwt: parseJwt,
+        isTokenExpired: isTokenExpired,
         sanitizeErrorMessage: sanitizeErrorMessage,
+        extractErrorMessage: extractErrorMessage,
         setButtonLoading: setButtonLoading,
 
         /** Authenticated GET request. Returns parsed JSON or text. */
@@ -380,7 +500,7 @@ var API = (function () {
          * @returns {Promise<Response>} Raw fetch Response.
          */
         rawPost: function (path, body) {
-            return fetch(BASE + path, {
+            return fetch(base() + path, {
                 method: 'POST',
                 credentials: 'same-origin',
                 headers: {

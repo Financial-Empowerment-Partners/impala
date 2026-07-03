@@ -5,7 +5,14 @@ pub const MIN_PASSWORD_LENGTH: usize = 8;
 pub const MAX_NAME_LENGTH: usize = 64;
 
 /// Refresh token time-to-live: 14 days in seconds.
+///
+/// This value is the source of truth for the refresh-token lifetime. Any
+/// documentation (README, SECURITY.md, client SDK kdoc) that quotes a
+/// different duration is stale — update the docs, not this constant,
+/// unless you mean to change the actual TTL. The compile-time assert below
+/// prevents silent drift of the multiplier.
 pub const REFRESH_TOKEN_TTL_SECS: usize = 14 * 24 * 3600;
+const _: () = assert!(REFRESH_TOKEN_TTL_SECS == 1_209_600);
 
 /// Temporal token time-to-live: 1 hour in seconds.
 pub const TEMPORAL_TOKEN_TTL_SECS: usize = 3600;
@@ -23,10 +30,17 @@ pub const DB_IDLE_TIMEOUT_SECS: u64 = 600;
 pub const DB_MAX_LIFETIME_SECS: u64 = 1800;
 
 /// Default Redis connection pool size.
+#[allow(dead_code)] // documents the default; pool size is configured elsewhere
 pub const DEFAULT_REDIS_POOL_SIZE: usize = 16;
 
 /// Request timeout in seconds (applied globally via middleware).
 pub const REQUEST_TIMEOUT_SECS: u64 = 30;
+
+/// Maximum time (seconds) to wait for in-flight requests to drain after a
+/// SIGTERM / Ctrl-C. If exceeded the process force-exits so the container
+/// orchestrator doesn't have to SIGKILL us. Must fit inside the typical ECS
+/// / Kubernetes stop timeout (30s default), so keep this below 30.
+pub const SHUTDOWN_DRAIN_DEADLINE_SECS: u64 = 25;
 
 /// Rate limit: maximum requests per window.
 pub const RATE_LIMIT_MAX_REQUESTS: u64 = 10;
@@ -45,6 +59,14 @@ pub const CRON_SYNC_BATCH_LIMIT: i64 = 500;
 
 /// Cron sync: max concurrent in-flight callback deliveries.
 pub const CRON_SYNC_CONCURRENCY: usize = 10;
+
+/// Rate limit for the custodial sign+submit endpoint: max requests per window.
+/// Deliberately tighter than the default `RATE_LIMIT_MAX_REQUESTS` because each
+/// call decrypts a seed and moves real funds.
+pub const SIGN_RATE_LIMIT_MAX_REQUESTS: u64 = 5;
+
+/// Rate-limit window (seconds) for the custodial sign+submit endpoint.
+pub const SIGN_RATE_LIMIT_WINDOW_SECS: usize = 60;
 
 /// Account lockout: number of failed login attempts before lockout.
 pub const LOCKOUT_THRESHOLD: u64 = 5;
@@ -96,7 +118,12 @@ pub const TOKEN_TYPE_TEMPORAL: &str = "temporal";
 /// Default JWKS refresh interval in seconds (1 hour).
 pub const DEFAULT_JWKS_REFRESH_SECS: u64 = 3600;
 
+// Canonical OIDC provider identifiers. Provider names are config-driven
+// (`SSO_PROVIDERS`), so the SSO handler binds the configured name directly;
+// these constants document the well-known vocabulary and are referenced by the
+// Duo 2FA path and docs.
 /// Auth provider identifier for Okta users.
+#[allow(dead_code)]
 pub const AUTH_PROVIDER_OKTA: &str = "okta";
 
 /// Auth provider identifier for Google users.
@@ -104,6 +131,14 @@ pub const AUTH_PROVIDER_GOOGLE: &str = "google";
 
 /// Auth provider identifier for GitHub users.
 pub const AUTH_PROVIDER_GITHUB: &str = "github";
+
+/// Auth provider identifier for Auth0 users.
+#[allow(dead_code)]
+pub const AUTH_PROVIDER_AUTH0: &str = "auth0";
+
+/// Auth provider identifier for Duo (SSO) users.
+#[allow(dead_code)]
+pub const AUTH_PROVIDER_DUO: &str = "duo";
 
 /// Auth provider identifier for local (password-based) users.
 pub const AUTH_PROVIDER_LOCAL: &str = "local";
@@ -140,6 +175,55 @@ pub const CARD_CHALLENGE_TTL_SECS: usize = 60;
 
 /// Maximum DER-encoded ECDSA P-256 signature length in bytes (144 hex chars).
 pub const CARD_SIGNATURE_MAX_BYTES: usize = 72;
+
+/// Account role: read-only access. Default for any account without an explicit role.
+pub const ROLE_VIEW_ONLY: &str = "view-only";
+
+/// Account role: device — can create transactions and manage cards.
+pub const ROLE_DEVICE: &str = "device";
+
+/// Account role: token — can manage accounts and MFA.
+pub const ROLE_TOKEN: &str = "token";
+
+/// Account role: admin — full access including role management and the admin console.
+pub const ROLE_ADMIN: &str = "admin";
+
+/// All valid account roles. The hyphenated `view-only` mirrors the UI's role keys
+/// (`impala-ui/html/js/roles.js`) so the UI can read the role straight from the JWT.
+pub const ALL_ROLES: &[&str] = &[ROLE_VIEW_ONLY, ROLE_DEVICE, ROLE_TOKEN, ROLE_ADMIN];
+
+/// Valid transaction review statuses (mirrors the `chk_review_status` DB CHECK).
+pub const VALID_REVIEW_STATUSES: &[&str] = &["unreviewed", "cleared", "flagged", "escalated"];
+
+/// Payala sync mode: batches are aggregated into a single per-currency
+/// reserve-balance update.
+pub const SYNC_MODE_RESERVE: &str = "reserve";
+
+/// Payala sync mode: every batch item is mirrored 1:1 as a `transaction` row.
+pub const SYNC_MODE_MIRROR: &str = "mirror";
+
+/// Valid per-account Payala sync modes (mirrors the `chk_impala_account_sync_mode` DB CHECK).
+pub const VALID_SYNC_MODES: &[&str] = &[SYNC_MODE_RESERVE, SYNC_MODE_MIRROR];
+
+/// Max items per `POST /sync/payala` batch. The effective ceilings are the 30s
+/// request timeout and the 60s per-statement timeout, not the 1 MB body limit.
+pub const MAX_SYNC_BATCH_ITEMS: usize = 500;
+
+/// Max distinct currencies per `POST /sync/payala` batch (bounds junk reserve rows).
+pub const MAX_SYNC_BATCH_CURRENCIES: usize = 10;
+
+/// Max length for a Payala currency code (mirrors the VARCHAR(16) columns).
+pub const MAX_PAYALA_CURRENCY_LENGTH: usize = 16;
+
+/// `transaction.origin` for rows created via `POST /transaction`. Applied by
+/// the column's DB default rather than bound in an INSERT; documents the
+/// vocabulary alongside `TX_ORIGIN_PAYALA_SYNC`.
+#[allow(dead_code)]
+pub const TX_ORIGIN_MANUAL: &str = "manual";
+
+/// `transaction.origin` for rows created by mirror-mode Payala sync.
+/// Server-set only — never accepted from a request body.
+pub const TX_ORIGIN_PAYALA_SYNC: &str = "payala_sync";
 
 /// Minimum length for JWT_SECRET (256 bits).
 pub const JWT_SECRET_MIN_LENGTH: usize = 32;

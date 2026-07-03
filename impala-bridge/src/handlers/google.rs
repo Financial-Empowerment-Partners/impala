@@ -94,10 +94,10 @@ async fn google_token_exchange_inner(
     // Auto-provision using a database transaction
     provision_federated_account(&pool, &account_id, AUTH_PROVIDER_GOOGLE).await?;
 
-    // Issue local JWT tokens (admin derived from the allowlist at issuance)
-    let is_admin = admin_ids.contains(&account_id);
+    // Issue local JWT tokens (role derived from DB + allowlist at issuance)
+    let role = crate::auth::issuance_role(&pool, &admin_ids, &account_id).await;
     let (refresh_token, temporal_token) =
-        crate::jwt::encode_token_pair(&jwt_keys, &account_id, is_admin)?;
+        crate::jwt::encode_token_pair(&jwt_keys, &account_id, &role)?;
 
     info!("google: tokens issued for account_id={}", account_id);
 

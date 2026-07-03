@@ -6,7 +6,8 @@ use crate::validate::validate_callback_url;
 use crate::worker::{JobError, WorkerContext};
 
 #[derive(Deserialize)]
-struct NotificationPayload {
+#[cfg_attr(test, derive(Debug))]
+pub(crate) struct NotificationPayload {
     notify_id: Option<i32>,
     account_id: String,
     medium: String,
@@ -221,14 +222,21 @@ async fn send_email(
             EmailContent::builder()
                 .simple(
                     Message::builder()
-                        .subject(Content::builder().data(subject).build().unwrap())
+                        .subject(Content::builder().data(subject).build().map_err(|e| {
+                            JobError::Permanent(format!("Failed to build email subject: {}", e))
+                        })?)
                         .body(
                             Body::builder()
                                 .text(
                                     Content::builder()
                                         .data(&payload.message_body)
                                         .build()
-                                        .unwrap(),
+                                        .map_err(|e| {
+                                            JobError::Permanent(format!(
+                                                "Failed to build email body: {}",
+                                                e
+                                            ))
+                                        })?,
                                 )
                                 .build(),
                         )
@@ -347,5 +355,95 @@ async fn send_push(
         Err(JobError::Transient(
             "FCM push failed for all device tokens".to_string(),
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_notification_payload_deserialize_webhook() {
+        let json = serde_json::json!({
+            "account_id": "user1",
+            "medium": "webhook",
+            "message_body": "Test notification",
+            "webhook_url": "https://example.com/hook"
+        });
+        let parsed: NotificationPayload = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed.medium, "webhook");
+        assert_eq!(
+            parsed.webhook_url,
+            Some("https://example.com/hook".to_string())
+        );
+        assert!(parsed.destination.is_none());
+    }
+
+    #[test]
+    fn test_notification_payload_deserialize_sms() {
+        let json = serde_json::json!({
+            "account_id": "user1",
+            "medium": "sms",
+            "message_body": "Your code is 123456",
+            "destination": "+1234567890"
+        });
+        let parsed: NotificationPayload = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed.medium, "sms");
+        assert_eq!(parsed.destination, Some("+1234567890".to_string()));
+    }
+
+    #[test]
+    fn test_notification_payload_deserialize_email() {
+        let json = serde_json::json!({
+            "account_id": "user1",
+            "medium": "email",
+            "message_body": "You have a new transfer",
+            "message_title": "Transfer Alert",
+            "destination": "user@example.com"
+        });
+        let parsed: NotificationPayload = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed.medium, "email");
+        assert_eq!(parsed.message_title, Some("Transfer Alert".to_string()));
+    }
+
+    #[test]
+    fn test_notification_payload_deserialize_push() {
+        let json = serde_json::json!({
+            "account_id": "user1",
+            "medium": "mobile_push",
+            "message_body": "New login detected",
+            "device_tokens": ["token1", "token2"]
+        });
+        let parsed: NotificationPayload = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed.medium, "mobile_push");
+        assert_eq!(
+            parsed.device_tokens,
+            Some(vec!["token1".to_string(), "token2".to_string()])
+        );
+    }
+
+    #[test]
+    fn test_notification_payload_missing_required_field() {
+        let json = serde_json::json!({
+            "medium": "sms",
+            "message_body": "test"
+        });
+        let result: Result<NotificationPayload, _> = serde_json::from_value(json);
+        assert!(result.is_err()); // missing account_id
+    }
+
+    #[test]
+    fn test_notification_payload_defaults() {
+        let json = serde_json::json!({
+            "account_id": "user1",
+            "medium": "webhook",
+            "message_body": "test"
+        });
+        let parsed: NotificationPayload = serde_json::from_value(json).unwrap();
+        assert!(parsed.message_title.is_none());
+        assert!(parsed.destination.is_none());
+        assert!(parsed.webhook_url.is_none());
+        assert!(parsed.device_tokens.is_none());
+        assert!(parsed.notify_id.is_none());
     }
 }

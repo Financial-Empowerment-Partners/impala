@@ -62,7 +62,7 @@ resource "aws_ecs_task_definition" "server" {
           [
             { name = "RUN_MODE", value = "server" },
             { name = "SERVICE_ADDRESS", value = "0.0.0.0:8080" },
-            { name = "REDIS_URL", value = "redis://${aws_elasticache_replication_group.main.primary_endpoint_address}:6379" },
+            { name = "REDIS_URL", value = "rediss://${aws_elasticache_replication_group.main.primary_endpoint_address}:6379" },
             { name = "STELLAR_HORIZON_URL", value = var.stellar_horizon_url },
             { name = "STELLAR_RPC_URL", value = var.stellar_rpc_url },
             { name = "SNS_TOPIC_ARN", value = aws_sns_topic.jobs.arn },
@@ -71,6 +71,7 @@ resource "aws_ecs_task_definition" "server" {
             { name = "FCM_PROJECT_ID", value = var.fcm_project_id },
           ],
           local.otel_app_env,
+          local.seed_protection_env,
         )
 
         secrets = [
@@ -128,7 +129,7 @@ resource "aws_ecs_task_definition" "worker" {
           [
             { name = "RUN_MODE", value = "worker" },
             { name = "SQS_QUEUE_URL", value = aws_sqs_queue.worker.url },
-            { name = "REDIS_URL", value = "redis://${aws_elasticache_replication_group.main.primary_endpoint_address}:6379" },
+            { name = "REDIS_URL", value = "rediss://${aws_elasticache_replication_group.main.primary_endpoint_address}:6379" },
             { name = "STELLAR_HORIZON_URL", value = var.stellar_horizon_url },
             { name = "STELLAR_RPC_URL", value = var.stellar_rpc_url },
             { name = "AWS_REGION", value = var.aws_region },
@@ -136,6 +137,7 @@ resource "aws_ecs_task_definition" "worker" {
             { name = "FCM_PROJECT_ID", value = var.fcm_project_id },
           ],
           local.otel_app_env,
+          local.seed_protection_env,
         )
 
         secrets = [
@@ -219,4 +221,60 @@ resource "aws_ecs_service" "worker" {
   lifecycle {
     ignore_changes = [desired_count]
   }
+}
+
+# --- One-off DB migration task definition ---
+# No service: invoked manually via `aws ecs run-task` with RUN_MODE=migrate
+# (applies ./migrations then exits). See docs/runbooks/deploy.md and the
+# `migrate_task_definition` / `migrate_network_config` outputs.
+
+resource "aws_ecs_task_definition" "migrate" {
+  family                   = "${local.name_prefix}-migrate"
+  network_mode             = "awsvpc"
+  requires_compatibilities = ["FARGATE"]
+  cpu                      = var.server_cpu
+  memory                   = var.server_memory
+  execution_role_arn       = aws_iam_role.ecs_task_execution.arn
+  task_role_arn            = aws_iam_role.ecs_task.arn
+
+  runtime_platform {
+    operating_system_family = "LINUX"
+    cpu_architecture        = var.container_architecture
+  }
+
+  container_definitions = jsonencode([
+    {
+      name      = "impala-bridge-migrate"
+      image     = "${aws_ecr_repository.bridge.repository_url}:${var.container_image_tag}"
+      essential = true
+
+      readonlyRootFilesystem = true
+      user                   = "1000:1000"
+
+      environment = [
+        { name = "RUN_MODE", value = "migrate" },
+        { name = "AWS_REGION", value = var.aws_region },
+      ]
+
+      secrets = [
+        {
+          name      = "DATABASE_URL"
+          valueFrom = aws_secretsmanager_secret.database_url.arn
+        },
+        {
+          name      = "JWT_SECRET"
+          valueFrom = aws_secretsmanager_secret.jwt_secret.arn
+        },
+      ]
+
+      logConfiguration = {
+        logDriver = "awslogs"
+        options = {
+          "awslogs-group"         = aws_cloudwatch_log_group.server.name
+          "awslogs-region"        = var.aws_region
+          "awslogs-stream-prefix" = "migrate"
+        }
+      }
+    }
+  ])
 }

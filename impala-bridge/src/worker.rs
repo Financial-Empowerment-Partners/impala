@@ -321,3 +321,65 @@ async fn shutdown_signal() {
         ctrl_c.await.expect("Failed to listen for Ctrl+C");
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_job_message_deserialize() {
+        let json = r#"{
+            "job_type": "send_notification",
+            "payload": {"account_id": "user1", "medium": "sms"},
+            "job_id": "job-123"
+        }"#;
+        let msg: JobMessage = serde_json::from_str(json).unwrap();
+        assert_eq!(msg.job_type, "send_notification");
+        assert_eq!(msg.job_id, Some("job-123".to_string()));
+        assert!(msg.payload.is_object());
+    }
+
+    #[test]
+    fn test_job_message_deserialize_without_job_id() {
+        let json = r#"{
+            "job_type": "batch_sync",
+            "payload": {"account_ids": ["a", "b"]}
+        }"#;
+        let msg: JobMessage = serde_json::from_str(json).unwrap();
+        assert_eq!(msg.job_type, "batch_sync");
+        assert!(msg.job_id.is_none());
+    }
+
+    #[test]
+    fn test_sns_envelope_deserialize() {
+        let json = r#"{
+            "Message": "{\"job_type\":\"test\",\"payload\":{}}",
+            "Type": "Notification"
+        }"#;
+        let env: SnsEnvelope = serde_json::from_str(json).unwrap();
+        assert_eq!(env.notification_type, Some("Notification".to_string()));
+
+        // Verify inner message can be parsed
+        let inner: JobMessage = serde_json::from_str(&env.message).unwrap();
+        assert_eq!(inner.job_type, "test");
+    }
+
+    #[test]
+    fn test_sns_envelope_without_type() {
+        let json = r#"{"Message": "{}"}"#;
+        let env: SnsEnvelope = serde_json::from_str(json).unwrap();
+        assert!(env.notification_type.is_none());
+    }
+
+    #[test]
+    fn test_job_error_display_transient() {
+        let err = JobError::Transient("connection timeout".to_string());
+        assert_eq!(err.to_string(), "Transient error: connection timeout");
+    }
+
+    #[test]
+    fn test_job_error_display_permanent() {
+        let err = JobError::Permanent("invalid payload".to_string());
+        assert_eq!(err.to_string(), "Permanent error: invalid payload");
+    }
+}

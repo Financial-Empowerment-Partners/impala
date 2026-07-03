@@ -263,11 +263,11 @@ async fn card_token_exchange_inner(
         card_id, account_id
     );
 
-    // Issue local JWT tokens (admin derived from the allowlist at issuance).
+    // Issue local JWT tokens (role derived from DB + allowlist at issuance).
     // No auto-provisioning: the card FK guarantees the account exists.
-    let is_admin = admin_ids.contains(&account_id);
+    let role = crate::auth::issuance_role(&pool, &admin_ids, &account_id).await;
     let (refresh_token, temporal_token) =
-        crate::jwt::encode_token_pair(&jwt_keys, &account_id, is_admin)?;
+        crate::jwt::encode_token_pair(&jwt_keys, &account_id, &role)?;
 
     info!("card_auth: tokens issued for account_id={}", account_id);
 

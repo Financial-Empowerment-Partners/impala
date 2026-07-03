@@ -32,6 +32,45 @@ services:
       timeout: 3s
       retries: 5
 
+  # OpenBao (OSS, API-compatible HashiCorp Vault fork) in dev mode: auto-initialized
+  # and unsealed, in-memory storage, no TLS. LOCAL DEVELOPMENT ONLY — the root token
+  # is well-known and all data is ephemeral. Used here as the seed-protection
+  # (Transit) backend for impala-bridge so the custodial /managed-account/* endpoints
+  # work locally without AWS KMS.
+  openbao:
+    image: openbao/openbao:2.5.5
+    cap_add:
+      - IPC_LOCK
+    ports:
+      - "8200:8200"
+    environment:
+      BAO_DEV_ROOT_TOKEN_ID: ${BAO_DEV_ROOT_TOKEN_ID:-dev-root-token}
+      BAO_DEV_LISTEN_ADDRESS: 0.0.0.0:8200
+      # So the in-container `bao` CLI (healthcheck) can reach the dev server over HTTP.
+      BAO_ADDR: http://127.0.0.1:8200
+    healthcheck:
+      test: ["CMD", "bao", "status"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # One-shot: enable the Transit engine and create the seed key (idempotent).
+  openbao-init:
+    image: openbao/openbao:2.5.5
+    depends_on:
+      openbao:
+        condition: service_healthy
+    environment:
+      BAO_ADDR: http://openbao:8200
+      BAO_TOKEN: ${BAO_DEV_ROOT_TOKEN_ID:-dev-root-token}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        bao secrets enable transit 2>/dev/null || true
+        bao write -f transit/keys/impala-seeds
+    restart: "no"
+
   impala-bridge:
     build: .
     restart: unless-stopped
@@ -59,11 +98,19 @@ services:
       GITHUB_API_URL: ${GITHUB_API_URL:-}
       GITHUB_CLIENT_ID: ${GITHUB_CLIENT_ID:-}
       GITHUB_CLIENT_SECRET: ${GITHUB_CLIENT_SECRET:-}
+      # Custodial seed protection via the local OpenBao Transit engine.
+      # Override SEED_PROTECTION_BACKEND=none to run without a secrets backend.
+      SEED_PROTECTION_BACKEND: ${SEED_PROTECTION_BACKEND:-openbao}
+      BAO_ADDR: http://openbao:8200
+      BAO_TOKEN: ${BAO_DEV_ROOT_TOKEN_ID:-dev-root-token}
+      BAO_TRANSIT_KEY: impala-seeds
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
+      openbao-init:
+        condition: service_completed_successfully
 
 volumes:
   pgdata:

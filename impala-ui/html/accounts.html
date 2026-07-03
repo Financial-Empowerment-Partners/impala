@@ -14,94 +14,39 @@
     <div class="grid-container">
         <div class="page-header">
             <h3>Accounts</h3>
+            <div class="page-actions">
+                <button class="button" id="new-account-btn" data-permission="manage_accounts">New Account</button>
+            </div>
         </div>
 
-        <!-- Search -->
         <div class="card">
             <div class="card-section">
-                <h5>Search Account</h5>
                 <div class="grid-x grid-margin-x">
-                    <div class="cell medium-8">
-                        <input type="text" id="search-account-id" placeholder="Enter stellar_account_id" aria-label="Stellar account ID to search">
+                    <div class="cell medium-9">
+                        <input type="search" id="accounts-search" placeholder="Search by name, Payala ID, or Stellar ID" aria-label="Search accounts">
                     </div>
-                    <div class="cell medium-4">
-                        <button class="button expanded" id="search-btn">Search</button>
+                    <div class="cell medium-3">
+                        <button class="button expanded ghost" id="accounts-search-btn">Search</button>
                     </div>
                 </div>
-                <div id="search-result"></div>
-            </div>
-        </div>
-
-        <!-- Create Account -->
-        <div class="card" data-permission="manage_accounts">
-            <div class="card-section">
-                <h5>Create Account</h5>
-                <form id="create-form">
-                    <div class="grid-x grid-margin-x">
-                        <div class="cell medium-6">
-                            <label>Stellar Account ID
-                                <input type="text" id="create-stellar-id" required>
-                            </label>
-                        </div>
-                        <div class="cell medium-6">
-                            <label>Payala Account ID
-                                <input type="text" id="create-payala-id">
-                            </label>
-                        </div>
-                        <div class="cell medium-6">
-                            <label>Display Name
-                                <input type="text" id="create-display-name">
-                            </label>
-                        </div>
-                        <div class="cell medium-6">
-                            <label>Phone
-                                <input type="text" id="create-phone" placeholder="+1234567890">
-                            </label>
-                        </div>
-                    </div>
-                    <button type="submit" class="button">Create Account</button>
-                </form>
-            </div>
-        </div>
-
-        <!-- Update Account -->
-        <div class="card hidden" id="update-card" data-permission="manage_accounts">
-            <div class="card-section">
-                <h5>Update Account</h5>
-                <form id="update-form">
-                    <div class="grid-x grid-margin-x">
-                        <div class="cell medium-6">
-                            <label>Stellar Account ID
-                                <input type="text" id="update-stellar-id" readonly>
-                            </label>
-                        </div>
-                        <div class="cell medium-6">
-                            <label>Payala Account ID
-                                <input type="text" id="update-payala-id">
-                            </label>
-                        </div>
-                        <div class="cell medium-6">
-                            <label>Display Name
-                                <input type="text" id="update-display-name">
-                            </label>
-                        </div>
-                        <div class="cell medium-6">
-                            <label>Phone
-                                <input type="text" id="update-phone" placeholder="+1234567890">
-                            </label>
-                        </div>
-                    </div>
-                    <button type="submit" class="button">Update Account</button>
-                </form>
+                <div id="accounts-list"></div>
+                <div id="accounts-pagination"></div>
             </div>
         </div>
     </div>
 
+    <script src="config.js"></script>
     <script src="js/escape-html.js"></script>
     <script src="js/api.js"></script>
+    <script src="js/theme.js"></script>
     <script src="js/roles.js"></script>
     <script src="js/auth.js"></script>
     <script src="js/validate.js"></script>
+    <script src="js/paginate.js"></script>
+    <script src="js/net-config.js"></script>
+    <script src="js/net.js"></script>
+    <script src="js/modal.js"></script>
+    <script src="js/drawer.js"></script>
     <script src="js/session-timer.js"></script>
     <script src="js/router.js"></script>
     <script src="js/accounts.js"></script>

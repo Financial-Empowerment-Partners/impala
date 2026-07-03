@@ -1,5 +1,6 @@
 use crate::constants::{
-    API_RATE_LIMIT_MAX_REQUESTS, API_RATE_LIMIT_WINDOW_SECS, TOKEN_TYPE_TEMPORAL,
+    API_RATE_LIMIT_MAX_REQUESTS, API_RATE_LIMIT_WINDOW_SECS, ROLE_ADMIN, ROLE_VIEW_ONLY,
+    TOKEN_TYPE_TEMPORAL,
 };
 use crate::error::AppError;
 use crate::jwt::JwtKeys;
@@ -29,21 +30,38 @@ pub enum AuthSource {
 #[derive(Debug, Clone)]
 pub struct AuthContext {
     pub account_id: String,
-    pub is_admin: bool,
+    /// Server-side role. Bearer path: the JWT `role` claim (stamped at
+    /// issuance). Session path: admin when the account is on the live
+    /// ADMIN_ACCOUNT_IDS allowlist, otherwise least privilege.
+    pub role: String,
     pub source: AuthSource,
+}
+
+impl AuthContext {
+    fn is_admin(&self) -> bool {
+        self.role == ROLE_ADMIN
+    }
 }
 
 /// Represents an authenticated user (bearer JWT or cookie session).
 #[derive(Debug, Clone)]
 pub struct AuthenticatedUser {
     pub account_id: String,
+    pub role: String,
+}
+
+impl AuthenticatedUser {
+    /// True if the user holds the server-side admin role.
+    pub fn is_admin(&self) -> bool {
+        self.role == ROLE_ADMIN
+    }
 }
 
 /// Represents an authenticated **admin** user. Extraction additionally
-/// requires admin privilege — `is_admin` claim on the bearer path (stamped at
-/// issuance from the ADMIN_ACCOUNT_IDS allowlist), live allowlist membership
-/// on the session path — so admin-only routes that take this extractor are
-/// gated at the type level.
+/// requires admin privilege — the `role` claim on the bearer path (stamped at
+/// issuance from the DB role and the ADMIN_ACCOUNT_IDS allowlist), live
+/// allowlist membership on the session path — so admin-only routes that take
+/// this extractor are gated at the type level.
 #[derive(Debug, Clone)]
 pub struct AdminUser {
     pub account_id: String,
@@ -66,6 +84,37 @@ pub fn require_owner(user: &AuthenticatedUser, account_id: &str) -> Result<(), A
         return Err(AppError::Forbidden);
     }
     Ok(())
+}
+
+/// Verify that the authenticated user holds the admin role.
+/// Returns `Err(AppError::Forbidden)` otherwise. Tokens minted before role
+/// support lack the claim and default to `view-only`, so they fail closed here.
+pub fn require_admin(user: &AuthenticatedUser) -> Result<(), AppError> {
+    if user.role != ROLE_ADMIN {
+        return Err(AppError::Forbidden);
+    }
+    Ok(())
+}
+
+/// Resolve the role to stamp into freshly-minted tokens: the account's DB
+/// role (defaulting to least privilege when the row or column read fails),
+/// with the ADMIN_ACCOUNT_IDS allowlist overriding to admin. Shared by every
+/// token-issuance path so the role semantics cannot diverge.
+pub async fn issuance_role(
+    pool: &sqlx::PgPool,
+    admin_ids: &std::collections::HashSet<String>,
+    account_id: &str,
+) -> String {
+    if admin_ids.contains(account_id) {
+        return ROLE_ADMIN.to_string();
+    }
+    sqlx::query_scalar::<_, String>("SELECT role FROM impala_account WHERE payala_account_id = $1")
+        .bind(account_id)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_else(crate::models::default_role)
 }
 
 /// Validate a request's authentication and return its [`AuthContext`].
@@ -120,7 +169,7 @@ where
 
         AuthContext {
             account_id: claims.sub,
-            is_admin: claims.is_admin,
+            role: claims.role,
             source: AuthSource::Bearer {
                 jti: claims.jti,
                 fid: claims.fid,
@@ -180,11 +229,18 @@ where
 
         // Admin is re-derived from the live allowlist on every session
         // request: removal takes effect immediately (vs ≤1h on the JWT path).
-        let is_admin = admin_ids.contains(&record.account_id);
+        // Cookie sessions don't carry a JWT role claim, so non-allowlisted
+        // session users act at least privilege; granular DB roles ride the
+        // bearer path.
+        let role = if admin_ids.contains(&record.account_id) {
+            ROLE_ADMIN.to_string()
+        } else {
+            ROLE_VIEW_ONLY.to_string()
+        };
 
         AuthContext {
             account_id: record.account_id,
-            is_admin,
+            role,
             source: AuthSource::Session { sid_hash },
         }
     };
@@ -225,6 +281,7 @@ where
         let context = validate_request_auth(parts, state).await?;
         Ok(AuthenticatedUser {
             account_id: context.account_id,
+            role: context.role,
         })
     }
 }
@@ -237,7 +294,7 @@ where
 
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
         let context = validate_request_auth(parts, state).await?;
-        if !context.is_admin {
+        if !context.is_admin() {
             return Err(AppError::Forbidden);
         }
         Ok(AdminUser {
@@ -254,6 +311,7 @@ where
 
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
         let context = validate_request_auth(parts, state).await?;
+        let is_admin = context.is_admin();
         match context.source {
             AuthSource::Session { sid_hash } => {
                 // The CSRF token is needed by /session/me; re-read is avoided
@@ -268,7 +326,7 @@ where
                     .ok_or(AppError::Unauthorized)?;
                 Ok(SessionUser {
                     account_id: context.account_id,
-                    is_admin: context.is_admin,
+                    is_admin,
                     sid_hash,
                     csrf: record.csrf,
                 })
@@ -281,7 +339,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::constants::JWT_ISSUER;
     use crate::jwt::{encode_token_pair, JwtKeys};
+    use crate::models::Claims;
     use axum::http::Request;
 
     const TEST_SECRET: &str = "test-secret-key-for-unit-tests-32ch";
@@ -332,7 +392,7 @@ mod tests {
         // The JWT itself is valid, but the revocation check cannot run — the
         // request must be rejected, never silently allowed.
         let keys = JwtKeys::new(TEST_SECRET.to_string(), None).unwrap();
-        let (_refresh, temporal) = encode_token_pair(&keys, "alice", false).unwrap();
+        let (_refresh, temporal) = encode_token_pair(&keys, "alice", ROLE_VIEW_ONLY).unwrap();
         let mut parts = parts_with_extensions(
             Request::builder()
                 .uri("/account")
@@ -345,7 +405,7 @@ mod tests {
     #[tokio::test]
     async fn refresh_token_rejected_on_protected_route() {
         let keys = JwtKeys::new(TEST_SECRET.to_string(), None).unwrap();
-        let (refresh, _temporal) = encode_token_pair(&keys, "alice", false).unwrap();
+        let (refresh, _temporal) = encode_token_pair(&keys, "alice", ROLE_VIEW_ONLY).unwrap();
         let mut parts = parts_with_extensions(
             Request::builder()
                 .uri("/account")
@@ -364,5 +424,50 @@ mod tests {
         );
         let result = AuthenticatedUser::from_request_parts(&mut parts, &()).await;
         assert!(matches!(result, Err(AppError::Unauthorized)));
+    }
+
+    #[test]
+    fn test_require_admin_allows_admin() {
+        let user = super::AuthenticatedUser {
+            account_id: "alice".to_string(),
+            role: crate::constants::ROLE_ADMIN.to_string(),
+        };
+        assert!(super::require_admin(&user).is_ok());
+        assert!(user.is_admin());
+    }
+
+    #[test]
+    fn test_require_admin_denies_non_admin() {
+        for role in [
+            crate::constants::ROLE_VIEW_ONLY,
+            crate::constants::ROLE_DEVICE,
+            crate::constants::ROLE_TOKEN,
+        ] {
+            let user = super::AuthenticatedUser {
+                account_id: "bob".to_string(),
+                role: role.to_string(),
+            };
+            assert!(super::require_admin(&user).is_err());
+            assert!(!user.is_admin());
+        }
+    }
+
+    #[test]
+    fn test_old_token_without_role_defaults_view_only() {
+        // A token JSON minted before role support (but after the aud/fid
+        // rollout — anything older fails decoding outright) omits `role`;
+        // serde default must yield least privilege.
+        let json = serde_json::json!({
+            "sub": "legacy",
+            "token_type": "temporal",
+            "iat": 1000usize,
+            "exp": 9999999999usize,
+            "jti": "abc",
+            "iss": JWT_ISSUER,
+            "aud": crate::constants::JWT_AUDIENCE,
+            "fid": "legacy-fid"
+        });
+        let claims: Claims = serde_json::from_value(json).expect("should deserialize");
+        assert_eq!(claims.role, crate::constants::ROLE_VIEW_ONLY);
     }
 }

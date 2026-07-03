@@ -32,12 +32,25 @@ android {
     }
 
     testOptions {
+        // IsoDepBibo logs via android.util.Log on the exception paths the
+        // unit tests exercise; return 0 instead of throwing "not mocked".
         unitTests.isReturnDefaultValues = true
         unitTests.isIncludeAndroidResources = true
+    }
+
+    lint {
+        // Integration artifact, not a Play submission; report lint findings
+        // without failing `build`.
+        abortOnError = false
     }
 }
 
 kotlin {
+    // Java 21 toolchain: Robolectric's SDK-36 sandbox requires >= 21, and its
+    // ASM cannot read newer (e.g. JDK 26) class files — so pin rather than
+    // inherit the launcher JDK. Bytecode still targets 17 (below).
+    jvmToolchain(21)
+
     compilerOptions {
         jvmTarget.set(JvmTarget.JVM_17)
     }

@@ -1,208 +1,71 @@
-# =============================================================================
-# Impala monorepo — .gitignore
-#
-# Covers:
-#   - OS artefacts (macOS, Windows, Linux)
-#   - IDE / editor configs (JetBrains, VS Code, Vim, Emacs, Fleet, Zed, …)
-#   - Rust build output (impala-bridge, impala-soroban)
-#   - Gradle / Android (impala-card, impala-lib, impala-android-demo)
-#   - JavaCard build artefacts (CAP / EXP / JCA)
-#   - Python (caprunner)
-#   - Terraform
-#   - Docker
-#   - Secrets / per-developer config
-#   - Logs, coverage, profiling, ad-hoc backups
-#
-# Intentionally NOT ignored (kept under VCS):
-#   - Cargo.lock                     (binary crates: impala-bridge, soroban)
-#   - .sqlx/                         (offline sqlx query metadata)
-#   - gradle-wrapper.jar             (required for `./gradlew`)
-#   - terraform.tfvars.example       (template — see *.tfvars.example exception)
-#   - impala-card/applet/libs/sdks/  (vendored JC SDK kits: .exp inputs, sample
-#                                     keystores, javadoc jquery dist/ bundles —
-#                                     see the negative patterns below)
-# =============================================================================
-
-
-# ── Operating system ─────────────────────────────────────────────────────────
-# macOS
+# ── OS ────────────────────────────────────────────────────────
 .DS_Store
-.AppleDouble
-.LSOverride
-# The macOS icon file is literally "Icon\r" — a bare "Icon" pattern matches
-# neither it nor anything else useful, so use the single-char wildcard.
-Icon?
-__MACOSX/
-._*
-.DocumentRevisions-V100
-.fseventsd
-.Spotlight-V100
-.TemporaryItems
-.Trashes
-.VolumeIcon.icns
-.com.apple.timemachine.donotpresent
-.AppleDB
-.AppleDesktop
-Network Trash Folder
-Temporary Items
-.apdisk
-
-# Windows
 Thumbs.db
-Thumbs.db:encryptable
-ehthumbs.db
-ehthumbs_vista.db
-*.stackdump
-[Dd]esktop.ini
-$RECYCLE.BIN/
-*.cab
-*.msi
-*.msix
-*.msm
-*.msp
-*.lnk
-
-# Linux
+Desktop.ini
 *~
-.fuse_hidden*
-.directory
-.Trash-*
-.nfs*
+*.swp
+*.swo
 
-
-# ── IDEs / editors ───────────────────────────────────────────────────────────
-# JetBrains (IntelliJ / Android Studio / Fleet)
+# ── IDE / Editors ─────────────────────────────────────────────
 .idea/
-*.iml
-*.iws
-*.ipr
-.fleet/
-
-# VS Code / Cursor / Zed / similar
 .vscode/
-*.code-workspace
-.history/
-.cursor/
-.zed/
-
-# Sublime
+*.iml
+*.ipr
+*.iws
 *.sublime-project
 *.sublime-workspace
-
-# Eclipse / NetBeans
 .project
 .classpath
 .settings/
-.metadata/
-.factorypath
-.springBeans
-.recommenders/
-nbproject/
+out/
+nbproject/private/
 
-# Xcode (KMP iOS targets of impala-card/sdk)
-xcuserdata/
-DerivedData/
-*.xcuserstate
+# ── Merge / Patch artifacts ───────────────────────────────────
+*.orig
+*.rej
 
-# Vim
-*.swp
-*.swo
-*.swn
-Session.vim
-.netrwhist
+# ── Temp / Backup ─────────────────────────────────────────────
+tmp/
+temp/
+*.bak
+*.tmp
 
-# Emacs
-\#*\#
-.\#*
-.emacs.desktop
-.emacs.desktop.lock
-auto-save-list/
-tramp
-.dir-locals.el
+# ── Claude Code / local tool settings ────────────────────────
+.claude/settings.local.json
 
-# nano
-*.save
-
-# Tag DBs
-tags
-TAGS
-cscope.*
-
-
-# ── Rust (impala-bridge, impala-soroban) ─────────────────────────────────────
+# ── Rust (impala-bridge, impala-soroban) ──────────────────────
 target/
-**/*.rs.bk
-
-# Soroban: stellar-cli writes identity/alias config into the working
-# directory (testnet-tests). NOTE: test_snapshots/ is deliberately NOT
-# ignored — the repo tracks the SDK's per-test ledger snapshots so behaviour
-# changes show up in diffs.
-.stellar/
-.soroban/
-
-# Coverage / profiling
+*.rs.bk
 *.profraw
-*.profdata
-flamegraph.svg
 perf.data
 perf.data.old
-tarpaulin-report.html
-cobertura.xml
+flamegraph.svg
 
-
-# ── Gradle / Android (impala-card, impala-lib, impala-android-demo) ──────────
+# ── Gradle / Android (impala-card, impala-lib, impala-android-demo)
 .gradle/
-.kotlin/
 build/
 local.properties
 captures/
 .externalNativeBuild/
 .cxx/
 release/
-
-# Build outputs
 *.apk
 *.aab
-*.aar
 *.ap_
 *.dex
 *.hprof
-*.class
-
-# JVM crash dumps (the .log variants are also caught by *.log below)
-hs_err_pid*
-replay_pid*
-
-# Per-user signing config / keystores — NEVER COMMIT
-# Vendored test keystores under the JavaCard SDK samples are exempt below.
-*.jks
 *.keystore
+*.jks
 *.p12
-*.pfx
-keystore.properties
-signing.properties
-key.properties
-!impala-card/applet/libs/sdks/**/*.keystore
 
-# Firebase / Google services per-developer config
-**/app/google-services.json
-**/google-services-info.plist
+# ── JavaCard ──────────────────────────────────────────────────
+# Vendor SDK JARs live in impala-card/applet/libs/sdks/ and are committed.
+*.cap
+*.exp
+*.jca
 
-
-# ── JavaCard ─────────────────────────────────────────────────────────────────
-# Build artefacts. The `build/` rule above already covers the applet output
-# directory; these patterns are extra-explicit so stray copies are caught.
-# Vendored SDK kits under impala-card/applet/libs/sdks/ ship .exp inputs that
-# MUST stay tracked — see the negative pattern.
-impala-card/applet/build/*.cap
-impala-card/applet/build/*.exp
-impala-card/applet/build/*.jca
-!impala-card/applet/libs/sdks/**/*.exp
-
-
-# ── Terraform ────────────────────────────────────────────────────────────────
+# ── Terraform ─────────────────────────────────────────────────
 .terraform/
-.terraform.lock.hcl.bak
 *.tfstate
 *.tfstate.*
 *.tfplan
@@ -212,91 +75,42 @@ override.tf
 override.tf.json
 *_override.tf
 *_override.tf.json
-*.tfvars
-*.tfvars.json
-!*.tfvars.example
-!*.tfvars.json.example
-.terraform.tfstate.lock.info
-.terraformrc
-terraform.rc
 
-
-# ── Docker ───────────────────────────────────────────────────────────────────
-docker-compose.override.yml
-docker-compose.override.yaml
-.docker/
-
-# Redis snapshot from ad-hoc local `redis-server` runs (compose uses named
-# volumes, so this only appears outside Docker)
-dump.rdb
-
-
-# ── Python (caprunner) ───────────────────────────────────────────────────────
-__pycache__/
-*.py[cod]
-*$py.class
-.venv/
-venv/
-env/
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-.tox/
-.coverage
-.coverage.*
-htmlcov/
-.python-version
-
-
-# ── Web / JS ─────────────────────────────────────────────────────────────────
+# ── Node / JS (impala-ui) ─────────────────────────────────────
 node_modules/
-dist/
-# The vendored JavaCard SDK javadocs ship jquery/jszip bundles in dirs named
-# dist/ that are tracked — un-ignore them (negation must follow `dist/`).
-!impala-card/applet/libs/sdks/**/dist/
-.parcel-cache/
-.next/
-.nuxt/
-.eslintcache
+coverage/
+.nyc_output/
 *.tsbuildinfo
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+pnpm-debug.log*
 .pnpm-store/
-.yarn/cache
-.yarn/unplugged
 
+# ── Python (caprunner) ────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
 
-# ── Secrets / environment (NEVER COMMIT) ─────────────────────────────────────
+# ── Caprunner generated artifacts ─────────────────────────────
+impala-card/caprunner/vendor/
+impala-card/caprunner/*.json
+
+# ── Environment / Secrets ─────────────────────────────────────
 .env
-.env.*
-!.env.example
-!.env.*.example
-.envrc
+.env.local
+.env.*.local
 *.pem
 *.key
-*.p8
-*.secret
-secrets.tfvars
-**/credentials.json
-**/serviceAccount*.json
-**/firebase-adminsdk-*.json
+secrets/
 
-# Per-developer agent/tool config
-**/.claude/settings.local.json
-
-
-# ── Logs / temp / backup files ───────────────────────────────────────────────
+# ── Logs ──────────────────────────────────────────────────────
 *.log
-*.log.*
-*.orig
-*.bak
-*.rej
-*.tmp
-.cache/
 
-
-# ── Coverage / test output ───────────────────────────────────────────────────
-coverage/
-*.lcov
-.nyc_output/
+# ── Firebase (impala-android-demo) ────────────────────────────
+impala-android-demo/app/google-services.json

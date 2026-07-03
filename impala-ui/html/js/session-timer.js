@@ -88,18 +88,18 @@ var SessionTimer = (function () {
         modalElement = null;
     }
 
-    /** Destroy the server-side session and redirect to the login page. */
+    /** End the session (revoking server-side) and redirect to the login page. */
     function doLogout() {
         stop();
         if (typeof Auth !== 'undefined' && Auth.logout) {
             Auth.logout();
-        } else {
-            // Fallback: drop local state and bounce to login.
-            if (typeof API !== 'undefined' && API.clearSession) {
-                API.clearSession();
-            }
-            window.location.href = 'index.html';
+            return;
         }
+        // Fallback: drop the active network's tokens and bounce to login.
+        if (typeof API !== 'undefined' && typeof API.clearTokens === 'function') {
+            API.clearTokens();
+        }
+        window.location.href = 'index.html';
     }
 
     /**

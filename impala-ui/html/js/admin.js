@@ -1,145 +1,69 @@
 /**
- * Admin page module — manage role assignments (admin-only).
+ * Admin page — read-only Roles & Permissions reference (admin-only).
  *
- * Displays role definitions with their permission sets, lists all current
- * role assignments with pagination, and allows assigning/removing roles.
- * The current user cannot modify their own role (self-demotion prevention).
- * Role changes and removals require confirmation.
+ * Authorization is server-driven now; role grants happen in the Accounts drawer
+ * (PUT /admin/accounts/:id/role). This page just documents the role → permission
+ * matrix from Roles.DEFINITIONS so operators can see what each role can do.
  */
 (function () {
     Router.init();
     if (!Router.requireAdmin()) return;
 
-    var PAGE_SIZE = 10;
-    var currentPage = 1;
-
     renderRoleDefinitions();
-    renderAssignments();
-
-    var assignForm = document.getElementById('assign-form');
-
-    assignForm.addEventListener('submit', function (e) {
-        e.preventDefault();
-
-        var accountId = document.getElementById('assign-account-id').value.trim();
-        var role = document.getElementById('assign-role').value;
-
-        var error = Validate.firstError([
-            Validate.required(accountId)
-        ]);
-        if (error) {
-            Router.showToast('Please enter an account ID', 'warning');
-            return;
-        }
-
-        if (!confirm('Are you sure you want to assign role "' + role + '" to ' + accountId + '?')) {
-            return;
-        }
-
-        Roles.setRole(accountId, role);
-        Router.showToast('Role assigned: ' + accountId + ' \u2192 ' + role, 'success');
-        assignForm.reset();
-        renderAssignments();
-    });
+    renderPermissionMatrix();
 
     function renderRoleDefinitions() {
         var defs = Roles.DEFINITIONS;
-        var html = '<table><thead><tr><th>Role</th><th>Permissions</th></tr></thead><tbody>';
-
+        var html = '<div class="table-wrap"><table><thead><tr><th>Role</th><th>Permissions</th></tr></thead><tbody>';
         Object.keys(defs).forEach(function (key) {
             var def = defs[key];
             html += '<tr>' +
-                '<td><span class="role-badge ' + key + '">' + escapeHtml(def.label) + '</span></td>' +
-                '<td>' + def.permissions.join(', ') + '</td>' +
+                '<td><span class="role-badge ' + escapeHtml(key) + '">' + escapeHtml(def.label) + '</span></td>' +
+                '<td>' + def.permissions.map(function (p) { return '<span class="badge neutral">' + escapeHtml(p) + '</span>'; }).join(' ') + '</td>' +
                 '</tr>';
         });
-
-        html += '</tbody></table>';
+        html += '</tbody></table></div>';
         document.getElementById('role-definitions').innerHTML = html;
     }
 
-    function renderAssignments() {
-        var assignments = Roles.getAllAssignments();
-        var keys = Object.keys(assignments);
+    function renderPermissionMatrix() {
+        var el = document.getElementById('permission-matrix');
+        if (!el) return;
 
-        if (keys.length === 0) {
-            document.getElementById('role-assignments').innerHTML =
-                '<div class="callout primary">No role assignments yet.</div>';
-            return;
-        }
+        var defs = Roles.DEFINITIONS;
+        var roleKeys = Object.keys(defs);
 
-        var info = Paginate.paginate(keys, currentPage, PAGE_SIZE);
-
-        var html = '<table><thead><tr><th>Account ID</th><th>Role</th><th>Actions</th></tr></thead><tbody>';
-
-        info.items.forEach(function (accountId) {
-            var role = assignments[accountId];
-            var currentUser = Auth.getUsername();
-            var isSelf = accountId === currentUser;
-
-            html += '<tr>' +
-                '<td>' + escapeHtml(accountId) + (isSelf ? ' <em>(you)</em>' : '') + '</td>' +
-                '<td>' +
-                '<select class="role-select" data-account="' + escapeHtml(accountId) + '"' +
-                (isSelf ? ' disabled title="Cannot change your own role"' : '') + '>';
-
-            Object.keys(Roles.DEFINITIONS).forEach(function (r) {
-                html += '<option value="' + r + '"' + (r === role ? ' selected' : '') + '>' +
-                    Roles.DEFINITIONS[r].label + '</option>';
+        // Collect the union of all permissions, preserving first-seen order.
+        var perms = [];
+        roleKeys.forEach(function (rk) {
+            defs[rk].permissions.forEach(function (p) {
+                if (perms.indexOf(p) === -1) perms.push(p);
             });
+        });
+        perms.sort();
 
-            html += '</select></td>' +
-                '<td>';
-            if (!isSelf) {
-                html += '<button class="button small alert remove-role-btn" data-account="' +
-                    escapeHtml(accountId) + '">Remove</button>';
-            }
-            html += '</td></tr>';
+        var html = '<div class="table-wrap"><table><thead><tr><th>Permission</th>';
+        roleKeys.forEach(function (rk) {
+            html += '<th>' + escapeHtml(defs[rk].label) + '</th>';
+        });
+        html += '</tr></thead><tbody>';
+
+        perms.forEach(function (perm) {
+            html += '<tr><td class="mono">' + escapeHtml(perm) + '</td>';
+            roleKeys.forEach(function (rk) {
+                var has = Roles.roleHasPermission(rk, perm);
+                html += '<td>' + (has ? '<span class="badge ok">✓</span>' : '<span class="text-muted">—</span>') + '</td>';
+            });
+            html += '</tr>';
         });
 
-        html += '</tbody></table>';
-        html += '<div id="admin-pagination"></div>';
-        document.getElementById('role-assignments').innerHTML = html;
-
-        Paginate.renderControls(info, 'admin-pagination', function (newPage) {
-            currentPage = newPage;
-            renderAssignments();
-        });
-
-        // Bind change handlers with confirmation
-        var selects = document.querySelectorAll('.role-select');
-        for (var i = 0; i < selects.length; i++) {
-            selects[i].addEventListener('change', function () {
-                var acct = this.getAttribute('data-account');
-                var newRole = this.value;
-                if (!confirm('Are you sure you want to change this user\'s role?')) {
-                    // Revert to previous value
-                    this.value = Roles.getRole(acct);
-                    return;
-                }
-                Roles.setRole(acct, newRole);
-                Router.showToast('Role updated: ' + acct + ' \u2192 ' + newRole, 'success');
-            });
-        }
-
-        // Bind remove handlers with confirmation
-        var removeBtns = document.querySelectorAll('.remove-role-btn');
-        for (var j = 0; j < removeBtns.length; j++) {
-            removeBtns[j].addEventListener('click', function () {
-                var acct = this.getAttribute('data-account');
-                if (!confirm('Are you sure you want to remove the role for ' + acct + '?')) {
-                    return;
-                }
-                Roles.removeRole(acct);
-                Router.showToast('Role removed: ' + acct, 'info');
-                renderAssignments();
-            });
-        }
+        html += '</tbody></table></div>';
+        el.innerHTML = html;
     }
 
     function escapeHtml(str) {
         var div = document.createElement('div');
-        div.appendChild(document.createTextNode(str));
+        div.appendChild(document.createTextNode(str == null ? '' : str));
         return div.innerHTML;
     }
 })();

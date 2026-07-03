@@ -12,11 +12,14 @@ mod ldap;
 mod middleware;
 mod models;
 mod notifications;
+mod oidc;
 mod okta;
 mod password;
 mod redis_helpers;
+mod seed_protect;
 mod session;
 mod sns;
+mod stellar;
 mod streams;
 mod telemetry;
 mod validate;
@@ -25,7 +28,7 @@ mod worker;
 
 use axum::extract::Extension;
 use axum::http::{header, HeaderName, HeaderValue, Method};
-use axum::routing::{get, post, put};
+use axum::routing::{delete, get, post, put};
 use axum::Router;
 use log::{debug, error, info, warn};
 use sqlx::postgres::PgPoolOptions;
@@ -43,9 +46,10 @@ use tower_http::trace::TraceLayer;
 
 use config::load_config;
 use handlers::{
-    account, admin_webhook, authenticate, card, card_auth, device_token, github as github_handler,
-    google as google_handler, health, logout, mfa, network, notification_subscription, notify,
-    okta as okta_handler, session as session_handler, subscribe, sync, token, transaction,
+    account, admin, admin_webhook, authenticate, card, card_auth, device_token,
+    github as github_handler, google as google_handler, health, logout, managed_seed, mfa, network,
+    notification_subscription, notify, okta as okta_handler, session as session_handler,
+    sso as sso_handler, subscribe, sync, token, transaction,
 };
 
 #[tokio::main]
@@ -96,19 +100,19 @@ async fn main() {
     info!("impala-bridge starting up (mode={})", run_mode);
     debug!("Config: {:?}", config);
 
-    // Resolve database URL (Vault unwrap or direct env var)
+    // Resolve database URL (Vault/OpenBao unwrap or direct env var)
     let database_url = if let Ok(wrapped_token) = env::var("DATABASE_URL_WRAPPED") {
-        info!("Unwrapping DATABASE_URL from Vault");
+        info!("Unwrapping DATABASE_URL from Vault/OpenBao");
         match vault::box_unwrap(&wrapped_token).await {
             Ok(secret_data) => {
-                info!("Vault secret unwrapped successfully");
+                info!("Secret unwrapped successfully");
                 secret_data["database_url"]
                     .as_str()
                     .expect("database_url field not found in unwrapped secret")
                     .to_string()
             }
             Err(e) => {
-                error!("Failed to unwrap DATABASE_URL from Vault: {}", e);
+                error!("Failed to unwrap DATABASE_URL from Vault/OpenBao: {}", e);
                 std::process::exit(1);
             }
         }
@@ -116,12 +120,26 @@ async fn main() {
         env::var("DATABASE_URL").expect("Either DATABASE_URL or DATABASE_URL_WRAPPED must be set")
     };
 
-    // Create database connection pool with timeouts
+    // Create database connection pool with timeouts.
+    //
+    // `after_connect` sets a per-session `statement_timeout` so no single
+    // query can wedge a connection indefinitely. The value is deliberately
+    // larger than the global HTTP request timeout so fast endpoints time out
+    // at the HTTP layer first; the DB limit is the last-resort catch.
     let pool = PgPoolOptions::new()
         .max_connections(config.db_max_connections)
         .acquire_timeout(Duration::from_secs(config.db_acquire_timeout_secs))
         .idle_timeout(Duration::from_secs(constants::DB_IDLE_TIMEOUT_SECS))
         .max_lifetime(Duration::from_secs(constants::DB_MAX_LIFETIME_SECS))
+        .after_connect(|conn, _meta| {
+            Box::pin(async move {
+                // 60_000 ms = 60s. Must exceed REQUEST_TIMEOUT_SECS.
+                sqlx::query("SET statement_timeout = 60000")
+                    .execute(conn)
+                    .await?;
+                Ok(())
+            })
+        })
         .connect(&database_url)
         .await
         .expect("Failed to connect to database");
@@ -198,7 +216,8 @@ async fn run_server(
         );
     }
 
-    // Admin allowlist: source of the `is_admin` JWT claim, stamped at issuance.
+    // Admin allowlist: overrides the DB role to `admin` in the JWT `role`
+    // claim, stamped at issuance.
     let admin_ids: Arc<std::collections::HashSet<String>> =
         Arc::new(config.admin_account_ids.clone());
     info!("Admin allowlist: {} account(s) configured", admin_ids.len());
@@ -215,7 +234,11 @@ async fn run_server(
         info!("Soroban contract ID: {}", cid);
     }
 
-    // Initialize Okta provider (if configured)
+    // Initialize the OIDC SSO provider registry (Okta / Auth0 / Duo / …)
+    let sso_registry = Arc::new(oidc::init_registry(&config).await);
+
+    // Initialize the legacy single-provider Okta flow (cookie-capable
+    // /auth/okta used by the web UI; bearer SSO rides the registry above).
     let okta_provider = okta::init_okta_provider(&config).await;
 
     // Initialize Google provider (if configured)
@@ -252,6 +275,35 @@ async fn run_server(
         error!("{}", msg);
         std::process::exit(1);
     }
+
+    // Custodial Stellar seed protector + signer. Built once and injected like
+    // other shared state. Fail closed at boot if the backend is misconfigured.
+    let seed_protector = seed_protect::build_protector(&config)
+        .await
+        .unwrap_or_else(|e| {
+            error!("Failed to initialize seed protector: {}", e);
+            std::process::exit(1);
+        });
+    info!(
+        "Custodial seed protection backend: {}",
+        config.seed_protection_backend
+    );
+    let stellar_signer = stellar::build_signer(&stellar_config);
+
+    // Shared HTTP client for read-only on-chain Horizon lookups
+    // (`GET /account/onchain`).
+    let http_client = Arc::new(
+        reqwest::Client::builder()
+            .timeout(Duration::from_secs(config.http_client_timeout_secs))
+            .build()
+            .expect("failed to build shared HTTP client"),
+    );
+
+    // Narrow LDAP config carried as shared state for the per-account force-sync
+    // endpoint (keeps `ldap_bind_password` out of a broadly-shared `Config`).
+    let ldap_config = Arc::new(ldap::LdapConfig::from_config(&config));
+
+    // CORS layer — restrict to configured origins when not wildcard
     if config.cors_allowed_origins == "*" {
         info!("CORS_ALLOWED_ORIGINS is set to wildcard '*' (testnet mode)");
     }
@@ -298,11 +350,46 @@ async fn run_server(
                 .get(account::get_account)
                 .put(account::update_account),
         )
+        .route("/account/onchain", get(account::get_account_onchain))
+        .route("/accounts", get(admin::list_accounts))
+        .route(
+            "/admin/accounts/{account_id}",
+            delete(admin::delete_account),
+        )
+        .route(
+            "/admin/accounts/{account_id}/role",
+            put(admin::set_account_role),
+        )
+        .route(
+            "/admin/accounts/{account_id}/sync-profile",
+            post(admin::sync_profile),
+        )
+        .route(
+            "/admin/accounts/{account_id}/sync-mode",
+            put(admin::set_sync_mode),
+        )
         .route("/authenticate", post(authenticate::authenticate))
         .route("/sync", post(sync::sync_account))
+        .route("/sync/payala", post(sync::sync_payala))
+        .route("/reserves/{account_id}", get(sync::get_reserves))
         .route("/token", post(token::token))
         .route("/subscribe", post(subscribe::subscribe))
+        .route("/transactions", get(transaction::list_transactions))
         .route("/transaction", post(transaction::create_transaction))
+        .route("/transaction/{btxid}", get(transaction::get_transaction))
+        .route(
+            "/transaction/{btxid}/review",
+            put(transaction::review_transaction),
+        )
+        .route(
+            "/managed-account/generate",
+            post(managed_seed::generate_managed_account),
+        )
+        .route(
+            "/managed-account/import",
+            post(managed_seed::import_managed_account),
+        )
+        .route("/managed-account/sign", post(managed_seed::sign_and_submit))
         .route("/card", post(card::create_card).delete(card::delete_card))
         .route("/mfa", post(mfa::enroll_mfa).get(mfa::get_mfa))
         .route("/mfa/verify", post(mfa::verify_mfa))
@@ -338,6 +425,12 @@ async fn run_server(
         .route("/auth/github", post(github_handler::github_token_exchange))
         .route("/auth/card/challenge", post(card_auth::card_challenge))
         .route("/auth/card", post(card_auth::card_token_exchange))
+        .route(
+            "/auth/sso/{provider}",
+            post(sso_handler::sso_token_exchange),
+        )
+        .route("/auth/sso/{provider}/config", get(sso_handler::sso_config))
+        .route("/auth/providers", get(sso_handler::sso_providers))
         .route("/healthz", get(health::liveness))
         .route("/readyz", get(health::readiness))
         .route("/network", get(network::network_info))
@@ -399,6 +492,10 @@ async fn run_server(
         .layer(Extension(session_config))
         .layer(Extension(stellar_config.clone()))
         .layer(Extension(admin_ids.clone()))
+        .layer(Extension(seed_protector))
+        .layer(Extension(stellar_signer))
+        .layer(Extension(http_client))
+        .layer(Extension(ldap_config))
         .layer(Extension(metrics))
         .layer(Extension(cancel.clone()));
 
@@ -409,7 +506,8 @@ async fn run_server(
         app
     };
 
-    // Add Okta provider extension and spawn JWKS refresh task (if configured)
+    // Add the legacy Okta provider extension and spawn its JWKS refresh task
+    // (if configured).
     let app = if let Some(ref provider) = okta_provider {
         let refresh_provider = provider.clone();
         let refresh_secs = config.okta_jwks_refresh_secs;
@@ -421,6 +519,18 @@ async fn run_server(
     } else {
         app
     };
+
+    // Register the SSO provider registry and spawn one JWKS refresh task per
+    // configured provider. The registry is always present (possibly empty).
+    for provider in sso_registry.iter() {
+        let refresh_provider = provider.clone();
+        let refresh_secs = provider.jwks_refresh_secs;
+        let jwks_cancel = cancel.clone();
+        tokio::spawn(async move {
+            oidc::jwks_refresh_task(refresh_provider, refresh_secs, jwks_cancel).await;
+        });
+    }
+    let app = app.layer(Extension(sso_registry.clone()));
 
     // Add Google provider extension and spawn JWKS refresh task (if configured)
     let app = if let Some(ref provider) = google_provider {
@@ -501,4 +611,18 @@ async fn shutdown_signal(cancel: CancellationToken) {
 
     // Signal background tasks to stop
     cancel.cancel();
+
+    // Graceful-shutdown drain deadline. Axum waits for in-flight requests
+    // to complete after shutdown_signal() returns; if that stalls (e.g. a
+    // downstream hang), this watchdog bounds the wait so the orchestrator
+    // doesn't have to SIGKILL us. The deadline is tuned to fit inside
+    // typical ECS/Kubernetes stop timeouts (30s default).
+    tokio::spawn(async {
+        tokio::time::sleep(Duration::from_secs(constants::SHUTDOWN_DRAIN_DEADLINE_SECS)).await;
+        warn!(
+            "Graceful shutdown exceeded {}s drain deadline — forcing exit",
+            constants::SHUTDOWN_DRAIN_DEADLINE_SECS
+        );
+        std::process::exit(0);
+    });
 }

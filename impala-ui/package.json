@@ -2,12 +2,17 @@
   "name": "impala-ui",
   "version": "0.0.1",
   "private": true,
-  "description": "Impala admin dashboard — static files served by Nginx (no build step). Vitest covers the pure JS modules.",
+  "description": "Static admin dashboard for impala-bridge. Served by Nginx in production (no build step); this package.json exists only for lint and test tooling.",
+  "type": "module",
   "scripts": {
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "eslint html/js"
   },
-  "//": "vitest pinned: ^4 requires Node >=20 (rolldown uses util.styleText); dev environment runs Node 18 (2026-06-09)",
+  "//": "vitest pinned: ^4 requires Node >=20 (rolldown uses util.styleText); pin revisit noted 2026-06-09",
   "devDependencies": {
+    "@eslint/js": "^9.13.0",
+    "eslint": "^9.13.0",
     "vitest": "^3"
   }
 }

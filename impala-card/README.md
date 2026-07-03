@@ -140,7 +140,7 @@ This command is used to sign an authentication challenge proving the identity of
 | Account UUID | 16 | +0 |
 | DateTime Millis | 8 | +16 |
 
- **Output:** 
+ **Output:**
 
 | **Field Name** | **Byte Length** | **CDATA Offset** |
 | --- | --- | --- |
@@ -155,7 +155,7 @@ This command returns the EC public key stored on the card.
 
 **Input:** *[ NO Input CDATA Payload ]*
 
-**Output:** 
+**Output:**
 
 | **Field Name** | **Byte Length** | **CDATA Offset** |
 | --- | --- | --- |
@@ -169,7 +169,7 @@ This command returns the RSA public key used for encryption via card.
 
 **Input:** *[ NO Input CDATA Payload ]*
 
-**Output:** 
+**Output:**
 
 | **Field Name** | **Byte Length** | **CDATA Offset** |
 | --- | --- | --- |
@@ -183,7 +183,7 @@ This command returns the name associated with a card.
 
 **Input:** *[ NO Input CDATA Payload ]*
 
-**Output:** 
+**Output:**
 
 | **Field Name** | **Byte Length** | **CDATA Offset** |
 | --- | --- | --- |
@@ -195,7 +195,7 @@ This command returns the name associated with a card.
 
 This command sets the name associated with a card.
 
-**Input:** 
+**Input:**
 
 | **Field Name** | **Byte Length** | **CDATA Offset** |
 | --- | --- | --- |
@@ -211,7 +211,7 @@ This is an aggregate command to obtain the card ID, account ID, and name.
 
 **Input:** *[ NO Input CDATA Payload ]*
 
-**Output:** 
+**Output:**
 
 | **Field Name** | **Byte Length** | **CDATA Offset** |
 | --- | --- | --- |
@@ -225,7 +225,7 @@ This is an aggregate command to obtain the card ID, account ID, and name.
 
 This is a convenience method for setting the account ID, card ID, and balance associated with a cardholder.
 
-**Input:** 
+**Input:**
 
 | **Field Name** | **Byte Length** | **CDATA Offset** |
 | --- | --- | --- |
@@ -251,7 +251,7 @@ This command checks if the card is able to process commands.
 
 Set the public key for an external account on the Stellar network. (ed25519)
 
-**Input:** 
+**Input:**
 
 | **Field Name** | **Byte Length** | **CDATA Offset** |
 | --- | --- | --- |
@@ -267,7 +267,7 @@ Retrieve the public key for an external account on the Stellar network for this 
 
 **Input:** *[ NO Input CDATA Payload ]*
 
-**Output:** 
+**Output:**
 
 | **Field Name** | **Byte Length** | **CDATA Offset** |
 | --- | --- | --- |

@@ -4,17 +4,75 @@
 aws_region  = "us-east-1"
 environment = "staging"
 
+# JWT signing secret for the primary impala-bridge (REQUIRED; >= 32 chars or
+# the bridge refuses to start)
+jwt_secret = "CHANGE_ME_to_a_long_random_string_of_32+_chars"
+
 # Container image tag pushed by CI
 # container_image_tag    = "latest"
 # container_architecture = "ARM64"   # ARM64 (Graviton, default) or X86_64
+
+# Primary stack sizing (defaults shown)
+# vpc_cidr             = "10.0.0.0/16"
+# az_count             = 2
+# server_desired_count = 2
+# worker_desired_count = 2
+# server_cpu           = 512
+# server_memory        = 1024
+# worker_cpu           = 512
+# worker_memory        = 1024
+# rds_instance_class        = "db.t3.small"
+# rds_allocated_storage     = 20
+# rds_backup_retention_days = 7
+# redis_node_type           = "cache.t3.micro"
+# certificate_arn           = ""   # ACM cert ARN enables the HTTPS listener
+
+# Auto scaling (primary cluster)
+# server_min_count = 2
+# server_max_count = 10
+# worker_min_count = 2
+# worker_max_count = 10
+# autoscaling_cpu_threshold        = 85
+# autoscaling_memory_threshold     = 90
+# autoscaling_latency_threshold_ms = 250
+# autoscaling_scale_out_cooldown   = 60
+# autoscaling_scale_in_cooldown    = 300
+
+# Monitoring / telemetry
+# alert_email         = "ops@example.com"
+# signoz_endpoint     = "ingest.us.signoz.cloud:443"
+# signoz_access_token = ""
 
 # Notifications (optional, shared by both stacks)
 # ses_from_address = "noreply@example.com"
 # fcm_project_id   = "my-firebase-project"
 
-# ECR cross-region replication (image-only DR)
-# dr_enabled = true
-# dr_region  = "us-west-2"
+# Stellar endpoints (primary bridge)
+# stellar_horizon_url = "https://horizon-testnet.stellar.org"
+# stellar_rpc_url     = "https://soroban-testnet.stellar.org"
+
+# Disaster Recovery (cross-region ECR replication + standby cluster)
+# dr_enabled              = true
+# dr_region               = "us-west-2"
+# dr_vpc_cidr             = "10.1.0.0/16"
+# dr_server_desired_count = 1
+# dr_worker_desired_count = 1
+
+# Route 53 failover DNS (requires dr_enabled = true)
+# domain_name     = "example.com"        # Creates api.example.com failover record
+# route53_zone_id = "Z1234567890"
+
+# Custodial Stellar seed protection (impala-bridge holds + signs with seeds)
+# seed_protection_backend = "kms"   # none (default) | kms | vault | openbao
+#   kms backend: a dedicated CMK is created automatically (or set kms_seed_key to
+#   reuse an external key). When dr_enabled, the CMK is multi-Region.
+# kms_seed_key = ""                  # optional: external CMK ARN to reuse
+#   vault/openbao backend: point at an external Vault or OpenBao Transit key (the
+#   two are API-compatible; Terraform does not provision the server). Auth secrets
+#   (VAULT_TOKEN/BAO_TOKEN or VAULT_ROLE_ID/VAULT_SECRET_ID) are supplied to the
+#   container out-of-band. vault_addr/vault_transit_key apply to both.
+# vault_addr        = "https://vault.internal:8200"   # or your OpenBao address
+# vault_transit_key = "impala-seeds"
 
 # =============================================================================
 # Testnet stack (Stellar testnet)
@@ -40,3 +98,10 @@ environment = "staging"
 # live_redis_node_type      = "cache.t3.small"
 # live_certificate_arn      = "arn:aws:acm:us-east-1:123456789:certificate/abc-123"
 # live_vpc_cidr             = "10.3.0.0/16"
+
+# =============================================================================
+# Impala cluster (impala-api / impala-admin)
+# =============================================================================
+# impala_enabled         = true
+# impala_vpc_cidr        = "10.4.0.0/16"
+# impala_certificate_arn = "arn:aws:acm:us-east-1:123456789:certificate/def-456"

@@ -36,4 +36,3 @@ fun ByteArray.toUuid(): Uuid {
     val leastSigBits = byteBuffer.readLong()
     return Uuid(mostSigBits, leastSigBits)
 }
-

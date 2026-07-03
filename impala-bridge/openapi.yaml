@@ -1,0 +1,1447 @@
+openapi: 3.1.0
+info:
+  title: impala-bridge
+  version: "0.0.0"
+  summary: REST bridge between offline Payala payments and the Stellar network.
+  description: |
+    impala-bridge issues JWTs, persists dual-chain transactions, dispatches
+    notifications via SMS/email/push/webhook, and streams events from Stellar
+    Horizon and Payala.
+
+    Authentication uses a two-token strategy:
+
+    - **Refresh token** (14-day TTL) — obtained via username+password from `POST /token`.
+      Used only to mint temporal tokens, never for API access.
+    - **Temporal token** (1-hour TTL) — obtained from a refresh token via `POST /token`.
+      Sent as `Authorization: Bearer <token>` on every authenticated request.
+
+    All mutating endpoints enforce account ownership via `require_owner`. A
+    `POST /logout` revokes the current token (the JTI is added to a Redis
+    blacklist until it would have expired naturally).
+
+    Rate limits apply to `/authenticate`, `/token`, `/mfa/verify`, `/transaction`,
+    and `/card`: 10 requests per 60-second window, keyed by account id (and
+    MFA type where applicable). Exceeding the limit returns HTTP 429 with a
+    `Retry-After` header.
+
+    Global request timeout is 30 s (HTTP 408 on exceed). Postgres has a
+    per-connection `statement_timeout` of 60 s.
+  contact:
+    name: impala-bridge maintainers
+  license:
+    name: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0
+
+servers:
+  - url: http://localhost:8080
+    description: Local development (`docker compose up` inside `impala-bridge/`).
+  - url: https://{host}
+    description: Production / staging behind ALB.
+    variables:
+      host:
+        default: bridge.example.com
+
+tags:
+  - name: health
+    description: Liveness, readiness, build and Stellar-network info.
+  - name: auth
+    description: Registration, credential verification, token issue/revoke, Okta.
+  - name: account
+    description: Account CRUD.
+  - name: admin
+    description: Admin-only cross-account management (list/delete/role/profile-sync).
+  - name: mfa
+    description: TOTP and SMS enrollment + verification.
+  - name: card
+    description: Hardware smartcard registration.
+  - name: transaction
+    description: Dual-chain (Stellar + Payala) transaction records.
+  - name: subscription
+    description: Notification subscriptions and stream subscribe triggers.
+  - name: notify
+    description: Notification destinations (phone, email, webhook).
+  - name: device
+    description: FCM device-token registration for mobile push.
+
+security:
+  - bearerAuth: []
+
+paths:
+  /:
+    get:
+      tags: [health]
+      summary: Root greeting.
+      security: []
+      responses:
+        '200':
+          description: Static greeting.
+          content:
+            text/plain:
+              schema: { type: string }
+
+  /health:
+    get:
+      tags: [health]
+      summary: Detailed health (DB + Redis + network).
+      security: []
+      responses:
+        '200':
+          description: Health snapshot.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HealthResponse' }
+
+  /healthz:
+    get:
+      tags: [health]
+      summary: Liveness probe.
+      security: []
+      responses:
+        '200': { description: Process alive. }
+
+  /readyz:
+    get:
+      tags: [health]
+      summary: Readiness probe. 200 if DB and Redis are reachable, else 503.
+      security: []
+      responses:
+        '200': { description: Ready to accept traffic. }
+        '503': { description: A dependency is unhealthy. }
+
+  /version:
+    get:
+      tags: [health]
+      summary: Build and schema version info.
+      security: []
+      responses:
+        '200':
+          description: Build info.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/VersionResponse' }
+
+  /network:
+    get:
+      tags: [health]
+      summary: Stellar network configuration the bridge is wired to.
+      security: []
+      responses:
+        '200':
+          description: Stellar network info.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/NetworkInfoResponse' }
+
+  /authenticate:
+    post:
+      tags: [auth]
+      summary: Register or verify a user with username+password.
+      description: |
+        If no credentials exist for the account, registers the user with the
+        supplied password (Argon2 hashed). If credentials exist, verifies the
+        password. Returns a generic "Invalid credentials" for both missing
+        accounts and wrong passwords (account-enumeration defense). Rate
+        limited; lockout after 5 failed attempts.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AuthenticateRequest' }
+      responses:
+        '200':
+          description: Authentication outcome (success may be false with 200).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthenticateResponse' }
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /token:
+    post:
+      tags: [auth]
+      summary: Mint or refresh JWTs.
+      description: |
+        Two flows. If `refresh_token` is supplied, returns a new refresh +
+        temporal pair and revokes the presented refresh token. Otherwise the
+        request must include `username`+`password` and returns only a refresh
+        token.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TokenRequest' }
+      responses:
+        '200':
+          description: Token pair (or single refresh token for password flow).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TokenResponse' }
+        '401':
+          description: Invalid or revoked refresh token.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /logout:
+    post:
+      tags: [auth]
+      summary: Revoke the current temporal or refresh token.
+      responses:
+        '200': { description: Token revoked. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /auth/sso/{provider}:
+    post:
+      tags: [auth]
+      summary: Exchange a validated OIDC token for bridge tokens.
+      description: >
+        Exchange a token from the named SSO provider (okta | auth0 | duo | …) for
+        the bridge's refresh + temporal JWT pair. Auto-provisions the account on
+        first login. Send `token` (the OIDC access token; `okta_token` is accepted
+        as a legacy alias) for access-token providers, or `id_token` for providers
+        configured with token_kind=id (e.g. Duo SSO).
+      security: []
+      parameters:
+        - name: provider
+          in: path
+          required: true
+          schema: { type: string }
+          description: Provider name (okta | auth0 | duo).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                token: { type: string, description: 'OIDC access token (legacy alias: okta_token).' }
+                id_token: { type: string, description: 'OIDC id token (token_kind=id providers, e.g. Duo SSO).' }
+      responses:
+        '200':
+          description: Bridge refresh + temporal tokens.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TokenResponse' }
+        '400': { description: Provider not configured, or no token supplied. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /auth/sso/{provider}/config:
+    get:
+      tags: [auth]
+      summary: Return client-side OIDC configuration for a provider.
+      security: []
+      parameters:
+        - name: provider
+          in: path
+          required: true
+          schema: { type: string }
+          description: Provider name (okta | auth0 | duo).
+      responses:
+        '200':
+          description: >
+            OIDC config for the UI — { enabled, provider, issuer, client_id,
+            audience, authorization_endpoint, token_endpoint, scopes }. Returns
+            { enabled: false } when the provider is not configured.
+
+  /auth/providers:
+    get:
+      tags: [auth]
+      summary: List the names of all configured SSO providers.
+      security: []
+      responses:
+        '200':
+          description: JSON array of configured provider names.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { type: string }
+
+  /account:
+    post:
+      tags: [account]
+      summary: Create an account.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateAccountRequest' }
+      responses:
+        '200':
+          description: Account created.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CreateAccountResponse' }
+    get:
+      tags: [account]
+      summary: Get account details (owner-scoped; admins may read any account).
+      parameters:
+        - in: query
+          name: stellar_account_id
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Account details.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GetAccountResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    put:
+      tags: [account]
+      summary: Update the authenticated user's account.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateAccountRequest' }
+      responses:
+        '200':
+          description: Account updated.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UpdateAccountResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /account/onchain:
+    get:
+      tags: [account]
+      summary: Live on-chain account details from this bridge's network (owner or admin).
+      parameters:
+        - in: query
+          name: stellar_account_id
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: On-chain account state (exists=false when unfunded).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OnchainAccount' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /accounts:
+    get:
+      tags: [admin]
+      summary: List all accounts (admin only).
+      parameters:
+        - in: query
+          name: page
+          schema: { type: integer, default: 1 }
+        - in: query
+          name: per_page
+          schema: { type: integer, default: 20 }
+        - in: query
+          name: search
+          schema: { type: string }
+      responses:
+        '200':
+          description: Paginated account list.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PaginatedAccountList' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /admin/accounts/{account_id}:
+    delete:
+      tags: [admin]
+      summary: Delete an account (admin only). Blocks self/last-admin delete.
+      parameters:
+        - in: path
+          name: account_id
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Account deleted.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DeleteAccountResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /admin/accounts/{account_id}/role:
+    put:
+      tags: [admin]
+      summary: Set an account's role (admin only). Blocks last-admin demotion.
+      parameters:
+        - in: path
+          name: account_id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SetRoleRequest' }
+      responses:
+        '200':
+          description: Role updated.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SetRoleResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /admin/accounts/{account_id}/sync-profile:
+    post:
+      tags: [admin]
+      summary: Force a directory re-pull for the account's profile source (admin only).
+      description: |
+        For `ldap`-sourced accounts, re-pulls name/affiliation from the directory
+        and writes them back. `okta` and `local` sources return 400 (no live
+        server-side re-pull is available).
+      parameters:
+        - in: path
+          name: account_id
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Profile synced.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SyncProfileResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /admin/accounts/{account_id}/sync-mode:
+    put:
+      tags: [admin]
+      summary: Set an account's Payala sync mode (admin only).
+      description: |
+        Flips are forward-only: existing reserve balances and mirrored rows are
+        untouched, and only future batches follow the new mode. Leaving
+        `reserve` while a nonzero reserve balance remains returns 409 unless
+        `force: true` is passed.
+      parameters:
+        - in: path
+          name: account_id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SetSyncModeRequest' }
+      responses:
+        '200':
+          description: Sync mode updated.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SetSyncModeResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /sync:
+    post:
+      tags: [account]
+      summary: Record a sync timestamp and reconcile against Soroban RPC.
+      description: |
+        Writes a per-account sync timestamp to Redis, then fetches
+        `getTransactions` from the configured Soroban RPC and checks the
+        returned ids against the local `transaction` table (read-only
+        reconciliation). `account_id` is a Stellar G-address.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SyncRequest' }
+      responses:
+        '200':
+          description: Sync timestamp recorded.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SyncResponse' }
+
+  /sync/payala:
+    post:
+      tags: [account]
+      summary: Ingest a batch of offline Payala transactions (reserve/mirror sync).
+      description: |
+        Owner-only (`account_id` is the caller's Payala account id — the JWT
+        `sub`, not a Stellar address). The batch is applied atomically in one
+        database transaction and is idempotent per
+        `(account_id, payala_tx_id)`: replayed ids are reported as
+        `duplicates` and an all-duplicate replay is a success with
+        `applied = 0`. A replayed id whose stored amount/currency differ from
+        this submission is additionally counted in `conflicting`.
+
+        Application depends on the account's `sync_mode`:
+        - `reserve`: the fresh items' per-currency net deltas are added to the
+          account's reserve balances — one balance update per batch. The
+          response echoes the current balances for the batch's currencies.
+        - `mirror`: each fresh item is inserted 1:1 into the transaction table
+          (`origin: payala_sync`), visible via `GET /transactions`.
+
+        Amounts are signed integers in minor units (sign = direction) and are
+        unverified client assertions; nothing is submitted on-chain. Rate
+        limited per account (10 req / 60 s); max 500 items and 10 distinct
+        currencies per batch.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PayalaSyncRequest' }
+      responses:
+        '200':
+          description: Batch applied (or fully deduplicated).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PayalaSyncResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /reserves/{account_id}:
+    get:
+      tags: [account]
+      summary: Read an account's Payala reserve balances (owner or admin).
+      description: |
+        Returns the per-currency reserve balances accumulated by reserve-mode
+        sync, plus the account's current `sync_mode`. Balances persist (and
+        stay readable) after an account is switched to mirror mode. An account
+        that has never synced in reserve mode returns an empty list.
+      parameters:
+        - in: path
+          name: account_id
+          required: true
+          schema: { type: string }
+          description: Payala account id.
+      responses:
+        '200':
+          description: Reserve balances.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ReserveBalancesResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /subscribe:
+    post:
+      tags: [subscription]
+      summary: Subscribe to Stellar Horizon or Payala TCP event streams.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SubscribeRequest' }
+      responses:
+        '200':
+          description: Stream subscription started (fire-and-forget).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SubscribeResponse' }
+
+  /transactions:
+    get:
+      tags: [transaction]
+      summary: List transactions with review state (admin=all, owner=own).
+      parameters:
+        - in: query
+          name: page
+          schema: { type: integer, default: 1 }
+        - in: query
+          name: per_page
+          schema: { type: integer, default: 20 }
+        - in: query
+          name: status
+          schema: { type: string, enum: [unreviewed, cleared, flagged, escalated] }
+        - in: query
+          name: flagged
+          schema: { type: boolean }
+        - in: query
+          name: source_account
+          schema: { type: string }
+        - in: query
+          name: from
+          schema: { type: string, format: date-time }
+        - in: query
+          name: to
+          schema: { type: string, format: date-time }
+        - in: query
+          name: q
+          schema: { type: string }
+      responses:
+        '200':
+          description: Paginated transaction list.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PaginatedTransactionList' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /transaction:
+    post:
+      tags: [transaction]
+      summary: Record a dual-chain transaction.
+      description: |
+        At least one of `stellar_tx_id` or `payala_tx_id` must be supplied.
+        A non-admin caller may only supply a `source_account` they own.
+        Rate limited per account (10 req / 60 s).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateTransactionRequest' }
+      responses:
+        '200':
+          description: Transaction recorded.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CreateTransactionResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /transaction/{btxid}:
+    get:
+      tags: [transaction]
+      summary: Get a single transaction with review state (admin or owner).
+      parameters:
+        - in: path
+          name: btxid
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Transaction detail.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TransactionDetail' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /transaction/{btxid}/review:
+    put:
+      tags: [transaction]
+      summary: Set a transaction's flag/status/note (admin only; PUT replaces review state).
+      parameters:
+        - in: path
+          name: btxid
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ReviewTransactionRequest' }
+      responses:
+        '200':
+          description: Review updated.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ReviewTransactionResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /card:
+    post:
+      tags: [card]
+      summary: Register a hardware smartcard.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateCardRequest' }
+      responses:
+        '200':
+          description: Card registered.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CardResponse' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+    delete:
+      tags: [card]
+      summary: Soft-delete a card.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/DeleteCardRequest' }
+      responses:
+        '200':
+          description: Card deleted or already gone.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CardResponse' }
+
+  /mfa:
+    post:
+      tags: [mfa]
+      summary: Enroll a new MFA method (TOTP or SMS).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/EnrollMfaRequest' }
+      responses:
+        '200':
+          description: Enrollment result (TOTP returns provisioning_uri).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MfaResponse' }
+    get:
+      tags: [mfa]
+      summary: List MFA enrollments for an account.
+      parameters:
+        - in: query
+          name: account_id
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Enrollment list.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/MfaEnrollment' }
+
+  /mfa/verify:
+    post:
+      tags: [mfa]
+      summary: Verify an MFA code (TOTP or SMS).
+      description: Constant-time comparison, lockout after 5 failures, rate limited.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/VerifyMfaRequest' }
+      responses:
+        '200':
+          description: Verification result.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MfaResponse' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /notify:
+    get:
+      tags: [notify]
+      summary: List notification destinations.
+      responses:
+        '200':
+          description: List of destinations.
+    post:
+      tags: [notify]
+      summary: Create a notification destination.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateNotifyRequest' }
+      responses:
+        '200':
+          description: Destination created.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/NotifyResponse' }
+    put:
+      tags: [notify]
+      summary: Update a notification destination.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateNotifyRequest' }
+      responses:
+        '200':
+          description: Destination updated.
+
+  /notification/subscriptions:
+    get:
+      tags: [subscription]
+      summary: List the authenticated user's event subscriptions.
+      parameters:
+        - in: query
+          name: page
+          schema: { type: integer, minimum: 1 }
+        - in: query
+          name: per_page
+          schema: { type: integer, minimum: 1, maximum: 100 }
+      responses:
+        '200':
+          description: Paginated subscriptions.
+    post:
+      tags: [subscription]
+      summary: Create a new subscription.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateSubscriptionRequest' }
+      responses:
+        '200':
+          description: Subscription created.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SubscriptionResponse' }
+
+  /notification/subscriptions/{id}:
+    put:
+      tags: [subscription]
+      summary: Update a subscription.
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateSubscriptionRequest' }
+      responses:
+        '200': { description: Subscription updated. }
+    delete:
+      tags: [subscription]
+      summary: Delete a subscription.
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200': { description: Subscription deleted. }
+
+  /device-token:
+    post:
+      tags: [device]
+      summary: Register a Firebase Cloud Messaging device token.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RegisterDeviceTokenRequest' }
+      responses:
+        '200':
+          description: Device registered.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DeviceTokenResponse' }
+    delete:
+      tags: [device]
+      summary: Remove a device token.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/DeleteDeviceTokenRequest' }
+      responses:
+        '200': { description: Device removed. }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        Temporal token (1-hour TTL). Obtain via `POST /token` with a valid
+        refresh token. Send as `Authorization: Bearer <token>`.
+
+  responses:
+    Unauthorized:
+      description: Missing, invalid, expired, or revoked token.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    Forbidden:
+      description: Token is valid but the resource belongs to another account.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    InternalError:
+      description: Unexpected server error.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    RateLimited:
+      description: Too many requests.
+      headers:
+        Retry-After:
+          schema: { type: integer }
+          description: Seconds to wait before retrying.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    BadRequest:
+      description: Invalid request.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    NotFound:
+      description: Resource not found.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    Conflict:
+      description: Request conflicts with the current state (e.g. last admin).
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  schemas:
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code: { type: string, example: "unauthorized" }
+            message: { type: string }
+          required: [code, message]
+      required: [error]
+
+    AuthenticateRequest:
+      type: object
+      properties:
+        account_id: { type: string }
+        password: { type: string, minLength: 8 }
+      required: [account_id, password]
+
+    AuthenticateResponse:
+      type: object
+      properties:
+        success: { type: boolean }
+        message: { type: string }
+        action:
+          type: string
+          enum: ["", registered, authenticated]
+
+    TokenRequest:
+      type: object
+      description: Supply either `refresh_token` OR `username`+`password`.
+      properties:
+        username: { type: string, nullable: true }
+        password: { type: string, nullable: true }
+        refresh_token: { type: string, nullable: true }
+
+    TokenResponse:
+      type: object
+      properties:
+        success: { type: boolean }
+        message: { type: string }
+        refresh_token: { type: string, nullable: true }
+        temporal_token: { type: string, nullable: true }
+
+    CreateAccountRequest:
+      type: object
+      properties:
+        stellar_account_id: { type: string }
+        payala_account_id: { type: string }
+        first_name: { type: string, maxLength: 64 }
+        middle_name: { type: string, nullable: true }
+        last_name: { type: string, maxLength: 64 }
+        nickname: { type: string, nullable: true }
+        affiliation: { type: string, nullable: true }
+        gender: { type: string, nullable: true }
+      required: [stellar_account_id, payala_account_id, first_name, last_name]
+
+    CreateAccountResponse:
+      type: object
+      properties:
+        success: { type: boolean }
+        message: { type: string }
+
+    GetAccountResponse:
+      type: object
+      properties:
+        payala_account_id: { type: string }
+        stellar_account_id: { type: string }
+        first_name: { type: string }
+        middle_name: { type: string, nullable: true }
+        last_name: { type: string }
+        nickname: { type: string, nullable: true }
+        affiliation: { type: string, nullable: true }
+        gender: { type: string, nullable: true }
+        role: { type: string, enum: [view-only, device, token, admin] }
+        sync_mode: { type: string, enum: [reserve, mirror] }
+        profile_source: { type: string, enum: [local, ldap, okta] }
+        profile_synced_at: { type: string, format: date-time, nullable: true }
+        created_at: { type: string, format: date-time, nullable: true }
+
+    UpdateAccountRequest:
+      type: object
+      description: Identify the target row by stellar_account_id (or payala_account_id). Admins may update any account.
+      properties:
+        stellar_account_id: { type: string, nullable: true }
+        payala_account_id: { type: string, nullable: true }
+        first_name: { type: string, nullable: true }
+        middle_name: { type: string, nullable: true }
+        last_name: { type: string, nullable: true }
+        nickname: { type: string, nullable: true }
+        affiliation: { type: string, nullable: true }
+        gender: { type: string, nullable: true }
+
+    UpdateAccountResponse:
+      type: object
+      properties:
+        success: { type: boolean }
+        message: { type: string }
+        rows_affected: { type: integer }
+
+    AdminAccountListItem:
+      type: object
+      properties:
+        payala_account_id: { type: string }
+        stellar_account_id: { type: string }
+        first_name: { type: string }
+        middle_name: { type: string, nullable: true }
+        last_name: { type: string }
+        nickname: { type: string, nullable: true }
+        affiliation: { type: string, nullable: true }
+        gender: { type: string, nullable: true }
+        role: { type: string, enum: [view-only, device, token, admin] }
+        sync_mode: { type: string, enum: [reserve, mirror] }
+        profile_source: { type: string, enum: [local, ldap, okta] }
+        created_at: { type: string, format: date-time, nullable: true }
+
+    PaginatedAccountList:
+      type: object
+      properties:
+        data:
+          type: array
+          items: { $ref: '#/components/schemas/AdminAccountListItem' }
+        page: { type: integer }
+        per_page: { type: integer }
+        total: { type: integer }
+
+    SetRoleRequest:
+      type: object
+      properties:
+        role: { type: string, enum: [view-only, device, token, admin] }
+      required: [role]
+
+    SetRoleResponse:
+      type: object
+      properties:
+        success: { type: boolean }
+        message: { type: string }
+        account_id: { type: string }
+        role: { type: string }
+
+    SetSyncModeRequest:
+      type: object
+      properties:
+        sync_mode: { type: string, enum: [reserve, mirror] }
+        force:
+          type: boolean
+          nullable: true
+          description: Required (true) to leave reserve mode while a nonzero balance remains.
+      required: [sync_mode]
+
+    SetSyncModeResponse:
+      type: object
+      properties:
+        success: { type: boolean }
+        message: { type: string }
+        account_id: { type: string }
+        sync_mode: { type: string, enum: [reserve, mirror] }
+
+    DeleteAccountResponse:
+      type: object
+      properties:
+        success: { type: boolean }
+        message: { type: string }
+        rows_affected: { type: integer }
+
+    SyncedProfile:
+      type: object
+      properties:
+        first_name: { type: string, nullable: true }
+        middle_name: { type: string, nullable: true }
+        last_name: { type: string, nullable: true }
+        affiliation: { type: string, nullable: true }
+
+    SyncProfileResponse:
+      type: object
+      properties:
+        success: { type: boolean }
+        message: { type: string }
+        profile_source: { type: string }
+        profile_synced_at: { type: string, format: date-time, nullable: true }
+        profile: { $ref: '#/components/schemas/SyncedProfile' }
+
+    OnchainBalance:
+      type: object
+      properties:
+        asset_type: { type: string }
+        asset_code: { type: string, nullable: true }
+        asset_issuer: { type: string, nullable: true }
+        balance: { type: string }
+
+    OnchainSigner:
+      type: object
+      properties:
+        key: { type: string }
+        weight: { type: integer }
+        type: { type: string }
+
+    OnchainAccount:
+      type: object
+      properties:
+        stellar_account_id: { type: string }
+        exists: { type: boolean }
+        sequence: { type: string, nullable: true }
+        native_balance: { type: string, nullable: true }
+        balances:
+          type: array
+          items: { $ref: '#/components/schemas/OnchainBalance' }
+        signers:
+          type: array
+          items: { $ref: '#/components/schemas/OnchainSigner' }
+        subentry_count: { type: integer, nullable: true }
+
+    SyncRequest:
+      type: object
+      properties:
+        account_id:
+          type: string
+          description: Stellar G-address.
+      required: [account_id]
+
+    SyncResponse:
+      type: object
+      properties:
+        success: { type: boolean }
+        message: { type: string }
+        timestamp: { type: string, format: date-time }
+
+    PayalaSyncItemInput:
+      type: object
+      properties:
+        payala_tx_id: { type: string, maxLength: 128, pattern: '^[A-Za-z0-9]{1,128}$' }
+        amount:
+          type: integer
+          format: int64
+          description: Signed amount in minor units; sign = direction. Must not be 0.
+        currency: { type: string, pattern: '^[A-Z0-9]{1,16}$' }
+        memo:
+          type: string
+          maxLength: 256
+          nullable: true
+          description: Maximum 256 UTF-8 bytes.
+        payala_digest:
+          type: string
+          maxLength: 256
+          nullable: true
+          description: Maximum 256 UTF-8 bytes.
+      required: [payala_tx_id, amount, currency]
+
+    PayalaSyncRequest:
+      type: object
+      properties:
+        account_id:
+          type: string
+          description: Payala account id (the JWT sub) — NOT a Stellar address.
+        transactions:
+          type: array
+          minItems: 1
+          maxItems: 500
+          items: { $ref: '#/components/schemas/PayalaSyncItemInput' }
+      required: [account_id, transactions]
+
+    PayalaSyncResponse:
+      type: object
+      properties:
+        success: { type: boolean }
+        message: { type: string }
+        batch_id: { type: string, format: uuid }
+        sync_mode: { type: string, enum: [reserve, mirror] }
+        received: { type: integer }
+        applied: { type: integer }
+        duplicates: { type: integer }
+        conflicting:
+          type: integer
+          description: Replayed ids whose stored amount/currency differ from this submission.
+        net_deltas:
+          type: object
+          description: Per-currency net delta over the applied items.
+          additionalProperties: { type: integer, format: int64 }
+        reserve_balances:
+          type: array
+          description: Current balances for the batch's currencies (reserve mode only).
+          items: { $ref: '#/components/schemas/ReserveBalance' }
+
+    ReserveBalance:
+      type: object
+      properties:
+        currency: { type: string }
+        balance: { type: integer, format: int64 }
+        updated_at: { type: string, format: date-time, nullable: true }
+
+    ReserveBalancesResponse:
+      type: object
+      properties:
+        account_id: { type: string }
+        sync_mode: { type: string, enum: [reserve, mirror] }
+        reserves:
+          type: array
+          items: { $ref: '#/components/schemas/ReserveBalance' }
+
+    SubscribeRequest:
+      type: object
+      properties:
+        network:
+          type: string
+          enum: [stellar, payala]
+        listen_endpoint: { type: string, nullable: true }
+
+    SubscribeResponse:
+      type: object
+      properties:
+        success: { type: boolean }
+        message: { type: string }
+
+    CreateTransactionRequest:
+      type: object
+      properties:
+        stellar_tx_id: { type: string, nullable: true }
+        payala_tx_id: { type: string, nullable: true }
+        stellar_hash: { type: string, nullable: true }
+        source_account: { type: string, nullable: true, description: "56-char Stellar account ID" }
+        stellar_fee: { type: integer, nullable: true }
+        stellar_max_fee: { type: integer, nullable: true }
+        memo: { type: string, nullable: true, maxLength: 256 }
+        signatures: { type: string, nullable: true }
+        preconditions: { type: string, nullable: true }
+        payala_currency: { type: string, nullable: true }
+        payala_digest: { type: string, nullable: true }
+
+    CreateTransactionResponse:
+      type: object
+      properties:
+        success: { type: boolean }
+        message: { type: string }
+        btxid: { type: string, format: uuid, nullable: true }
+
+    TransactionListItem:
+      type: object
+      properties:
+        btxid: { type: string, format: uuid }
+        stellar_tx_id: { type: string, nullable: true }
+        payala_tx_id: { type: string, nullable: true }
+        stellar_hash: { type: string, nullable: true }
+        source_account: { type: string, nullable: true }
+        stellar_fee: { type: integer, nullable: true }
+        stellar_max_fee: { type: integer, nullable: true }
+        memo: { type: string, nullable: true }
+        payala_currency: { type: string, nullable: true }
+        payala_amount:
+          type: integer
+          format: int64
+          nullable: true
+          description: Signed minor units; set on mirror-mode rows only.
+        origin:
+          type: string
+          enum: [manual, payala_sync]
+          description: Server-set provenance; payala_sync rows come from mirror-mode sync.
+        created_at: { type: string, format: date-time }
+        flagged: { type: boolean }
+        status: { type: string, enum: [unreviewed, cleared, flagged, escalated] }
+        note: { type: string, nullable: true }
+        reviewed_by: { type: string, nullable: true }
+        reviewed_at: { type: string, format: date-time, nullable: true }
+
+    PaginatedTransactionList:
+      type: object
+      properties:
+        data:
+          type: array
+          items: { $ref: '#/components/schemas/TransactionListItem' }
+        page: { type: integer }
+        per_page: { type: integer }
+        total: { type: integer }
+
+    TransactionDetail:
+      allOf:
+        - $ref: '#/components/schemas/TransactionListItem'
+        - type: object
+          properties:
+            signatures: { type: string, nullable: true }
+            preconditions: { type: string, nullable: true }
+            payala_digest: { type: string, nullable: true }
+
+    ReviewTransactionRequest:
+      type: object
+      description: PUT replaces the full review state; omitted fields reset.
+      properties:
+        flagged: { type: boolean, nullable: true }
+        status: { type: string, enum: [unreviewed, cleared, flagged, escalated], nullable: true }
+        note: { type: string, nullable: true, maxLength: 2000 }
+
+    ReviewTransactionResponse:
+      type: object
+      properties:
+        success: { type: boolean }
+        message: { type: string }
+        btxid: { type: string, format: uuid }
+        flagged: { type: boolean }
+        status: { type: string }
+
+    CreateCardRequest:
+      type: object
+      properties:
+        account_id: { type: string }
+        card_id: { type: string }
+        ec_pubkey: { type: string }
+        rsa_pubkey: { type: string }
+      required: [account_id, card_id, ec_pubkey, rsa_pubkey]
+
+    DeleteCardRequest:
+      type: object
+      properties:
+        card_id: { type: string }
+      required: [card_id]
+
+    CardResponse:
+      type: object
+      properties:
+        success: { type: boolean }
+        message: { type: string }
+
+    EnrollMfaRequest:
+      type: object
+      properties:
+        account_id: { type: string }
+        mfa_type: { type: string, enum: [totp, sms] }
+        phone_number: { type: string, nullable: true }
+      required: [account_id, mfa_type]
+
+    VerifyMfaRequest:
+      type: object
+      properties:
+        account_id: { type: string }
+        mfa_type: { type: string, enum: [totp, sms] }
+        code: { type: string }
+      required: [account_id, mfa_type, code]
+
+    MfaResponse:
+      type: object
+      properties:
+        success: { type: boolean }
+        message: { type: string }
+        provisioning_uri: { type: string, nullable: true }
+
+    MfaEnrollment:
+      type: object
+      properties:
+        account_id: { type: string }
+        mfa_type: { type: string }
+        secret: { type: string, nullable: true }
+        phone_number: { type: string, nullable: true }
+        enabled: { type: boolean }
+
+    CreateNotifyRequest:
+      type: object
+      properties:
+        account_id: { type: string }
+        notify_type: { type: string, enum: [sms, email, webhook, mobile_push] }
+        destination: { type: string }
+      required: [account_id, notify_type, destination]
+
+    UpdateNotifyRequest:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        destination: { type: string }
+        enabled: { type: boolean }
+
+    NotifyResponse:
+      type: object
+      properties:
+        success: { type: boolean }
+        message: { type: string }
+
+    CreateSubscriptionRequest:
+      type: object
+      properties:
+        event_type:
+          type: string
+          enum: [login_success, login_failure, password_change, transfer_incoming, transfer_outgoing, profile_updated]
+        medium:
+          type: string
+          enum: [webhook, sms, mobile_push, to_app, email]
+      required: [event_type, medium]
+
+    UpdateSubscriptionRequest:
+      type: object
+      properties:
+        enabled: { type: boolean }
+
+    SubscriptionResponse:
+      type: object
+      properties:
+        success: { type: boolean }
+        message: { type: string }
+        id: { type: string, format: uuid, nullable: true }
+
+    RegisterDeviceTokenRequest:
+      type: object
+      properties:
+        account_id: { type: string }
+        device_token: { type: string }
+        platform: { type: string, enum: [android, ios] }
+      required: [account_id, device_token, platform]
+
+    DeleteDeviceTokenRequest:
+      type: object
+      properties:
+        device_token: { type: string }
+      required: [device_token]
+
+    DeviceTokenResponse:
+      type: object
+      properties:
+        success: { type: boolean }
+        message: { type: string }
+
+    HealthResponse:
+      type: object
+      properties:
+        status: { type: string, example: healthy }
+        database: { type: string, enum: [ok, error] }
+        redis: { type: string, enum: [ok, error] }
+        stellar_network: { type: string }
+
+    VersionResponse:
+      type: object
+      properties:
+        name: { type: string }
+        version: { type: string }
+        build_date: { type: string }
+        rustc_version: { type: string }
+        schema_version: { type: string, nullable: true }
+
+    NetworkInfoResponse:
+      type: object
+      properties:
+        stellar_network: { type: string, enum: [testnet, pubnet] }
+        stellar_horizon_url: { type: string, format: uri }
+        stellar_rpc_url: { type: string, format: uri }
+        network_passphrase: { type: string }
+        soroban_contract_id: { type: string, nullable: true }

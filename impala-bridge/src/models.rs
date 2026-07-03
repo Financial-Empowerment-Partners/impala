@@ -19,11 +19,19 @@ pub struct Claims {
     /// refresh rotations, so reuse of a rotated-out refresh token can revoke
     /// every descendant token in one operation. NOT serde-defaulted (see `aud`).
     pub fid: String,
-    /// Admin privilege, server-derived from the ADMIN_ACCOUNT_IDS allowlist at
-    /// every token issuance. `#[serde(default)]` so any non-admin path decodes
-    /// as `false`; clients cannot set it (HS256-signed).
-    #[serde(default)]
-    pub is_admin: bool,
+    /// Server-side role claim, stamped at every token issuance (the account's
+    /// DB role, with the ADMIN_ACCOUNT_IDS allowlist overriding to `admin`).
+    /// Admin privilege is derived from this claim — there is no separate
+    /// `is_admin` claim. Absent in tokens minted before role support, so it
+    /// defaults to least privilege (`view-only`) — fail closed; clients cannot
+    /// set it (HS256-signed).
+    #[serde(default = "default_role")]
+    pub role: String,
+}
+
+/// Default role for tokens/accounts without an explicit role. Least privilege.
+pub(crate) fn default_role() -> String {
+    crate::constants::ROLE_VIEW_ONLY.to_string()
 }
 
 // ── Pagination ─────────────────────────────────────────────────────────
@@ -36,11 +44,11 @@ pub struct PaginationParams {
     pub per_page: u64,
 }
 
-fn default_page() -> u64 {
+pub(crate) fn default_page() -> u64 {
     1
 }
 
-fn default_per_page() -> u64 {
+pub(crate) fn default_per_page() -> u64 {
     20
 }
 
@@ -88,15 +96,78 @@ pub struct GetAccountQuery {
     pub stellar_account_id: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, sqlx::FromRow)]
 pub struct GetAccountResponse {
     pub payala_account_id: String,
+    pub stellar_account_id: String,
     pub first_name: String,
     pub middle_name: Option<String>,
     pub last_name: String,
     pub nickname: Option<String>,
     pub affiliation: Option<String>,
     pub gender: Option<String>,
+    pub role: String,
+    pub sync_mode: String,
+    pub profile_source: String,
+    pub profile_synced_at: Option<String>,
+    pub created_at: Option<String>,
+}
+
+// ── Admin: account management ──────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct ListAccountsQuery {
+    #[serde(default = "default_page")]
+    pub page: u64,
+    #[serde(default = "default_per_page")]
+    pub per_page: u64,
+    pub search: Option<String>,
+}
+
+#[derive(Serialize, sqlx::FromRow)]
+pub struct AdminAccountListItem {
+    pub payala_account_id: String,
+    pub stellar_account_id: String,
+    pub first_name: String,
+    pub middle_name: Option<String>,
+    pub last_name: String,
+    pub nickname: Option<String>,
+    pub affiliation: Option<String>,
+    pub gender: Option<String>,
+    pub role: String,
+    pub sync_mode: String,
+    pub profile_source: String,
+    pub created_at: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct SetRoleRequest {
+    pub role: String,
+}
+
+#[derive(Serialize)]
+pub struct SetRoleResponse {
+    pub success: bool,
+    pub message: String,
+    pub account_id: String,
+    pub role: String,
+}
+
+#[derive(Serialize)]
+pub struct DeleteAccountResponse {
+    pub success: bool,
+    pub message: String,
+    pub rows_affected: u64,
+}
+
+#[derive(Serialize)]
+pub struct SyncProfileResponse {
+    pub success: bool,
+    pub message: String,
+    pub profile_source: String,
+    pub profile_synced_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile: Option<crate::ldap::SyncedProfile>,
 }
 
 #[derive(Deserialize)]
@@ -116,6 +187,60 @@ pub struct UpdateAccountResponse {
     pub success: bool,
     pub message: String,
     pub rows_affected: u64,
+}
+
+// ── Managed Seed (custodial Stellar accounts) ──────────────────────────
+// NB: request types carrying a `secret_seed` are Deserialize-only and never
+// derive Debug, so seed material cannot be echoed or accidentally logged.
+
+#[derive(Deserialize)]
+pub struct GenerateManagedAccountRequest {
+    pub payala_account_id: String,
+    pub first_name: String,
+    pub middle_name: Option<String>,
+    pub last_name: String,
+    pub nickname: Option<String>,
+    pub affiliation: Option<String>,
+    pub gender: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct ImportManagedAccountRequest {
+    pub payala_account_id: String,
+    pub secret_seed: String,
+    pub first_name: String,
+    pub middle_name: Option<String>,
+    pub last_name: String,
+    pub nickname: Option<String>,
+    pub affiliation: Option<String>,
+    pub gender: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct ManagedAccountResponse {
+    pub success: bool,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stellar_account_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct SignSubmitRequest {
+    pub payala_account_id: String,
+    pub destination: String,
+    pub amount: String,
+    pub memo: Option<String>,
+    pub fee: Option<u32>,
+}
+
+#[derive(Serialize)]
+pub struct SignSubmitResponse {
+    pub success: bool,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stellar_hash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub btxid: Option<Uuid>,
 }
 
 // ── Authenticate ───────────────────────────────────────────────────────
@@ -145,6 +270,73 @@ pub struct SyncResponse {
     pub success: bool,
     pub message: String,
     pub timestamp: String,
+}
+
+// ── Payala Sync (reserve / mirror modes) ───────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct PayalaSyncItemInput {
+    pub payala_tx_id: String,
+    /// Signed amount in minor units; sign = direction (+incoming / -outgoing).
+    pub amount: i64,
+    pub currency: String,
+    pub memo: Option<String>,
+    pub payala_digest: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PayalaSyncRequest {
+    /// The Payala account id (== JWT sub), NOT a Stellar G-address.
+    pub account_id: String,
+    pub transactions: Vec<PayalaSyncItemInput>,
+}
+
+#[derive(Serialize)]
+pub struct PayalaSyncResponse {
+    pub success: bool,
+    pub message: String,
+    pub batch_id: Uuid,
+    pub sync_mode: String,
+    pub received: usize,
+    pub applied: usize,
+    pub duplicates: usize,
+    /// Previously-seen ids whose stored (amount, currency) differ from this
+    /// submission — a ledger-integrity signal, not routine idempotency.
+    pub conflicting: usize,
+    /// Per-currency net delta over APPLIED items (BTreeMap → stable key order).
+    pub net_deltas: std::collections::BTreeMap<String, i64>,
+    /// Current reserve balances for the batch's currencies (reserve mode only;
+    /// lets an idempotent replay after a timed-out response reconcile state).
+    pub reserve_balances: Vec<ReserveBalance>,
+}
+
+#[derive(Debug, Serialize, sqlx::FromRow)]
+pub struct ReserveBalance {
+    pub currency: String,
+    pub balance: i64,
+    pub updated_at: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct ReserveBalancesResponse {
+    pub account_id: String,
+    pub sync_mode: String,
+    pub reserves: Vec<ReserveBalance>,
+}
+
+#[derive(Deserialize)]
+pub struct SetSyncModeRequest {
+    pub sync_mode: String,
+    /// Required (true) to leave reserve mode while a nonzero balance remains.
+    pub force: Option<bool>,
+}
+
+#[derive(Serialize)]
+pub struct SetSyncModeResponse {
+    pub success: bool,
+    pub message: String,
+    pub account_id: String,
+    pub sync_mode: String,
 }
 
 // ── Token ──────────────────────────────────────────────────────────────
@@ -203,6 +395,87 @@ pub struct CreateTransactionResponse {
     pub message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub btxid: Option<Uuid>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ListTransactionsQuery {
+    #[serde(default = "default_page")]
+    pub page: u64,
+    #[serde(default = "default_per_page")]
+    pub per_page: u64,
+    /// Review status filter (unreviewed/cleared/flagged/escalated).
+    pub status: Option<String>,
+    /// Flag filter.
+    pub flagged: Option<bool>,
+    /// Exact Stellar G-address (source_account) filter.
+    pub source_account: Option<String>,
+    /// created_at >= this RFC3339 timestamp.
+    pub from: Option<String>,
+    /// created_at < this RFC3339 timestamp.
+    pub to: Option<String>,
+    /// Free-text search over memo / tx ids / hash / source account.
+    pub q: Option<String>,
+}
+
+#[derive(Debug, Serialize, sqlx::FromRow)]
+pub struct TransactionListItem {
+    pub btxid: Uuid,
+    pub stellar_tx_id: Option<String>,
+    pub payala_tx_id: Option<String>,
+    pub stellar_hash: Option<String>,
+    pub source_account: Option<String>,
+    pub stellar_fee: Option<i64>,
+    pub stellar_max_fee: Option<i64>,
+    pub memo: Option<String>,
+    pub payala_currency: Option<String>,
+    pub payala_amount: Option<i64>,
+    pub origin: String,
+    pub created_at: String,
+    pub flagged: bool,
+    pub status: String,
+    pub note: Option<String>,
+    pub reviewed_by: Option<String>,
+    pub reviewed_at: Option<String>,
+}
+
+#[derive(Debug, Serialize, sqlx::FromRow)]
+pub struct TransactionDetail {
+    pub btxid: Uuid,
+    pub stellar_tx_id: Option<String>,
+    pub payala_tx_id: Option<String>,
+    pub stellar_hash: Option<String>,
+    pub source_account: Option<String>,
+    pub stellar_fee: Option<i64>,
+    pub stellar_max_fee: Option<i64>,
+    pub memo: Option<String>,
+    pub signatures: Option<String>,
+    pub preconditions: Option<String>,
+    pub payala_currency: Option<String>,
+    pub payala_digest: Option<String>,
+    pub payala_amount: Option<i64>,
+    pub origin: String,
+    pub created_at: String,
+    pub flagged: bool,
+    pub status: String,
+    pub note: Option<String>,
+    pub reviewed_by: Option<String>,
+    pub reviewed_at: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ReviewTransactionRequest {
+    pub flagged: Option<bool>,
+    pub status: Option<String>,
+    pub note: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct ReviewTransactionResponse {
+    pub success: bool,
+    pub message: String,
+    pub btxid: Uuid,
+    pub flagged: bool,
+    pub status: String,
 }
 
 // ── Card ───────────────────────────────────────────────────────────────
@@ -404,7 +677,7 @@ pub struct NetworkInfoResponse {
     pub soroban_contract_id: Option<String>,
 }
 
-// ── Okta ───────────────────────────────────────────────────────────────
+// ── SSO (OIDC) ──────────────────────────────────────────────────────────
 
 #[derive(Deserialize)]
 pub struct OktaTokenExchangeRequest {
@@ -415,6 +688,16 @@ pub struct OktaTokenExchangeRequest {
     pub cookie_mode: bool,
 }
 
+#[derive(Deserialize)]
+pub struct SsoTokenExchangeRequest {
+    /// Access token (Okta / Auth0). Legacy clients send it as `okta_token`.
+    #[serde(default, alias = "okta_token")]
+    pub token: Option<String>,
+    /// ID token, for providers configured with `token_kind = id` (e.g. Duo SSO).
+    #[serde(default)]
+    pub id_token: Option<String>,
+}
+
 #[derive(Serialize)]
 pub struct OktaConfigResponse {
     pub enabled: bool,
@@ -422,6 +705,25 @@ pub struct OktaConfigResponse {
     pub issuer: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub client_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub authorization_endpoint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token_endpoint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scopes: Option<Vec<String>>,
+}
+
+#[derive(Serialize)]
+pub struct SsoConfigResponse {
+    pub enabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub issuer: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub audience: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub authorization_endpoint: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -598,5 +900,172 @@ mod tests {
         let (per_page, offset) = p.clamped();
         assert_eq!(per_page, 25);
         assert_eq!(offset, 50);
+    }
+
+    #[test]
+    fn test_authenticate_request_deserialize() {
+        let json = r#"{"account_id":"user1","password":"secret123"}"#;
+        let req: AuthenticateRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.account_id, "user1");
+        assert_eq!(req.password, "secret123");
+    }
+
+    #[test]
+    fn test_token_request_deserialize_refresh_flow() {
+        let json = r#"{"refresh_token":"eyJ..."}"#;
+        let req: TokenRequest = serde_json::from_str(json).unwrap();
+        assert!(req.refresh_token.is_some());
+        assert!(req.username.is_none());
+        assert!(req.password.is_none());
+    }
+
+    #[test]
+    fn test_token_request_deserialize_password_flow() {
+        let json = r#"{"username":"admin","password":"pass123"}"#;
+        let req: TokenRequest = serde_json::from_str(json).unwrap();
+        assert!(req.refresh_token.is_none());
+        assert_eq!(req.username.as_deref(), Some("admin"));
+        assert_eq!(req.password.as_deref(), Some("pass123"));
+    }
+
+    #[test]
+    fn test_token_response_skips_none_tokens() {
+        let resp = TokenResponse {
+            success: true,
+            message: "ok".to_string(),
+            refresh_token: None,
+            temporal_token: None,
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(!json.contains("refresh_token"));
+        assert!(!json.contains("temporal_token"));
+    }
+
+    #[test]
+    fn test_token_response_includes_present_tokens() {
+        let resp = TokenResponse {
+            success: true,
+            message: "ok".to_string(),
+            refresh_token: Some("rt".to_string()),
+            temporal_token: Some("tt".to_string()),
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains("refresh_token"));
+        assert!(json.contains("temporal_token"));
+    }
+
+    #[test]
+    fn test_create_account_request_with_optionals() {
+        let json = r#"{
+            "stellar_account_id": "GABCDEF",
+            "payala_account_id": "payala1",
+            "first_name": "John",
+            "last_name": "Doe",
+            "middle_name": "M",
+            "nickname": "johnny",
+            "affiliation": "Corp",
+            "gender": "male"
+        }"#;
+        let req: CreateAccountRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.first_name, "John");
+        assert_eq!(req.middle_name, Some("M".to_string()));
+        assert_eq!(req.nickname, Some("johnny".to_string()));
+    }
+
+    #[test]
+    fn test_create_account_request_without_optionals() {
+        let json = r#"{
+            "stellar_account_id": "GABCDEF",
+            "payala_account_id": "payala1",
+            "first_name": "John",
+            "last_name": "Doe"
+        }"#;
+        let req: CreateAccountRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.first_name, "John");
+        assert!(req.middle_name.is_none());
+        assert!(req.nickname.is_none());
+    }
+
+    #[test]
+    fn test_subscribe_request_deserialize() {
+        let json = r#"{"network":"stellar"}"#;
+        let req: SubscribeRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.network, "stellar");
+        assert!(req.listen_endpoint.is_none());
+    }
+
+    #[test]
+    fn test_subscribe_request_with_endpoint() {
+        let json = r#"{"network":"payala","listen_endpoint":"127.0.0.1:9000"}"#;
+        let req: SubscribeRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.network, "payala");
+        assert_eq!(req.listen_endpoint, Some("127.0.0.1:9000".to_string()));
+    }
+
+    #[test]
+    fn test_register_device_token_default_platform() {
+        let json = r#"{"token":"fcm-token-abc"}"#;
+        let req: RegisterDeviceTokenRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.token, "fcm-token-abc");
+        assert_eq!(req.platform, "android");
+    }
+
+    #[test]
+    fn test_create_transaction_response_skips_none_btxid() {
+        let resp = CreateTransactionResponse {
+            success: true,
+            message: "ok".to_string(),
+            btxid: None,
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(!json.contains("btxid"));
+    }
+
+    #[test]
+    fn test_notification_subscription_request_deserialize() {
+        let json = r#"{"event_type":"login_success","medium":"sms"}"#;
+        let req: CreateSubscriptionRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.event_type, "login_success");
+        assert_eq!(req.medium, "sms");
+    }
+
+    #[test]
+    fn test_mfa_response_skips_none_provisioning_uri() {
+        let resp = MfaResponse {
+            success: true,
+            message: "ok".to_string(),
+            provisioning_uri: None,
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(!json.contains("provisioning_uri"));
+    }
+
+    #[test]
+    fn test_sso_config_response_disabled() {
+        let resp = SsoConfigResponse {
+            enabled: false,
+            provider: None,
+            issuer: None,
+            client_id: None,
+            audience: None,
+            authorization_endpoint: None,
+            token_endpoint: None,
+            scopes: None,
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains("\"enabled\":false"));
+        assert!(!json.contains("issuer"));
+    }
+
+    #[test]
+    fn test_sso_token_exchange_request_legacy_alias() {
+        // Legacy clients send `okta_token`; it maps onto the generic `token`.
+        let req: SsoTokenExchangeRequest = serde_json::from_str(r#"{"okta_token":"abc"}"#).unwrap();
+        assert_eq!(req.token.as_deref(), Some("abc"));
+        assert_eq!(req.id_token, None);
+
+        let req2: SsoTokenExchangeRequest = serde_json::from_str(r#"{"id_token":"xyz"}"#).unwrap();
+        assert_eq!(req2.id_token.as_deref(), Some("xyz"));
+        assert_eq!(req2.token, None);
     }
 }

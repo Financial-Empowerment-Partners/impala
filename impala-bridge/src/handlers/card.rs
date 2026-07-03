@@ -2,8 +2,10 @@ use axum::extract::Extension;
 use axum::Json;
 use log::{error, info, warn};
 use sqlx::PgPool;
+use std::sync::Arc;
 
 use crate::auth::AuthenticatedUser;
+use crate::constants::{RATE_LIMIT_MAX_REQUESTS, RATE_LIMIT_WINDOW_SECS};
 use crate::error::AppError;
 use crate::models::{CardResponse, CreateCardRequest, DeleteCardRequest};
 
@@ -11,9 +13,21 @@ use crate::models::{CardResponse, CreateCardRequest, DeleteCardRequest};
 pub async fn create_card(
     user: AuthenticatedUser,
     Extension(pool): Extension<PgPool>,
+    Extension(redis_pool): Extension<Arc<deadpool_redis::Pool>>,
     Json(payload): Json<CreateCardRequest>,
 ) -> Result<Json<CardResponse>, AppError> {
     crate::auth::require_owner(&user, &payload.account_id)?;
+
+    // Per-account rate limiting. Blocks scripted bulk-registration attempts.
+    crate::redis_helpers::check_rate_limit(
+        &redis_pool,
+        "card",
+        &user.account_id,
+        RATE_LIMIT_MAX_REQUESTS,
+        RATE_LIMIT_WINDOW_SECS,
+    )
+    .await?;
+
     crate::validate::validate_card_id(&payload.card_id)?;
     crate::validate::validate_ec_pubkey(&payload.ec_pubkey)?;
     crate::validate::validate_rsa_pubkey(&payload.rsa_pubkey)?;

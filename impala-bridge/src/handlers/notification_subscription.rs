@@ -224,3 +224,47 @@ pub async fn delete_subscription(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_valid_event_types_contains_expected() {
+        assert!(VALID_EVENT_TYPES.contains(&"login_success"));
+        assert!(VALID_EVENT_TYPES.contains(&"login_failure"));
+        assert!(VALID_EVENT_TYPES.contains(&"password_change"));
+        assert!(VALID_EVENT_TYPES.contains(&"transfer_incoming"));
+        assert!(VALID_EVENT_TYPES.contains(&"transfer_outgoing"));
+        assert!(VALID_EVENT_TYPES.contains(&"profile_updated"));
+    }
+
+    #[test]
+    fn test_valid_event_types_count() {
+        assert_eq!(VALID_EVENT_TYPES.len(), 6);
+    }
+
+    #[test]
+    fn test_valid_mediums_contains_expected() {
+        assert!(VALID_MEDIUMS.contains(&"webhook"));
+        assert!(VALID_MEDIUMS.contains(&"sms"));
+        assert!(VALID_MEDIUMS.contains(&"mobile_push"));
+        assert!(VALID_MEDIUMS.contains(&"to_app"));
+        assert!(VALID_MEDIUMS.contains(&"email"));
+    }
+
+    #[test]
+    fn test_valid_mediums_count() {
+        assert_eq!(VALID_MEDIUMS.len(), 5);
+    }
+
+    #[test]
+    fn test_invalid_event_type_not_in_list() {
+        assert!(!VALID_EVENT_TYPES.contains(&"invalid_event"));
+    }
+
+    #[test]
+    fn test_invalid_medium_not_in_list() {
+        assert!(!VALID_MEDIUMS.contains(&"carrier_pigeon"));
+    }
+}

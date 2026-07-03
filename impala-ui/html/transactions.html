@@ -53,23 +53,66 @@
             </div>
         </div>
 
-        <!-- Session Log -->
+        <!-- Transaction Log -->
         <div class="card">
             <div class="card-section">
-                <h5>Session Transaction Log</h5>
-                <div id="tx-log">
-                    <p class="text-center" style="color:#666;">No transactions in this session.</p>
+                <h5>Transaction Log</h5>
+                <div class="filter-bar">
+                    <div class="field">
+                        <label for="tx-filter-status">Status</label>
+                        <select id="tx-filter-status">
+                            <option value="">All</option>
+                            <option value="unreviewed">Unreviewed</option>
+                            <option value="cleared">Cleared</option>
+                            <option value="flagged">Flagged</option>
+                            <option value="escalated">Escalated</option>
+                        </select>
+                    </div>
+                    <div class="field">
+                        <label for="tx-filter-flagged">Flagged</label>
+                        <select id="tx-filter-flagged">
+                            <option value="">All</option>
+                            <option value="true">Flagged</option>
+                            <option value="false">Not flagged</option>
+                        </select>
+                    </div>
+                    <div class="field">
+                        <label for="tx-filter-from">From</label>
+                        <input type="date" id="tx-filter-from">
+                    </div>
+                    <div class="field">
+                        <label for="tx-filter-to">To</label>
+                        <input type="date" id="tx-filter-to">
+                    </div>
+                    <div class="field">
+                        <label for="tx-filter-q">Search</label>
+                        <input type="search" id="tx-filter-q" placeholder="memo, id, hash, source">
+                    </div>
+                    <div class="field">
+                        <button class="button" id="tx-filter-apply">Apply</button>
+                    </div>
+                    <div class="field">
+                        <button class="button ghost" id="tx-filter-reset">Reset</button>
+                    </div>
                 </div>
+                <div id="tx-list"></div>
+                <div id="tx-pagination"></div>
             </div>
         </div>
     </div>
 
+    <script src="config.js"></script>
     <script src="js/escape-html.js"></script>
     <script src="js/api.js"></script>
+    <script src="js/theme.js"></script>
     <script src="js/roles.js"></script>
     <script src="js/auth.js"></script>
     <script src="js/validate.js"></script>
     <script src="js/paginate.js"></script>
+    <script src="js/net-config.js"></script>
+    <script src="js/net.js"></script>
+    <script src="js/modal.js"></script>
+    <script src="js/tx-filter.js"></script>
     <script src="js/session-timer.js"></script>
     <script src="js/router.js"></script>
     <script src="js/transactions.js"></script>

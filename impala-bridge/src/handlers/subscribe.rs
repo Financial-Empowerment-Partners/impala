@@ -77,6 +77,8 @@ pub async fn subscribe(
                 }
             };
 
+            crate::validate::validate_listen_endpoint(&listen_endpoint)?;
+
             let redis = redis_pool.clone();
 
             info!(

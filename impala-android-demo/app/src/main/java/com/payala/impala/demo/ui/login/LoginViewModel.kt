@@ -293,7 +293,7 @@ class LoginViewModel : ViewModel() {
 
     /**
      * Authenticate via Okta. Exchanges the Okta access token with the bridge
-     * via the dedicated `POST /auth/okta` endpoint (no password derivation).
+     * via the dedicated `POST /auth/sso/okta` endpoint (no password derivation).
      */
     fun loginWithOkta(
         api: BridgeApiService,

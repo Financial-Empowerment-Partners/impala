@@ -29,8 +29,8 @@
                 '<span class="badge error">Error</span> ' + escapeHtml(err.message);
         });
 
-    // Health check
-    fetch('/api/version')
+    // Health check (against the active network's bridge)
+    fetch(API.BASE + '/version')
         .then(function (res) {
             var status = res.ok ? 'ok' : 'error';
             var label = res.ok ? 'Healthy' : 'Unhealthy';

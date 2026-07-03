@@ -1,5 +1,12 @@
 # --- Secrets Manager: RDS password ---
 
+# Auto-generated master password (no special chars — the DATABASE_URL below
+# embeds it unescaped).
+resource "random_password" "rds_password" {
+  length  = 32
+  special = false
+}
+
 resource "aws_secretsmanager_secret" "rds_password" {
   name        = "${local.name_prefix}-rds-password"
   description = "RDS master password for impala-bridge"
@@ -62,6 +69,40 @@ resource "aws_db_subnet_group" "main" {
   }
 }
 
+resource "aws_db_parameter_group" "main" {
+  name   = "${local.name_prefix}-pg16"
+  family = "postgres16"
+
+  parameter {
+    name  = "log_min_duration_statement"
+    value = "1000"
+  }
+
+  parameter {
+    name  = "log_statement"
+    value = "ddl"
+  }
+
+  parameter {
+    name  = "log_connections"
+    value = "1"
+  }
+
+  parameter {
+    name  = "log_disconnections"
+    value = "1"
+  }
+
+  parameter {
+    name  = "log_lock_waits"
+    value = "1"
+  }
+
+  tags = {
+    Name = "${local.name_prefix}-pg-params"
+  }
+}
+
 # --- RDS PostgreSQL Instance (Multi-AZ, encrypted, automated backups) ---
 
 resource "aws_db_instance" "main" {
@@ -92,6 +133,9 @@ resource "aws_db_instance" "main" {
   # Performance monitoring
   performance_insights_enabled    = true
   performance_insights_kms_key_id = aws_kms_key.rds.arn
+
+  parameter_group_name            = aws_db_parameter_group.main.name
+  enabled_cloudwatch_logs_exports = ["postgresql"]
 
   publicly_accessible       = false
   skip_final_snapshot       = var.rds_skip_final_snapshot
@@ -151,7 +195,7 @@ resource "aws_db_instance" "read_replica" {
 
   multi_az            = false
   publicly_accessible = false
-  skip_final_snapshot = true
+  skip_final_snapshot = var.rds_skip_final_snapshot
 
   performance_insights_enabled    = true
   performance_insights_kms_key_id = aws_kms_key.rds_dr[0].arn

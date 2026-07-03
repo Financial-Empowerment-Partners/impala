@@ -274,11 +274,12 @@ resource "aws_lb" "dr" {
   count    = var.dr_enabled ? 1 : 0
   provider = aws.dr
 
-  name               = "${local.name_prefix}-alb-dr"
-  internal           = false
-  load_balancer_type = "application"
-  security_groups    = [aws_security_group.dr_alb[0].id]
-  subnets            = aws_subnet.dr_public[*].id
+  name                       = "${local.name_prefix}-alb-dr"
+  internal                   = false
+  load_balancer_type         = "application"
+  security_groups            = [aws_security_group.dr_alb[0].id]
+  subnets                    = aws_subnet.dr_public[*].id
+  drop_invalid_header_fields = true
 
   tags = {
     Name = "${local.name_prefix}-alb-dr"
@@ -364,7 +365,7 @@ resource "aws_elasticache_replication_group" "dr" {
   multi_az_enabled           = true
 
   at_rest_encryption_enabled = true
-  transit_encryption_enabled = false
+  transit_encryption_enabled = true
 
   tags = {
     Name = "${local.name_prefix}-redis-dr"
@@ -381,6 +382,8 @@ resource "aws_sns_topic" "dr_jobs" {
 
   name = "${local.name_prefix}-jobs-dr"
 
+  kms_master_key_id = "alias/aws/sns"
+
   tags = {
     Name = "${local.name_prefix}-jobs-dr"
   }
@@ -392,6 +395,7 @@ resource "aws_sqs_queue" "dr_worker_dlq" {
 
   name                      = "${local.name_prefix}-worker-dlq-dr"
   message_retention_seconds = 1209600
+  sqs_managed_sse_enabled   = true
 
   tags = {
     Name = "${local.name_prefix}-worker-dlq-dr"
@@ -406,6 +410,7 @@ resource "aws_sqs_queue" "dr_worker" {
   visibility_timeout_seconds = var.sqs_visibility_timeout_seconds
   message_retention_seconds  = 345600
   receive_wait_time_seconds  = 20
+  sqs_managed_sse_enabled    = true
 
   redrive_policy = jsonencode({
     deadLetterTargetArn = aws_sqs_queue.dr_worker_dlq[0].arn
@@ -677,17 +682,17 @@ resource "aws_ecs_task_definition" "dr_server" {
         }
       ]
 
-      environment = [
+      environment = concat([
         { name = "RUN_MODE", value = "server" },
         { name = "SERVICE_ADDRESS", value = "0.0.0.0:8080" },
-        { name = "REDIS_URL", value = "redis://${aws_elasticache_replication_group.dr[0].primary_endpoint_address}:6379" },
+        { name = "REDIS_URL", value = "rediss://${aws_elasticache_replication_group.dr[0].primary_endpoint_address}:6379" },
         { name = "STELLAR_HORIZON_URL", value = var.stellar_horizon_url },
         { name = "STELLAR_RPC_URL", value = var.stellar_rpc_url },
         { name = "SNS_TOPIC_ARN", value = aws_sns_topic.dr_jobs[0].arn },
         { name = "AWS_REGION", value = var.dr_region },
         { name = "SES_FROM_ADDRESS", value = var.ses_from_address },
         { name = "FCM_PROJECT_ID", value = var.fcm_project_id },
-      ]
+      ], local.seed_protection_env_dr)
 
       secrets = [
         {
@@ -736,16 +741,16 @@ resource "aws_ecs_task_definition" "dr_worker" {
       image     = "${data.aws_caller_identity.current.account_id}.dkr.ecr.${var.dr_region}.amazonaws.com/${var.project_name}:${var.container_image_tag}"
       essential = true
 
-      environment = [
+      environment = concat([
         { name = "RUN_MODE", value = "worker" },
         { name = "SQS_QUEUE_URL", value = aws_sqs_queue.dr_worker[0].url },
-        { name = "REDIS_URL", value = "redis://${aws_elasticache_replication_group.dr[0].primary_endpoint_address}:6379" },
+        { name = "REDIS_URL", value = "rediss://${aws_elasticache_replication_group.dr[0].primary_endpoint_address}:6379" },
         { name = "STELLAR_HORIZON_URL", value = var.stellar_horizon_url },
         { name = "STELLAR_RPC_URL", value = var.stellar_rpc_url },
         { name = "AWS_REGION", value = var.dr_region },
         { name = "SES_FROM_ADDRESS", value = var.ses_from_address },
         { name = "FCM_PROJECT_ID", value = var.fcm_project_id },
-      ]
+      ], local.seed_protection_env_dr)
 
       secrets = [
         {

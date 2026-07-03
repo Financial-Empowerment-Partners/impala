@@ -28,6 +28,23 @@ provider "aws" {
   }
 }
 
+# Aliased provider for the cross-region DR stack (dr.tf) and the ECR
+# replication target. Always declared; the DR resources it serves are all
+# gated on var.dr_enabled.
+provider "aws" {
+  alias  = "dr"
+  region = var.dr_region
+
+  default_tags {
+    tags = {
+      Project     = var.project_name
+      Environment = var.environment
+      ManagedBy   = "terraform"
+      Role        = "disaster-recovery"
+    }
+  }
+}
+
 locals {
   name_prefix = "${var.project_name}-${var.environment}"
 }

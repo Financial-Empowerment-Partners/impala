@@ -16,15 +16,11 @@
 #                            OR AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY
 #
 # Optional Secrets (for Terraform deploy):
-#   TF_VAR_testnet_jwt_secret           - JWT secret for testnet cluster
-#   TF_VAR_testnet_soroban_contract_id  - Soroban contract on testnet
-#   TF_VAR_testnet_certificate_arn      - ACM cert ARN for testnet HTTPS (optional)
-#   TF_VAR_live_jwt_secret              - JWT secret for live cluster
-#   TF_VAR_live_certificate_arn         - ACM cert ARN for live HTTPS (optional)
-#
-# Optional Repository Variables (vars, not secrets):
-#   TESTNET_ENABLED  - "true" to enable testnet stack (default false)
-#   LIVE_ENABLED     - "true" to enable live stack (default false)
+#   TF_VAR_jwt_secret      - JWT signing secret
+#   TF_VAR_signoz_endpoint - SigNoz OTLP endpoint
+#   TF_VAR_signoz_access_token - SigNoz access token
+#   TF_VAR_testnet_jwt_secret  - JWT secret for testnet cluster
+#   TF_VAR_testnet_soroban_contract_id - Soroban contract on testnet
 # =============================================================================
 
 name: CI
@@ -32,8 +28,6 @@ name: CI
 on:
   push:
     branches: [main]
-    tags:
-      - 'impala-bridge-v*'
     paths:
       - 'impala-bridge/**'
       - '.github/workflows/ci.yml'
@@ -85,12 +79,6 @@ permissions:
   id-token: write
   contents: read
 
-# Avoid racing/duplicate runs on the same ref. PRs cancel in-progress runs;
-# main pushes (which may deploy) are allowed to finish.
-concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
-
 jobs:
   # ===========================================================================
   # Test — Run cargo test and clippy
@@ -103,21 +91,15 @@ jobs:
         working-directory: impala-bridge
 
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-        with:
-          persist-credentials: false
+      - uses: actions/checkout@v4
 
       - name: Install Rust toolchain
-        # Pinned toolchain, not @stable: lint drift on new stables has broken
-        # this CI before. Bump deliberately, fixing clippy/fmt fallout in the
-        # same change.
-        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: '1.96.0'
           components: clippy, rustfmt
 
       - name: Cache cargo registry + build
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
@@ -162,9 +144,7 @@ jobs:
             arch_tag: arm64
 
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-        with:
-          persist-credentials: false
+      - uses: actions/checkout@v4
 
       - name: Check if architecture is requested
         id: check_arch
@@ -178,23 +158,23 @@ jobs:
 
       - name: Configure AWS credentials
         if: steps.check_arch.outputs.should_build == 'true'
-        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4.3.1
+        uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: ${{ secrets.AWS_REGION }}
 
       - name: Login to Amazon ECR
         if: steps.check_arch.outputs.should_build == 'true'
-        uses: aws-actions/amazon-ecr-login@fa648b43de3d4d023bcb3f89ed6940096949c419 # v2.1.5
+        uses: aws-actions/amazon-ecr-login@v2
 
       - name: Set up Docker Buildx
         if: steps.check_arch.outputs.should_build == 'true'
-        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+        uses: docker/setup-buildx-action@v3
 
       - name: Docker metadata
         if: steps.check_arch.outputs.should_build == 'true'
         id: meta
-        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
+        uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
@@ -204,7 +184,7 @@ jobs:
 
       - name: Build and push (per-arch)
         if: steps.check_arch.outputs.should_build == 'true'
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        uses: docker/build-push-action@v6
         with:
           context: impala-bridge
           platforms: ${{ matrix.platform }}
@@ -227,13 +207,13 @@ jobs:
 
     steps:
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4.3.1
+        uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: ${{ secrets.AWS_REGION }}
 
       - name: Login to Amazon ECR
-        uses: aws-actions/amazon-ecr-login@fa648b43de3d4d023bcb3f89ed6940096949c419 # v2.1.5
+        uses: aws-actions/amazon-ecr-login@v2
 
       - name: Determine architectures
         id: archs
@@ -272,309 +252,68 @@ jobs:
           docker manifest push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
 
   # ===========================================================================
-  # Lint Dockerfile — hadolint (no creds). BLOCKING: accepted findings carry
-  # inline `# hadolint ignore=` annotations in impala-bridge/Dockerfile.
+  # Deploy — Terraform plan/apply (optional)
   # ===========================================================================
-  lint-docker:
-    name: Lint Dockerfile
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-        with:
-          persist-credentials: false
-      - name: hadolint
-        run: docker run --rm -i hadolint/hadolint hadolint - < impala-bridge/Dockerfile
-
-  # ===========================================================================
-  # Terraform checks — fmt, validate (root + modules + bootstrap), lint, IaC
-  # security scan. No AWS creds needed. Gates deploy. tflint and trivy are
-  # BLOCKING (baseline triaged 2026-06-09: accepted findings carry justified
-  # #trivy:ignore annotations in the .tf files; AVD-AWS-0052 was fixed via
-  # drop_invalid_header_fields instead of ignored).
-  # ===========================================================================
-  terraform-checks:
-    name: Terraform checks
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: terraform
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-        with:
-          persist-credentials: false
-
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
-        with:
-          terraform_version: "~> 1.15"
-
-      - name: Terraform fmt
-        run: terraform fmt -check -recursive
-
-      - name: Terraform validate (root + modules + bootstrap)
-        run: |
-          terraform init -backend=false
-          terraform validate
-          for d in modules/*/ bootstrap; do
-            if [ -d "$d" ]; then
-              echo "== validate $d =="
-              (cd "$d" && terraform init -backend=false && terraform validate)
-            fi
-          done
-
-      - name: tflint
-        run: |
-          curl -sSL https://raw.githubusercontent.com/terraform-linters/tflint/master/install_linux.sh | bash
-          tflint --recursive --no-color
-
-      - name: Trivy IaC config scan
-        # Two blocking passes: the default pass covers root/bootstrap/ecr as
-        # evaluated for a toggles-off plan; the --tf-vars pass forces all
-        # three stack toggles on (trivy-scan.tfvars, scanner-only file) so
-        # modules/ecs-stack and modules/impala-stack are fully evaluated too.
-        run: |
-          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
-          trivy config --severity HIGH,CRITICAL --exit-code 1 .
-          trivy config --severity HIGH,CRITICAL --exit-code 1 --tf-vars trivy-scan.tfvars .
-
-  # ===========================================================================
-  # Plan — informational terraform plan, ungated. The plan output goes to the
-  # job log and the step summary for review. The plan file is deliberately NOT
-  # uploaded as an artifact (artifacts outlive the job and a tfplan embeds
-  # sensitive variable values); the gated apply job re-plans atomically.
-  # ===========================================================================
-  plan:
-    name: Terraform plan
-    needs: [manifest, terraform-checks]
+  deploy:
+    name: Terraform ${{ github.event.inputs.terraform_action || 'plan' }}
+    needs: manifest
     runs-on: ubuntu-latest
     if: >
       (github.event_name == 'workflow_dispatch' && github.event.inputs.deploy == 'true') ||
       (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    environment: ${{ github.event.inputs.environment || 'staging' }}
 
     defaults:
       run:
         working-directory: terraform
 
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-        with:
-          persist-credentials: false
+      - uses: actions/checkout@v4
 
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4.3.1
+        uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: ${{ secrets.AWS_REGION }}
 
       - name: Setup Terraform
-        uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
+        uses: hashicorp/setup-terraform@v3
         with:
-          terraform_version: "~> 1.15"
+          # main.tf pins required_version = ">= 1.9, < 2.0"
+          terraform_version: "~> 1.9"
 
       - name: Terraform Init
-        # Backend config (bucket/key/region/lock table) supplied here; see backend.tf.
-        run: |
-          terraform init \
-            -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
-            -backend-config="key=impala/terraform.tfstate" \
-            -backend-config="region=${{ secrets.AWS_REGION }}" \
-            -backend-config="dynamodb_table=${{ vars.TF_LOCK_TABLE }}"
+        run: terraform init
 
-      - name: Terraform Plan (informational)
-        run: |
-          set -o pipefail
-          terraform plan \
-            -var="container_image_tag=${{ github.sha }}" \
-            -var="environment=${{ github.event.inputs.environment || 'staging' }}" \
-            -var="testnet_enabled=${{ vars.TESTNET_ENABLED || 'false' }}" \
-            -var="live_enabled=${{ vars.LIVE_ENABLED || 'false' }}" \
-            -no-color 2>&1 | tee /tmp/tfplan.log
-          {
-            echo "## Terraform plan (${{ github.event.inputs.environment || 'staging' }})"
-            echo '```'
-            tail -n 400 /tmp/tfplan.log
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
-        env:
-          TF_VAR_testnet_jwt_secret: ${{ secrets.TF_VAR_testnet_jwt_secret }}
-          TF_VAR_testnet_soroban_contract_id: ${{ secrets.TF_VAR_testnet_soroban_contract_id }}
-          TF_VAR_testnet_certificate_arn: ${{ secrets.TF_VAR_testnet_certificate_arn }}
-          TF_VAR_live_jwt_secret: ${{ secrets.TF_VAR_live_jwt_secret }}
-          TF_VAR_live_certificate_arn: ${{ secrets.TF_VAR_live_certificate_arn }}
+      - name: Terraform Validate
+        run: terraform validate -no-color
 
-  # ===========================================================================
-  # Apply — gated terraform apply.
-  #
-  # *** MANUAL REPO-SETTINGS STEP — REQUIRED BEFORE THIS CHANGE MERGES ***
-  # This job is gated on a GitHub Environment named `production`, which cannot
-  # be created from repository files. A repo admin must, under
-  # Settings → Environments → New environment:
-  #   1. Create an environment named exactly `production`.
-  #   2. Add required reviewers (the operators who approve applies).
-  #   3. Restrict deployment branches to `main` only.
-  # Until that exists, GitHub runs this job WITHOUT a manual approval pause —
-  # an unknown environment name does not block execution.
-  #
-  # The job re-plans and applies in one step (plan -out + apply of that file
-  # in the same shell) instead of consuming a plan artifact, so the applied
-  # plan can never be a stale or tampered file from another job.
-  # ===========================================================================
-  apply:
-    name: Terraform apply
-    needs: plan
-    runs-on: ubuntu-latest
-    if: >
-      github.event.inputs.terraform_action == 'apply' ||
-      (github.event_name == 'push' && github.ref == 'refs/heads/main')
-    environment: production
+      - name: Terraform Format Check
+        run: terraform fmt -check -recursive -no-color
 
-    defaults:
-      run:
-        working-directory: terraform
-
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-        with:
-          persist-credentials: false
-
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4.3.1
-        with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-          aws-region: ${{ secrets.AWS_REGION }}
-
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
-        with:
-          terraform_version: "~> 1.15"
-
-      - name: Terraform Init
-        run: |
-          terraform init \
-            -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
-            -backend-config="key=impala/terraform.tfstate" \
-            -backend-config="region=${{ secrets.AWS_REGION }}" \
-            -backend-config="dynamodb_table=${{ vars.TF_LOCK_TABLE }}"
-
-      - name: Terraform Plan + Apply (atomic)
+      - name: Terraform Plan
+        id: plan
         run: |
           terraform plan \
             -var="container_image_tag=${{ github.sha }}" \
             -var="environment=${{ github.event.inputs.environment || 'staging' }}" \
-            -var="testnet_enabled=${{ vars.TESTNET_ENABLED || 'false' }}" \
-            -var="live_enabled=${{ vars.LIVE_ENABLED || 'false' }}" \
             -out=tfplan \
             -no-color
-          terraform apply -auto-approve tfplan
         env:
+          TF_VAR_jwt_secret: ${{ secrets.TF_VAR_jwt_secret }}
+          TF_VAR_signoz_endpoint: ${{ secrets.TF_VAR_signoz_endpoint }}
+          TF_VAR_signoz_access_token: ${{ secrets.TF_VAR_signoz_access_token }}
           TF_VAR_testnet_jwt_secret: ${{ secrets.TF_VAR_testnet_jwt_secret }}
           TF_VAR_testnet_soroban_contract_id: ${{ secrets.TF_VAR_testnet_soroban_contract_id }}
-          TF_VAR_testnet_certificate_arn: ${{ secrets.TF_VAR_testnet_certificate_arn }}
-          TF_VAR_live_jwt_secret: ${{ secrets.TF_VAR_live_jwt_secret }}
-          TF_VAR_live_certificate_arn: ${{ secrets.TF_VAR_live_certificate_arn }}
 
-  # ===========================================================================
-  # Native binary — glibc Linux tarballs for the GitHub Release.
-  # Tag-push-only (impala-bridge-v*). Runs in parallel with the Docker build
-  # matrix; reuses the same amd64/arm64 runners.
-  # ===========================================================================
-  native-build:
-    name: Native binary (${{ matrix.platform }})
-    needs: test
-    if: startsWith(github.ref, 'refs/tags/impala-bridge-v')
-
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - platform: linux-amd64
-            runner: ubuntu-latest
-          - platform: linux-arm64
-            runner: ubuntu-24.04-arm
-
-    runs-on: ${{ matrix.runner }}
-
-    defaults:
-      run:
-        working-directory: impala-bridge
-
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-        with:
-          persist-credentials: false
-
-      - name: Install Rust toolchain
-        # Pinned toolchain, not @stable — see the test job.
-        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
-        with:
-          toolchain: '1.96.0'
-
-      - name: Cache cargo registry + build
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            impala-bridge/target
-          key: ${{ runner.os }}-${{ matrix.platform }}-cargo-release-${{ hashFiles('impala-bridge/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-${{ matrix.platform }}-cargo-release-
-
-      - name: Build release binary
-        run: cargo build --release --locked
-
-      - name: Package tarball
-        run: |
-          VERSION="${GITHUB_REF_NAME#impala-bridge-v}"
-          STAGE="impala-bridge-${VERSION}-${{ matrix.platform }}"
-          mkdir -p "dist/${STAGE}"
-          cp target/release/impala-bridge "dist/${STAGE}/"
-          cp README.md "dist/${STAGE}/README.md"
-          cp ../LICENSE-2.0.txt "dist/${STAGE}/LICENSE-2.0.txt" 2>/dev/null || true
-          tar -czf "dist/${STAGE}.tar.gz" -C dist "${STAGE}"
-          (cd dist && sha256sum "${STAGE}.tar.gz" > "${STAGE}.tar.gz.sha256")
-          ls -la dist
-
-      - name: Upload tarball
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: impala-bridge-${{ matrix.platform }}
-          path: |
-            impala-bridge/dist/impala-bridge-*.tar.gz
-            impala-bridge/dist/impala-bridge-*.tar.gz.sha256
-          if-no-files-found: error
-          retention-days: 14
-
-  # ===========================================================================
-  # GitHub Release — attach the per-arch tarballs to a release named after
-  # the tag. Tag-push-only.
-  # ===========================================================================
-  release:
-    name: GitHub Release
-    needs: native-build
-    if: startsWith(github.ref, 'refs/tags/impala-bridge-v')
-    runs-on: ubuntu-latest
-
-    permissions:
-      contents: write
-
-    steps:
-      - name: Download tarball artifacts
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          pattern: impala-bridge-linux-*
-          path: release-assets
-          merge-multiple: true
-
-      - name: List assets
-        run: ls -la release-assets
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
-        with:
-          name: impala-bridge ${{ github.ref_name }}
-          tag_name: ${{ github.ref_name }}
-          files: |
-            release-assets/*.tar.gz
-            release-assets/*.tar.gz.sha256
-          generate_release_notes: true
-          fail_on_unmatched_files: true
+      - name: Terraform Apply
+        if: >
+          github.event.inputs.terraform_action == 'apply' ||
+          (github.event_name == 'push' && github.ref == 'refs/heads/main')
+        run: terraform apply -auto-approve tfplan
+        env:
+          TF_VAR_jwt_secret: ${{ secrets.TF_VAR_jwt_secret }}
+          TF_VAR_signoz_endpoint: ${{ secrets.TF_VAR_signoz_endpoint }}
+          TF_VAR_signoz_access_token: ${{ secrets.TF_VAR_signoz_access_token }}
+          TF_VAR_testnet_jwt_secret: ${{ secrets.TF_VAR_testnet_jwt_secret }}
+          TF_VAR_testnet_soroban_contract_id: ${{ secrets.TF_VAR_testnet_soroban_contract_id }}

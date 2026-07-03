@@ -113,3 +113,20 @@ pub async fn readiness(
         StatusCode::SERVICE_UNAVAILABLE
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_default_route_returns_hello() {
+        let result = default_route().await;
+        assert_eq!(result, "Hello, World!");
+    }
+
+    #[tokio::test]
+    async fn test_liveness_returns_ok() {
+        let status = liveness().await;
+        assert_eq!(status, StatusCode::OK);
+    }
+}

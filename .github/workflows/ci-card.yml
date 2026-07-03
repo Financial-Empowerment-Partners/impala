@@ -1,0 +1,60 @@
+name: CI — impala-card
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'impala-card/**'
+      - '.github/workflows/ci-card.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'impala-card/**'
+      - '.github/workflows/ci-card.yml'
+
+jobs:
+  sdk-test:
+    name: SDK (:sdk:jvmTest)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: impala-card
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-card-${{ hashFiles('impala-card/**/*.gradle*', 'impala-card/gradle/libs.versions.toml') }}
+          restore-keys: ${{ runner.os }}-gradle-card-
+
+      - name: Run SDK JVM tests
+        run: ./gradlew :sdk:jvmTest --no-daemon
+
+      - name: Upload test reports on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdk-test-reports
+          path: impala-card/sdk/build/reports/tests/jvmTest/
+
+  # Applet tests are temporarily gated off: the applet module has ~40
+  # pre-existing compilation errors (missing Repository/LUK classes not yet
+  # checked in). Re-enable once those classes land.
+  # applet-test:
+  #   name: Applet (:applet:jvmTest)
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - uses: actions/setup-java@v4
+  #       with: { distribution: temurin, java-version: '17' }
+  #     - run: cd impala-card && ./gradlew :applet:jvmTest --no-daemon

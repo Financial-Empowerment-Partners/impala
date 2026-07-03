@@ -129,6 +129,11 @@ const INSTANCE_TTL_EXTEND_TO: u32 = 30 * 17_280;
 #[contract]
 pub struct MultisigUsdcWrapper;
 
+// soroban-sdk 23 deprecates Events::publish in favor of #[contractevent]
+// structs. Migrating changes the emitted event encoding, and the current
+// topics (wrap, sched_unw, exec_tx, ...) are load-bearing for downstream
+// consumers, so the migration is deliberately deferred.
+#[allow(deprecated)]
 #[contractimpl]
 impl MultisigUsdcWrapper {
     /// One-time setup: signer set, threshold, the network's USDC SAC address,
@@ -1666,6 +1671,63 @@ mod tests {
 
         // Do NOT advance time — try to execute immediately
         client.execute_transfer(&tl_id);
+    }
+
+    // --- Multisig authorization enforcement ---
+    //
+    // Most of the tests above use `env.mock_all_auths()`, which bypasses the
+    // host's authorization machinery entirely. Those tests prove that the
+    // contract behaves correctly *when auths are present* — they do NOT prove
+    // that the contract *demands* authorization from the configured signers.
+    //
+    // The tests below intentionally do not call `mock_all_auths()`. Instead
+    // they call `env.mock_auths(&[])` (no mocks). A call that reaches a
+    // `require_auth()` site without a matching mock panics. This regression
+    // guard catches the failure mode where someone removes or weakens the
+    // `provided_signer.require_auth()` loop in `verify_multisig`.
+
+    #[test]
+    #[should_panic]
+    fn test_wrap_requires_signer_auth() {
+        let env = Env::default();
+        env.mock_auths(&[]); // explicitly: no mocked auths
+        let contract_id = env.register(MultisigUsdcWrapper, ());
+        let s1 = Address::generate(&env);
+        let s2 = Address::generate(&env);
+        // A real USDC-shaped token so initialize passes its token validation
+        // without touching auth (the panic must come from require_auth).
+        let token_addr = create_usdc_token(&env);
+
+        // initialize does not call require_auth, so this works without mocks.
+        let client = MultisigUsdcWrapperClient::new(&env, &contract_id);
+        let signers = vec![&env, s1.clone(), s2.clone()];
+        client.initialize(&signers, &1, &token_addr, &10);
+
+        // wrap -> verify_multisig -> require_auth on each signer (before the
+        // depositor auth and the token transfer). With no mocks registered,
+        // this must panic.
+        let auth = vec![&env, s1.clone()];
+        let depositor = Address::generate(&env);
+        client.wrap(&auth, &depositor, &100);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_schedule_unwrap_requires_signer_auth() {
+        let env = Env::default();
+        env.mock_auths(&[]);
+        let contract_id = env.register(MultisigUsdcWrapper, ());
+        let s1 = Address::generate(&env);
+        let s2 = Address::generate(&env);
+        let token_addr = create_usdc_token(&env);
+
+        let client = MultisigUsdcWrapperClient::new(&env, &contract_id);
+        let signers = vec![&env, s1.clone(), s2.clone()];
+        client.initialize(&signers, &1, &token_addr, &10);
+
+        // schedule_unwrap requires multisig. Without mocks it must panic.
+        let auth = vec![&env, s1.clone()];
+        client.schedule_unwrap(&auth, &s2, &100, &10);
     }
 
     #[test]

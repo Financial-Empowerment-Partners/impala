@@ -10,6 +10,7 @@ use crate::error::AppError;
 #[derive(Debug, Clone, Deserialize)]
 #[allow(dead_code)] // full discovery doc deserialized; not every field is read
 pub struct OidcDiscovery {
+    #[allow(dead_code)] // part of the OIDC discovery document; retained for completeness
     pub issuer: String,
     pub authorization_endpoint: String,
     pub token_endpoint: String,
