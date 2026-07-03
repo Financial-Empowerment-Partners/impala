@@ -169,7 +169,7 @@ jobs:
 
       - name: Set up Docker Buildx
         if: steps.check_arch.outputs.should_build == 'true'
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Docker metadata
         if: steps.check_arch.outputs.should_build == 'true'
