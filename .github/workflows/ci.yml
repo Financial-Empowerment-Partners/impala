@@ -174,7 +174,7 @@ jobs:
       - name: Docker metadata
         if: steps.check_arch.outputs.should_build == 'true'
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
