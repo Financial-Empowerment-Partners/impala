@@ -125,7 +125,10 @@ pub async fn fetch_discovery(
                 error!("oidc[{}]: failed to parse discovery document: {}", name, e);
                 AppError::InternalError("Failed to parse OIDC discovery document".to_string())
             })?;
-            info!("oidc[{}]: discovery loaded from oauth-authorization-server", name);
+            info!(
+                "oidc[{}]: discovery loaded from oauth-authorization-server",
+                name
+            );
             return Ok(discovery);
         }
         _ => {
@@ -138,19 +141,29 @@ pub async fn fetch_discovery(
 
     let oidc_url = format!("{}/.well-known/openid-configuration", base);
     let res = client.get(&oidc_url).send().await.map_err(|e| {
-        error!("oidc[{}]: failed to fetch openid-configuration: {}", name, e);
+        error!(
+            "oidc[{}]: failed to fetch openid-configuration: {}",
+            name, e
+        );
         AppError::InternalError("Failed to fetch OIDC discovery document".to_string())
     })?;
 
     if !res.status().is_success() {
-        error!("oidc[{}]: discovery endpoint returned {}", name, res.status());
+        error!(
+            "oidc[{}]: discovery endpoint returned {}",
+            name,
+            res.status()
+        );
         return Err(AppError::InternalError(
             "OIDC discovery endpoint returned an error".to_string(),
         ));
     }
 
     let discovery: OidcDiscovery = res.json().await.map_err(|e| {
-        error!("oidc[{}]: failed to parse openid-configuration: {}", name, e);
+        error!(
+            "oidc[{}]: failed to parse openid-configuration: {}",
+            name, e
+        );
         AppError::InternalError("Failed to parse OIDC discovery document".to_string())
     })?;
 
@@ -198,11 +211,17 @@ pub async fn init_provider(
 
     // Validate that the issuer URL uses HTTPS.
     if !cfg.issuer_url.starts_with("https://") {
-        error!("oidc[{}]: issuer URL must use HTTPS: {}", cfg.name, cfg.issuer_url);
+        error!(
+            "oidc[{}]: issuer URL must use HTTPS: {}",
+            cfg.name, cfg.issuer_url
+        );
         return None;
     }
 
-    info!("oidc[{}]: initializing provider for issuer {}", cfg.name, cfg.issuer_url);
+    info!(
+        "oidc[{}]: initializing provider for issuer {}",
+        cfg.name, cfg.issuer_url
+    );
 
     let http_client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(http_client_timeout_secs))
@@ -249,7 +268,10 @@ pub async fn init_registry(config: &Config) -> ProviderRegistry {
                 providers.insert(cfg.name.clone(), provider);
             }
             None => {
-                error!("oidc[{}]: provider failed to initialize; skipping", cfg.name);
+                error!(
+                    "oidc[{}]: provider failed to initialize; skipping",
+                    cfg.name
+                );
             }
         }
     }
@@ -283,7 +305,13 @@ pub async fn jwks_refresh_task(
 
     loop {
         debug!("oidc[{}]: refreshing JWKS keys", provider.name);
-        match fetch_jwks(&provider.http_client, &provider.name, &provider.discovery.jwks_uri).await {
+        match fetch_jwks(
+            &provider.http_client,
+            &provider.name,
+            &provider.discovery.jwks_uri,
+        )
+        .await
+        {
             Ok(new_jwks) => {
                 consecutive_failures = 0;
                 last_success = Instant::now();
@@ -295,9 +323,15 @@ pub async fn jwks_refresh_task(
                 consecutive_failures += 1;
                 let stale_secs = last_success.elapsed().as_secs();
                 if stale_secs > interval_secs * 2 {
-                    error!("oidc[{}]: JWKS keys are {} seconds stale", provider.name, stale_secs);
+                    error!(
+                        "oidc[{}]: JWKS keys are {} seconds stale",
+                        provider.name, stale_secs
+                    );
                 } else {
-                    warn!("oidc[{}]: failed to refresh JWKS keys: {}", provider.name, e);
+                    warn!(
+                        "oidc[{}]: failed to refresh JWKS keys: {}",
+                        provider.name, e
+                    );
                 }
             }
         }
@@ -331,7 +365,10 @@ pub async fn validate_token(
     token: &str,
 ) -> Result<OidcTokenClaims, AppError> {
     let header = jsonwebtoken::decode_header(token).map_err(|e| {
-        warn!("oidc[{}]: failed to decode token header: {}", provider.name, e);
+        warn!(
+            "oidc[{}]: failed to decode token header: {}",
+            provider.name, e
+        );
         AppError::Unauthorized
     })?;
 
@@ -347,9 +384,16 @@ pub async fn validate_token(
         Ok(c) => Ok(c),
         Err(_) if !kid.is_empty() => {
             // Key not found or validation failed — try refreshing JWKS once
-            debug!("oidc[{}]: key kid={} not found in cache, refreshing JWKS", provider.name, kid);
-            match fetch_jwks(&provider.http_client, &provider.name, &provider.discovery.jwks_uri)
-                .await
+            debug!(
+                "oidc[{}]: key kid={} not found in cache, refreshing JWKS",
+                provider.name, kid
+            );
+            match fetch_jwks(
+                &provider.http_client,
+                &provider.name,
+                &provider.discovery.jwks_uri,
+            )
+            .await
             {
                 Ok(new_jwks) => {
                     let result = try_validate_with_jwks(&new_jwks, token, kid, provider);
@@ -359,7 +403,10 @@ pub async fn validate_token(
                     result
                 }
                 Err(_) => {
-                    warn!("oidc[{}]: JWKS refresh failed during token validation", provider.name);
+                    warn!(
+                        "oidc[{}]: JWKS refresh failed during token validation",
+                        provider.name
+                    );
                     Err(AppError::Unauthorized)
                 }
             }
@@ -386,7 +433,10 @@ fn try_validate_with_jwks(
                 && k.use_.as_deref().is_none_or(|u| u == "sig")
         })
         .ok_or_else(|| {
-            warn!("oidc[{}]: no matching JWK found for kid={}", provider.name, kid);
+            warn!(
+                "oidc[{}]: no matching JWK found for kid={}",
+                provider.name, kid
+            );
             AppError::Unauthorized
         })?;
 
@@ -396,13 +446,16 @@ fn try_validate_with_jwks(
     validation.iss = Some(provider.issuer_url.clone());
     validation.set_audience(&[&provider.audience]);
 
-    let token_data =
-        jsonwebtoken::decode::<OidcTokenClaims>(token, &decoding_key, &validation).map_err(|e| {
+    let token_data = jsonwebtoken::decode::<OidcTokenClaims>(token, &decoding_key, &validation)
+        .map_err(|e| {
             warn!("oidc[{}]: token validation failed: {}", provider.name, e);
             AppError::Unauthorized
         })?;
 
-    debug!("oidc[{}]: token validated for sub={}", provider.name, token_data.claims.sub);
+    debug!(
+        "oidc[{}]: token validated for sub={}",
+        provider.name, token_data.claims.sub
+    );
     Ok(token_data.claims)
 }
 
@@ -421,7 +474,10 @@ mod tests {
         }"#;
 
         let discovery: OidcDiscovery = serde_json::from_str(json).unwrap();
-        assert_eq!(discovery.issuer, "https://dev-12345.okta.com/oauth2/default");
+        assert_eq!(
+            discovery.issuer,
+            "https://dev-12345.okta.com/oauth2/default"
+        );
         assert_eq!(discovery.scopes_supported.len(), 3);
     }
 

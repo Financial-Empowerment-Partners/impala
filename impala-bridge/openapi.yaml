@@ -420,10 +420,45 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
 
+  /admin/accounts/{account_id}/sync-mode:
+    put:
+      tags: [admin]
+      summary: Set an account's Payala sync mode (admin only).
+      description: |
+        Flips are forward-only: existing reserve balances and mirrored rows are
+        untouched, and only future batches follow the new mode. Leaving
+        `reserve` while a nonzero reserve balance remains returns 409 unless
+        `force: true` is passed.
+      parameters:
+        - in: path
+          name: account_id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SetSyncModeRequest' }
+      responses:
+        '200':
+          description: Sync mode updated.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SetSyncModeResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
   /sync:
     post:
       tags: [account]
-      summary: Register a periodic account-state sync callback.
+      summary: Record a sync timestamp and reconcile against Soroban RPC.
+      description: |
+        Writes a per-account sync timestamp to Redis, then fetches
+        `getTransactions` from the configured Soroban RPC and checks the
+        returned ids against the local `transaction` table (read-only
+        reconciliation). `account_id` is a Stellar G-address.
       requestBody:
         required: true
         content:
@@ -431,10 +466,77 @@ paths:
             schema: { $ref: '#/components/schemas/SyncRequest' }
       responses:
         '200':
-          description: Sync registered.
+          description: Sync timestamp recorded.
           content:
             application/json:
               schema: { $ref: '#/components/schemas/SyncResponse' }
+
+  /sync/payala:
+    post:
+      tags: [account]
+      summary: Ingest a batch of offline Payala transactions (reserve/mirror sync).
+      description: |
+        Owner-only (`account_id` is the caller's Payala account id — the JWT
+        `sub`, not a Stellar address). The batch is applied atomically in one
+        database transaction and is idempotent per
+        `(account_id, payala_tx_id)`: replayed ids are reported as
+        `duplicates` and an all-duplicate replay is a success with
+        `applied = 0`. A replayed id whose stored amount/currency differ from
+        this submission is additionally counted in `conflicting`.
+
+        Application depends on the account's `sync_mode`:
+        - `reserve`: the fresh items' per-currency net deltas are added to the
+          account's reserve balances — one balance update per batch. The
+          response echoes the current balances for the batch's currencies.
+        - `mirror`: each fresh item is inserted 1:1 into the transaction table
+          (`origin: payala_sync`), visible via `GET /transactions`.
+
+        Amounts are signed integers in minor units (sign = direction) and are
+        unverified client assertions; nothing is submitted on-chain. Rate
+        limited per account (10 req / 60 s); max 500 items and 10 distinct
+        currencies per batch.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PayalaSyncRequest' }
+      responses:
+        '200':
+          description: Batch applied (or fully deduplicated).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PayalaSyncResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /reserves/{account_id}:
+    get:
+      tags: [account]
+      summary: Read an account's Payala reserve balances (owner or admin).
+      description: |
+        Returns the per-currency reserve balances accumulated by reserve-mode
+        sync, plus the account's current `sync_mode`. Balances persist (and
+        stay readable) after an account is switched to mirror mode. An account
+        that has never synced in reserve mode returns an empty list.
+      parameters:
+        - in: path
+          name: account_id
+          required: true
+          schema: { type: string }
+          description: Payala account id.
+      responses:
+        '200':
+          description: Reserve balances.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ReserveBalancesResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
 
   /subscribe:
     post:
@@ -495,6 +597,7 @@ paths:
       summary: Record a dual-chain transaction.
       description: |
         At least one of `stellar_tx_id` or `payala_tx_id` must be supplied.
+        A non-admin caller may only supply a `source_account` they own.
         Rate limited per account (10 req / 60 s).
       requestBody:
         required: true
@@ -507,6 +610,9 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/CreateTransactionResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
         '429': { $ref: '#/components/responses/RateLimited' }
 
   /transaction/{btxid}:
@@ -873,6 +979,7 @@ components:
         affiliation: { type: string, nullable: true }
         gender: { type: string, nullable: true }
         role: { type: string, enum: [view-only, device, token, admin] }
+        sync_mode: { type: string, enum: [reserve, mirror] }
         profile_source: { type: string, enum: [local, ldap, okta] }
         profile_synced_at: { type: string, format: date-time, nullable: true }
         created_at: { type: string, format: date-time, nullable: true }
@@ -909,6 +1016,7 @@ components:
         affiliation: { type: string, nullable: true }
         gender: { type: string, nullable: true }
         role: { type: string, enum: [view-only, device, token, admin] }
+        sync_mode: { type: string, enum: [reserve, mirror] }
         profile_source: { type: string, enum: [local, ldap, okta] }
         created_at: { type: string, format: date-time, nullable: true }
 
@@ -935,6 +1043,24 @@ components:
         message: { type: string }
         account_id: { type: string }
         role: { type: string }
+
+    SetSyncModeRequest:
+      type: object
+      properties:
+        sync_mode: { type: string, enum: [reserve, mirror] }
+        force:
+          type: boolean
+          nullable: true
+          description: Required (true) to leave reserve mode while a nonzero balance remains.
+      required: [sync_mode]
+
+    SetSyncModeResponse:
+      type: object
+      properties:
+        success: { type: boolean }
+        message: { type: string }
+        account_id: { type: string }
+        sync_mode: { type: string, enum: [reserve, mirror] }
 
     DeleteAccountResponse:
       type: object
@@ -993,14 +1119,89 @@ components:
     SyncRequest:
       type: object
       properties:
-        account_id: { type: string }
-        callback_url: { type: string, format: uri }
+        account_id:
+          type: string
+          description: Stellar G-address.
+      required: [account_id]
 
     SyncResponse:
       type: object
       properties:
         success: { type: boolean }
         message: { type: string }
+        timestamp: { type: string, format: date-time }
+
+    PayalaSyncItemInput:
+      type: object
+      properties:
+        payala_tx_id: { type: string, maxLength: 128, pattern: '^[A-Za-z0-9]{1,128}$' }
+        amount:
+          type: integer
+          format: int64
+          description: Signed amount in minor units; sign = direction. Must not be 0.
+        currency: { type: string, pattern: '^[A-Z0-9]{1,16}$' }
+        memo:
+          type: string
+          maxLength: 256
+          nullable: true
+          description: Maximum 256 UTF-8 bytes.
+        payala_digest:
+          type: string
+          maxLength: 256
+          nullable: true
+          description: Maximum 256 UTF-8 bytes.
+      required: [payala_tx_id, amount, currency]
+
+    PayalaSyncRequest:
+      type: object
+      properties:
+        account_id:
+          type: string
+          description: Payala account id (the JWT sub) — NOT a Stellar address.
+        transactions:
+          type: array
+          minItems: 1
+          maxItems: 500
+          items: { $ref: '#/components/schemas/PayalaSyncItemInput' }
+      required: [account_id, transactions]
+
+    PayalaSyncResponse:
+      type: object
+      properties:
+        success: { type: boolean }
+        message: { type: string }
+        batch_id: { type: string, format: uuid }
+        sync_mode: { type: string, enum: [reserve, mirror] }
+        received: { type: integer }
+        applied: { type: integer }
+        duplicates: { type: integer }
+        conflicting:
+          type: integer
+          description: Replayed ids whose stored amount/currency differ from this submission.
+        net_deltas:
+          type: object
+          description: Per-currency net delta over the applied items.
+          additionalProperties: { type: integer, format: int64 }
+        reserve_balances:
+          type: array
+          description: Current balances for the batch's currencies (reserve mode only).
+          items: { $ref: '#/components/schemas/ReserveBalance' }
+
+    ReserveBalance:
+      type: object
+      properties:
+        currency: { type: string }
+        balance: { type: integer, format: int64 }
+        updated_at: { type: string, format: date-time, nullable: true }
+
+    ReserveBalancesResponse:
+      type: object
+      properties:
+        account_id: { type: string }
+        sync_mode: { type: string, enum: [reserve, mirror] }
+        reserves:
+          type: array
+          items: { $ref: '#/components/schemas/ReserveBalance' }
 
     SubscribeRequest:
       type: object
@@ -1050,6 +1251,15 @@ components:
         stellar_max_fee: { type: integer, nullable: true }
         memo: { type: string, nullable: true }
         payala_currency: { type: string, nullable: true }
+        payala_amount:
+          type: integer
+          format: int64
+          nullable: true
+          description: Signed minor units; set on mirror-mode rows only.
+        origin:
+          type: string
+          enum: [manual, payala_sync]
+          description: Server-set provenance; payala_sync rows come from mirror-mode sync.
         created_at: { type: string, format: date-time }
         flagged: { type: boolean }
         status: { type: string, enum: [unreviewed, cleared, flagged, escalated] }

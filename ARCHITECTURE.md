@@ -223,7 +223,9 @@ graph LR
 | `/account` | PUT | Update account profile fields. Validates Stellar account ID format (56 chars, Base32) |
 | `/card` | POST | Register a smartcard by storing its card ID, EC public key (secp256r1), and RSA public key. Validates key formats before INSERT |
 | `/card` | DELETE | Soft-delete a card registration (sets `is_delete = TRUE` and `deleted_at` timestamp) |
-| `/transaction` | POST | Create a dual-chain transaction record with Stellar and Payala transaction IDs, hashes, fees, memo, and signatures |
+| `/transaction` | POST | Create a dual-chain transaction record with Stellar and Payala transaction IDs, hashes, fees, memo, and signatures. Non-admin callers may only supply a `source_account` they own |
+| `/sync/payala` | POST | Ingest a batch of offline Payala transactions (owner-only, atomic, idempotent per `(account, payala_tx_id)`). Applied per the account's `sync_mode`: `reserve` nets each batch into per-currency reserve balances; `mirror` inserts each fresh item 1:1 into `transaction` (`origin = 'payala_sync'`) |
+| `/reserves/:account_id` | GET | Read an account's per-currency Payala reserve balances and current `sync_mode` (owner or admin) |
 | `/mfa` | GET | List all MFA enrollments (TOTP and/or SMS) for the authenticated user |
 | `/mfa` | POST | Enroll a new MFA method. TOTP: generates a secret and returns a provisioning URI for QR code display. SMS: requires and validates a phone number (E.164 format) |
 | `/mfa/verify` | POST | Verify an MFA code. TOTP: validates against stored secret using `totp-rs`. SMS: validates against code stored in Redis with constant-time comparison (`subtle::ConstantTimeEq`). Brute force protected: 5 attempts per account/type, then 15-minute lockout |
@@ -244,6 +246,7 @@ graph LR
 |----------|--------|---------|
 | `/subscribe` | POST | Initiate a network event stream — Stellar SSE from Horizon `/ledgers` or Payala TCP listener |
 | `/sync` | POST | Trigger cross-ledger transaction reconciliation against Soroban RPC `getTransactions` |
+| `/admin/accounts/:account_id/sync-mode` | PUT | Set an account's Payala sync mode (`reserve`/`mirror`). Forward-only — history is not migrated; leaving reserve mode with a nonzero balance requires `force: true` |
 
 ### Authentication and Authorization
 
@@ -452,7 +455,7 @@ stateDiagram-v2
 
 ## impala-lib — Android NFC and Geolocation Library
 
-This Android library (package `com.payala.impala`, min SDK 24) provides two communication channels for integrating Impala into Android applications:
+This Android library (package `com.payala.impala`, min SDK 30) provides two communication channels for integrating Impala into Android applications:
 
 **NFC via IsoDep (ISO 14443-4 smartcard interface)**:
 - `NfcContactActivity` manages foreground dispatch to intercept NFC tag discoveries
@@ -663,6 +666,8 @@ erDiagram
         varchar nickname
         varchar affiliation
         varchar gender
+        varchar role
+        varchar sync_mode
         timestamptz created_at
         timestamptz updated_at
     }
@@ -698,6 +703,36 @@ erDiagram
         text memo
         varchar payala_currency
         varchar payala_digest
+        bigint payala_amount
+        varchar origin
+        timestamptz created_at
+    }
+
+    payala_reserve {
+        varchar payala_account_id PK
+        varchar currency PK
+        bigint balance
+        timestamptz updated_at
+    }
+
+    payala_sync_batch {
+        uuid batch_id PK
+        varchar payala_account_id FK
+        varchar sync_mode
+        integer item_count
+        integer applied_count
+        integer duplicate_count
+        integer conflicting_count
+        jsonb net_deltas
+        timestamptz created_at
+    }
+
+    payala_sync_item {
+        varchar payala_account_id PK
+        varchar payala_tx_id PK
+        uuid batch_id FK
+        bigint amount
+        varchar currency
         timestamptz created_at
     }
 
@@ -751,9 +786,14 @@ erDiagram
     impala_account ||--o{ notification_subscription : "subscribes"
     impala_account ||--o{ device_token : "registers"
     impala_account ||--o{ transaction : "initiates"
+    impala_account ||--o{ payala_reserve : "holds reserve"
+    impala_account ||--o{ payala_sync_batch : "syncs batches"
+    payala_sync_batch ||--o{ payala_sync_item : "contains"
 ```
 
-The database schema is managed by 17 sequential SQL migrations. Performance indices cover: `card(account_id)` filtered on active cards, `impala_mfa(account_id, mfa_type)`, `notify(account_id)` filtered on active entries, `transaction(created_at)`, and `notification_subscription(account_id, event_type)` filtered on enabled subscriptions.
+Each account carries a `sync_mode` (`reserve` default, or `mirror`) selecting how `POST /sync/payala` applies a batch of offline Payala transactions: reserve mode nets each batch into `payala_reserve` (one balance update per batch, per currency), mirror mode inserts each fresh item 1:1 into `transaction` with `origin = 'payala_sync'`. `payala_sync_item` is the shared idempotency ledger — its `(payala_account_id, payala_tx_id)` primary key makes batch replay a no-op — and `payala_sync_batch` audits every ingestion.
+
+The database schema is managed by 23 sequential SQL migrations. Performance indices cover: `card(account_id)` filtered on active cards, `impala_mfa(account_id, mfa_type)`, `notify(account_id)` filtered on active entries, `transaction(created_at)`, and `notification_subscription(account_id, event_type)` filtered on enabled subscriptions.
 
 ---
 

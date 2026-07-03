@@ -114,7 +114,7 @@ pub async fn get_account(
     let mut sql = String::from(
         r#"
         SELECT payala_account_id, stellar_account_id, first_name, middle_name, last_name,
-               nickname, affiliation, gender, role, profile_source,
+               nickname, affiliation, gender, role, sync_mode, profile_source,
                to_char(profile_synced_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS profile_synced_at,
                to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS created_at
         FROM impala_account

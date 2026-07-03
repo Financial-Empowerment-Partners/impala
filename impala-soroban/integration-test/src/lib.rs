@@ -17,9 +17,7 @@
 //! All state is stored at the instance level via `env.storage().instance()`.
 
 #![no_std]
-use soroban_sdk::{
-    contract, contractimpl, contracttype, token, Address, Env, Vec, symbol_short
-};
+use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, token, Address, Env, Vec};
 
 /// Configuration for the multisig signer set.
 #[contracttype]
@@ -82,6 +80,11 @@ const MAX_LOCK_DURATION: u64 = 31_536_000;
 #[contract]
 pub struct MultisigAssetWrapper;
 
+// soroban-sdk 23 deprecates Events::publish in favor of #[contractevent]
+// structs. Migrating changes the emitted event encoding, and the current
+// topics (wrap, sched_unw, exec_tx, ...) are load-bearing for downstream
+// consumers, so the migration is deliberately deferred.
+#[allow(deprecated)]
 #[contractimpl]
 impl MultisigAssetWrapper {
     /// Initialize with minimum lock duration (in seconds)
@@ -101,15 +104,23 @@ impl MultisigAssetWrapper {
         }
 
         let config = MultisigConfig { signers, threshold };
-        env.storage().instance().set(&DataKey::MultisigConfig, &config);
+        env.storage()
+            .instance()
+            .set(&DataKey::MultisigConfig, &config);
 
         let wrapped_asset = WrappedAsset {
             underlying_token: underlying_token.clone(),
             total_wrapped: 0,
         };
-        env.storage().instance().set(&DataKey::WrappedAsset, &wrapped_asset);
-        env.storage().instance().set(&DataKey::MinLockDuration, &min_lock_duration);
-        env.storage().instance().set(&DataKey::NextTimeLockId, &0u64);
+        env.storage()
+            .instance()
+            .set(&DataKey::WrappedAsset, &wrapped_asset);
+        env.storage()
+            .instance()
+            .set(&DataKey::MinLockDuration, &min_lock_duration);
+        env.storage()
+            .instance()
+            .set(&DataKey::NextTimeLockId, &0u64);
         env.storage().instance().set(&DataKey::Initialized, &true);
     }
 
@@ -117,20 +128,14 @@ impl MultisigAssetWrapper {
     pub fn pause(env: Env, signers: Vec<Address>) {
         Self::verify_multisig(&env, &signers);
         env.storage().instance().set(&DataKey::Paused, &true);
-        env.events().publish(
-            (symbol_short!("pause"),),
-            0,
-        );
+        env.events().publish((symbol_short!("pause"),), 0);
     }
 
     /// Unpause the contract (requires multisig).
     pub fn unpause(env: Env, signers: Vec<Address>) {
         Self::verify_multisig(&env, &signers);
         env.storage().instance().set(&DataKey::Paused, &false);
-        env.events().publish(
-            (symbol_short!("unpause"),),
-            0,
-        );
+        env.events().publish((symbol_short!("unpause"),), 0);
     }
 
     /// Rotate the authorized signer set (requires current multisig).
@@ -140,7 +145,7 @@ impl MultisigAssetWrapper {
         new_signers: Vec<Address>,
         new_threshold: u32,
     ) {
-        if new_signers.len() == 0 {
+        if new_signers.is_empty() {
             panic!("New signers must not be empty");
         }
         if new_threshold == 0 || new_threshold > new_signers.len() {
@@ -153,12 +158,12 @@ impl MultisigAssetWrapper {
             signers: new_signers,
             threshold: new_threshold,
         };
-        env.storage().instance().set(&DataKey::MultisigConfig, &config);
+        env.storage()
+            .instance()
+            .set(&DataKey::MultisigConfig, &config);
 
-        env.events().publish(
-            (symbol_short!("rotate"),),
-            new_threshold,
-        );
+        env.events()
+            .publish((symbol_short!("rotate"),), new_threshold);
     }
 
     /// Wrap tokens (immediate execution, no timelock)
@@ -179,36 +184,28 @@ impl MultisigAssetWrapper {
 
         let token_client = token::Client::new(&env, &wrapped_asset.underlying_token);
         let contract_address = env.current_contract_address();
-        
+
         signers.get(0).unwrap().require_auth();
-        token_client.transfer(
-            &signers.get(0).unwrap(),
-            &contract_address,
-            &amount,
-        );
+        token_client.transfer(&signers.get(0).unwrap(), &contract_address, &amount);
 
         let balance_key = DataKey::Balance(signers.get(0).unwrap());
-        let current_balance: i128 = env
-            .storage()
-            .instance()
-            .get(&balance_key)
-            .unwrap_or(0);
-        
-        let new_balance = current_balance.checked_add(amount).expect("Balance overflow");
-        env.storage()
-            .instance()
-            .set(&balance_key, &new_balance);
+        let current_balance: i128 = env.storage().instance().get(&balance_key).unwrap_or(0);
 
-        wrapped_asset.total_wrapped = wrapped_asset.total_wrapped
-            .checked_add(amount).expect("Total supply overflow");
+        let new_balance = current_balance
+            .checked_add(amount)
+            .expect("Balance overflow");
+        env.storage().instance().set(&balance_key, &new_balance);
+
+        wrapped_asset.total_wrapped = wrapped_asset
+            .total_wrapped
+            .checked_add(amount)
+            .expect("Total supply overflow");
         env.storage()
             .instance()
             .set(&DataKey::WrappedAsset, &wrapped_asset);
 
-        env.events().publish(
-            (symbol_short!("wrap"), signers.get(0).unwrap()),
-            amount,
-        );
+        env.events()
+            .publish((symbol_short!("wrap"), signers.get(0).unwrap()), amount);
     }
 
     /// Schedule a time-locked unwrap operation
@@ -242,11 +239,7 @@ impl MultisigAssetWrapper {
         }
 
         let balance_key = DataKey::Balance(recipient.clone());
-        let current_balance: i128 = env
-            .storage()
-            .instance()
-            .get(&balance_key)
-            .unwrap_or(0);
+        let current_balance: i128 = env.storage().instance().get(&balance_key).unwrap_or(0);
 
         if current_balance < amount {
             panic!("Insufficient wrapped balance");
@@ -261,7 +254,7 @@ impl MultisigAssetWrapper {
         let unlock_time = env.ledger().timestamp() + delay_seconds;
 
         let timelock = TimeLock {
-            operation_type: 1,  // unwrap
+            operation_type: 1, // unwrap
             signers: signers.clone(),
             sender: recipient.clone(),
             recipient: recipient.clone(),
@@ -273,7 +266,7 @@ impl MultisigAssetWrapper {
         env.storage()
             .instance()
             .set(&DataKey::TimeLock(timelock_id), &timelock);
-        
+
         env.storage()
             .instance()
             .set(&DataKey::NextTimeLockId, &(timelock_id + 1));
@@ -308,11 +301,7 @@ impl MultisigAssetWrapper {
         Self::verify_multisig(&env, &timelock.signers);
 
         let balance_key = DataKey::Balance(timelock.recipient.clone());
-        let current_balance: i128 = env
-            .storage()
-            .instance()
-            .get(&balance_key)
-            .unwrap_or(0);
+        let current_balance: i128 = env.storage().instance().get(&balance_key).unwrap_or(0);
 
         if current_balance < timelock.amount {
             panic!("Insufficient balance");
@@ -331,10 +320,10 @@ impl MultisigAssetWrapper {
             .unwrap();
 
         // Burn wrapped tokens
-        let new_balance = current_balance.checked_sub(timelock.amount).expect("Balance underflow");
-        env.storage()
-            .instance()
-            .set(&balance_key, &new_balance);
+        let new_balance = current_balance
+            .checked_sub(timelock.amount)
+            .expect("Balance underflow");
+        env.storage().instance().set(&balance_key, &new_balance);
 
         // Transfer underlying tokens
         let token_client = token::Client::new(&env, &wrapped_asset.underlying_token);
@@ -342,8 +331,10 @@ impl MultisigAssetWrapper {
 
         token_client.transfer(&contract_address, &timelock.recipient, &timelock.amount);
 
-        wrapped_asset.total_wrapped = wrapped_asset.total_wrapped
-            .checked_sub(timelock.amount).expect("Total supply underflow");
+        wrapped_asset.total_wrapped = wrapped_asset
+            .total_wrapped
+            .checked_sub(timelock.amount)
+            .expect("Total supply underflow");
         env.storage()
             .instance()
             .set(&DataKey::WrappedAsset, &wrapped_asset);
@@ -405,7 +396,7 @@ impl MultisigAssetWrapper {
         let unlock_time = env.ledger().timestamp() + delay_seconds;
 
         let timelock = TimeLock {
-            operation_type: 2,  // transfer
+            operation_type: 2, // transfer
             signers: signers.clone(),
             sender: from.clone(),
             recipient: to.clone(),
@@ -417,7 +408,7 @@ impl MultisigAssetWrapper {
         env.storage()
             .instance()
             .set(&DataKey::TimeLock(timelock_id), &timelock);
-        
+
         env.storage()
             .instance()
             .set(&DataKey::NextTimeLockId, &(timelock_id + 1));
@@ -466,13 +457,22 @@ impl MultisigAssetWrapper {
             .instance()
             .set(&DataKey::TimeLock(timelock_id), &timelock);
 
-        let new_from = from_balance.checked_sub(timelock.amount).expect("Balance underflow");
-        let new_to = to_balance.checked_add(timelock.amount).expect("Balance overflow");
+        let new_from = from_balance
+            .checked_sub(timelock.amount)
+            .expect("Balance underflow");
+        let new_to = to_balance
+            .checked_add(timelock.amount)
+            .expect("Balance overflow");
         env.storage().instance().set(&from_key, &new_from);
         env.storage().instance().set(&to_key, &new_to);
 
         env.events().publish(
-            (symbol_short!("exec_tx"), timelock.sender, timelock.recipient, timelock_id),
+            (
+                symbol_short!("exec_tx"),
+                timelock.sender,
+                timelock.recipient,
+                timelock_id,
+            ),
             timelock.amount,
         );
     }
@@ -497,10 +497,8 @@ impl MultisigAssetWrapper {
             .instance()
             .set(&DataKey::TimeLock(timelock_id), &timelock);
 
-        env.events().publish(
-            (symbol_short!("cancel"), timelock_id),
-            0,
-        );
+        env.events()
+            .publish((symbol_short!("cancel"), timelock_id), 0);
     }
 
     /// Get timelock details
@@ -768,9 +766,7 @@ mod tests {
                 .get(&DataKey::WrappedAsset)
                 .unwrap();
             wa.total_wrapped = 500;
-            env.storage()
-                .instance()
-                .set(&DataKey::WrappedAsset, &wa);
+            env.storage().instance().set(&DataKey::WrappedAsset, &wa);
         });
 
         let client = MultisigAssetWrapperClient::new(&env, &contract_id);
@@ -796,9 +792,7 @@ mod tests {
                 .get(&DataKey::WrappedAsset)
                 .unwrap();
             wa.total_wrapped = 1000;
-            env.storage()
-                .instance()
-                .set(&DataKey::WrappedAsset, &wa);
+            env.storage().instance().set(&DataKey::WrappedAsset, &wa);
         });
 
         let client = MultisigAssetWrapperClient::new(&env, &contract_id);
@@ -829,9 +823,7 @@ mod tests {
                 .get(&DataKey::WrappedAsset)
                 .unwrap();
             wa.total_wrapped = 500;
-            env.storage()
-                .instance()
-                .set(&DataKey::WrappedAsset, &wa);
+            env.storage().instance().set(&DataKey::WrappedAsset, &wa);
         });
 
         let client = MultisigAssetWrapperClient::new(&env, &contract_id);
@@ -840,7 +832,10 @@ mod tests {
         client.cancel_timelock(&signers, &tl_id);
 
         let tl = client.get_timelock(&tl_id);
-        assert!(tl.executed, "Cancelled timelock should be marked as executed");
+        assert!(
+            tl.executed,
+            "Cancelled timelock should be marked as executed"
+        );
     }
 
     #[test]
@@ -860,9 +855,7 @@ mod tests {
                 .get(&DataKey::WrappedAsset)
                 .unwrap();
             wa.total_wrapped = 500;
-            env.storage()
-                .instance()
-                .set(&DataKey::WrappedAsset, &wa);
+            env.storage().instance().set(&DataKey::WrappedAsset, &wa);
         });
 
         let client = MultisigAssetWrapperClient::new(&env, &contract_id);
@@ -892,9 +885,7 @@ mod tests {
                 .get(&DataKey::WrappedAsset)
                 .unwrap();
             wa.total_wrapped = 5000;
-            env.storage()
-                .instance()
-                .set(&DataKey::WrappedAsset, &wa);
+            env.storage().instance().set(&DataKey::WrappedAsset, &wa);
         });
 
         let client = MultisigAssetWrapperClient::new(&env, &contract_id);
@@ -1000,9 +991,7 @@ mod tests {
                 .get(&DataKey::WrappedAsset)
                 .unwrap();
             wa.total_wrapped = 500;
-            env.storage()
-                .instance()
-                .set(&DataKey::WrappedAsset, &wa);
+            env.storage().instance().set(&DataKey::WrappedAsset, &wa);
         });
 
         let client = MultisigAssetWrapperClient::new(&env, &contract_id);
@@ -1031,9 +1020,7 @@ mod tests {
                 .get(&DataKey::WrappedAsset)
                 .unwrap();
             wa.total_wrapped = 500;
-            env.storage()
-                .instance()
-                .set(&DataKey::WrappedAsset, &wa);
+            env.storage().instance().set(&DataKey::WrappedAsset, &wa);
         });
 
         let client = MultisigAssetWrapperClient::new(&env, &contract_id);
@@ -1065,9 +1052,7 @@ mod tests {
                 .get(&DataKey::WrappedAsset)
                 .unwrap();
             wa.total_wrapped = 500;
-            env.storage()
-                .instance()
-                .set(&DataKey::WrappedAsset, &wa);
+            env.storage().instance().set(&DataKey::WrappedAsset, &wa);
         });
 
         // Only 1 signer provided when 2 are required
@@ -1095,9 +1080,7 @@ mod tests {
                 .get(&DataKey::WrappedAsset)
                 .unwrap();
             wa.total_wrapped = 1500;
-            env.storage()
-                .instance()
-                .set(&DataKey::WrappedAsset, &wa);
+            env.storage().instance().set(&DataKey::WrappedAsset, &wa);
         });
 
         let client = MultisigAssetWrapperClient::new(&env, &contract_id);
@@ -1134,9 +1117,7 @@ mod tests {
                 .get(&DataKey::WrappedAsset)
                 .unwrap();
             wa.total_wrapped = 300;
-            env.storage()
-                .instance()
-                .set(&DataKey::WrappedAsset, &wa);
+            env.storage().instance().set(&DataKey::WrappedAsset, &wa);
         });
 
         let client = MultisigAssetWrapperClient::new(&env, &contract_id);
@@ -1164,9 +1145,7 @@ mod tests {
                 .get(&DataKey::WrappedAsset)
                 .unwrap();
             wa.total_wrapped = 300;
-            env.storage()
-                .instance()
-                .set(&DataKey::WrappedAsset, &wa);
+            env.storage().instance().set(&DataKey::WrappedAsset, &wa);
         });
 
         let client = MultisigAssetWrapperClient::new(&env, &contract_id);
@@ -1206,9 +1185,7 @@ mod tests {
                 .get(&DataKey::WrappedAsset)
                 .unwrap();
             wa.total_wrapped = 500;
-            env.storage()
-                .instance()
-                .set(&DataKey::WrappedAsset, &wa);
+            env.storage().instance().set(&DataKey::WrappedAsset, &wa);
         });
 
         let client = MultisigAssetWrapperClient::new(&env, &contract_id);
@@ -1234,9 +1211,7 @@ mod tests {
                 .get(&DataKey::WrappedAsset)
                 .unwrap();
             wa.total_wrapped = 500;
-            env.storage()
-                .instance()
-                .set(&DataKey::WrappedAsset, &wa);
+            env.storage().instance().set(&DataKey::WrappedAsset, &wa);
         });
 
         let client = MultisigAssetWrapperClient::new(&env, &contract_id);
@@ -1270,9 +1245,7 @@ mod tests {
                 .get(&DataKey::WrappedAsset)
                 .unwrap();
             wa.total_wrapped = 500;
-            env.storage()
-                .instance()
-                .set(&DataKey::WrappedAsset, &wa);
+            env.storage().instance().set(&DataKey::WrappedAsset, &wa);
         });
 
         let client = MultisigAssetWrapperClient::new(&env, &contract_id);
@@ -1298,9 +1271,7 @@ mod tests {
                 .get(&DataKey::WrappedAsset)
                 .unwrap();
             wa.total_wrapped = 500;
-            env.storage()
-                .instance()
-                .set(&DataKey::WrappedAsset, &wa);
+            env.storage().instance().set(&DataKey::WrappedAsset, &wa);
         });
 
         let client = MultisigAssetWrapperClient::new(&env, &contract_id);
@@ -1346,9 +1317,7 @@ mod tests {
                 .get(&DataKey::WrappedAsset)
                 .unwrap();
             wa.total_wrapped = 500;
-            env.storage()
-                .instance()
-                .set(&DataKey::WrappedAsset, &wa);
+            env.storage().instance().set(&DataKey::WrappedAsset, &wa);
         });
 
         // Pause then unpause
@@ -1378,9 +1347,7 @@ mod tests {
                 .get(&DataKey::WrappedAsset)
                 .unwrap();
             wa.total_wrapped = 500;
-            env.storage()
-                .instance()
-                .set(&DataKey::WrappedAsset, &wa);
+            env.storage().instance().set(&DataKey::WrappedAsset, &wa);
         });
 
         let client = MultisigAssetWrapperClient::new(&env, &contract_id);
@@ -1427,9 +1394,7 @@ mod tests {
                 .get(&DataKey::WrappedAsset)
                 .unwrap();
             wa.total_wrapped = 500;
-            env.storage()
-                .instance()
-                .set(&DataKey::WrappedAsset, &wa);
+            env.storage().instance().set(&DataKey::WrappedAsset, &wa);
         });
 
         // New signers should be able to operate
@@ -1467,9 +1432,7 @@ mod tests {
                 .get(&DataKey::WrappedAsset)
                 .unwrap();
             wa.total_wrapped = 500;
-            env.storage()
-                .instance()
-                .set(&DataKey::WrappedAsset, &wa);
+            env.storage().instance().set(&DataKey::WrappedAsset, &wa);
         });
 
         // Old signer should be rejected
@@ -1493,9 +1456,7 @@ mod tests {
                 .get(&DataKey::WrappedAsset)
                 .unwrap();
             wa.total_wrapped = 500;
-            env.storage()
-                .instance()
-                .set(&DataKey::WrappedAsset, &wa);
+            env.storage().instance().set(&DataKey::WrappedAsset, &wa);
         });
 
         let client = MultisigAssetWrapperClient::new(&env, &contract_id);
@@ -1530,9 +1491,7 @@ mod tests {
                 .get(&DataKey::WrappedAsset)
                 .unwrap();
             wa.total_wrapped = 500;
-            env.storage()
-                .instance()
-                .set(&DataKey::WrappedAsset, &wa);
+            env.storage().instance().set(&DataKey::WrappedAsset, &wa);
         });
 
         let client = MultisigAssetWrapperClient::new(&env, &contract_id);
@@ -1619,9 +1578,7 @@ mod tests {
                 .get(&DataKey::WrappedAsset)
                 .unwrap();
             wa.total_wrapped = 500;
-            env.storage()
-                .instance()
-                .set(&DataKey::WrappedAsset, &wa);
+            env.storage().instance().set(&DataKey::WrappedAsset, &wa);
         });
 
         let client = MultisigAssetWrapperClient::new(&env, &contract_id);

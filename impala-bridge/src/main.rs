@@ -288,8 +288,14 @@ async fn run_server(
             "/admin/accounts/:account_id/sync-profile",
             post(admin::sync_profile),
         )
+        .route(
+            "/admin/accounts/:account_id/sync-mode",
+            put(admin::set_sync_mode),
+        )
         .route("/authenticate", post(authenticate::authenticate))
         .route("/sync", post(sync::sync_account))
+        .route("/sync/payala", post(sync::sync_payala))
+        .route("/reserves/:account_id", get(sync::get_reserves))
         .route("/token", post(token::token))
         .route("/subscribe", post(subscribe::subscribe))
         .route("/transactions", get(transaction::list_transactions))

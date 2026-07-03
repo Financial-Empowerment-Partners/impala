@@ -13,12 +13,13 @@ use log::{error, info, warn};
 use sqlx::PgPool;
 
 use crate::auth::{require_admin, AuthenticatedUser};
-use crate::constants::ROLE_ADMIN;
+use crate::constants::{ROLE_ADMIN, SYNC_MODE_RESERVE};
 use crate::error::AppError;
 use crate::ldap::LdapConfig;
 use crate::models::{
     AdminAccountListItem, DeleteAccountResponse, ListAccountsQuery, PaginatedResponse,
-    PaginationParams, SetRoleRequest, SetRoleResponse, SyncProfileResponse,
+    PaginationParams, SetRoleRequest, SetRoleResponse, SetSyncModeRequest, SetSyncModeResponse,
+    SyncProfileResponse,
 };
 
 const TS_FMT: &str = "YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"";
@@ -66,7 +67,7 @@ pub async fn list_accounts(
 
     let select_sql = format!(
         r#"SELECT payala_account_id, stellar_account_id, first_name, middle_name, last_name,
-                  nickname, affiliation, gender, role, profile_source,
+                  nickname, affiliation, gender, role, sync_mode, profile_source,
                   to_char(created_at AT TIME ZONE 'UTC', '{ts}') AS created_at
            FROM impala_account
            WHERE ($1::text IS NULL
@@ -160,6 +161,99 @@ pub async fn set_account_role(
         message: "Role updated".to_string(),
         account_id,
         role: payload.role,
+    }))
+}
+
+/// `PUT /admin/accounts/:account_id/sync-mode` — set an account's Payala sync
+/// mode (admin only). Flips are forward-only: existing reserve balances and
+/// mirrored rows are untouched, and only future batches follow the new mode.
+/// Leaving `reserve` while a nonzero balance remains requires `force: true`
+/// (the balance would otherwise sit frozen and easy to overlook).
+pub async fn set_sync_mode(
+    user: AuthenticatedUser,
+    Extension(pool): Extension<PgPool>,
+    Path(account_id): Path<String>,
+    Json(payload): Json<SetSyncModeRequest>,
+) -> Result<Json<SetSyncModeResponse>, AppError> {
+    require_admin(&user)?;
+    crate::validate::validate_sync_mode(&payload.sync_mode)?;
+
+    // Guard and flip run in one transaction under the same per-account
+    // advisory lock as sync_payala, so the nonzero-balance check cannot race
+    // an in-flight batch (which would otherwise land a reserve delta between
+    // the check and the UPDATE, silently bypassing the 409).
+    let mut tx = pool.begin().await.map_err(|e| {
+        error!("set_sync_mode: begin error: {}", e);
+        AppError::InternalError("Database error".to_string())
+    })?;
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext('payala_sync:' || $1))")
+        .bind(&account_id)
+        .execute(&mut tx)
+        .await
+        .map_err(|e| {
+            error!("set_sync_mode: advisory lock error: {}", e);
+            AppError::InternalError("Database error".to_string())
+        })?;
+
+    let current_mode: String =
+        sqlx::query_scalar("SELECT sync_mode FROM impala_account WHERE payala_account_id = $1")
+            .bind(&account_id)
+            .fetch_optional(&mut tx)
+            .await
+            .map_err(|e| {
+                error!("set_sync_mode: mode lookup error: {}", e);
+                AppError::InternalError("Database error".to_string())
+            })?
+            .ok_or_else(|| AppError::NotFound("Account not found".to_string()))?;
+
+    if current_mode == SYNC_MODE_RESERVE
+        && payload.sync_mode != SYNC_MODE_RESERVE
+        && payload.force != Some(true)
+    {
+        let nonzero: Option<i32> = sqlx::query_scalar(
+            "SELECT 1 FROM payala_reserve WHERE payala_account_id = $1 AND balance != 0 LIMIT 1",
+        )
+        .bind(&account_id)
+        .fetch_optional(&mut tx)
+        .await
+        .map_err(|e| {
+            error!("set_sync_mode: reserve check error: {}", e);
+            AppError::InternalError("Database error".to_string())
+        })?;
+        if nonzero.is_some() {
+            return Err(AppError::Conflict(
+                "account has a nonzero reserve balance; pass force=true to switch anyway"
+                    .to_string(),
+            ));
+        }
+    }
+
+    sqlx::query(
+        "UPDATE impala_account SET sync_mode = $1, updated_at = NOW() WHERE payala_account_id = $2",
+    )
+    .bind(&payload.sync_mode)
+    .bind(&account_id)
+    .execute(&mut tx)
+    .await
+    .map_err(|e| {
+        error!("set_sync_mode: update error: {}", e);
+        AppError::InternalError("Database error".to_string())
+    })?;
+
+    tx.commit().await.map_err(|e| {
+        error!("set_sync_mode: commit error: {}", e);
+        AppError::InternalError("Database error".to_string())
+    })?;
+
+    info!(
+        "set_sync_mode: account_id={} sync_mode={} by={}",
+        account_id, payload.sync_mode, user.account_id
+    );
+    Ok(Json(SetSyncModeResponse {
+        success: true,
+        message: "Sync mode updated".to_string(),
+        account_id,
+        sync_mode: payload.sync_mode,
     }))
 }
 

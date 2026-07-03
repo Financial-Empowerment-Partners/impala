@@ -42,6 +42,10 @@ pub struct AppMetrics {
 
     // Batch sync
     pub batch_sync_accounts: Counter<u64>,
+
+    // Payala sync (reserve/mirror)
+    pub payala_sync_batches: Counter<u64>,
+    pub payala_sync_items: Counter<u64>,
 }
 
 impl AppMetrics {
@@ -109,6 +113,15 @@ impl AppMetrics {
             batch_sync_accounts: meter
                 .u64_counter("batch_sync.accounts")
                 .with_description("Batch sync account outcomes")
+                .init(),
+
+            payala_sync_batches: meter
+                .u64_counter("payala_sync.batches")
+                .with_description("Payala sync batches successfully applied, by mode")
+                .init(),
+            payala_sync_items: meter
+                .u64_counter("payala_sync.items")
+                .with_description("Payala sync items by result (applied/duplicate/conflicting)")
                 .init(),
         }
     }

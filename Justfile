@@ -34,15 +34,15 @@ test: test-bridge test-card test-lib test-demo test-soroban test-ui
 test-bridge:
     cd impala-bridge && cargo test
 
-# impala-card SDK tests (JVM target; applet has known-missing classes).
+# impala-card SDK tests (JVM target, jcardsim-backed). Needs JDK 17 (JAVA_HOME).
 test-card:
     cd impala-card && ./gradlew :sdk:jvmTest
 
-# impala-lib unit tests.
+# impala-lib unit tests. Needs JDK 17 (JAVA_HOME) + Android SDK.
 test-lib:
     cd impala-lib && ./gradlew test
 
-# impala-android-demo unit tests.
+# impala-android-demo unit tests. Needs JDK 17, Android SDK, app/google-services.json.
 test-demo:
     cd impala-android-demo && ./gradlew test
 
@@ -119,6 +119,7 @@ scan-docker:
     trivy config impala-bridge/Dockerfile
     trivy config impala-ui/Dockerfile 2>/dev/null || true
 
-# Scan terraform with tfsec (requires `brew install tfsec`).
+# Scan terraform with trivy (requires `brew install trivy`; replaces the
+# deprecated tfsec, which cannot parse Terraform 1.5 `check` blocks).
 scan-tf:
-    tfsec terraform
+    trivy config --severity HIGH,CRITICAL terraform

@@ -1,7 +1,7 @@
 # Impala bridge
 
 The Payala impala bridge uses the Rust SDK to exercise the Horizon API or RPC API for
-[accounts](https://developers.stellar.org/docs/data/apis/horizon/api-reference/resources/accounts), 
+[accounts](https://developers.stellar.org/docs/data/apis/horizon/api-reference/resources/accounts),
 [assets](https://developers.stellar.org/docs/data/apis/horizon/api-reference/resources/assets),
 [payments](https://developers.stellar.org/docs/data/apis/horizon/api-reference/resources/payments),
 and [transactions](https://developers.stellar.org/docs/data/apis/horizon/api-reference/resources/transactions).
@@ -92,11 +92,11 @@ The server will start on `http://0.0.0.0:8080`
 ### Docker configuration
 
 ```bash
-cd impala-bridge                                                                                                                                                                                                
-docker compose up --build                                                                                                                                                                                       
-```                                                                                                                                                                                                                  
-The bridge will be available at http://localhost:8080. Note that if your app reads REDIS_URL with a different env var name, you may need to adjust that in the environment section.                             
-                                                                                                                                   
+cd impala-bridge
+docker compose up --build
+```
+The bridge will be available at http://localhost:8080. Note that if your app reads REDIS_URL with a different env var name, you may need to adjust that in the environment section.
+
 
 ## API Endpoints
 
@@ -289,4 +289,3 @@ When account not found (200 OK with success: false):
 ```
 
 **500 Internal Server Error:** Database operation failed
-

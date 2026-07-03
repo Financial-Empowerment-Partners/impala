@@ -95,6 +95,7 @@ pub struct GetAccountResponse {
     pub affiliation: Option<String>,
     pub gender: Option<String>,
     pub role: String,
+    pub sync_mode: String,
     pub profile_source: String,
     pub profile_synced_at: Option<String>,
     pub created_at: Option<String>,
@@ -122,6 +123,7 @@ pub struct AdminAccountListItem {
     pub affiliation: Option<String>,
     pub gender: Option<String>,
     pub role: String,
+    pub sync_mode: String,
     pub profile_source: String,
     pub created_at: Option<String>,
 }
@@ -258,6 +260,73 @@ pub struct SyncResponse {
     pub timestamp: String,
 }
 
+// ── Payala Sync (reserve / mirror modes) ───────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct PayalaSyncItemInput {
+    pub payala_tx_id: String,
+    /// Signed amount in minor units; sign = direction (+incoming / -outgoing).
+    pub amount: i64,
+    pub currency: String,
+    pub memo: Option<String>,
+    pub payala_digest: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PayalaSyncRequest {
+    /// The Payala account id (== JWT sub), NOT a Stellar G-address.
+    pub account_id: String,
+    pub transactions: Vec<PayalaSyncItemInput>,
+}
+
+#[derive(Serialize)]
+pub struct PayalaSyncResponse {
+    pub success: bool,
+    pub message: String,
+    pub batch_id: Uuid,
+    pub sync_mode: String,
+    pub received: usize,
+    pub applied: usize,
+    pub duplicates: usize,
+    /// Previously-seen ids whose stored (amount, currency) differ from this
+    /// submission — a ledger-integrity signal, not routine idempotency.
+    pub conflicting: usize,
+    /// Per-currency net delta over APPLIED items (BTreeMap → stable key order).
+    pub net_deltas: std::collections::BTreeMap<String, i64>,
+    /// Current reserve balances for the batch's currencies (reserve mode only;
+    /// lets an idempotent replay after a timed-out response reconcile state).
+    pub reserve_balances: Vec<ReserveBalance>,
+}
+
+#[derive(Debug, Serialize, sqlx::FromRow)]
+pub struct ReserveBalance {
+    pub currency: String,
+    pub balance: i64,
+    pub updated_at: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct ReserveBalancesResponse {
+    pub account_id: String,
+    pub sync_mode: String,
+    pub reserves: Vec<ReserveBalance>,
+}
+
+#[derive(Deserialize)]
+pub struct SetSyncModeRequest {
+    pub sync_mode: String,
+    /// Required (true) to leave reserve mode while a nonzero balance remains.
+    pub force: Option<bool>,
+}
+
+#[derive(Serialize)]
+pub struct SetSyncModeResponse {
+    pub success: bool,
+    pub message: String,
+    pub account_id: String,
+    pub sync_mode: String,
+}
+
 // ── Token ──────────────────────────────────────────────────────────────
 
 #[derive(Deserialize)]
@@ -347,6 +416,8 @@ pub struct TransactionListItem {
     pub stellar_max_fee: Option<i64>,
     pub memo: Option<String>,
     pub payala_currency: Option<String>,
+    pub payala_amount: Option<i64>,
+    pub origin: String,
     pub created_at: String,
     pub flagged: bool,
     pub status: String,
@@ -369,6 +440,8 @@ pub struct TransactionDetail {
     pub preconditions: Option<String>,
     pub payala_currency: Option<String>,
     pub payala_digest: Option<String>,
+    pub payala_amount: Option<i64>,
+    pub origin: String,
     pub created_at: String,
     pub flagged: bool,
     pub status: String,
@@ -838,13 +911,11 @@ mod tests {
     #[test]
     fn test_sso_token_exchange_request_legacy_alias() {
         // Legacy clients send `okta_token`; it maps onto the generic `token`.
-        let req: SsoTokenExchangeRequest =
-            serde_json::from_str(r#"{"okta_token":"abc"}"#).unwrap();
+        let req: SsoTokenExchangeRequest = serde_json::from_str(r#"{"okta_token":"abc"}"#).unwrap();
         assert_eq!(req.token.as_deref(), Some("abc"));
         assert_eq!(req.id_token, None);
 
-        let req2: SsoTokenExchangeRequest =
-            serde_json::from_str(r#"{"id_token":"xyz"}"#).unwrap();
+        let req2: SsoTokenExchangeRequest = serde_json::from_str(r#"{"id_token":"xyz"}"#).unwrap();
         assert_eq!(req2.id_token.as_deref(), Some("xyz"));
         assert_eq!(req2.token, None);
     }

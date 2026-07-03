@@ -27,10 +27,16 @@ pub async fn sso_token_exchange(
     Json(payload): Json<SsoTokenExchangeRequest>,
 ) -> Result<Json<TokenResponse>, AppError> {
     let provider_name = provider_name.to_lowercase();
-    debug!("POST /auth/sso/{}: token exchange request received", provider_name);
+    debug!(
+        "POST /auth/sso/{}: token exchange request received",
+        provider_name
+    );
 
     let provider = registry.get(&provider_name).ok_or_else(|| {
-        AppError::BadRequest(format!("SSO provider '{}' is not configured", provider_name))
+        AppError::BadRequest(format!(
+            "SSO provider '{}' is not configured",
+            provider_name
+        ))
     })?;
 
     // Select the token to validate based on what this provider issues.
@@ -60,19 +66,38 @@ pub async fn sso_token_exchange(
     };
 
     if account_id.is_empty() {
-        warn!("sso[{}]: empty account_id derived from token", provider.name);
-        return Err(AppError::BadRequest("Invalid account identifier".to_string()));
+        warn!(
+            "sso[{}]: empty account_id derived from token",
+            provider.name
+        );
+        return Err(AppError::BadRequest(
+            "Invalid account identifier".to_string(),
+        ));
     }
     if account_id.len() > MAX_EMAIL_LENGTH {
-        warn!("sso[{}]: account_id exceeds max length: {}", provider.name, account_id.len());
-        return Err(AppError::BadRequest("Invalid account identifier".to_string()));
+        warn!(
+            "sso[{}]: account_id exceeds max length: {}",
+            provider.name,
+            account_id.len()
+        );
+        return Err(AppError::BadRequest(
+            "Invalid account identifier".to_string(),
+        ));
     }
     if account_id.chars().any(|c| c.is_control()) {
-        warn!("sso[{}]: account_id contains control characters", provider.name);
-        return Err(AppError::BadRequest("Invalid account identifier".to_string()));
+        warn!(
+            "sso[{}]: account_id contains control characters",
+            provider.name
+        );
+        return Err(AppError::BadRequest(
+            "Invalid account identifier".to_string(),
+        ));
     }
 
-    info!("sso[{}]: token exchange for account_id={}", provider.name, account_id);
+    info!(
+        "sso[{}]: token exchange for account_id={}",
+        provider.name, account_id
+    );
 
     // Rate limiting and lockout checks. Rate limit is scoped per provider;
     // lockout is per account across all providers/local (locking the human).
@@ -133,12 +158,18 @@ pub async fn sso_token_exchange(
     .execute(&mut *tx)
     .await
     .map_err(|e| {
-        error!("sso[{}]: failed to upsert auth record: {}", provider.name, e);
+        error!(
+            "sso[{}]: failed to upsert auth record: {}",
+            provider.name, e
+        );
         AppError::InternalError("Failed to provision authentication".to_string())
     })?;
 
     tx.commit().await.map_err(|e| {
-        error!("sso[{}]: failed to commit transaction: {}", provider.name, e);
+        error!(
+            "sso[{}]: failed to commit transaction: {}",
+            provider.name, e
+        );
         AppError::InternalError("Database error".to_string())
     })?;
 
@@ -155,7 +186,10 @@ pub async fn sso_token_exchange(
     .unwrap_or_else(crate::models::default_role);
     let (refresh_token, temporal_token) = crate::jwt::encode_token_pair(key, &account_id, &role)?;
 
-    info!("sso[{}]: tokens issued for account_id={}", provider.name, account_id);
+    info!(
+        "sso[{}]: tokens issued for account_id={}",
+        provider.name, account_id
+    );
 
     Ok(Json(TokenResponse {
         success: true,
@@ -176,7 +210,10 @@ pub async fn sso_config(
     let provider_name = provider_name.to_lowercase();
     match registry.get(&provider_name) {
         Some(provider) => {
-            debug!("GET /auth/sso/{}/config: returning configuration", provider_name);
+            debug!(
+                "GET /auth/sso/{}/config: returning configuration",
+                provider_name
+            );
             Json(SsoConfigResponse {
                 enabled: true,
                 provider: Some(provider.name.clone()),
@@ -189,7 +226,10 @@ pub async fn sso_config(
             })
         }
         None => {
-            debug!("GET /auth/sso/{}/config: provider not configured", provider_name);
+            debug!(
+                "GET /auth/sso/{}/config: provider not configured",
+                provider_name
+            );
             Json(SsoConfigResponse {
                 enabled: false,
                 provider: None,
@@ -206,6 +246,8 @@ pub async fn sso_config(
 
 /// `GET /auth/providers` — List the names of all configured SSO providers,
 /// so the dashboard can render one button per provider without hardcoding.
-pub async fn sso_providers(Extension(registry): Extension<Arc<ProviderRegistry>>) -> Json<Vec<String>> {
+pub async fn sso_providers(
+    Extension(registry): Extension<Arc<ProviderRegistry>>,
+) -> Json<Vec<String>> {
     Json(registry.names())
 }

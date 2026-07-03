@@ -75,6 +75,34 @@ pub async fn create_transaction(
         }
     }
 
+    // A non-admin caller may only record transactions sourced from a Stellar
+    // account they own. Without this, anyone could plant rows carrying a
+    // victim's stellar_account_id, which the victim's transaction listing
+    // (owner-scoped by source_account) would then surface as their own.
+    if let Some(ref account) = payload.source_account {
+        if !account.is_empty() && !user.is_admin() {
+            let owned: Option<i32> = sqlx::query_scalar(
+                "SELECT 1 FROM impala_account \
+                 WHERE stellar_account_id = $1 AND payala_account_id = $2",
+            )
+            .bind(account)
+            .bind(&user.account_id)
+            .fetch_optional(&pool)
+            .await
+            .map_err(|e| {
+                error!("create_transaction: ownership lookup error: {}", e);
+                AppError::InternalError("Database error".to_string())
+            })?;
+            if owned.is_none() {
+                warn!(
+                    "create_transaction: {} attempted to use unowned source_account {}",
+                    user.account_id, account
+                );
+                return Err(AppError::Forbidden);
+            }
+        }
+    }
+
     let result = sqlx::query_scalar::<_, Uuid>(
         r#"
         INSERT INTO transaction
@@ -135,7 +163,7 @@ pub async fn create_transaction(
 
 /// SQL `to_char` timestamp format producing RFC3339 (UTC). The codebase returns
 /// timestamps as text because sqlx has no `chrono` decode feature enabled.
-const TS_FMT: &str = "YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"";
+pub(crate) const TS_FMT: &str = "YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"";
 
 /// A single dynamic filter bind value (heterogeneous String/bool).
 enum FilterBind {
@@ -258,7 +286,7 @@ pub async fn list_transactions(
     );
     let select_sql = format!(
         "SELECT t.btxid, t.stellar_tx_id, t.payala_tx_id, t.stellar_hash, t.source_account, \
-         t.stellar_fee, t.stellar_max_fee, t.memo, t.payala_currency, \
+         t.stellar_fee, t.stellar_max_fee, t.memo, t.payala_currency, t.payala_amount, t.origin, \
          to_char(t.created_at AT TIME ZONE 'UTC', '{ts}') AS created_at, \
          COALESCE(r.flagged, FALSE) AS flagged, COALESCE(r.status, 'unreviewed') AS status, \
          r.note, r.reviewed_by, \
@@ -318,7 +346,7 @@ pub async fn get_transaction(
     let mut sql = format!(
         "SELECT t.btxid, t.stellar_tx_id, t.payala_tx_id, t.stellar_hash, t.source_account, \
          t.stellar_fee, t.stellar_max_fee, t.memo, t.signatures, t.preconditions, \
-         t.payala_currency, t.payala_digest, \
+         t.payala_currency, t.payala_digest, t.payala_amount, t.origin, \
          to_char(t.created_at AT TIME ZONE 'UTC', '{ts}') AS created_at, \
          COALESCE(r.flagged, FALSE) AS flagged, COALESCE(r.status, 'unreviewed') AS status, \
          r.note, r.reviewed_by, \

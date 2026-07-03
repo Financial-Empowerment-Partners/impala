@@ -19,7 +19,10 @@ class TokenManagerTest {
     @Before
     fun setUp() {
         val context = ApplicationProvider.getApplicationContext<Context>()
-        tokenManager = TokenManager(context)
+        // Inject plain SharedPreferences: the Android Keystore backing
+        // EncryptedSharedPreferences does not exist on the host JVM.
+        val prefs = context.getSharedPreferences("test_token_prefs", Context.MODE_PRIVATE)
+        tokenManager = TokenManager(prefs)
         tokenManager.clearAll()
     }
 

@@ -266,11 +266,12 @@ resource "aws_security_group" "testnet_redis" {
 resource "aws_lb" "testnet" {
   count = var.testnet_enabled ? 1 : 0
 
-  name               = "${local.name_prefix}-alb-testnet"
-  internal           = false
-  load_balancer_type = "application"
-  security_groups    = [aws_security_group.testnet_alb[0].id]
-  subnets            = aws_subnet.testnet_public[*].id
+  name                       = "${local.name_prefix}-alb-testnet"
+  internal                   = false
+  load_balancer_type         = "application"
+  security_groups            = [aws_security_group.testnet_alb[0].id]
+  subnets                    = aws_subnet.testnet_public[*].id
+  drop_invalid_header_fields = true
 
   tags = {
     Name = "${local.name_prefix}-alb-testnet"
@@ -456,6 +457,8 @@ resource "aws_sns_topic" "testnet_jobs" {
 
   name = "${local.name_prefix}-jobs-testnet"
 
+  kms_master_key_id = "alias/aws/sns"
+
   tags = {
     Name = "${local.name_prefix}-jobs-testnet"
   }
@@ -466,6 +469,7 @@ resource "aws_sqs_queue" "testnet_worker_dlq" {
 
   name                      = "${local.name_prefix}-worker-dlq-testnet"
   message_retention_seconds = 1209600
+  sqs_managed_sse_enabled   = true
 
   tags = {
     Name = "${local.name_prefix}-worker-dlq-testnet"
@@ -479,6 +483,7 @@ resource "aws_sqs_queue" "testnet_worker" {
   visibility_timeout_seconds = var.sqs_visibility_timeout_seconds
   message_retention_seconds  = 345600
   receive_wait_time_seconds  = 20
+  sqs_managed_sse_enabled    = true
 
   redrive_policy = jsonencode({
     deadLetterTargetArn = aws_sqs_queue.testnet_worker_dlq[0].arn

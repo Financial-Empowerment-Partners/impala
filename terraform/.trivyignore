@@ -1,0 +1,36 @@
+# Trivy misconfiguration baseline for terraform/.
+# Established when the pre-commit hook migrated from the deprecated tfsec to
+# trivy (tfsec could not parse the Terraform 1.5 `check` blocks in testnet.tf).
+# Entries are either intentional architecture (kept, with rationale) or
+# pre-existing findings queued for the validation-fixes pass (marked TODO).
+
+# --- Intentional architecture ---
+
+# Public-facing ALB fronted by WAF (waf.tf); exposure is the design.
+AVD-AWS-0053
+
+# HTTP listener forwards only when no certificate_arn is configured; with a
+# cert it 301-redirects to HTTPS (alb.tf). Production sets certificate_arn.
+AVD-AWS-0054
+
+# ECS tasks need unrestricted egress to reach ECR, Stellar Horizon/RPC,
+# Twilio, FCM, and other external APIs; scoping would require VPC endpoints
+# plus an allowlist that breaks the bridge's outbound integrations.
+AVD-AWS-0104
+
+# Public subnets host only the ALB and NAT gateways; auto-assign public IPs
+# is required there. Services run in private subnets.
+AVD-AWS-0164
+
+# ALB access-log delivery does not support SSE-KMS; the alb_logs bucket must
+# use SSE-S3 (AES256). Backup buckets use SSE-S3 by choice (no CMK to manage).
+AVD-AWS-0132
+
+# The jobs topics are encrypted with the AWS-managed SNS key (alias/aws/sns);
+# a customer-managed key is not worth the key-policy and rotation surface for
+# internal job-dispatch payloads. Same trade-off as AVD-AWS-0132 above.
+AVD-AWS-0136
+
+# (SNS/SQS at-rest encryption AVD-AWS-0095/0096 and ALB header-dropping
+# AVD-AWS-0052 were fixed rather than ignored; the alerts topic in
+# monitoring.tf carries a scoped inline trivy:ignore instead.)

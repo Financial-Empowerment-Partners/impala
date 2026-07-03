@@ -11,4 +11,3 @@ open class BIBOException : RuntimeException {
         const val serialVersionUID: Long = 6710240956038548175L
     }
 }
-

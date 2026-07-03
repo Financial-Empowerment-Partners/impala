@@ -281,6 +281,40 @@ pub fn validate_role(role: &str) -> Result<(), AppError> {
     }
 }
 
+/// Validate a Payala currency code: 1–16 chars, uppercase alphanumeric.
+/// Lowercase is rejected rather than normalized so per-currency reserve keys
+/// stay canonical ("USD" vs "Usd" must not fork into separate balances).
+pub fn validate_payala_currency(currency: &str) -> Result<(), AppError> {
+    if currency.is_empty() || currency.len() > crate::constants::MAX_PAYALA_CURRENCY_LENGTH {
+        return Err(AppError::BadRequest(format!(
+            "currency must be between 1 and {} characters",
+            crate::constants::MAX_PAYALA_CURRENCY_LENGTH
+        )));
+    }
+    if !currency
+        .chars()
+        .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+    {
+        return Err(AppError::BadRequest(
+            "currency must be uppercase alphanumeric (A-Z, 0-9)".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// Validate a Payala sync mode against the allowed set (`VALID_SYNC_MODES`).
+pub fn validate_sync_mode(mode: &str) -> Result<(), AppError> {
+    if crate::constants::VALID_SYNC_MODES.contains(&mode) {
+        Ok(())
+    } else {
+        Err(AppError::BadRequest(format!(
+            "Invalid sync_mode '{}'. Must be one of: {}",
+            mode,
+            crate::constants::VALID_SYNC_MODES.join(", ")
+        )))
+    }
+}
+
 /// Validate that `value` is a well-formed RFC 3339 timestamp (e.g. used for
 /// transaction date-range filters). Returns `BadRequest` naming the field.
 pub fn validate_rfc3339_timestamp(value: &str, field: &str) -> Result<(), AppError> {
@@ -676,6 +710,57 @@ mod tests {
         assert!(validate_role("superuser").is_err());
         assert!(validate_role("").is_err());
         assert!(validate_role("Admin").is_err());
+    }
+
+    // ── Payala currency / sync mode ────────────────────────────────────
+
+    #[test]
+    fn test_validate_payala_currency_valid() {
+        for c in ["USD", "XLM", "PAYALA1", "A", "0123456789ABCDEF"] {
+            assert!(
+                validate_payala_currency(c).is_ok(),
+                "currency {} should be valid",
+                c
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_payala_currency_rejects_lowercase() {
+        assert!(validate_payala_currency("usd").is_err());
+        assert!(validate_payala_currency("Usd").is_err());
+    }
+
+    #[test]
+    fn test_validate_payala_currency_rejects_empty_and_too_long() {
+        assert!(validate_payala_currency("").is_err());
+        assert!(validate_payala_currency("ABCDEFGHIJKLMNOPQ").is_err()); // 17 chars
+    }
+
+    #[test]
+    fn test_validate_payala_currency_rejects_symbols_and_whitespace() {
+        assert!(validate_payala_currency("US D").is_err());
+        assert!(validate_payala_currency(" USD").is_err());
+        assert!(validate_payala_currency("US-D").is_err());
+    }
+
+    #[test]
+    fn test_validate_sync_mode_accepts_all_modes() {
+        for mode in crate::constants::VALID_SYNC_MODES {
+            assert!(
+                validate_sync_mode(mode).is_ok(),
+                "mode {} should be valid",
+                mode
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_sync_mode_rejects_unknown() {
+        assert!(validate_sync_mode("Reserve").is_err());
+        assert!(validate_sync_mode("MIRROR").is_err());
+        assert!(validate_sync_mode("").is_err());
+        assert!(validate_sync_mode("both").is_err());
     }
 
     // ── RFC 3339 timestamp ─────────────────────────────────────────────

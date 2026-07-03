@@ -124,6 +124,36 @@ pub const ALL_ROLES: &[&str] = &[ROLE_VIEW_ONLY, ROLE_DEVICE, ROLE_TOKEN, ROLE_A
 /// Valid transaction review statuses (mirrors the `chk_review_status` DB CHECK).
 pub const VALID_REVIEW_STATUSES: &[&str] = &["unreviewed", "cleared", "flagged", "escalated"];
 
+/// Payala sync mode: batches are aggregated into a single per-currency
+/// reserve-balance update.
+pub const SYNC_MODE_RESERVE: &str = "reserve";
+
+/// Payala sync mode: every batch item is mirrored 1:1 as a `transaction` row.
+pub const SYNC_MODE_MIRROR: &str = "mirror";
+
+/// Valid per-account Payala sync modes (mirrors the `chk_impala_account_sync_mode` DB CHECK).
+pub const VALID_SYNC_MODES: &[&str] = &[SYNC_MODE_RESERVE, SYNC_MODE_MIRROR];
+
+/// Max items per `POST /sync/payala` batch. The effective ceilings are the 30s
+/// request timeout and the 60s per-statement timeout, not the 1 MB body limit.
+pub const MAX_SYNC_BATCH_ITEMS: usize = 500;
+
+/// Max distinct currencies per `POST /sync/payala` batch (bounds junk reserve rows).
+pub const MAX_SYNC_BATCH_CURRENCIES: usize = 10;
+
+/// Max length for a Payala currency code (mirrors the VARCHAR(16) columns).
+pub const MAX_PAYALA_CURRENCY_LENGTH: usize = 16;
+
+/// `transaction.origin` for rows created via `POST /transaction`. Applied by
+/// the column's DB default rather than bound in an INSERT; documents the
+/// vocabulary alongside `TX_ORIGIN_PAYALA_SYNC`.
+#[allow(dead_code)]
+pub const TX_ORIGIN_MANUAL: &str = "manual";
+
+/// `transaction.origin` for rows created by mirror-mode Payala sync.
+/// Server-set only — never accepted from a request body.
+pub const TX_ORIGIN_PAYALA_SYNC: &str = "payala_sync";
+
 /// Minimum length for JWT_SECRET (256 bits).
 pub const JWT_SECRET_MIN_LENGTH: usize = 32;
 

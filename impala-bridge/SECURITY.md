@@ -36,6 +36,25 @@ All data-modifying endpoints enforce account ownership:
 
 The `require_owner()` helper in `auth.rs` provides consistent ownership checks across handlers.
 
+### Payala Sync (reserve/mirror)
+
+`POST /sync/payala` ingests batches of offline Payala transactions as **unverified
+client assertions**: amounts, currencies, and digests are taken on the caller's
+word, gated only by JWT ownership (`require_owner`) and rate limiting. Because
+writes are strictly owner-scoped, a caller can only fabricate *their own*
+reserve balances or mirrored history. The bridge performs no verification of
+the card's ECDSA transfer signatures, and nothing recorded by sync is ever
+submitted to Horizon or Soroban — reserve balances and mirrored rows must stay
+quarantined from anything that moves value until a server-side verification
+step exists. Batches are idempotent per `(account, payala_tx_id)`; replays
+whose stored amount/currency differ from the submission are surfaced as
+`conflicting` and logged as a tamper/corruption signal. Mirror-mode rows are
+tagged `origin = 'payala_sync'` server-side (never settable via any request
+body) so they remain distinguishable from client-posted `POST /transaction`
+rows. Relatedly, non-admin `POST /transaction` callers may only supply a
+`source_account` they own, so one account cannot plant rows in another
+account's transaction listing.
+
 ## Input Validation
 
 - **Stellar account IDs**: Must be 56 characters, start with 'G', alphanumeric only.

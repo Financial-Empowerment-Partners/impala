@@ -18,19 +18,14 @@ import androidx.security.crypto.MasterKeys
  * Encryption uses AES-256-SIV for keys and AES-256-GCM for values, backed by
  * the Android Keystore master key.
  *
- * @param context Application context used to open EncryptedSharedPreferences
+ * The internal constructor takes the backing [SharedPreferences] directly so
+ * unit tests can substitute a plain in-memory store — the Android Keystore
+ * that EncryptedSharedPreferences requires does not exist on a host JVM.
  */
-class TokenManager(context: Context) {
+class TokenManager internal constructor(private val prefs: SharedPreferences) {
 
-    private val masterKeyAlias = MasterKeys.getOrCreate(MasterKeys.AES256_GCM_SPEC)
-
-    private val prefs: SharedPreferences = EncryptedSharedPreferences.create(
-        "impala_secure_prefs",
-        masterKeyAlias,
-        context,
-        EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
-        EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
-    )
+    /** @param context Application context used to open EncryptedSharedPreferences */
+    constructor(context: Context) : this(createEncryptedPrefs(context))
 
     companion object {
         private const val KEY_REFRESH_TOKEN = "refresh_token"
@@ -39,6 +34,17 @@ class TokenManager(context: Context) {
         private const val KEY_ACCOUNT_ID = "account_id"
         private const val KEY_AUTH_PROVIDER = "auth_provider"
         private const val KEY_DISPLAY_NAME = "display_name"
+
+        private fun createEncryptedPrefs(context: Context): SharedPreferences {
+            val masterKeyAlias = MasterKeys.getOrCreate(MasterKeys.AES256_GCM_SPEC)
+            return EncryptedSharedPreferences.create(
+                "impala_secure_prefs",
+                masterKeyAlias,
+                context,
+                EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
+                EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
+            )
+        }
     }
 
     fun saveRefreshToken(token: String) {

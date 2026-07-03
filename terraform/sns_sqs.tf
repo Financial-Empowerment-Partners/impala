@@ -3,6 +3,12 @@
 resource "aws_sns_topic" "jobs" {
   name = "${local.name_prefix}-jobs"
 
+  # At-rest encryption. The AWS-managed key suffices: only the bridge (an
+  # IAM-role SDK publisher) publishes here. Do NOT reuse this pattern for
+  # topics receiving CloudWatch alarm actions (monitoring.tf's alerts) —
+  # alarms cannot publish through the AWS-managed key.
+  kms_master_key_id = "alias/aws/sns"
+
   tags = {
     Name = "${local.name_prefix}-jobs"
   }
@@ -13,6 +19,7 @@ resource "aws_sns_topic" "jobs" {
 resource "aws_sqs_queue" "worker_dlq" {
   name                      = "${local.name_prefix}-worker-dlq"
   message_retention_seconds = 1209600 # 14 days
+  sqs_managed_sse_enabled   = true
 
   tags = {
     Name = "${local.name_prefix}-worker-dlq"
@@ -26,6 +33,7 @@ resource "aws_sqs_queue" "worker" {
   visibility_timeout_seconds = var.sqs_visibility_timeout_seconds
   message_retention_seconds  = 345600 # 4 days
   receive_wait_time_seconds  = 20     # long polling
+  sqs_managed_sse_enabled    = true
 
   redrive_policy = jsonencode({
     deadLetterTargetArn = aws_sqs_queue.worker_dlq.arn

@@ -71,7 +71,10 @@ public class NfcContactActivity extends Activity {
             isoDep.connect();
 
             IsoDepBibo bibo = new IsoDepBibo(isoDep);
-            ImpalaSDK sdk = new ImpalaSDK(bibo);
+            // No SCP03 static keys: this activity only sends plain APDUs and
+            // never opens a secure channel. (Kotlin's default for the keys
+            // parameter is not visible from Java, so pass null explicitly.)
+            ImpalaSDK sdk = new ImpalaSDK(bibo, null);
 
             // Use the tag ID from the intent, falling back to tag.getId()
             byte[] tagId = intent.getByteArrayExtra(NfcAdapter.EXTRA_ID);
