@@ -42,7 +42,7 @@ jobs:
 
       - name: Upload test reports on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: sdk-test-reports
           path: impala-card/sdk/build/reports/tests/jvmTest/
