@@ -33,7 +33,7 @@ log = "0.4"
 syslog = "7"
 ldap3 = "0.12"
 tower = "0.5"
-tower-http = { version = "0.6", features = ["cors", "trace", "request-id", "set-header", "limit", "compression-gzip", "timeout"] }
+tower-http = { version = "0.7", features = ["cors", "trace", "request-id", "set-header", "limit", "compression-gzip", "timeout"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 subtle = "2"
 totp-rs = { version = "5.7", features = ["gen_secret", "otpauth"] }
