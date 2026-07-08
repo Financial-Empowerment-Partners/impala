@@ -86,7 +86,7 @@ graph TB
     end
 
     subgraph Storage["Data Layer"]
-        Postgres[("PostgreSQL 16<br/><i>17 migrations, slow query logs</i>")]
+        Postgres[("PostgreSQL 16<br/><i>27 migrations, slow query logs</i>")]
         Redis[("Redis 7<br/><i>TLS in transit, connection pool</i>")]
         Vault["HashiCorp Vault / OpenBao"]
     end
@@ -265,9 +265,9 @@ Account ownership is enforced by `require_owner()`, which verifies that `user.ac
 Five authentication methods are supported across the platform:
 1. **Username/password** — direct registration and login with Argon2 password hashing
 2. **Okta SSO** — OIDC token exchange with JWKS validation and background key refresh
-3. **NFC smartcard** — card signs a timestamp with ECDSA; password derived from `SHA-256(cardId)`
-4. **Google Sign-In** — Credential Manager flow; password derived from `SHA-256(idToken)`
-5. **GitHub OAuth** — Custom Chrome Tabs flow; password derived from `SHA-256(access_token)`
+3. **NFC smartcard** — the bridge issues a single-use challenge (`POST /auth/card/challenge`); the card signs it on-device with ECDSA-SHA256 and the signature is exchanged for JWTs at `POST /auth/card`
+4. **Google Sign-In** — Credential Manager ID token exchanged server-side at `POST /auth/google`
+5. **GitHub OAuth** — Custom Chrome Tabs authorization code exchanged server-side at `POST /auth/github` (the bridge performs the code→token exchange, so the client secret never ships in the app)
 
 ### Notification System
 
@@ -500,20 +500,18 @@ flowchart TB
     Login --> Okta["Continue with<br/>Okta"]
     Login --> CardAuth["Sign in with<br/>Card"]
 
-    PW -->|"account_id + password"| AuthFlow
-    Google -->|"Credential Manager<br/>ID Token"| DeriveG["SHA-256(idToken)<br/>.take(32)"]
-    GitHub -->|"Custom Chrome Tabs<br/>Access Token"| DeriveH["SHA-256(token)<br/>.take(32)"]
-    Okta -->|"OIDC Flow<br/>Access Token"| DeriveO["SHA-256(token)<br/>.take(32)"]
-    CardAuth -->|"NFC Tap<br/>Card UUID"| DeriveC["SHA-256(cardId)<br/>.take(32)"]
+    PW -->|"account_id + password"| AuthFlow["POST /authenticate"]
+    Google -->|"Credential Manager<br/>ID Token"| ExchG["POST /auth/google"]
+    GitHub -->|"Custom Chrome Tabs<br/>Authorization Code"| ExchH["POST /auth/github"]
+    Okta -->|"OIDC Flow<br/>Access Token"| ExchO["POST /auth/okta"]
+    CardAuth -->|"NFC Tap<br/>challenge + signature"| ExchC["POST /auth/card"]
 
-    DeriveG --> EnsureAcct["POST /account<br/><i>ensure exists</i>"]
-    DeriveH --> EnsureAcct
-    DeriveO --> EnsureAcct
-    DeriveC --> EnsureAcct
-    EnsureAcct --> AuthFlow
-
-    AuthFlow["POST /authenticate"] --> TokenFlow["POST /token<br/><i>username + password</i>"]
+    AuthFlow --> TokenFlow["POST /token<br/><i>username + password</i>"]
     TokenFlow --> RefreshTok["refresh_token<br/><i>14-day JWT</i>"]
+    ExchG --> RefreshTok
+    ExchH --> RefreshTok
+    ExchO --> RefreshTok
+    ExchC --> RefreshTok
     RefreshTok --> TemporalFlow["POST /token<br/><i>refresh_token</i>"]
     TemporalFlow --> TemporalTok["temporal_token<br/><i>1-hour JWT</i>"]
     TemporalTok --> Store["EncryptedSharedPreferences<br/><i>AES-256-SIV / GCM</i>"]
@@ -601,7 +599,7 @@ The dashboard gates four roles via `[data-permission]` HTML attributes:
 | **token** | All device permissions + `manage_accounts`, `manage_mfa` |
 | **admin** | All permissions including `manage_roles` |
 
-Authorization is **server-driven**: each account's role lives in `impala_account.role` and is embedded in every issued JWT as the `role` claim. `roles.js` only *reads* that claim (via `API.parseJwt`) to gate `[data-permission]` elements — there is no client-side role store (it actively clears the legacy `impala_roles` key). The **first account ever created is bootstrapped to `admin` server-side** by a `BEFORE INSERT` trigger (`impala-bridge/migrations/019_add_account_role.sql`), covering all sign-up paths including SSO auto-provisioning; subsequent grants use `PUT /admin/accounts/:id/role` and take effect at the target's next token refresh.
+Authorization is **server-driven**: each account's role lives in `impala_account.role` and is embedded in every issued JWT as the `role` claim. `roles.js` only *reads* that claim (via `API.parseJwt`) to gate `[data-permission]` elements — there is no client-side role store (it actively clears the legacy `impala_roles` key). The **first account ever created is bootstrapped to `admin` server-side** by a `BEFORE INSERT` trigger (`impala-bridge/migrations/023_add_account_role.sql`), covering all sign-up paths including SSO auto-provisioning; subsequent grants use `PUT /admin/accounts/:id/role` and take effect at the target's next token refresh.
 
 ### Core Modules
 
@@ -801,7 +799,7 @@ erDiagram
 
 Each account carries a `sync_mode` (`reserve` default, or `mirror`) selecting how `POST /sync/payala` applies a batch of offline Payala transactions: reserve mode nets each batch into `payala_reserve` (one balance update per batch, per currency), mirror mode inserts each fresh item 1:1 into `transaction` with `origin = 'payala_sync'`. `payala_sync_item` is the shared idempotency ledger — its `(payala_account_id, payala_tx_id)` primary key makes batch replay a no-op — and `payala_sync_batch` audits every ingestion.
 
-The database schema is managed by 23 sequential SQL migrations. Performance indices cover: `card(account_id)` filtered on active cards, `impala_mfa(account_id, mfa_type)`, `notify(account_id)` filtered on active entries, `transaction(created_at)`, and `notification_subscription(account_id, event_type)` filtered on enabled subscriptions.
+The database schema is managed by 27 sequential SQL migrations. Performance indices cover: `card(account_id)` filtered on active cards, `impala_mfa(account_id, mfa_type)`, `notify(account_id)` filtered on active entries, `transaction(created_at)`, and `notification_subscription(account_id, event_type)` filtered on enabled subscriptions.
 
 ---
 
@@ -910,7 +908,7 @@ sequenceDiagram
 graph TB
     subgraph DockerCompose["Docker Compose Stack"]
         BridgeContainer["impala-bridge<br/><i>Rust / Axum</i><br/>:8080"]
-        PGContainer["PostgreSQL 16<br/><i>17 migrations</i><br/>:5432"]
+        PGContainer["PostgreSQL 16<br/><i>27 migrations</i><br/>:5432"]
         RedisContainer["Redis 7<br/><i>Connection pool + event cache</i><br/>:6379"]
     end
 
@@ -1102,18 +1100,18 @@ sequenceDiagram
     App->>SDK: getEcPubKey()
     SDK->>Card: [CLA=00 INS=24]
     Card-->>SDK: 65-byte pubkey + 9000
-    App->>SDK: signAuth(timestamp)
-    SDK->>Card: [CLA=00 INS=25 DATA=timestamp]
-    Card-->>SDK: ECDSA signature + 9000
-
-    Note over App, Bridge: Bridge Authentication Phase
-    App->>App: password = SHA-256(cardId).take(32)
-    App->>Bridge: POST /authenticate {account_id, password}
-    Bridge->>Redis: check_rate_limit("auth", account_id)
-    Bridge->>Redis: check_lockout(account_id)
-    Bridge->>DB: SELECT password_hash FROM impala_auth
-    Bridge-->>App: {success: true, action: "login"}
-    App->>Bridge: POST /token {username, password}
+    Note over App, Bridge: Bridge Challenge + Token Exchange
+    App->>Bridge: POST /auth/card/challenge {card_id}
+    Bridge->>Redis: check_rate_limit("card_challenge", card_id)
+    Bridge->>Redis: store single-use challenge (60s TTL)
+    Bridge-->>App: {challenge (64-hex)}
+    App->>SDK: signAuth(challenge)
+    SDK->>Card: [CLA=00 INS=25 DATA=challenge]
+    Card-->>SDK: ECDSA signature (DER) + 9000
+    App->>Bridge: POST /auth/card {card_id, signature}
+    Bridge->>Redis: consume challenge (GETDEL, single-use)
+    Bridge->>DB: SELECT account_id, ec_pubkey FROM card
+    Bridge->>Bridge: verify ECDSA-SHA256 over "IMPALA-AUTH:" || accountId || challenge
     Bridge-->>App: {refresh_token (14-day)}
     App->>Bridge: POST /token {refresh_token}
     Bridge->>Redis: Check JTI not revoked

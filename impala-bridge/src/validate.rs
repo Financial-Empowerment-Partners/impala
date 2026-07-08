@@ -179,8 +179,15 @@ pub fn validate_callback_url(url: &str) -> Result<(), AppError> {
         ));
     }
 
-    // Block private/reserved IPs
-    if let Ok(ip) = host.parse::<IpAddr>() {
+    // Block private/reserved IPs. `host_str()` returns IPv6 literals in
+    // bracketed form (e.g. "[fc00::1]"), which `IpAddr::from_str` rejects, so
+    // strip the brackets first — otherwise the IPv6 arm of `is_private_ip`
+    // below is unreachable and link-local/ULA/IPv6-metadata hosts slip through.
+    let host_ip = host
+        .strip_prefix('[')
+        .and_then(|h| h.strip_suffix(']'))
+        .unwrap_or(host);
+    if let Ok(ip) = host_ip.parse::<IpAddr>() {
         if is_private_ip(&ip) {
             return Err(AppError::BadRequest(
                 "Callback URL must not target private IP addresses".to_string(),
@@ -512,6 +519,33 @@ mod tests {
     #[test]
     fn test_callback_ftp_scheme() {
         assert!(validate_callback_url("ftp://example.com/file").is_err());
+    }
+
+    #[test]
+    fn test_callback_ipv6_loopback() {
+        assert!(validate_callback_url("http://[::1]/callback").is_err());
+    }
+
+    #[test]
+    fn test_callback_ipv6_link_local() {
+        assert!(validate_callback_url("http://[fe80::1]/callback").is_err());
+    }
+
+    #[test]
+    fn test_callback_ipv6_unique_local() {
+        assert!(validate_callback_url("http://[fc00::1]/callback").is_err());
+    }
+
+    #[test]
+    fn test_callback_ipv6_aws_metadata() {
+        // AWS IPv6 instance metadata endpoint (ULA fd00:ec2::254).
+        assert!(validate_callback_url("http://[fd00:ec2::254]/latest/meta-data").is_err());
+    }
+
+    #[test]
+    fn test_callback_ipv6_public_ok() {
+        // A public IPv6 literal must still be allowed.
+        assert!(validate_callback_url("https://[2606:4700:4700::1111]/webhook").is_ok());
     }
 
     // ── LDAP escape ────────────────────────────────────────────────────

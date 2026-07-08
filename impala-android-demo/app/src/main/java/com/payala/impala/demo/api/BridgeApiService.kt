@@ -27,6 +27,19 @@ interface BridgeApiService {
     @POST("token")
     suspend fun token(@Body request: TokenRequest): TokenResponse
 
+    /**
+     * Synchronous refresh-token → temporal-token exchange used by
+     * [TokenRefresher] from inside an OkHttp interceptor/authenticator. This
+     * MUST stay a blocking [retrofit2.Call] rather than a `suspend` function:
+     * `Call.execute()` runs as an OkHttp *synchronous* call, which — unlike the
+     * enqueued async call a suspend function issues — is exempt from the
+     * dispatcher's per-host limit. That exemption is what prevents a burst of
+     * concurrent 401s (each holding a host slot while it refreshes) from
+     * starving the nested refresh of a slot and deadlocking.
+     */
+    @POST("token")
+    fun refreshToken(@Body request: TokenRequest): retrofit2.Call<TokenResponse>
+
     /** Exchange an Okta access token for local JWT tokens (multi-provider SSO). */
     @POST("auth/sso/okta")
     suspend fun oktaTokenExchange(@Body request: OktaTokenExchangeRequest): TokenResponse

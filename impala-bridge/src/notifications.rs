@@ -147,7 +147,6 @@ pub async fn dispatch_event(
         WHERE ns.account_id = $1
           AND ns.event_type = $2::event_type
           AND ns.enabled = true
-          AND n.active = true
         "#,
     )
     .bind(&account_id)

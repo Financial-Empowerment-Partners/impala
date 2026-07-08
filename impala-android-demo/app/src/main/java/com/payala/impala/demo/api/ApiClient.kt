@@ -2,6 +2,7 @@ package com.payala.impala.demo.api
 
 import com.payala.impala.demo.BuildConfig
 import com.payala.impala.demo.auth.TokenManager
+import com.payala.impala.demo.model.TokenRequest
 import okhttp3.OkHttpClient
 import okhttp3.logging.HttpLoggingInterceptor
 import retrofit2.Retrofit
@@ -57,10 +58,23 @@ object ApiClient {
                 }
             }
 
+            // Refreshes the temporal token via POST /token using the current
+            // service instance (resolved lazily, only on refresh, so there is
+            // no construction cycle with the client being built here). Uses the
+            // synchronous refreshToken()/execute() so the nested call is exempt
+            // from the dispatcher per-host limit (see BridgeApiService).
+            val tokenRefresher = TokenRefresher(tokenManager) { refreshToken ->
+                service?.refreshToken(TokenRequest(refresh_token = refreshToken))
+                    ?.execute()
+                    ?.takeIf { it.isSuccessful }
+                    ?.body()
+            }
+
             val okHttpClient = OkHttpClient.Builder()
                 .addInterceptor(RetryInterceptor())
-                .addInterceptor(AuthInterceptor(tokenManager))
+                .addInterceptor(AuthInterceptor(tokenManager, tokenRefresher))
                 .addInterceptor(logging)
+                .authenticator(TokenAuthenticator(tokenManager, tokenRefresher))
                 .connectTimeout(30, TimeUnit.SECONDS)
                 .readTimeout(30, TimeUnit.SECONDS)
                 .build()

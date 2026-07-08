@@ -12,8 +12,18 @@ import okhttp3.Response
  * because those endpoints are used to *obtain* tokens in the first place. If
  * no temporal token is stored (or it has expired), the request proceeds
  * without an `Authorization` header.
+ *
+ * When a [TokenRefresher] is supplied, the interceptor also refreshes
+ * proactively: if the temporal token is within its expiry-skew window (see
+ * [TokenManager.isTemporalTokenExpired]) and a refresh token is stored, it
+ * exchanges for a fresh temporal token *before* sending, so the request carries
+ * a valid credential instead of racing a 401. [TokenAuthenticator] remains the
+ * reactive fallback for any 401 that still slips through.
  */
-class AuthInterceptor(private val tokenManager: TokenManager) : Interceptor {
+class AuthInterceptor(
+    private val tokenManager: TokenManager,
+    private val tokenRefresher: TokenRefresher? = null
+) : Interceptor {
 
     override fun intercept(chain: Interceptor.Chain): Response {
         val request = chain.request()
@@ -22,6 +32,15 @@ class AuthInterceptor(private val tokenManager: TokenManager) : Interceptor {
         // Do not attach tokens to auth endpoints
         if (path.endsWith("/authenticate") || path.endsWith("/token") || path.contains("/auth/")) {
             return chain.proceed(request)
+        }
+
+        // Proactively renew a temporal token that is at/near its expiry so this
+        // request is authenticated on the first try rather than after a 401.
+        if (tokenRefresher != null &&
+            tokenManager.getRefreshToken() != null &&
+            tokenManager.isTemporalTokenExpired()
+        ) {
+            tokenRefresher.refreshTemporalToken(tokenManager.getTemporalToken())
         }
 
         val temporalToken = tokenManager.getTemporalToken()

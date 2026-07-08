@@ -45,11 +45,15 @@ tags:
   - name: health
     description: Liveness, readiness, build and Stellar-network info.
   - name: auth
-    description: Registration, credential verification, token issue/revoke, Okta.
+    description: >
+      Registration, credential verification, token issue/revoke, cookie
+      sessions, and federated login (Okta, Google, GitHub, SSO/OIDC, card).
   - name: account
     description: Account CRUD.
   - name: admin
     description: Admin-only cross-account management (list/delete/role/profile-sync).
+  - name: managed-account
+    description: Custodial Stellar accounts — server-side seed generation/import and sign+submit.
   - name: mfa
     description: TOTP and SMS enrollment + verification.
   - name: card
@@ -62,6 +66,8 @@ tags:
     description: Notification destinations (phone, email, webhook).
   - name: device
     description: FCM device-token registration for mobile push.
+  - name: webhook
+    description: Admin-only outbound webhook registration and event feed.
 
 security:
   - bearerAuth: []
@@ -192,9 +198,235 @@ paths:
     post:
       tags: [auth]
       summary: Revoke the current temporal or refresh token.
+      description: |
+        Accepts either token type as the bearer credential and adds its JTI to
+        the Redis revocation blacklist for the token's remaining lifetime.
       responses:
-        '200': { description: Token revoked. }
+        '200':
+          description: Token revoked.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LogoutResponse' }
         '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /logout/all:
+    post:
+      tags: [auth]
+      summary: Revoke every token and session for the account.
+      description: |
+        Bumps the account's auth epoch so every refresh/temporal token and
+        session issued at or before now is rejected. Works from the bearer or
+        the cookie path; on the cookie path the current session is also deleted.
+      security:
+        - bearerAuth: []
+        - cookieAuth: []
+      responses:
+        '200':
+          description: All tokens and sessions revoked.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LogoutResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /session/login:
+    post:
+      tags: [auth]
+      summary: Establish a browser cookie session from local credentials.
+      description: |
+        Same credential check and rate-limit/lockout regime as `POST /token`
+        (password flow). On success sets an HttpOnly session cookie and returns
+        a CSRF synchronizer token to send as `X-CSRF-Token` on later
+        unsafe-method cookie requests.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SessionLoginRequest' }
+      responses:
+        '200':
+          description: Session established (also sets a `Set-Cookie` header).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SessionResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /session/me:
+    get:
+      tags: [auth]
+      summary: Current cookie-session identity and CSRF token.
+      description: Requires a valid session cookie. Re-derives `is_admin` from the live allowlist.
+      security:
+        - cookieAuth: []
+      responses:
+        '200':
+          description: Active session identity.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SessionResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /session/logout:
+    post:
+      tags: [auth]
+      summary: Destroy the current cookie session.
+      description: Requires a valid session cookie; CSRF is enforced. Clears the session cookie.
+      security:
+        - cookieAuth: []
+      responses:
+        '200': { description: Session destroyed (also clears the session cookie). }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /auth/okta:
+    post:
+      tags: [auth]
+      summary: Exchange an Okta access token for bridge tokens (legacy single-provider flow).
+      description: |
+        Validates the Okta access token, auto-provisions the account on first
+        login, and issues a refresh + temporal token pair. With
+        `cookie_mode: true` (used by the web UI) it instead establishes an
+        HttpOnly cookie session and returns a `SessionResponse`.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/OktaTokenExchangeRequest' }
+      responses:
+        '200':
+          description: Bridge tokens (bearer mode) or session identity (cookie mode).
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/TokenResponse'
+                  - $ref: '#/components/schemas/SessionResponse'
+        '400': { description: Okta authentication is not configured. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /auth/okta/config:
+    get:
+      tags: [auth]
+      summary: Okta client configuration for the UI.
+      security: []
+      responses:
+        '200':
+          description: Okta config; returns enabled=false when not configured.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OktaConfigResponse' }
+
+  /auth/google:
+    post:
+      tags: [auth]
+      summary: Exchange a Google ID token for bridge tokens.
+      description: |
+        Validates the Google ID token (RS256, issuer, audience = Google client
+        id, expiry), auto-provisions the account (verified email, else
+        `google:{sub}`), and issues a refresh + temporal token pair.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/GoogleTokenExchangeRequest' }
+      responses:
+        '200':
+          description: Bridge refresh + temporal tokens.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TokenResponse' }
+        '400': { description: Google authentication is not configured. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /auth/google/config:
+    get:
+      tags: [auth]
+      summary: Google client configuration for the UI.
+      security: []
+      responses:
+        '200':
+          description: Google config; returns enabled=false when not configured.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GoogleConfigResponse' }
+
+  /auth/github:
+    post:
+      tags: [auth]
+      summary: Exchange a GitHub OAuth code or access token for bridge tokens.
+      description: |
+        Supply `code` (+ optional `redirect_uri`) for the server-side
+        code→token exchange, or a legacy `access_token`. The token is verified
+        against `GET {GITHUB_API_URL}/user`; the account id is `github:{id}`,
+        auto-provisioned on first login.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/GitHubTokenExchangeRequest' }
+      responses:
+        '200':
+          description: Bridge tokens plus the GitHub login/display name.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GitHubExchangeResponse' }
+        '400': { description: GitHub not configured, or neither code nor access_token supplied. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /auth/card/challenge:
+    post:
+      tags: [auth]
+      summary: Issue a single-use card-signing challenge.
+      description: |
+        Returns a random 32-byte challenge (hex) the card signs. Issued
+        unconditionally (no card lookup) so the response never reveals whether a
+        card is registered. Stored in Redis with a 60 s TTL, consumed by
+        `POST /auth/card`.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CardChallengeRequest' }
+      responses:
+        '200':
+          description: Challenge issued.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CardChallengeResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /auth/card:
+    post:
+      tags: [auth]
+      summary: Exchange a card signature for bridge tokens.
+      description: |
+        Consumes the outstanding challenge (single-use) and verifies the
+        ECDSA-SHA256 signature against the registered card's EC public key. All
+        failure modes return a generic 401 and count toward a per-card lockout.
+        No auto-provisioning — a registered card implies an existing account.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CardTokenExchangeRequest' }
+      responses:
+        '200':
+          description: Bridge refresh + temporal tokens.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TokenResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimited' }
 
   /auth/sso/{provider}:
     post:
@@ -450,6 +682,111 @@ paths:
         '404': { $ref: '#/components/responses/NotFound' }
         '409': { $ref: '#/components/responses/Conflict' }
 
+  /admin/webhooks:
+    post:
+      tags: [webhook]
+      summary: Register an outbound admin webhook (admin only).
+      description: |
+        Registers a callback URL for the event feed. The URL is SSRF-validated
+        at registration (and again on every delivery). A 256-bit HMAC-SHA256
+        signing secret is generated and returned **once**. Rate limited per admin.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RegisterWebhookRequest' }
+      responses:
+        '200':
+          description: Webhook registered (secret returned once).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RegisterWebhookResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+    get:
+      tags: [webhook]
+      summary: List registered admin webhooks (admin only). Never returns the signing secret.
+      responses:
+        '200':
+          description: Webhook list.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/WebhookInfo' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /admin/webhooks/{id}:
+    delete:
+      tags: [webhook]
+      summary: Delete an admin webhook (admin only).
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer, format: int64 }
+      responses:
+        '200':
+          description: Webhook deleted.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /admin/webhooks/{id}/test:
+    post:
+      tags: [webhook]
+      summary: Enqueue a signed test event to a webhook (admin only).
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer, format: int64 }
+      responses:
+        '200':
+          description: Test event enqueued.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+                  event_id: { type: integer, format: int64 }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /admin/events:
+    get:
+      tags: [webhook]
+      summary: Pull/replay the admin event feed (admin only).
+      parameters:
+        - in: query
+          name: since
+          schema: { type: integer, format: int64, default: 0 }
+          description: Return events with id strictly greater than this cursor.
+        - in: query
+          name: limit
+          schema: { type: integer, format: int64, default: 100 }
+          description: Max events to return (clamped to 1..500).
+      responses:
+        '200':
+          description: Event feed page.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/EventFeedResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
   /sync:
     post:
       tags: [account]
@@ -657,6 +994,82 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
 
+  /managed-account/generate:
+    post:
+      tags: [managed-account]
+      summary: Generate a custodial Stellar account (owner-scoped).
+      description: |
+        Creates a fresh Stellar keypair server-side, protects the seed with the
+        configured backend, and stores it. Only the public `G...` address is
+        returned — the seed never leaves the bridge. Rate limited per account.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/GenerateManagedAccountRequest' }
+      responses:
+        '200':
+          description: Managed account created.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ManagedAccountResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /managed-account/import:
+    post:
+      tags: [managed-account]
+      summary: Import an existing Stellar secret seed under custody (owner-scoped).
+      description: |
+        Takes a Stellar secret seed (`S...`), derives its public address,
+        protects the seed with the configured backend, and stores it. Rate
+        limited per account.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ImportManagedAccountRequest' }
+      responses:
+        '200':
+          description: Managed account imported.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ManagedAccountResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /managed-account/sign:
+    post:
+      tags: [managed-account]
+      summary: Sign and submit a native payment from a custodial account (owner-scoped).
+      description: |
+        Loads the protected seed for the owner's account, signs a native (XLM)
+        payment to `destination`, submits it to the network, and records the
+        resulting transaction. Synchronous and server-only so a retry cannot
+        double-submit. Rate limited per account.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SignSubmitRequest' }
+      responses:
+        '200':
+          description: Payment signed and submitted.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SignSubmitResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
   /card:
     post:
       tags: [card]
@@ -741,10 +1154,21 @@ paths:
   /notify:
     get:
       tags: [notify]
-      summary: List notification destinations.
+      summary: List the authenticated user's notification destinations.
+      parameters:
+        - in: query
+          name: page
+          schema: { type: integer, default: 1 }
+        - in: query
+          name: per_page
+          schema: { type: integer, default: 20, maximum: 100 }
       responses:
         '200':
-          description: List of destinations.
+          description: Paginated list of destinations.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PaginatedNotifyList' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
     post:
       tags: [notify]
       summary: Create a notification destination.
@@ -785,6 +1209,10 @@ paths:
       responses:
         '200':
           description: Paginated subscriptions.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PaginatedSubscriptionList' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
     post:
       tags: [subscription]
       summary: Create a new subscription.
@@ -803,19 +1231,24 @@ paths:
   /notification/subscriptions/{id}:
     put:
       tags: [subscription]
-      summary: Update a subscription.
+      summary: Update a subscription (toggle enabled).
       parameters:
         - in: path
           name: id
           required: true
-          schema: { type: string, format: uuid }
+          schema: { type: integer }
       requestBody:
         required: true
         content:
           application/json:
             schema: { $ref: '#/components/schemas/UpdateSubscriptionRequest' }
       responses:
-        '200': { description: Subscription updated. }
+        '200':
+          description: Subscription updated (success=false when not found).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SubscriptionResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
     delete:
       tags: [subscription]
       summary: Delete a subscription.
@@ -823,9 +1256,14 @@ paths:
         - in: path
           name: id
           required: true
-          schema: { type: string, format: uuid }
+          schema: { type: integer }
       responses:
-        '200': { description: Subscription deleted. }
+        '200':
+          description: Subscription deleted (success=false when not found).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SubscriptionResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
 
   /device-token:
     post:
@@ -862,6 +1300,16 @@ components:
       description: |
         Temporal token (1-hour TTL). Obtain via `POST /token` with a valid
         refresh token. Send as `Authorization: Bearer <token>`.
+    cookieAuth:
+      type: apiKey
+      in: cookie
+      name: impala_session
+      description: |
+        Browser session cookie (HttpOnly), established by `POST /session/login`
+        or `POST /auth/okta` with `cookie_mode: true`. In production the cookie
+        is `__Host-`-prefixed (`__Host-impala_session`). Unsafe-method requests
+        additionally require the CSRF synchronizer token in the `X-CSRF-Token`
+        header.
 
   responses:
     Unauthorized:
@@ -1329,6 +1777,10 @@ components:
       properties:
         account_id: { type: string }
         mfa_type: { type: string, enum: [totp, sms] }
+        secret:
+          type: string
+          nullable: true
+          description: Accepted in the body but ignored — the TOTP secret is generated server-side.
         phone_number: { type: string, nullable: true }
       required: [account_id, mfa_type]
 
@@ -1358,24 +1810,67 @@ components:
 
     CreateNotifyRequest:
       type: object
+      description: >
+        A destination record. `medium` selects the channel; the per-channel
+        fields carry the address(es). Only fields relevant to the medium need
+        be set.
       properties:
         account_id: { type: string }
-        notify_type: { type: string, enum: [sms, email, webhook, mobile_push] }
-        destination: { type: string }
-      required: [account_id, notify_type, destination]
+        medium: { type: string, enum: [webhook, sms, mobile_push, to_app, email] }
+        mobile: { type: string, nullable: true }
+        wa: { type: string, nullable: true, description: WhatsApp address. }
+        signal: { type: string, nullable: true, description: Signal address. }
+        tel: { type: string, nullable: true, description: Telephone number. }
+        email: { type: string, nullable: true }
+        url: { type: string, nullable: true, description: Webhook URL (SSRF-validated). }
+        app: { type: string, nullable: true, description: In-app target. }
+      required: [account_id, medium]
 
     UpdateNotifyRequest:
       type: object
+      description: Identify the row by integer `id`; only supplied fields are updated.
       properties:
-        id: { type: string, format: uuid }
-        destination: { type: string }
-        enabled: { type: boolean }
+        id: { type: integer }
+        medium: { type: string, enum: [webhook, sms, mobile_push, to_app, email], nullable: true }
+        mobile: { type: string, nullable: true }
+        wa: { type: string, nullable: true }
+        signal: { type: string, nullable: true }
+        tel: { type: string, nullable: true }
+        email: { type: string, nullable: true }
+        url: { type: string, nullable: true }
+        app: { type: string, nullable: true }
+      required: [id]
 
     NotifyResponse:
       type: object
       properties:
         success: { type: boolean }
         message: { type: string }
+        id: { type: integer, nullable: true }
+
+    NotifyListItem:
+      type: object
+      properties:
+        id: { type: integer }
+        account_id: { type: string }
+        medium: { type: string, enum: [webhook, sms, mobile_push, to_app, email] }
+        mobile: { type: string, nullable: true }
+        wa: { type: string, nullable: true }
+        signal: { type: string, nullable: true }
+        tel: { type: string, nullable: true }
+        email: { type: string, nullable: true }
+        url: { type: string, nullable: true }
+        app: { type: string, nullable: true }
+
+    PaginatedNotifyList:
+      type: object
+      properties:
+        data:
+          type: array
+          items: { $ref: '#/components/schemas/NotifyListItem' }
+        page: { type: integer }
+        per_page: { type: integer }
+        total: { type: integer }
 
     CreateSubscriptionRequest:
       type: object
@@ -1398,21 +1893,48 @@ components:
       properties:
         success: { type: boolean }
         message: { type: string }
-        id: { type: string, format: uuid, nullable: true }
+        id: { type: integer, nullable: true }
+
+    SubscriptionListItem:
+      type: object
+      properties:
+        id: { type: integer }
+        event_type:
+          type: string
+          enum: [login_success, login_failure, password_change, transfer_incoming, transfer_outgoing, profile_updated]
+        medium:
+          type: string
+          enum: [webhook, sms, mobile_push, to_app, email]
+        enabled: { type: boolean }
+
+    PaginatedSubscriptionList:
+      type: object
+      properties:
+        data:
+          type: array
+          items: { $ref: '#/components/schemas/SubscriptionListItem' }
+        page: { type: integer }
+        per_page: { type: integer }
+        total: { type: integer }
 
     RegisterDeviceTokenRequest:
       type: object
+      description: >
+        The account is taken from the bearer token, not the body. `platform`
+        defaults to `android` when omitted.
       properties:
-        account_id: { type: string }
-        device_token: { type: string }
-        platform: { type: string, enum: [android, ios] }
-      required: [account_id, device_token, platform]
+        token: { type: string, description: FCM device token. }
+        platform:
+          type: string
+          default: android
+          description: Client platform, e.g. android or ios.
+      required: [token]
 
     DeleteDeviceTokenRequest:
       type: object
       properties:
-        device_token: { type: string }
-      required: [device_token]
+        token: { type: string }
+      required: [token]
 
     DeviceTokenResponse:
       type: object
@@ -1445,3 +1967,211 @@ components:
         stellar_rpc_url: { type: string, format: uri }
         network_passphrase: { type: string }
         soroban_contract_id: { type: string, nullable: true }
+
+    LogoutResponse:
+      type: object
+      properties:
+        success: { type: boolean }
+        message: { type: string }
+
+    SessionLoginRequest:
+      type: object
+      properties:
+        username: { type: string }
+        password: { type: string }
+      required: [username, password]
+
+    SessionResponse:
+      type: object
+      properties:
+        success: { type: boolean }
+        message: { type: string }
+        account_id: { type: string }
+        is_admin: { type: boolean }
+        csrf_token:
+          type: string
+          description: CSRF synchronizer token for `X-CSRF-Token` on unsafe-method cookie requests.
+
+    OktaTokenExchangeRequest:
+      type: object
+      properties:
+        okta_token: { type: string, description: Okta access token. }
+        cookie_mode:
+          type: boolean
+          default: false
+          description: Establish an HttpOnly cookie session instead of returning bearer tokens.
+      required: [okta_token]
+
+    OktaConfigResponse:
+      type: object
+      properties:
+        enabled: { type: boolean }
+        issuer: { type: string, nullable: true }
+        client_id: { type: string, nullable: true }
+        authorization_endpoint: { type: string, nullable: true }
+        token_endpoint: { type: string, nullable: true }
+        scopes:
+          type: array
+          items: { type: string }
+          nullable: true
+
+    GoogleTokenExchangeRequest:
+      type: object
+      properties:
+        id_token: { type: string, description: Google OIDC ID token. }
+      required: [id_token]
+
+    GoogleConfigResponse:
+      type: object
+      properties:
+        enabled: { type: boolean }
+        client_id: { type: string, nullable: true }
+
+    GitHubTokenExchangeRequest:
+      type: object
+      description: >
+        Supply `code` (+ optional `redirect_uri`) for the server-side
+        code→token exchange, or a legacy `access_token`. At least one of
+        `code`/`access_token` is required.
+      properties:
+        access_token: { type: string, nullable: true }
+        code: { type: string, nullable: true }
+        redirect_uri: { type: string, nullable: true }
+
+    GitHubExchangeResponse:
+      allOf:
+        - $ref: '#/components/schemas/TokenResponse'
+        - type: object
+          properties:
+            login: { type: string, nullable: true }
+            display_name: { type: string, nullable: true }
+
+    CardChallengeRequest:
+      type: object
+      properties:
+        card_id: { type: string }
+      required: [card_id]
+
+    CardChallengeResponse:
+      type: object
+      properties:
+        success: { type: boolean }
+        challenge:
+          type: string
+          description: 32 random bytes, hex-encoded (64 chars); the card signs the raw bytes.
+        expires_in: { type: integer, description: Challenge TTL in seconds. }
+
+    CardTokenExchangeRequest:
+      type: object
+      properties:
+        card_id: { type: string }
+        signature:
+          type: string
+          description: Hex-encoded ASN.1 DER ECDSA-SHA256 signature from the card (INS_SIGN_AUTH).
+      required: [card_id, signature]
+
+    GenerateManagedAccountRequest:
+      type: object
+      properties:
+        payala_account_id: { type: string }
+        first_name: { type: string, maxLength: 64 }
+        middle_name: { type: string, nullable: true }
+        last_name: { type: string, maxLength: 64 }
+        nickname: { type: string, nullable: true }
+        affiliation: { type: string, nullable: true }
+        gender: { type: string, nullable: true }
+      required: [payala_account_id, first_name, last_name]
+
+    ImportManagedAccountRequest:
+      type: object
+      properties:
+        payala_account_id: { type: string }
+        secret_seed:
+          type: string
+          description: Stellar secret seed (S...). Never stored in plaintext or echoed back.
+        first_name: { type: string, maxLength: 64 }
+        middle_name: { type: string, nullable: true }
+        last_name: { type: string, maxLength: 64 }
+        nickname: { type: string, nullable: true }
+        affiliation: { type: string, nullable: true }
+        gender: { type: string, nullable: true }
+      required: [payala_account_id, secret_seed, first_name, last_name]
+
+    ManagedAccountResponse:
+      type: object
+      properties:
+        success: { type: boolean }
+        message: { type: string }
+        stellar_account_id: { type: string, nullable: true }
+
+    SignSubmitRequest:
+      type: object
+      properties:
+        payala_account_id: { type: string }
+        destination: { type: string, description: Destination Stellar G-address. }
+        amount: { type: string, description: Native (XLM) amount as a decimal string. }
+        memo: { type: string, nullable: true }
+        fee: { type: integer, nullable: true, description: Base fee in stroops. }
+      required: [payala_account_id, destination, amount]
+
+    SignSubmitResponse:
+      type: object
+      properties:
+        success: { type: boolean }
+        message: { type: string }
+        stellar_hash: { type: string, nullable: true }
+        btxid: { type: string, format: uuid, nullable: true }
+
+    RegisterWebhookRequest:
+      type: object
+      properties:
+        url: { type: string, description: Callback URL (SSRF-validated). }
+        event_types:
+          type: array
+          items: { type: string }
+          nullable: true
+          description: Event types to deliver; omit or empty for all.
+      required: [url]
+
+    RegisterWebhookResponse:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        url: { type: string }
+        secret:
+          type: string
+          description: HMAC-SHA256 signing secret. Returned once; verify the `X-Impala-Signature` header with it.
+
+    WebhookInfo:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        url: { type: string }
+        event_types:
+          type: array
+          items: { type: string }
+          nullable: true
+        enabled: { type: boolean }
+        failure_count: { type: integer }
+        last_error: { type: string, nullable: true }
+        last_delivery_at: { type: string, nullable: true }
+        created_at: { type: string }
+
+    EventFeedItem:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        event_type: { type: string }
+        account_id: { type: string }
+        payload:
+          type: object
+          additionalProperties: true
+          description: Event-specific JSON payload.
+        created_at: { type: string }
+
+    EventFeedResponse:
+      type: object
+      properties:
+        events:
+          type: array
+          items: { $ref: '#/components/schemas/EventFeedItem' }

@@ -68,7 +68,7 @@ lint-bridge:
 
 # Terraform: fmt + validate.
 lint-terraform:
-    cd terraform && terraform fmt -check -recursive && terraform validate
+    cd terraform && terraform fmt -check -recursive && terraform init -backend=false && terraform validate
 
 # Soroban: rustfmt --check + clippy -D warnings.
 lint-soroban:
