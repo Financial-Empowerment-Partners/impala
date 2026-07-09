@@ -433,18 +433,19 @@ paths:
       tags: [auth]
       summary: Exchange a validated OIDC token for bridge tokens.
       description: >
-        Exchange a token from the named SSO provider (okta | auth0 | duo | …) for
-        the bridge's refresh + temporal JWT pair. Auto-provisions the account on
-        first login. Send `token` (the OIDC access token; `okta_token` is accepted
-        as a legacy alias) for access-token providers, or `id_token` for providers
-        configured with token_kind=id (e.g. Duo SSO).
+        Exchange a token from the named SSO provider (okta | auth0 | duo |
+        openbao | …) for the bridge's refresh + temporal JWT pair.
+        Auto-provisions the account on first login. Send `token` (the OIDC
+        access token; `okta_token` is accepted as a legacy alias) for
+        access-token providers, or `id_token` for providers configured with
+        token_kind=id (e.g. Duo SSO, the local OpenBao test IdP).
       security: []
       parameters:
         - name: provider
           in: path
           required: true
           schema: { type: string }
-          description: Provider name (okta | auth0 | duo).
+          description: Provider name (okta | auth0 | duo | openbao).
       requestBody:
         required: true
         content:
@@ -453,7 +454,7 @@ paths:
               type: object
               properties:
                 token: { type: string, description: 'OIDC access token (legacy alias: okta_token).' }
-                id_token: { type: string, description: 'OIDC id token (token_kind=id providers, e.g. Duo SSO).' }
+                id_token: { type: string, description: 'OIDC id token (token_kind=id providers, e.g. Duo SSO or OpenBao).' }
       responses:
         '200':
           description: Bridge refresh + temporal tokens.
@@ -473,7 +474,7 @@ paths:
           in: path
           required: true
           schema: { type: string }
-          description: Provider name (okta | auth0 | duo).
+          description: Provider name (okta | auth0 | duo | openbao).
       responses:
         '200':
           description: >

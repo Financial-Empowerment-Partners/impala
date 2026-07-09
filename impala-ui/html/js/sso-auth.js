@@ -40,6 +40,9 @@ var SsoAuth = (function () {
         });
     }
 
+    // Display names that plain first-letter capitalization gets wrong.
+    var LABELS = { openbao: 'OpenBao' };
+
     /**
      * Render a "Sign in with <Provider>" button into the container.
      * @param {string} name
@@ -48,7 +51,7 @@ var SsoAuth = (function () {
     function renderButton(name, container) {
         if (!container) return;
         if (document.getElementById('sso-btn-' + name)) return;
-        var label = name.charAt(0).toUpperCase() + name.slice(1);
+        var label = LABELS[name] || name.charAt(0).toUpperCase() + name.slice(1);
         var btn = document.createElement('button');
         btn.type = 'button';
         btn.id = 'sso-btn-' + name;
@@ -144,6 +147,24 @@ var SsoAuth = (function () {
     }
 
     /**
+     * Token-endpoint URL policy: HTTPS always; plain HTTP only for loopback
+     * hosts (local dev IdPs, e.g. the docker-compose OpenBao). Parsed with
+     * `URL` so userinfo tricks like `http://localhost@evil.com/` don't pass.
+     * Pure — unit-tested via tests/sso-auth.test.js.
+     * @param {string} url
+     * @returns {boolean}
+     */
+    function isAllowedTokenEndpoint(url) {
+        var u;
+        try { u = new URL(url); } catch (e) { return false; }
+        if (u.protocol === 'https:') return true;
+        if (u.protocol === 'http:') {
+            return u.hostname === 'localhost' || u.hostname === '127.0.0.1' || u.hostname === '[::1]';
+        }
+        return false;
+    }
+
+    /**
      * Handle the SSO callback. Called from `sso-callback.html`. Recovers the
      * provider from `state`, validates it, exchanges the code with the
      * provider's token endpoint, then exchanges that token with the bridge for
@@ -199,8 +220,8 @@ var SsoAuth = (function () {
             .then(function (res) { return res.json(); })
             .then(function (cfg) {
                 if (!cfg.enabled) throw new Error('SSO provider is not configured');
-                if (cfg.token_endpoint.indexOf('https://') !== 0) {
-                    throw new Error('Token endpoint must use HTTPS');
+                if (!isAllowedTokenEndpoint(cfg.token_endpoint)) {
+                    throw new Error('Token endpoint must use HTTPS (or loopback HTTP for local dev)');
                 }
 
                 var body = new URLSearchParams();
@@ -264,6 +285,7 @@ var SsoAuth = (function () {
     return {
         init: init,
         startLogin: startLogin,
-        handleCallback: handleCallback
+        handleCallback: handleCallback,
+        isAllowedTokenEndpoint: isAllowedTokenEndpoint
     };
 })();

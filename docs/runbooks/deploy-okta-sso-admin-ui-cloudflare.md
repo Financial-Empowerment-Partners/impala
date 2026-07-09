@@ -17,6 +17,8 @@ enabled). No code changes.
 - [`deploy-staging-openbao-kms-cloudflare.md`](./deploy-staging-openbao-kms-cloudflare.md) — hosts the
   static UI on **S3 (§6)** and stands up the **CloudFlare edge (§7)**. This guide layers the Okta +
   CloudFlare‑Access pieces on top of that topology.
+- [`test-sso-openbao-local.md`](./test-sso-openbao-local.md) — exercise the same SSO path **without an
+  Okta org**: the local compose stack's OpenBao doubles as a bootstrapped OIDC test IdP.
 
 ---
 
@@ -169,19 +171,11 @@ Then open `http://localhost:3000` — the **"Sign in with Okta"** button appears
 `GET /api/<net>/auth/sso/okta/config` reports `enabled: true`, and a click round‑trips through Okta to
 `dashboard.html`.
 
-> **Local routing quirk (expect a 502 otherwise).** The default `impala-ui/html/config.js` targets
-> the `testnet` network, whose base is `/api/testnet`, and `nginx.conf` proxies `/api/testnet/*` to
-> an upstream named **`testnet-bridge`** — which the single‑bridge local compose (service name
-> `impala-bridge`) does **not** run. For local Okta testing either **curl the bridge directly** as
-> above, or point a network's `base` at the legacy `/api` fallback (which Nginx proxies to
-> `impala-bridge:8080`) in `config.js`:
-> ```js
-> window.IMPALA_CONFIG = {
->   networks: { local: { base: '/api', label: 'Local' } },
->   default: 'local'
-> };
-> ```
-> Then reload `http://localhost:3000` and the Okta button + login will work end‑to‑end.
+> **Local routing.** `nginx.conf` proxies `/api/testnet/*` / `/api/mainnet/*` to per‑network
+> upstreams (`testnet-bridge` / `mainnet-bridge`). The bridge compose now gives its single local
+> bridge both names as network **aliases**, so the default `config.js` (testnet) works as‑is —
+> locally every network routes to the same bridge, and `http://localhost:3000` works end‑to‑end
+> with no `config.js` edit.
 
 > The compose only wires `OKTA_ISSUER_URL` / `OKTA_CLIENT_ID`; to override the JWKS refresh interval
 > locally, add `OKTA_JWKS_REFRESH_SECS: ${OKTA_JWKS_REFRESH_SECS:-3600}` to the `impala-bridge`

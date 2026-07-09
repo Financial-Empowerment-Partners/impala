@@ -30,7 +30,7 @@
     }
 
     // Initialize SSO (renders a button per enabled provider)
-    SsoAuth.init(['okta', 'auth0', 'duo']);
+    SsoAuth.init(['okta', 'auth0', 'duo', 'openbao']);
 
     var form = document.getElementById('login-form');
     var loginBtn = document.getElementById('login-btn');

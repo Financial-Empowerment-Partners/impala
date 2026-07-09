@@ -74,6 +74,12 @@ pub struct OidcProvider {
     pub token_kind: TokenKind,
     pub jwks_refresh_secs: u64,
     pub http_client: reqwest::Client,
+    /// URL used for ALL server-side JWKS fetches (initial, background refresh,
+    /// on-kid-miss). Equals `discovery.jwks_uri` unless an internal issuer is
+    /// configured, in which case the public issuer prefix is rewritten so the
+    /// bridge can reach the IdP on its internal address (split-horizon dev
+    /// setups, e.g. the docker-compose OpenBao test IdP).
+    pub jwks_fetch_uri: String,
 }
 
 /// Registry of all configured OIDC providers, shared as a single Axum extension.
@@ -199,8 +205,33 @@ pub async fn fetch_jwks(
     Ok(jwks)
 }
 
+/// Issuer scheme policy: HTTPS always allowed; plain HTTP only with the
+/// per-provider dev opt-in (`{NAME}_ALLOW_HTTP`).
+fn issuer_scheme_allowed(url: &str, allow_http: bool) -> bool {
+    url.starts_with("https://") || (allow_http && url.starts_with("http://"))
+}
+
+/// Rewrite `url`'s `public_base` prefix to `internal_base` (both compared with
+/// trailing slashes trimmed). Returns `url` unchanged when the prefix does not
+/// match. The remainder must be empty or start with `/` so a base of
+/// `https://idp.example.com` never rewrites `https://idp.example.com-evil/…`.
+fn rewrite_url_base(url: &str, public_base: &str, internal_base: &str) -> String {
+    let public = public_base.trim_end_matches('/');
+    let internal = internal_base.trim_end_matches('/');
+    if public == internal {
+        return url.to_string();
+    }
+    match url.strip_prefix(public) {
+        Some(rest) if rest.is_empty() || rest.starts_with('/') => {
+            format!("{}{}", internal, rest)
+        }
+        _ => url.to_string(),
+    }
+}
+
 /// Initialize a single OIDC provider from its config. Returns `None`
-/// (logging the reason) if the issuer is non-HTTPS or discovery/JWKS fails.
+/// (logging the reason) if the issuer scheme is not allowed or
+/// discovery/JWKS fails.
 pub async fn init_provider(
     cfg: &ProviderConfig,
     http_client_timeout_secs: u64,
@@ -209,13 +240,34 @@ pub async fn init_provider(
         return None;
     }
 
-    // Validate that the issuer URL uses HTTPS.
-    if !cfg.issuer_url.starts_with("https://") {
+    // Issuers must use HTTPS unless the dev-only escape hatch is set.
+    if !issuer_scheme_allowed(&cfg.issuer_url, cfg.allow_http) {
         error!(
             "oidc[{}]: issuer URL must use HTTPS: {}",
             cfg.name, cfg.issuer_url
         );
         return None;
+    }
+    if let Some(internal) = &cfg.internal_issuer_url {
+        if !issuer_scheme_allowed(internal, cfg.allow_http) {
+            error!(
+                "oidc[{}]: internal issuer URL must use HTTPS: {}",
+                cfg.name, internal
+            );
+            return None;
+        }
+    }
+    if cfg.allow_http
+        && (cfg.issuer_url.starts_with("http://")
+            || cfg
+                .internal_issuer_url
+                .as_deref()
+                .is_some_and(|u| u.starts_with("http://")))
+    {
+        warn!(
+            "oidc[{}]: ALLOW_HTTP enabled — accepting plain-HTTP issuer {} (LOCAL DEVELOPMENT ONLY)",
+            cfg.name, cfg.issuer_url
+        );
     }
 
     info!(
@@ -229,7 +281,14 @@ pub async fn init_provider(
         .build()
         .expect("Failed to create HTTP client");
 
-    let discovery = match fetch_discovery(&http_client, &cfg.name, &cfg.issuer_url).await {
+    // Discovery is fetched from the internal issuer when configured (the
+    // public issuer may only be reachable by browsers); the document itself
+    // still carries the public endpoints, which is what we hand to clients.
+    let fetch_base = cfg
+        .internal_issuer_url
+        .as_deref()
+        .unwrap_or(&cfg.issuer_url);
+    let discovery = match fetch_discovery(&http_client, &cfg.name, fetch_base).await {
         Ok(d) => d,
         Err(e) => {
             error!("oidc[{}]: failed to initialize provider: {}", cfg.name, e);
@@ -237,7 +296,21 @@ pub async fn init_provider(
         }
     };
 
-    let jwks = match fetch_jwks(&http_client, &cfg.name, &discovery.jwks_uri).await {
+    let jwks_fetch_uri = match &cfg.internal_issuer_url {
+        Some(internal) => {
+            let rewritten = rewrite_url_base(&discovery.jwks_uri, &cfg.issuer_url, internal);
+            if rewritten == discovery.jwks_uri {
+                warn!(
+                    "oidc[{}]: jwks_uri {} is not under the public issuer {}; fetching it verbatim",
+                    cfg.name, discovery.jwks_uri, cfg.issuer_url
+                );
+            }
+            rewritten
+        }
+        None => discovery.jwks_uri.clone(),
+    };
+
+    let jwks = match fetch_jwks(&http_client, &cfg.name, &jwks_fetch_uri).await {
         Ok(j) => j,
         Err(e) => {
             error!("oidc[{}]: failed to fetch initial JWKS: {}", cfg.name, e);
@@ -255,6 +328,7 @@ pub async fn init_provider(
         token_kind: cfg.token_kind,
         jwks_refresh_secs: cfg.jwks_refresh_secs,
         http_client,
+        jwks_fetch_uri,
     }))
 }
 
@@ -308,7 +382,7 @@ pub async fn jwks_refresh_task(
         match fetch_jwks(
             &provider.http_client,
             &provider.name,
-            &provider.discovery.jwks_uri,
+            &provider.jwks_fetch_uri,
         )
         .await
         {
@@ -391,7 +465,7 @@ pub async fn validate_token(
             match fetch_jwks(
                 &provider.http_client,
                 &provider.name,
-                &provider.discovery.jwks_uri,
+                &provider.jwks_fetch_uri,
             )
             .await
             {
@@ -605,5 +679,99 @@ mod tests {
                 && k.use_.as_deref().is_none_or(|u| u == "sig")
         });
         assert!(found.is_none());
+    }
+
+    #[test]
+    fn test_issuer_scheme_allowed() {
+        assert!(issuer_scheme_allowed("https://idp.example.com", false));
+        assert!(issuer_scheme_allowed("https://idp.example.com", true));
+        assert!(!issuer_scheme_allowed("http://openbao:8200", false));
+        assert!(issuer_scheme_allowed("http://openbao:8200", true));
+        assert!(!issuer_scheme_allowed("ftp://idp.example.com", true));
+        assert!(!issuer_scheme_allowed("idp.example.com", true));
+        assert!(!issuer_scheme_allowed("", true));
+    }
+
+    #[test]
+    fn test_rewrite_url_base_happy_path() {
+        assert_eq!(
+            rewrite_url_base(
+                "http://localhost:8200/v1/identity/oidc/provider/openbao/.well-known/keys",
+                "http://localhost:8200/v1/identity/oidc/provider/openbao",
+                "http://openbao:8200/v1/identity/oidc/provider/openbao",
+            ),
+            "http://openbao:8200/v1/identity/oidc/provider/openbao/.well-known/keys"
+        );
+    }
+
+    #[test]
+    fn test_rewrite_url_base_trailing_slashes_trimmed() {
+        // Trailing slash on the public base.
+        assert_eq!(
+            rewrite_url_base(
+                "https://idp.example.com/keys",
+                "https://idp.example.com/",
+                "http://internal:8200",
+            ),
+            "http://internal:8200/keys"
+        );
+        // Trailing slash on the internal base.
+        assert_eq!(
+            rewrite_url_base(
+                "https://idp.example.com/keys",
+                "https://idp.example.com",
+                "http://internal:8200/",
+            ),
+            "http://internal:8200/keys"
+        );
+    }
+
+    #[test]
+    fn test_rewrite_url_base_exact_base_url() {
+        assert_eq!(
+            rewrite_url_base(
+                "https://idp.example.com",
+                "https://idp.example.com",
+                "http://internal:8200",
+            ),
+            "http://internal:8200"
+        );
+    }
+
+    #[test]
+    fn test_rewrite_url_base_mismatch_unchanged() {
+        assert_eq!(
+            rewrite_url_base(
+                "https://other-idp.example.com/keys",
+                "https://idp.example.com",
+                "http://internal:8200",
+            ),
+            "https://other-idp.example.com/keys"
+        );
+    }
+
+    #[test]
+    fn test_rewrite_url_base_false_prefix_not_rewritten() {
+        // `example.com-evil` shares the string prefix but is a different host.
+        assert_eq!(
+            rewrite_url_base(
+                "https://idp.example.com-evil/keys",
+                "https://idp.example.com",
+                "http://internal:8200",
+            ),
+            "https://idp.example.com-evil/keys"
+        );
+    }
+
+    #[test]
+    fn test_rewrite_url_base_identical_bases_unchanged() {
+        assert_eq!(
+            rewrite_url_base(
+                "https://idp.example.com/keys",
+                "https://idp.example.com",
+                "https://idp.example.com/",
+            ),
+            "https://idp.example.com/keys"
+        );
     }
 }

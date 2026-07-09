@@ -39,6 +39,7 @@ export default [
                 confirm: 'readonly',
                 prompt: 'readonly',
                 TextEncoder: 'readonly',
+                URL: 'readonly',
                 URLSearchParams: 'readonly',
                 AbortController: 'readonly',
                 Event: 'readonly',

@@ -57,9 +57,10 @@ impl TokenKind {
 /// Configuration for a single OIDC SSO provider (Okta / Auth0 / Duo / …).
 ///
 /// Providers are declared via `SSO_PROVIDERS=okta,auth0,duo` (or the
-/// `sso_providers` config-file array) and each is configured through prefixed
-/// env vars: `{NAME}_ISSUER_URL`, `{NAME}_CLIENT_ID`, `{NAME}_AUDIENCE`,
-/// `{NAME}_JWKS_REFRESH_SECS`, `{NAME}_TOKEN_KIND`.
+/// `sso_providers` config-file key — a comma-list *string*, not an array) and
+/// each is configured through prefixed env vars: `{NAME}_ISSUER_URL`,
+/// `{NAME}_CLIENT_ID`, `{NAME}_AUDIENCE`, `{NAME}_JWKS_REFRESH_SECS`,
+/// `{NAME}_TOKEN_KIND`, `{NAME}_INTERNAL_ISSUER_URL`, `{NAME}_ALLOW_HTTP`.
 #[derive(Debug, Clone)]
 pub struct ProviderConfig {
     pub name: String,
@@ -70,6 +71,57 @@ pub struct ProviderConfig {
     pub audience: String,
     pub jwks_refresh_secs: u64,
     pub token_kind: TokenKind,
+    /// Optional server-side base URL used ONLY for discovery/JWKS fetches when
+    /// the public issuer is not reachable from the bridge (split-horizon dev
+    /// setups, e.g. the docker-compose OpenBao test IdP). `iss` validation and
+    /// the `/auth/sso/:provider/config` passthrough always use `issuer_url`.
+    pub internal_issuer_url: Option<String>,
+    /// Dev-only opt-in permitting plain-HTTP issuer URLs. Default false.
+    pub allow_http: bool,
+}
+
+/// Build the SSO provider list from a lookup function mapping
+/// `(provider name, KEY)` to a configured value (env var or config file).
+/// Extracted from `load_config` so tests can drive it with a plain closure
+/// instead of mutating process-wide env vars.
+pub(crate) fn parse_sso_providers<F>(names: &[String], provider_var: F) -> Vec<ProviderConfig>
+where
+    F: Fn(&str, &str) -> Option<String>,
+{
+    names
+        .iter()
+        .filter_map(|name| {
+            let issuer_url = provider_var(name, "ISSUER_URL")?;
+            if issuer_url.trim().is_empty() {
+                return None;
+            }
+            let client_id = provider_var(name, "CLIENT_ID").unwrap_or_default();
+            let audience = provider_var(name, "AUDIENCE")
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| client_id.clone());
+            let jwks_refresh_secs = provider_var(name, "JWKS_REFRESH_SECS")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(crate::constants::DEFAULT_JWKS_REFRESH_SECS);
+            let token_kind = provider_var(name, "TOKEN_KIND")
+                .map(|v| TokenKind::from_str_opt(&v))
+                .unwrap_or(TokenKind::Access);
+            let internal_issuer_url =
+                provider_var(name, "INTERNAL_ISSUER_URL").filter(|s| !s.trim().is_empty());
+            let allow_http = provider_var(name, "ALLOW_HTTP")
+                .map(|v| v == "true" || v == "1")
+                .unwrap_or(false);
+            Some(ProviderConfig {
+                name: name.clone(),
+                issuer_url,
+                client_id,
+                audience,
+                jwks_refresh_secs,
+                token_kind,
+                internal_issuer_url,
+                allow_http,
+            })
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone)]
@@ -266,10 +318,10 @@ pub fn load_config() -> Config {
         .unwrap_or(crate::constants::DEFAULT_HTTP_CLIENT_TIMEOUT_SECS);
 
     // OIDC SSO providers (multi-provider registry). Declare the set via
-    // `SSO_PROVIDERS=okta,auth0,duo` (or a `sso_providers` array in the config
-    // file); each provider is then configured with prefixed vars. For backward
-    // compatibility, if `SSO_PROVIDERS` is unset but `OKTA_ISSUER_URL` is set we
-    // synthesize a single `okta` provider.
+    // `SSO_PROVIDERS=okta,auth0,duo` (or an `sso_providers` comma-list string
+    // in the config file); each provider is then configured with prefixed
+    // vars. For backward compatibility, if `SSO_PROVIDERS` is unset but
+    // `OKTA_ISSUER_URL` is set we synthesize a single `okta` provider.
     let provider_var = |name: &str, key: &str| -> Option<String> {
         let env_key = format!("{}_{}", name.to_uppercase(), key);
         let file_key = format!("{}_{}", name.to_lowercase(), key.to_lowercase());
@@ -298,33 +350,7 @@ pub fn load_config() -> Config {
         }
     };
 
-    let sso_providers: Vec<ProviderConfig> = provider_names
-        .iter()
-        .filter_map(|name| {
-            let issuer_url = provider_var(name, "ISSUER_URL")?;
-            if issuer_url.trim().is_empty() {
-                return None;
-            }
-            let client_id = provider_var(name, "CLIENT_ID").unwrap_or_default();
-            let audience = provider_var(name, "AUDIENCE")
-                .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| client_id.clone());
-            let jwks_refresh_secs = provider_var(name, "JWKS_REFRESH_SECS")
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(crate::constants::DEFAULT_JWKS_REFRESH_SECS);
-            let token_kind = provider_var(name, "TOKEN_KIND")
-                .map(|v| TokenKind::from_str_opt(&v))
-                .unwrap_or(TokenKind::Access);
-            Some(ProviderConfig {
-                name: name.clone(),
-                issuer_url,
-                client_id,
-                audience,
-                jwks_refresh_secs,
-                token_kind,
-            })
-        })
-        .collect();
+    let sso_providers = parse_sso_providers(&provider_names, provider_var);
 
     // Legacy single-provider Okta config, still consumed by the `/auth/okta`
     // cookie-capable flow (okta::init_okta_provider). The same variables also
@@ -756,5 +782,122 @@ mod tests {
         assert_eq!(sc.horizon_url, "https://horizon-testnet.stellar.org");
         assert_eq!(sc.rpc_url, "https://soroban-testnet.stellar.org");
         assert_eq!(sc.contract_id, Some("CONTRACT123".to_string()));
+    }
+
+    /// Build a `provider_var`-shaped lookup from `("NAME", "KEY", "value")`
+    /// triples, mirroring the env-var naming used by `load_config`.
+    fn lookup<'a>(
+        entries: &'a [(&'a str, &'a str, &'a str)],
+    ) -> impl Fn(&str, &str) -> Option<String> + 'a {
+        move |name: &str, key: &str| {
+            entries
+                .iter()
+                .find(|(n, k, _)| n.eq_ignore_ascii_case(name) && *k == key)
+                .map(|(_, _, v)| v.to_string())
+        }
+    }
+
+    #[test]
+    fn sso_provider_parses_internal_issuer_and_allow_http() {
+        let names = vec!["openbao".to_string()];
+        let providers = parse_sso_providers(
+            &names,
+            lookup(&[
+                (
+                    "openbao",
+                    "ISSUER_URL",
+                    "http://localhost:8200/v1/identity/oidc/provider/openbao",
+                ),
+                ("openbao", "CLIENT_ID", "generated-id"),
+                (
+                    "openbao",
+                    "INTERNAL_ISSUER_URL",
+                    "http://openbao:8200/v1/identity/oidc/provider/openbao",
+                ),
+                ("openbao", "ALLOW_HTTP", "true"),
+                ("openbao", "TOKEN_KIND", "id"),
+            ]),
+        );
+        assert_eq!(providers.len(), 1);
+        let p = &providers[0];
+        assert_eq!(
+            p.internal_issuer_url.as_deref(),
+            Some("http://openbao:8200/v1/identity/oidc/provider/openbao")
+        );
+        assert!(p.allow_http);
+        assert_eq!(p.token_kind, TokenKind::Id);
+        assert_eq!(p.audience, "generated-id");
+    }
+
+    #[test]
+    fn sso_provider_new_keys_default_backward_compatible() {
+        let names = vec!["okta".to_string()];
+        let providers = parse_sso_providers(
+            &names,
+            lookup(&[
+                (
+                    "okta",
+                    "ISSUER_URL",
+                    "https://example.okta.com/oauth2/default",
+                ),
+                ("okta", "CLIENT_ID", "abc123"),
+            ]),
+        );
+        assert_eq!(providers.len(), 1);
+        let p = &providers[0];
+        assert_eq!(p.internal_issuer_url, None);
+        assert!(!p.allow_http);
+        assert_eq!(p.audience, "abc123");
+        assert_eq!(p.token_kind, TokenKind::Access);
+        assert_eq!(
+            p.jwks_refresh_secs,
+            crate::constants::DEFAULT_JWKS_REFRESH_SECS
+        );
+    }
+
+    #[test]
+    fn sso_provider_allow_http_accepts_true_and_1_only() {
+        for (value, expected) in [
+            ("true", true),
+            ("1", true),
+            ("false", false),
+            ("yes", false),
+            ("TRUE", false),
+            ("", false),
+        ] {
+            let names = vec!["dev".to_string()];
+            let providers = parse_sso_providers(
+                &names,
+                lookup(&[
+                    ("dev", "ISSUER_URL", "https://idp.example.com"),
+                    ("dev", "ALLOW_HTTP", value),
+                ]),
+            );
+            assert_eq!(providers[0].allow_http, expected, "value {value:?}");
+        }
+    }
+
+    #[test]
+    fn sso_provider_blank_internal_issuer_treated_as_unset() {
+        let names = vec!["dev".to_string()];
+        let providers = parse_sso_providers(
+            &names,
+            lookup(&[
+                ("dev", "ISSUER_URL", "https://idp.example.com"),
+                ("dev", "INTERNAL_ISSUER_URL", "   "),
+            ]),
+        );
+        assert_eq!(providers[0].internal_issuer_url, None);
+    }
+
+    #[test]
+    fn sso_provider_missing_issuer_drops_provider() {
+        let names = vec!["ghost".to_string(), "real".to_string()];
+        let providers = parse_sso_providers(
+            &names,
+            lookup(&[("real", "ISSUER_URL", "https://idp.example.com")]),
+        );
+        assert_eq!(providers.len(), 1);
+        assert_eq!(providers[0].name, "real");
     }
 }
