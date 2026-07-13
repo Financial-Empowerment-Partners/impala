@@ -17,7 +17,7 @@ javacard-simulator = { module = "com.klinec:jcardsim", version = "3.0.6.0" }
 # jvmTest-only: independent CMac/AES reference implementation in Scp03CounterIcvTest.
 # Was previously satisfied transitively (via at.asitplus.crypto:datatypes, removed
 # 2026-06 as a dead commonMain dep); declared explicitly now that it is the only user.
-bouncycastle = { module = "org.bouncycastle:bcprov-jdk18on", version = "1.84" }
+bouncycastle = { module = "org.bouncycastle:bcprov-jdk18on", version = "1.85" }
 okio = { module = "com.squareup.okio:okio", version.ref = "okio" }
 uuid = { module = "com.benasher44:uuid", version.ref = "uuid" }
 bignum = { module = "com.ionspin.kotlin:bignum", version.ref = "bignum" }
