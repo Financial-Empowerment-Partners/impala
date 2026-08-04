@@ -347,6 +347,102 @@ pub fn validate_rfc3339_timestamp(value: &str, field: &str) -> Result<(), AppErr
         .map_err(|_| AppError::BadRequest(format!("{} must be an RFC 3339 timestamp", field)))
 }
 
+/// Validate an exchange currency/ticker code (e.g. "USD", "xlm", "usdcxlm"):
+/// 1–24 chars of `[A-Za-z0-9_-]`. Case is preserved rather than normalized —
+/// Changelly tickers are lowercase while fiat codes are uppercase, so unlike
+/// Payala currencies no canonical case exists.
+pub fn validate_exchange_currency(currency: &str) -> Result<(), AppError> {
+    if currency.is_empty() || currency.len() > crate::constants::MAX_EXCHANGE_CURRENCY_LEN {
+        return Err(AppError::BadRequest(format!(
+            "currency must be between 1 and {} characters",
+            crate::constants::MAX_EXCHANGE_CURRENCY_LEN
+        )));
+    }
+    if !currency
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return Err(AppError::BadRequest(
+            "currency must contain only letters, digits, '_' or '-'".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// Validate a decimal amount string: up to 20 integer digits, optionally a
+/// '.' plus up to 18 fraction digits, strictly positive. Exchange amounts are
+/// provider-quoted decimal STRINGS end-to-end (heterogeneous precisions) —
+/// this gate never parses them into numbers.
+pub fn validate_decimal_amount(amount: &str) -> Result<(), AppError> {
+    if amount.is_empty() || amount.len() > crate::constants::MAX_EXCHANGE_AMOUNT_LEN {
+        return Err(AppError::BadRequest(format!(
+            "amount must be between 1 and {} characters",
+            crate::constants::MAX_EXCHANGE_AMOUNT_LEN
+        )));
+    }
+    let (int_part, frac_part) = match amount.split_once('.') {
+        Some((i, f)) => (i, Some(f)),
+        None => (amount, None),
+    };
+    if int_part.is_empty() || int_part.len() > 20 || !int_part.chars().all(|c| c.is_ascii_digit()) {
+        return Err(AppError::BadRequest(
+            "amount must be an unsigned decimal number (e.g. 12.5) with at most 20 integer digits"
+                .to_string(),
+        ));
+    }
+    if let Some(frac) = frac_part {
+        if frac.is_empty() || frac.len() > 18 || !frac.chars().all(|c| c.is_ascii_digit()) {
+            return Err(AppError::BadRequest(
+                "amount must have between 1 and 18 fraction digits".to_string(),
+            ));
+        }
+    }
+    // Strictly positive: at least one nonzero digit somewhere.
+    if !amount.chars().any(|c| matches!(c, '1'..='9')) {
+        return Err(AppError::BadRequest(
+            "amount must be greater than zero".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// Validate a crypto payout/refund address: 1–128 chars of printable ASCII
+/// with no whitespace or control characters. Per-chain format correctness is
+/// delegated to the provider's validate-address endpoint; this gate only
+/// blocks junk and header/log injection.
+pub fn validate_exchange_address(address: &str) -> Result<(), AppError> {
+    if address.is_empty() || address.len() > crate::constants::MAX_EXCHANGE_ADDRESS_LEN {
+        return Err(AppError::BadRequest(format!(
+            "address must be between 1 and {} characters",
+            crate::constants::MAX_EXCHANGE_ADDRESS_LEN
+        )));
+    }
+    if !address.chars().all(|c| c.is_ascii_graphic()) {
+        return Err(AppError::BadRequest(
+            "address must be printable ASCII without whitespace".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// Validate a payout/refund extra id (destination tag / memo): 1–64 chars of
+/// printable ASCII. Interior spaces are allowed (Stellar text memos may
+/// contain them); control characters are not.
+pub fn validate_exchange_extra_id(extra_id: &str) -> Result<(), AppError> {
+    if extra_id.is_empty() || extra_id.len() > crate::constants::MAX_EXCHANGE_EXTRA_ID_LEN {
+        return Err(AppError::BadRequest(format!(
+            "extra_id must be between 1 and {} characters",
+            crate::constants::MAX_EXCHANGE_EXTRA_ID_LEN
+        )));
+    }
+    if !extra_id.chars().all(|c| c == ' ' || c.is_ascii_graphic()) {
+        return Err(AppError::BadRequest(
+            "extra_id must be printable ASCII".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 /// Escape special characters in LDAP filter values per RFC 4515.
 pub fn ldap_escape(input: &str) -> String {
     let mut escaped = String::with_capacity(input.len());
@@ -856,5 +952,143 @@ mod tests {
         assert!(validate_rfc3339_timestamp("not-a-date", "from").is_err());
         assert!(validate_rfc3339_timestamp("2026-13-01T00:00:00Z", "from").is_err());
         assert!(validate_rfc3339_timestamp("2026-06-30", "from").is_err());
+    }
+
+    // ── Exchange currency ──────────────────────────────────────────────
+
+    #[test]
+    fn test_validate_exchange_currency_valid() {
+        for c in [
+            "USD",
+            "xlm",
+            "usdcxlm",
+            "USDT-TRC20",
+            "usdc_polygon",
+            "A",
+            "0",
+        ] {
+            assert!(
+                validate_exchange_currency(c).is_ok(),
+                "currency {} should be valid",
+                c
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_exchange_currency_length_bounds() {
+        assert!(validate_exchange_currency(&"a".repeat(24)).is_ok());
+        assert!(validate_exchange_currency(&"a".repeat(25)).is_err());
+        assert!(validate_exchange_currency("").is_err());
+    }
+
+    #[test]
+    fn test_validate_exchange_currency_rejects_bad_chars() {
+        assert!(validate_exchange_currency("US D").is_err()); // space
+        assert!(validate_exchange_currency("usd.e").is_err()); // dot
+        assert!(validate_exchange_currency("usd!").is_err());
+        assert!(validate_exchange_currency("usd\n").is_err()); // control
+        assert!(validate_exchange_currency("usd\t").is_err());
+        assert!(validate_exchange_currency("usdé").is_err()); // non-ASCII
+    }
+
+    // ── Decimal amount ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_validate_decimal_amount_valid() {
+        for a in [
+            "1",
+            "0.1",
+            "125.5",
+            "01", // leading zeros allowed; value is nonzero
+            "0001.0500",
+            "99999999999999999999",                    // 20 integer digits
+            "0.000000000000000001",                    // 18 fraction digits
+            "99999999999999999999.999999999999999999", // both at max
+        ] {
+            assert!(
+                validate_decimal_amount(a).is_ok(),
+                "amount {} should be valid",
+                a
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_decimal_amount_rejects_zero() {
+        for a in ["0", "0.0", "00", "0.000", "000.000000"] {
+            assert!(
+                validate_decimal_amount(a).is_err(),
+                "amount {} must be rejected as zero",
+                a
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_decimal_amount_rejects_malformed() {
+        assert!(validate_decimal_amount("").is_err());
+        assert!(validate_decimal_amount(".5").is_err()); // leading dot
+        assert!(validate_decimal_amount("5.").is_err()); // trailing dot
+        assert!(validate_decimal_amount("1.2.3").is_err()); // two dots
+        assert!(validate_decimal_amount("-1").is_err()); // signed
+        assert!(validate_decimal_amount("+1").is_err());
+        assert!(validate_decimal_amount("1e5").is_err()); // exponent
+        assert!(validate_decimal_amount("1,5").is_err()); // comma decimal
+        assert!(validate_decimal_amount(" 1").is_err()); // whitespace
+        assert!(validate_decimal_amount("1 ").is_err());
+        assert!(validate_decimal_amount("١٢").is_err()); // non-ASCII digits
+    }
+
+    #[test]
+    fn test_validate_decimal_amount_rejects_oversized() {
+        // 21 integer digits.
+        assert!(validate_decimal_amount(&"9".repeat(21)).is_err());
+        // 19 fraction digits.
+        assert!(validate_decimal_amount(&format!("1.{}", "9".repeat(19))).is_err());
+        // Over MAX_EXCHANGE_AMOUNT_LEN outright.
+        assert!(validate_decimal_amount(&"9".repeat(41)).is_err());
+    }
+
+    // ── Exchange address ───────────────────────────────────────────────
+
+    #[test]
+    fn test_validate_exchange_address_valid() {
+        let stellar = "GABCDEFGHIJKLMNOPQRSTUVWXYZ234567ABCDEFGHIJKLMNOPQRSTUVW";
+        assert!(validate_exchange_address(stellar).is_ok());
+        assert!(validate_exchange_address("0x52908400098527886E0F7030069857D2E4169EE7").is_ok());
+        assert!(validate_exchange_address("bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq").is_ok());
+        assert!(validate_exchange_address(&"a".repeat(128)).is_ok());
+    }
+
+    #[test]
+    fn test_validate_exchange_address_rejects_bad_input() {
+        assert!(validate_exchange_address("").is_err());
+        assert!(validate_exchange_address(&"a".repeat(129)).is_err());
+        assert!(validate_exchange_address("addr with space").is_err());
+        assert!(validate_exchange_address("addr\ttab").is_err());
+        assert!(validate_exchange_address("addr\nnewline").is_err());
+        assert!(validate_exchange_address("addr\r").is_err());
+        assert!(validate_exchange_address("addr\u{7f}").is_err()); // DEL
+        assert!(validate_exchange_address("addrß").is_err()); // non-ASCII
+    }
+
+    // ── Exchange extra id ──────────────────────────────────────────────
+
+    #[test]
+    fn test_validate_exchange_extra_id_valid() {
+        assert!(validate_exchange_extra_id("123456").is_ok()); // XRP-style tag
+        assert!(validate_exchange_extra_id("invoice 42").is_ok()); // memo with space
+        assert!(validate_exchange_extra_id(&"m".repeat(64)).is_ok());
+    }
+
+    #[test]
+    fn test_validate_exchange_extra_id_rejects_bad_input() {
+        assert!(validate_exchange_extra_id("").is_err());
+        assert!(validate_exchange_extra_id(&"m".repeat(65)).is_err());
+        assert!(validate_exchange_extra_id("memo\n").is_err());
+        assert!(validate_exchange_extra_id("memo\t").is_err());
+        assert!(validate_exchange_extra_id("memo\u{0}").is_err());
+        assert!(validate_exchange_extra_id("mémo").is_err()); // non-ASCII
     }
 }

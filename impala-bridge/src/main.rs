@@ -4,6 +4,7 @@ mod config;
 mod constants;
 mod error;
 mod events;
+mod exchange;
 mod google;
 mod handlers;
 mod jobs;
@@ -47,7 +48,8 @@ use tower_http::trace::TraceLayer;
 use config::load_config;
 use handlers::{
     account, admin, admin_webhook, authenticate, card, card_auth, device_token,
-    github as github_handler, google as google_handler, health, logout, managed_seed, mfa, network,
+    exchange as exchange_handler, exchange_webhook, github as github_handler,
+    google as google_handler, health, logout, managed_seed, mfa, network,
     notification_subscription, notify, okta as okta_handler, session as session_handler,
     sso as sso_handler, subscribe, sync, token, transaction,
 };
@@ -255,6 +257,23 @@ async fn run_server(
         None
     };
 
+    // Initialize exchange providers (OwlPay Harbor + Changelly crypto/fiat).
+    // Misconfigured credentials on a money-moving path are a hard startup
+    // error — fail closed rather than run with a half-working provider.
+    let owlpay_provider = exchange::owlpay::init_owlpay_provider(&config).unwrap_or_else(|e| {
+        error!("Failed to initialize OwlPay provider: {}", e);
+        std::process::exit(1);
+    });
+    let changelly_crypto =
+        exchange::changelly::init_changelly_crypto(&config).unwrap_or_else(|e| {
+            error!("Failed to initialize Changelly exchange provider: {}", e);
+            std::process::exit(1);
+        });
+    let changelly_fiat = exchange::changelly::init_changelly_fiat(&config).unwrap_or_else(|e| {
+        error!("Failed to initialize Changelly fiat provider: {}", e);
+        std::process::exit(1);
+    });
+
     // Initialize SNS client for job dispatch (if configured)
     let sns_client = if config.sns_topic_arn.is_some() {
         let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
@@ -338,6 +357,16 @@ async fn run_server(
     // Also handed to handlers via Extension so streams spawned from
     // POST /subscribe participate in graceful shutdown.
     let cancel = CancellationToken::new();
+
+    // Keep a handle for the exchange reconcile loop; `metrics` itself is
+    // moved into the router's Extension layer below.
+    let exchange_metrics = metrics.clone();
+
+    // Shared by the reconcile loop and the `?refresh=true` handler path so
+    // both schedule the next poll on the same configured cadence.
+    let reconcile_config = Arc::new(exchange::reconcile::ReconcileConfig {
+        poll_secs: config.exchange_poll_secs,
+    });
 
     // Build router with routes
     let app = Router::new()
@@ -448,6 +477,30 @@ async fn run_server(
             post(admin_webhook::test_webhook),
         )
         .route("/admin/events", get(admin_webhook::list_events))
+        // Exchange: fiat<->USDC on/off-ramp (OwlPay Harbor, Changelly Fiat)
+        // and crypto->USDC swaps (Changelly). The /webhooks/* callbacks are
+        // deliberately unauthenticated — each verifies its provider's own
+        // signature over the raw request body before parsing.
+        .route("/exchange/providers", get(exchange_handler::list_providers))
+        .route("/exchange/reference", get(exchange_handler::get_reference))
+        .route(
+            "/exchange/owlpay/quotes/{quote_id}/requirements",
+            get(exchange_handler::get_owlpay_quote_requirements),
+        )
+        .route("/exchange/quote", post(exchange_handler::create_quote))
+        .route(
+            "/exchange/orders",
+            post(exchange_handler::create_order).get(exchange_handler::list_orders),
+        )
+        .route(
+            "/exchange/orders/{order_id}",
+            get(exchange_handler::get_order),
+        )
+        .route("/webhooks/owlpay", post(exchange_webhook::owlpay_webhook))
+        .route(
+            "/webhooks/changelly",
+            post(exchange_webhook::changelly_webhook),
+        )
         .layer(cors)
         .layer(RequestBodyLimitLayer::new(1_048_576)) // 1 MB body limit
         // Global request deadline (408 on expiry). Safe for this app: the
@@ -497,6 +550,7 @@ async fn run_server(
         .layer(Extension(http_client))
         .layer(Extension(ldap_config))
         .layer(Extension(metrics))
+        .layer(Extension(reconcile_config.clone()))
         .layer(Extension(cancel.clone()));
 
     // Add optional SNS client extension
@@ -552,6 +606,24 @@ async fn run_server(
         app
     };
 
+    // Add exchange provider extensions (if configured). Routes stay mounted
+    // either way; handlers answer 400 "not configured" when the layer is absent.
+    let app = if let Some(ref provider) = owlpay_provider {
+        app.layer(Extension(provider.clone()))
+    } else {
+        app
+    };
+    let app = if let Some(ref provider) = changelly_crypto {
+        app.layer(Extension(provider.clone()))
+    } else {
+        app
+    };
+    let app = if let Some(ref provider) = changelly_fiat {
+        app.layer(Extension(provider.clone()))
+    } else {
+        app
+    };
+
     // LDAP directory sync
     ldap::directory_sync(&pool, &config).await;
 
@@ -574,6 +646,31 @@ async fn run_server(
     tokio::spawn(async move {
         admin_webhook_delivery::run(wh_pool, wh_cfg, wh_cancel).await;
     });
+
+    // Spawn the exchange-order reconcile loop when any exchange provider is
+    // configured. Changelly's swap API has no webhooks, so non-terminal
+    // orders must be polled; for OwlPay/Changelly-Fiat the poll is a
+    // belt-and-braces backstop behind their webhooks.
+    if owlpay_provider.is_some() || changelly_crypto.is_some() || changelly_fiat.is_some() {
+        let ex_pool = pool.clone();
+        let ex_cancel = cancel.clone();
+        let ex_owlpay = owlpay_provider.clone();
+        let ex_crypto = changelly_crypto.clone();
+        let ex_fiat = changelly_fiat.clone();
+        let ex_cfg = (*reconcile_config).clone();
+        tokio::spawn(async move {
+            exchange::reconcile::run(
+                ex_pool,
+                ex_owlpay,
+                ex_crypto,
+                ex_fiat,
+                exchange_metrics,
+                ex_cfg,
+                ex_cancel,
+            )
+            .await;
+        });
+    }
 
     // Run server with graceful shutdown
     info!("Server listening on {}", config.service_address);

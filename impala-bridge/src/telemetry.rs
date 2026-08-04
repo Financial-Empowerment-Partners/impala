@@ -53,6 +53,10 @@ pub struct AppMetrics {
     // Payala sync (reserve/mirror)
     pub payala_sync_batches: Counter<u64>,
     pub payala_sync_items: Counter<u64>,
+
+    // Exchange orders (OwlPay / Changelly)
+    pub exchange_orders: Counter<u64>,
+    pub exchange_order_updates: Counter<u64>,
 }
 
 impl AppMetrics {
@@ -147,6 +151,15 @@ impl AppMetrics {
                 .u64_counter("payala_sync.items")
                 .with_description("Payala sync items by result (applied/duplicate/conflicting)")
                 .build(),
+
+            exchange_orders: meter
+                .u64_counter("exchange.orders_created")
+                .with_description("Exchange orders created by provider and outcome")
+                .build(),
+            exchange_order_updates: meter
+                .u64_counter("exchange.order_updates")
+                .with_description("Exchange order status updates by provider, status and source")
+                .build(),
         }
     }
 }
@@ -161,6 +174,33 @@ impl AppMetrics {
             &[
                 KeyValue::new("provider", provider),
                 KeyValue::new("outcome", outcome),
+            ],
+        );
+    }
+
+    /// Record an exchange-order creation on the `exchange.orders_created`
+    /// counter (`provider` = owlpay|changelly_crypto|changelly_fiat, `outcome`
+    /// = success|provider_error|db_error).
+    pub fn record_exchange_order(&self, provider: &str, outcome: &'static str) {
+        self.exchange_orders.add(
+            1,
+            &[
+                KeyValue::new("provider", provider.to_string()),
+                KeyValue::new("outcome", outcome),
+            ],
+        );
+    }
+
+    /// Record an exchange-order state change on the `exchange.order_updates`
+    /// counter (`status` from `VALID_EXCHANGE_STATUSES`, `source` =
+    /// webhook|poll|refresh).
+    pub fn record_exchange_order_update(&self, provider: &str, status: &str, source: &'static str) {
+        self.exchange_order_updates.add(
+            1,
+            &[
+                KeyValue::new("provider", provider.to_string()),
+                KeyValue::new("status", status.to_string()),
+                KeyValue::new("source", source),
             ],
         );
     }

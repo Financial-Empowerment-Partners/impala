@@ -290,3 +290,42 @@ When account not found (200 OK with success: false):
 ```
 
 **500 Internal Server Error:** Database operation failed
+
+## Exchange integrations (OwlPay + Changelly)
+
+The bridge can convert fiat to USDC and back, and swap XLM (or other coins)
+into USDC, through three optional providers. Full request/response shapes live
+in `openapi.yaml` (tag `exchange`); configuration lives in `.env.example`.
+
+| Provider | Env toggle | Directions | Notes |
+|---|---|---|---|
+| OwlPay Harbor | `OWLPAY_API_KEY` | fiat→USDC, USDC→fiat | Quote-first v2 transfers; wire instructions returned on-ramp; webhook at `POST /webhooks/owlpay` (`harbor-signature` HMAC, 5-min replay window) |
+| Changelly (swaps) | `CHANGELLY_API_KEY` + `CHANGELLY_PRIVATE_KEY[_FILE]` | crypto→crypto (e.g. `xlm` → `usdcxlm`) | JSON-RPC v2, RSA-signed bodies; no provider webhooks — the reconcile loop polls status |
+| Changelly Fiat | `CHANGELLY_FIAT_API_KEY` + `CHANGELLY_FIAT_PRIVATE_KEY[_FILE]` | fiat→USDC, USDC→fiat | Aggregated offers (MoonPay et al), hosted checkout `redirect_url`; callback at `POST /webhooks/changelly` (RSA-verified, state re-fetched) |
+
+Endpoints (bearer-authenticated unless noted):
+
+- `GET /exchange/providers` — configured providers and supported directions
+- `GET /exchange/reference` — provider reference data: currency/network
+  tickers (find `usdcxlm` here), tradable pairs, and Changelly Fiat
+  sub-provider codes
+- `GET /exchange/owlpay/quotes/{quote_id}/requirements` — the JSON Schema an
+  OwlPay order's `beneficiary`/`payout_instrument` must satisfy
+- `POST /exchange/quote` — provider quote/estimate (rate-limited)
+- `POST /exchange/orders` — create an order; response carries a pay-in
+  address + memo (swaps), a hosted `redirect_url` (fiat), or bank wire
+  `transfer_instructions` (OwlPay on-ramp)
+- `GET /exchange/orders` / `GET /exchange/orders/{order_id}?refresh=true` —
+  list/detail; `refresh` polls the provider before answering
+- `POST /webhooks/owlpay`, `POST /webhooks/changelly` — unauthenticated
+  provider callbacks; each verifies the provider's signature over the raw
+  request body before any parsing
+
+Orders are tracked in the `exchange_order` table with a unified status
+lifecycle (`created → awaiting_deposit → processing → completed`, plus
+`on_hold`/`failed`/`refunded`/`expired`); status changes emit
+`exchange.order_created`/`exchange.order_updated` events into the admin
+webhook feed. Amounts are decimal strings end-to-end. Pay-in memos
+(`payin_extra_id`) are mandatory when present — funds sent without them can
+be lost. Provider API keys are read from the environment at startup and are
+never logged; setting a key with invalid companion credentials fails startup.

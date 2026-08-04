@@ -846,6 +846,226 @@ fn default_event_limit() -> i64 {
     100
 }
 
+// ── Exchange ───────────────────────────────────────────────────────────
+// OwlPay / Changelly fiat<->USDC on/off-ramp and crypto->USDC swaps. All
+// amounts are provider-quoted decimal STRINGS (heterogeneous precisions;
+// never parsed into floats).
+
+#[derive(Debug, Deserialize)]
+pub struct ExchangeQuoteRequest {
+    pub provider: String,
+    pub direction: String,
+    pub from_currency: String,
+    pub to_currency: String,
+    pub amount_from: String,
+    /// changelly_crypto: "float" | "fixed".
+    #[serde(default)]
+    pub rate_type: Option<String>,
+    /// changelly_fiat.
+    #[serde(default)]
+    pub country: Option<String>,
+    /// changelly_fiat, US only.
+    #[serde(default)]
+    pub state: Option<String>,
+    /// changelly_fiat offers `ip`.
+    #[serde(default)]
+    pub user_ip: Option<String>,
+    /// owlpay.
+    #[serde(default)]
+    pub source_country: Option<String>,
+    /// owlpay.
+    #[serde(default)]
+    pub destination_country: Option<String>,
+    /// owlpay (crypto source).
+    #[serde(default)]
+    pub source_chain: Option<String>,
+    /// owlpay (crypto destination, e.g. "stellar").
+    #[serde(default)]
+    pub destination_chain: Option<String>,
+    /// owlpay "individual" | "business" (default individual).
+    #[serde(default)]
+    pub customer_type: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct ExchangeQuoteResponse {
+    pub success: bool,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quotes: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateExchangeOrderRequest {
+    /// The Payala account id (== JWT sub); require_owner-gated.
+    pub account_id: String,
+    pub provider: String,
+    pub direction: String,
+    pub from_currency: String,
+    pub to_currency: String,
+    pub amount_from: String,
+    #[serde(default)]
+    pub payout_address: Option<String>,
+    #[serde(default)]
+    pub payout_extra_id: Option<String>,
+    #[serde(default)]
+    pub refund_address: Option<String>,
+    #[serde(default)]
+    pub refund_extra_id: Option<String>,
+    #[serde(default)]
+    pub rate_type: Option<String>,
+    /// changelly_crypto fixed-rate quotes.
+    #[serde(default)]
+    pub rate_id: Option<String>,
+    /// owlpay v2.
+    #[serde(default)]
+    pub quote_id: Option<String>,
+    /// changelly_fiat (e.g. "moonpay").
+    #[serde(default)]
+    pub provider_code: Option<String>,
+    /// changelly_fiat.
+    #[serde(default)]
+    pub payment_method: Option<String>,
+    #[serde(default)]
+    pub country: Option<String>,
+    #[serde(default)]
+    pub state: Option<String>,
+    #[serde(default)]
+    pub user_ip: Option<String>,
+    /// changelly_fiat buy.
+    #[serde(default)]
+    pub return_success_url: Option<String>,
+    #[serde(default)]
+    pub return_failed_url: Option<String>,
+    /// owlpay on_behalf_of ("cus_...").
+    #[serde(default)]
+    pub customer_uuid: Option<String>,
+    /// owlpay.
+    #[serde(default)]
+    pub transfer_purpose: Option<String>,
+    /// owlpay.
+    #[serde(default)]
+    pub is_self_transfer: Option<bool>,
+    /// owlpay destination.beneficiary_info passthrough.
+    #[serde(default)]
+    pub beneficiary: Option<serde_json::Value>,
+    /// owlpay destination.payout_instrument passthrough.
+    #[serde(default)]
+    pub payout_instrument: Option<serde_json::Value>,
+    /// owlpay source.payment_instrument (off-ramp).
+    #[serde(default)]
+    pub source_payment_instrument: Option<serde_json::Value>,
+}
+
+#[derive(Serialize)]
+pub struct ExchangeOrderResponse {
+    pub success: bool,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub order: Option<ExchangeOrderDetail>,
+}
+
+#[derive(Debug, Serialize, sqlx::FromRow)]
+pub struct ExchangeOrderDetail {
+    pub order_id: Uuid,
+    pub payala_account_id: String,
+    pub provider: String,
+    pub direction: String,
+    pub from_currency: String,
+    pub to_currency: String,
+    pub amount_from: String,
+    pub amount_to: Option<String>,
+    pub status: String,
+    pub provider_status: Option<String>,
+    pub provider_order_id: String,
+    pub payin_address: Option<String>,
+    pub payin_extra_id: Option<String>,
+    pub payout_address: Option<String>,
+    pub payout_extra_id: Option<String>,
+    pub redirect_url: Option<String>,
+    pub transfer_instructions: Option<serde_json::Value>,
+    pub btxid: Option<Uuid>,
+    pub last_error: Option<String>,
+    /// Rendered in SQL via to_char(... TS_FMT).
+    pub created_at: String,
+    pub updated_at: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ListExchangeOrdersQuery {
+    #[serde(default = "default_page_i64")]
+    pub page: i64,
+    #[serde(default = "default_per_page_i64")]
+    pub per_page: i64,
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub provider: Option<String>,
+    /// Admin-only filter.
+    #[serde(default)]
+    pub account_id: Option<String>,
+}
+
+fn default_page_i64() -> i64 {
+    1
+}
+
+fn default_per_page_i64() -> i64 {
+    20
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GetExchangeOrderQuery {
+    /// When true, refresh a non-terminal order from the provider before returning.
+    #[serde(default)]
+    pub refresh: bool,
+}
+
+#[derive(Serialize)]
+pub struct ExchangeProviderStatus {
+    pub provider: String,
+    pub enabled: bool,
+    pub directions: Vec<String>,
+}
+
+#[derive(Serialize)]
+pub struct ExchangeProvidersResponse {
+    pub providers: Vec<ExchangeProviderStatus>,
+}
+
+/// Query for `GET /exchange/reference` — read-only provider reference data
+/// (currency/network tickers, tradable pairs, aggregated fiat sub-providers).
+#[derive(Debug, Deserialize)]
+pub struct ExchangeReferenceQuery {
+    pub provider: String,
+    /// `currencies` (default) | `pairs` (changelly_crypto) | `providers`
+    /// (changelly_fiat).
+    #[serde(default)]
+    pub kind: Option<String>,
+    /// changelly_fiat currencies filter: `crypto` | `fiat`.
+    #[serde(default, rename = "type")]
+    pub currency_type: Option<String>,
+    /// changelly_fiat currencies filter: `buy` | `sell`.
+    #[serde(default)]
+    pub flow: Option<String>,
+    /// changelly_crypto pairs filter (source ticker).
+    #[serde(default)]
+    pub from: Option<String>,
+    /// changelly_crypto pairs filter (destination ticker).
+    #[serde(default)]
+    pub to: Option<String>,
+}
+
+/// Provider-payload passthrough envelope shared by `GET /exchange/reference`
+/// and `GET /exchange/owlpay/quotes/{quote_id}/requirements`.
+#[derive(Serialize)]
+pub struct ExchangeReferenceResponse {
+    pub success: bool,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<serde_json::Value>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1067,5 +1287,291 @@ mod tests {
         let req2: SsoTokenExchangeRequest = serde_json::from_str(r#"{"id_token":"xyz"}"#).unwrap();
         assert_eq!(req2.id_token.as_deref(), Some("xyz"));
         assert_eq!(req2.token, None);
+    }
+
+    // ── Exchange ───────────────────────────────────────────────────────
+
+    #[test]
+    fn test_exchange_reference_query_defaults_and_type_rename() {
+        let q: ExchangeReferenceQuery =
+            serde_json::from_str(r#"{"provider": "changelly_crypto"}"#).unwrap();
+        assert_eq!(q.provider, "changelly_crypto");
+        assert!(q.kind.is_none());
+        assert!(q.currency_type.is_none());
+        assert!(q.flow.is_none());
+        assert!(q.from.is_none());
+        assert!(q.to.is_none());
+
+        // `type` is a Rust keyword — the field rides a serde rename.
+        let q: ExchangeReferenceQuery = serde_json::from_str(
+            r#"{"provider": "changelly_fiat", "kind": "currencies", "type": "crypto", "flow": "sell"}"#,
+        )
+        .unwrap();
+        assert_eq!(q.currency_type.as_deref(), Some("crypto"));
+        assert_eq!(q.flow.as_deref(), Some("sell"));
+    }
+
+    #[test]
+    fn test_exchange_reference_response_skips_none_data() {
+        let resp = ExchangeReferenceResponse {
+            success: true,
+            message: "OK".to_string(),
+            data: None,
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(!json.contains("data"));
+    }
+
+    #[test]
+    fn test_exchange_quote_request_minimal() {
+        let json = r#"{
+            "provider": "changelly_crypto",
+            "direction": "crypto_to_crypto",
+            "from_currency": "xlm",
+            "to_currency": "usdcxlm",
+            "amount_from": "125.5"
+        }"#;
+        let req: ExchangeQuoteRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.provider, "changelly_crypto");
+        assert_eq!(req.direction, "crypto_to_crypto");
+        assert_eq!(req.amount_from, "125.5");
+        assert!(req.rate_type.is_none());
+        assert!(req.country.is_none());
+        assert!(req.state.is_none());
+        assert!(req.user_ip.is_none());
+        assert!(req.source_country.is_none());
+        assert!(req.destination_country.is_none());
+        assert!(req.source_chain.is_none());
+        assert!(req.destination_chain.is_none());
+        assert!(req.customer_type.is_none());
+    }
+
+    #[test]
+    fn test_exchange_quote_request_fiat_fields() {
+        let json = r#"{
+            "provider": "changelly_fiat",
+            "direction": "fiat_to_crypto",
+            "from_currency": "USD",
+            "to_currency": "USDC",
+            "amount_from": "100",
+            "rate_type": "fixed",
+            "country": "US",
+            "state": "AZ",
+            "user_ip": "203.0.113.9"
+        }"#;
+        let req: ExchangeQuoteRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.rate_type.as_deref(), Some("fixed"));
+        assert_eq!(req.country.as_deref(), Some("US"));
+        assert_eq!(req.state.as_deref(), Some("AZ"));
+        assert_eq!(req.user_ip.as_deref(), Some("203.0.113.9"));
+    }
+
+    #[test]
+    fn test_exchange_quote_response_skips_none_quotes() {
+        let resp = ExchangeQuoteResponse {
+            success: false,
+            message: "changelly_fiat is not configured".to_string(),
+            quotes: None,
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(!json.contains("quotes"));
+
+        let resp = ExchangeQuoteResponse {
+            success: true,
+            message: "ok".to_string(),
+            quotes: Some(serde_json::json!([{"rate": "0.35"}])),
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains("\"quotes\""));
+    }
+
+    #[test]
+    fn test_create_exchange_order_request_minimal() {
+        let json = r#"{
+            "account_id": "payala1",
+            "provider": "changelly_crypto",
+            "direction": "crypto_to_crypto",
+            "from_currency": "xlm",
+            "to_currency": "usdcxlm",
+            "amount_from": "125.5"
+        }"#;
+        let req: CreateExchangeOrderRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.account_id, "payala1");
+        assert!(req.payout_address.is_none());
+        assert!(req.refund_address.is_none());
+        assert!(req.rate_id.is_none());
+        assert!(req.quote_id.is_none());
+        assert!(req.provider_code.is_none());
+        assert!(req.customer_uuid.is_none());
+        assert!(req.is_self_transfer.is_none());
+        assert!(req.beneficiary.is_none());
+        assert!(req.payout_instrument.is_none());
+        assert!(req.source_payment_instrument.is_none());
+    }
+
+    #[test]
+    fn test_create_exchange_order_request_owlpay_passthrough() {
+        // OwlPay beneficiary/instrument objects ride through untyped.
+        let json = r#"{
+            "account_id": "payala1",
+            "provider": "owlpay",
+            "direction": "fiat_to_crypto",
+            "from_currency": "USD",
+            "to_currency": "USDC",
+            "amount_from": "250",
+            "quote_id": "quote_123",
+            "customer_uuid": "cus_abc",
+            "is_self_transfer": true,
+            "beneficiary": {"name": "Jane"},
+            "payout_instrument": {"chain": "stellar", "wallet_address": "GABC"}
+        }"#;
+        let req: CreateExchangeOrderRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.quote_id.as_deref(), Some("quote_123"));
+        assert_eq!(req.customer_uuid.as_deref(), Some("cus_abc"));
+        assert_eq!(req.is_self_transfer, Some(true));
+        assert_eq!(req.beneficiary, Some(serde_json::json!({"name": "Jane"})));
+        assert_eq!(
+            req.payout_instrument.as_ref().and_then(|v| v.get("chain")),
+            Some(&serde_json::json!("stellar"))
+        );
+    }
+
+    #[test]
+    fn test_exchange_order_response_skips_none_order() {
+        let resp = ExchangeOrderResponse {
+            success: true,
+            message: "ok".to_string(),
+            order: None,
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(!json.contains("\"order\""));
+    }
+
+    #[test]
+    fn test_exchange_order_detail_serializes() {
+        let order_id = Uuid::new_v4();
+        let detail = ExchangeOrderDetail {
+            order_id,
+            payala_account_id: "payala1".to_string(),
+            provider: "changelly_crypto".to_string(),
+            direction: "crypto_to_crypto".to_string(),
+            from_currency: "xlm".to_string(),
+            to_currency: "usdcxlm".to_string(),
+            amount_from: "125.5".to_string(),
+            amount_to: None,
+            status: "awaiting_deposit".to_string(),
+            provider_status: Some("waiting".to_string()),
+            provider_order_id: "abc123".to_string(),
+            payin_address: Some("GABC".to_string()),
+            payin_extra_id: None,
+            payout_address: Some("GDEF".to_string()),
+            payout_extra_id: None,
+            redirect_url: None,
+            transfer_instructions: None,
+            btxid: None,
+            last_error: None,
+            created_at: "2026-08-03T12:00:00Z".to_string(),
+            updated_at: None,
+        };
+        let json = serde_json::to_value(&detail).unwrap();
+        assert_eq!(json["order_id"], serde_json::json!(order_id.to_string()));
+        assert_eq!(json["status"], "awaiting_deposit");
+        assert_eq!(json["provider_status"], "waiting");
+        assert_eq!(json["amount_from"], "125.5");
+        assert_eq!(json["amount_to"], serde_json::Value::Null);
+        assert_eq!(json["created_at"], "2026-08-03T12:00:00Z");
+    }
+
+    #[test]
+    fn test_list_exchange_orders_query_defaults() {
+        let q: ListExchangeOrdersQuery = serde_json::from_str("{}").unwrap();
+        assert_eq!(q.page, 1);
+        assert_eq!(q.per_page, 20);
+        assert!(q.status.is_none());
+        assert!(q.provider.is_none());
+        assert!(q.account_id.is_none());
+    }
+
+    #[test]
+    fn test_get_exchange_order_query_default_refresh_false() {
+        let q: GetExchangeOrderQuery = serde_json::from_str("{}").unwrap();
+        assert!(!q.refresh);
+        let q: GetExchangeOrderQuery = serde_json::from_str(r#"{"refresh":true}"#).unwrap();
+        assert!(q.refresh);
+    }
+
+    #[test]
+    fn test_exchange_providers_response_shape() {
+        let resp = ExchangeProvidersResponse {
+            providers: vec![ExchangeProviderStatus {
+                provider: "owlpay".to_string(),
+                enabled: false,
+                directions: vec!["fiat_to_crypto".to_string(), "crypto_to_fiat".to_string()],
+            }],
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["providers"][0]["provider"], "owlpay");
+        assert_eq!(json["providers"][0]["enabled"], false);
+        assert_eq!(json["providers"][0]["directions"][1], "crypto_to_fiat");
+    }
+
+    // ── Exchange constants ↔ migration 029 DDL drift guards ────────────
+
+    #[test]
+    fn test_valid_exchange_providers_match_ddl() {
+        // Mirrors chk_exchange_order_provider in 029_create_exchange_order.sql.
+        assert_eq!(
+            crate::constants::VALID_EXCHANGE_PROVIDERS,
+            &["owlpay", "changelly_crypto", "changelly_fiat"]
+        );
+    }
+
+    #[test]
+    fn test_valid_exchange_directions_match_ddl() {
+        // Mirrors chk_exchange_order_direction in 029_create_exchange_order.sql.
+        assert_eq!(
+            crate::constants::VALID_EXCHANGE_DIRECTIONS,
+            &["fiat_to_crypto", "crypto_to_fiat", "crypto_to_crypto"]
+        );
+    }
+
+    #[test]
+    fn test_valid_exchange_statuses_match_ddl() {
+        // Mirrors chk_exchange_order_status in 029_create_exchange_order.sql,
+        // in DDL order.
+        assert_eq!(
+            crate::constants::VALID_EXCHANGE_STATUSES,
+            &[
+                "created",
+                "awaiting_deposit",
+                "processing",
+                "on_hold",
+                "completed",
+                "failed",
+                "refunded",
+                "expired"
+            ]
+        );
+    }
+
+    #[test]
+    fn test_terminal_exchange_statuses_partition_valid_set() {
+        assert_eq!(crate::constants::TERMINAL_EXCHANGE_STATUSES.len(), 4);
+        for s in crate::constants::TERMINAL_EXCHANGE_STATUSES {
+            assert!(
+                crate::constants::VALID_EXCHANGE_STATUSES.contains(s),
+                "terminal status {} must be a valid status",
+                s
+            );
+        }
+        // The remaining four are the non-terminal set scanned by the reconcile
+        // poller (idx_exchange_order_pending's WHERE list in migration 029).
+        for s in ["created", "awaiting_deposit", "processing", "on_hold"] {
+            assert!(
+                !crate::constants::TERMINAL_EXCHANGE_STATUSES.contains(&s),
+                "status {} must not be terminal",
+                s
+            );
+        }
     }
 }

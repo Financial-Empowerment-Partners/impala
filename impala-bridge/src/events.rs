@@ -50,6 +50,22 @@ pub enum AccountEvent {
     DeviceTokenDeleted {
         account_id: String,
     },
+    ExchangeOrderCreated {
+        account_id: String,
+        order_id: String,
+        provider: String,
+        direction: String,
+        from_currency: String,
+        to_currency: String,
+        amount_from: String,
+    },
+    ExchangeOrderUpdated {
+        account_id: String,
+        order_id: String,
+        provider: String,
+        status: String,
+        provider_status: String,
+    },
 }
 
 impl AccountEvent {
@@ -64,6 +80,8 @@ impl AccountEvent {
             AccountEvent::MfaEnrolled { .. } => "mfa.enrolled",
             AccountEvent::DeviceTokenRegistered { .. } => "device_token.registered",
             AccountEvent::DeviceTokenDeleted { .. } => "device_token.deleted",
+            AccountEvent::ExchangeOrderCreated { .. } => "exchange.order_created",
+            AccountEvent::ExchangeOrderUpdated { .. } => "exchange.order_updated",
         }
     }
 
@@ -76,12 +94,16 @@ impl AccountEvent {
             | AccountEvent::CardDeleted { account_id, .. }
             | AccountEvent::MfaEnrolled { account_id, .. }
             | AccountEvent::DeviceTokenRegistered { account_id, .. }
-            | AccountEvent::DeviceTokenDeleted { account_id } => account_id,
+            | AccountEvent::DeviceTokenDeleted { account_id }
+            | AccountEvent::ExchangeOrderCreated { account_id, .. }
+            | AccountEvent::ExchangeOrderUpdated { account_id, .. } => account_id,
         }
     }
 
     /// Event-specific data. **Never** includes secrets/PII: no MFA secret, no raw
-    /// device token (only its platform), no card private material (pubkeys are public).
+    /// device token (only its platform), no card private material (pubkeys are
+    /// public), and no exchange pay-in/payout addresses or memos (currencies,
+    /// amounts and statuses only).
     pub fn data(&self) -> Value {
         match self {
             AccountEvent::AccountCreated {
@@ -105,6 +127,34 @@ impl AccountEvent {
                 json!({ "platform": platform })
             }
             AccountEvent::DeviceTokenDeleted { .. } => json!({}),
+            AccountEvent::ExchangeOrderCreated {
+                order_id,
+                provider,
+                direction,
+                from_currency,
+                to_currency,
+                amount_from,
+                ..
+            } => json!({
+                "order_id": order_id,
+                "provider": provider,
+                "direction": direction,
+                "from_currency": from_currency,
+                "to_currency": to_currency,
+                "amount_from": amount_from,
+            }),
+            AccountEvent::ExchangeOrderUpdated {
+                order_id,
+                provider,
+                status,
+                provider_status,
+                ..
+            } => json!({
+                "order_id": order_id,
+                "provider": provider,
+                "status": status,
+                "provider_status": provider_status,
+            }),
         }
     }
 }
@@ -176,6 +226,75 @@ mod tests {
         let data = e.data();
         assert_eq!(data, json!({ "platform": "android" }));
         assert!(data.get("token").is_none());
+    }
+
+    #[test]
+    fn exchange_order_created_payload_never_leaks_addresses() {
+        let e = AccountEvent::ExchangeOrderCreated {
+            account_id: "acct-1".into(),
+            order_id: "9b2f7a04-2f2a-4d4e-9c1e-1a2b3c4d5e6f".into(),
+            provider: "changelly_crypto".into(),
+            direction: "crypto_to_crypto".into(),
+            from_currency: "xlm".into(),
+            to_currency: "usdcxlm".into(),
+            amount_from: "125.5".into(),
+        };
+        assert_eq!(e.event_type(), "exchange.order_created");
+        assert_eq!(e.account_id(), "acct-1");
+        let data = e.data();
+        assert_eq!(
+            data,
+            json!({
+                "order_id": "9b2f7a04-2f2a-4d4e-9c1e-1a2b3c4d5e6f",
+                "provider": "changelly_crypto",
+                "direction": "crypto_to_crypto",
+                "from_currency": "xlm",
+                "to_currency": "usdcxlm",
+                "amount_from": "125.5",
+            })
+        );
+        for pii in [
+            "payin_address",
+            "payin_extra_id",
+            "payout_address",
+            "payout_extra_id",
+            "refund_address",
+            "memo",
+        ] {
+            assert!(data.get(pii).is_none(), "{} must not be in payload", pii);
+        }
+    }
+
+    #[test]
+    fn exchange_order_updated_payload_never_leaks_addresses() {
+        let e = AccountEvent::ExchangeOrderUpdated {
+            account_id: "acct-1".into(),
+            order_id: "9b2f7a04-2f2a-4d4e-9c1e-1a2b3c4d5e6f".into(),
+            provider: "owlpay".into(),
+            status: "completed".into(),
+            provider_status: "completed".into(),
+        };
+        assert_eq!(e.event_type(), "exchange.order_updated");
+        assert_eq!(e.account_id(), "acct-1");
+        let data = e.data();
+        assert_eq!(
+            data,
+            json!({
+                "order_id": "9b2f7a04-2f2a-4d4e-9c1e-1a2b3c4d5e6f",
+                "provider": "owlpay",
+                "status": "completed",
+                "provider_status": "completed",
+            })
+        );
+        for pii in [
+            "payin_address",
+            "payout_address",
+            "payout_extra_id",
+            "transfer_instructions",
+            "memo",
+        ] {
+            assert!(data.get(pii).is_none(), "{} must not be in payload", pii);
+        }
     }
 
     #[test]

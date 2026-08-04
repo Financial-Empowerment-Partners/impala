@@ -68,6 +68,10 @@ tags:
     description: FCM device-token registration for mobile push.
   - name: webhook
     description: Admin-only outbound webhook registration and event feed.
+  - name: exchange
+    description: >
+      Fiat<->USDC on/off-ramp (OwlPay Harbor, Changelly Fiat) and crypto->USDC
+      swaps (Changelly Exchange API v2), plus the provider webhook callbacks.
 
 security:
   - bearerAuth: []
@@ -1292,6 +1296,229 @@ paths:
       responses:
         '200': { description: Device removed. }
 
+  /exchange/providers:
+    get:
+      tags: [exchange]
+      summary: List exchange providers with configured/enabled state.
+      responses:
+        '200':
+          description: Provider roster.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ExchangeProvidersResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /exchange/reference:
+    get:
+      tags: [exchange]
+      summary: Provider reference data (tickers, pairs, fiat sub-providers).
+      description: |
+        Read-only passthrough of provider reference data — how a client
+        discovers e.g. the `usdcxlm` ticker (`provider=changelly_crypto`,
+        `kind=currencies`), tradable pairs (`kind=pairs`), Changelly Fiat
+        currency coverage (`provider=changelly_fiat`, optional `type`/`flow`),
+        or the fiat sub-provider codes like `moonpay` (`kind=providers`).
+        Rate limited per account (10 req / 60 s).
+      parameters:
+        - in: query
+          name: provider
+          required: true
+          schema: { type: string, enum: [changelly_crypto, changelly_fiat] }
+        - in: query
+          name: kind
+          schema: { type: string, enum: [currencies, pairs, providers], default: currencies }
+        - in: query
+          name: type
+          schema: { type: string, enum: [crypto, fiat] }
+        - in: query
+          name: flow
+          schema: { type: string, enum: [buy, sell] }
+        - in: query
+          name: from
+          schema: { type: string }
+        - in: query
+          name: to
+          schema: { type: string }
+      responses:
+        '200':
+          description: Provider reference payload, passed through verbatim.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ExchangeReferenceResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /exchange/owlpay/quotes/{quote_id}/requirements:
+    get:
+      tags: [exchange]
+      summary: OwlPay corridor-specific transfer requirements for a quote.
+      description: |
+        Returns the JSON Schema (Draft 2020-12) that the `beneficiary` /
+        `payout_instrument` passthroughs must satisfy when creating an order
+        from this quote. Rate limited per account (10 req / 60 s).
+      parameters:
+        - in: path
+          name: quote_id
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Requirements schema.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ExchangeReferenceResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /exchange/quote:
+    post:
+      tags: [exchange]
+      summary: Get a conversion quote/estimate from a provider.
+      description: |
+        Dispatches to the selected provider:
+        `changelly_crypto` (float or fixed swap estimate, e.g. xlm -> usdcxlm),
+        `changelly_fiat` (buy/sell offers across aggregated on/off-ramp
+        providers; requires `country` and an end-user IP), or `owlpay`
+        (Harbor v2 transfer quotes). Rate limited per account (10 req / 60 s).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ExchangeQuoteRequest' }
+      responses:
+        '200':
+          description: Provider quotes (shape is provider-specific, passed through).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ExchangeQuoteResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /exchange/orders:
+    post:
+      tags: [exchange]
+      summary: Create an exchange order (swap, on-ramp, or off-ramp).
+      description: |
+        Creates the order at the provider and records it in the local
+        `exchange_order` ledger. Depending on provider/direction the response
+        carries a crypto pay-in address (+ memo), a hosted redirect URL, or
+        bank wire instructions. Rate limited per account (10 req / 60 s).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateExchangeOrderRequest' }
+      responses:
+        '200':
+          description: Order created.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ExchangeOrderResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+    get:
+      tags: [exchange]
+      summary: List exchange orders (admin=all, owner=own).
+      parameters:
+        - in: query
+          name: page
+          schema: { type: integer, default: 1 }
+        - in: query
+          name: per_page
+          schema: { type: integer, default: 20 }
+        - in: query
+          name: status
+          schema:
+            type: string
+            enum: [created, awaiting_deposit, processing, on_hold, completed, failed, refunded, expired]
+        - in: query
+          name: provider
+          schema:
+            type: string
+            enum: [owlpay, changelly_crypto, changelly_fiat]
+        - in: query
+          name: account_id
+          description: Admin-only filter.
+          schema: { type: string }
+      responses:
+        '200':
+          description: Paginated order list.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PaginatedExchangeOrderList' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /exchange/orders/{order_id}:
+    get:
+      tags: [exchange]
+      summary: Get one exchange order (admin or owner).
+      parameters:
+        - in: path
+          name: order_id
+          required: true
+          schema: { type: string, format: uuid }
+        - in: query
+          name: refresh
+          description: When true, poll the provider for fresh status first.
+          schema: { type: boolean, default: false }
+      responses:
+        '200':
+          description: Order detail.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ExchangeOrderResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /webhooks/owlpay:
+    post:
+      tags: [exchange]
+      summary: OwlPay Harbor webhook callback (unauthenticated; HMAC-verified).
+      description: |
+        Verified via the `harbor-signature` header — `t=<unix>,v1=<hex>` where
+        `v1 = HMAC-SHA256(webhook_secret, "{t}.{raw body}")` — with a 5-minute
+        replay window. Transfer status changes update the matching
+        `exchange_order` row. Unknown orders are acknowledged with 200 so the
+        provider stops retrying.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        '200': { description: Acknowledged. }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /webhooks/changelly:
+    post:
+      tags: [exchange]
+      summary: Changelly Fiat API callback (unauthenticated; RSA-verified).
+      description: |
+        Verified via `x-callback-api-key` plus `x-callback-signature` (RSA
+        PKCS#1 v1.5 / SHA-256 over `{"orderId":"<id>"}` with Changelly's
+        callback public key). The callback payload itself is untrusted beyond
+        the order id — order state is re-fetched from the Fiat API before the
+        local row is updated.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        '200': { description: Acknowledged. }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
 components:
   securitySchemes:
     bearerAuth:
@@ -2176,3 +2403,186 @@ components:
         events:
           type: array
           items: { $ref: '#/components/schemas/EventFeedItem' }
+
+    ExchangeProviderStatus:
+      type: object
+      properties:
+        provider:
+          type: string
+          enum: [owlpay, changelly_crypto, changelly_fiat]
+        enabled: { type: boolean }
+        directions:
+          type: array
+          items:
+            type: string
+            enum: [fiat_to_crypto, crypto_to_fiat, crypto_to_crypto]
+      required: [provider, enabled, directions]
+
+    ExchangeProvidersResponse:
+      type: object
+      properties:
+        providers:
+          type: array
+          items: { $ref: '#/components/schemas/ExchangeProviderStatus' }
+      required: [providers]
+
+    ExchangeReferenceResponse:
+      type: object
+      properties:
+        success: { type: boolean }
+        message: { type: string }
+        data:
+          description: Provider reference payload, passed through verbatim.
+          nullable: true
+      required: [success, message]
+
+    ExchangeQuoteRequest:
+      type: object
+      properties:
+        provider:
+          type: string
+          enum: [owlpay, changelly_crypto, changelly_fiat]
+        direction:
+          type: string
+          enum: [fiat_to_crypto, crypto_to_fiat, crypto_to_crypto]
+        from_currency: { type: string, example: "xlm" }
+        to_currency: { type: string, example: "usdcxlm" }
+        amount_from:
+          type: string
+          description: Decimal string; amounts are never floats.
+          example: "250.0"
+        rate_type:
+          type: string
+          enum: [float, fixed]
+          description: changelly_crypto only (default float).
+        country: { type: string, description: "changelly_fiat: ISO 3166-1 alpha-2." }
+        state: { type: string, description: "changelly_fiat: required when country=US." }
+        user_ip: { type: string, description: "changelly_fiat: end-user IP (falls back to X-Forwarded-For)." }
+        source_country: { type: string, description: "owlpay quote source country." }
+        destination_country: { type: string, description: "owlpay quote destination country." }
+        source_chain: { type: string, description: "owlpay: source chain for crypto legs (e.g. stellar)." }
+        destination_chain: { type: string, description: "owlpay: destination chain for crypto legs." }
+        customer_type:
+          type: string
+          enum: [individual, business]
+          description: owlpay (default individual).
+      required: [provider, direction, from_currency, to_currency, amount_from]
+
+    ExchangeQuoteResponse:
+      type: object
+      properties:
+        success: { type: boolean }
+        message: { type: string }
+        quotes:
+          description: Provider-specific quote payload, passed through verbatim.
+          nullable: true
+      required: [success, message]
+
+    CreateExchangeOrderRequest:
+      type: object
+      properties:
+        account_id: { type: string, description: Payala account id (must be owned by the caller). }
+        provider:
+          type: string
+          enum: [owlpay, changelly_crypto, changelly_fiat]
+        direction:
+          type: string
+          enum: [fiat_to_crypto, crypto_to_fiat, crypto_to_crypto]
+        from_currency: { type: string }
+        to_currency: { type: string }
+        amount_from: { type: string, description: Decimal string. }
+        payout_address: { type: string, description: Destination crypto address (swap payout / on-ramp wallet). }
+        payout_extra_id: { type: string, description: Destination memo/tag where the chain requires one. }
+        refund_address: { type: string, description: Refund address in the source currency. }
+        refund_extra_id: { type: string }
+        rate_type: { type: string, enum: [float, fixed], description: changelly_crypto. }
+        rate_id: { type: string, description: "changelly_crypto: fixed-rate quote id (required for fixed)." }
+        quote_id: { type: string, description: "owlpay: Harbor v2 quote id (required)." }
+        provider_code: { type: string, description: "changelly_fiat: aggregated provider (e.g. moonpay); required." }
+        payment_method: { type: string, description: changelly_fiat payment method code. }
+        country: { type: string }
+        state: { type: string }
+        user_ip: { type: string }
+        return_success_url: { type: string, description: changelly_fiat buy redirect. }
+        return_failed_url: { type: string }
+        customer_uuid: { type: string, description: "owlpay: on_behalf_of customer (cus_...); required." }
+        transfer_purpose: { type: string, description: owlpay transfer purpose enum value. }
+        is_self_transfer: { type: boolean, description: owlpay. }
+        beneficiary:
+          type: object
+          additionalProperties: true
+          description: "owlpay: destination.beneficiary_info passthrough (per quote requirements schema)."
+        payout_instrument:
+          type: object
+          additionalProperties: true
+          description: "owlpay: destination.payout_instrument passthrough."
+        source_payment_instrument:
+          type: object
+          additionalProperties: true
+          description: "owlpay: source.payment_instrument passthrough (off-ramp/ACH-pull)."
+      required: [account_id, provider, direction, from_currency, to_currency, amount_from]
+
+    ExchangeOrderDetail:
+      type: object
+      properties:
+        order_id: { type: string, format: uuid }
+        payala_account_id: { type: string }
+        provider: { type: string, enum: [owlpay, changelly_crypto, changelly_fiat] }
+        direction: { type: string, enum: [fiat_to_crypto, crypto_to_fiat, crypto_to_crypto] }
+        from_currency: { type: string }
+        to_currency: { type: string }
+        amount_from: { type: string }
+        amount_to: { type: string, nullable: true }
+        status:
+          type: string
+          enum: [created, awaiting_deposit, processing, on_hold, completed, failed, refunded, expired]
+        provider_status:
+          type: string
+          nullable: true
+          description: Raw provider-side status string.
+        provider_order_id: { type: string }
+        payin_address:
+          type: string
+          nullable: true
+          description: Where to send funds (changelly_crypto swaps).
+        payin_extra_id:
+          type: string
+          nullable: true
+          description: Memo/tag that MUST accompany the pay-in when present.
+        payout_address: { type: string, nullable: true }
+        payout_extra_id: { type: string, nullable: true }
+        redirect_url:
+          type: string
+          nullable: true
+          description: Hosted provider page (changelly_fiat buy/sell).
+        transfer_instructions:
+          type: object
+          additionalProperties: true
+          nullable: true
+          description: OwlPay wire/deposit instructions (include the narrative as the wire memo).
+        btxid: { type: string, format: uuid, nullable: true }
+        last_error: { type: string, nullable: true }
+        created_at: { type: string }
+        updated_at: { type: string, nullable: true }
+      required: [order_id, payala_account_id, provider, direction, from_currency, to_currency, amount_from, status, provider_order_id, created_at]
+
+    ExchangeOrderResponse:
+      type: object
+      properties:
+        success: { type: boolean }
+        message: { type: string }
+        order:
+          allOf: [{ $ref: '#/components/schemas/ExchangeOrderDetail' }]
+          nullable: true
+      required: [success, message]
+
+    PaginatedExchangeOrderList:
+      type: object
+      properties:
+        data:
+          type: array
+          items: { $ref: '#/components/schemas/ExchangeOrderDetail' }
+        page: { type: integer }
+        per_page: { type: integer }
+        total: { type: integer, format: int64 }
+      required: [data, page, per_page, total]

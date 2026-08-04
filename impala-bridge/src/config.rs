@@ -207,6 +207,18 @@ pub struct Config {
     pub kms_seed_key_id: Option<String>,
     pub vault_addr: Option<String>,
     pub vault_transit_key: Option<String>,
+    // Exchange providers (OwlPay / Changelly). Non-secret config only — API
+    // keys and signing keys (OWLPAY_API_KEY, CHANGELLY_PRIVATE_KEY, …) are read
+    // directly from the environment by the provider init fns so they never
+    // land in this `Debug`-logged struct.
+    /// OwlPay Harbor API base URL (sandbox default; production is per-tenant).
+    pub owlpay_api_url: String,
+    /// Changelly Exchange API v2 (crypto swap) base URL.
+    pub changelly_api_url: String,
+    /// Changelly Fiat API base URL.
+    pub changelly_fiat_api_url: String,
+    /// Poll interval (seconds) for the exchange-order reconcile loop.
+    pub exchange_poll_secs: u64,
 }
 
 /// Hard policy gate: wildcard CORS is forbidden on pubnet. `Ok(())` otherwise.
@@ -561,6 +573,45 @@ pub fn load_config() -> Config {
     let vault_transit_key = env_any(&["BAO_TRANSIT_KEY", "VAULT_TRANSIT_KEY"])
         .or_else(|| from_file("vault_transit_key"));
 
+    // Exchange providers. Secrets (OWLPAY_API_KEY, OWLPAY_WEBHOOK_SECRET,
+    // CHANGELLY_API_KEY, CHANGELLY_PRIVATE_KEY, CHANGELLY_FIAT_API_KEY, …) are
+    // deliberately NOT loaded here — the provider init fns read them straight
+    // from the environment (see the seed-protection rule above).
+    // The empty-string filter runs BEFORE the file fallback: compose always
+    // injects `VAR: ${VAR:-}`, and a set-but-empty env var must fall through
+    // to CONFIG_FILE rather than shadow it (docker-compose.yml warns about
+    // exactly this shadowing for the SSO bootstrap config).
+    let owlpay_api_url = env::var("OWLPAY_API_URL")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .or_else(|| from_file("owlpay_api_url"))
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| DEFAULT_OWLPAY_API_URL.to_string());
+
+    let changelly_api_url = env::var("CHANGELLY_API_URL")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .or_else(|| from_file("changelly_api_url"))
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| DEFAULT_CHANGELLY_API_URL.to_string());
+
+    let changelly_fiat_api_url = env::var("CHANGELLY_FIAT_API_URL")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .or_else(|| from_file("changelly_fiat_api_url"))
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| DEFAULT_CHANGELLY_FIAT_API_URL.to_string());
+
+    // Clamped to >= 1s: a zero tick would spin the reconcile loop against the
+    // database with no delay (poll_backoff_secs applies the same 1s floor).
+    let exchange_poll_secs = env::var("EXCHANGE_POLL_SECS")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .or_else(|| from_file("exchange_poll_secs"))
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_EXCHANGE_POLL_SECS)
+        .max(1);
+
     Config {
         public_endpoint,
         service_address,
@@ -616,6 +667,10 @@ pub fn load_config() -> Config {
         kms_seed_key_id,
         vault_addr,
         vault_transit_key,
+        owlpay_api_url,
+        changelly_api_url,
+        changelly_fiat_api_url,
+        exchange_poll_secs,
     }
 }
 
@@ -678,6 +733,10 @@ pub(crate) fn test_config() -> Config {
         kms_seed_key_id: None,
         vault_addr: None,
         vault_transit_key: None,
+        owlpay_api_url: DEFAULT_OWLPAY_API_URL.to_string(),
+        changelly_api_url: DEFAULT_CHANGELLY_API_URL.to_string(),
+        changelly_fiat_api_url: DEFAULT_CHANGELLY_FIAT_API_URL.to_string(),
+        exchange_poll_secs: DEFAULT_EXCHANGE_POLL_SECS,
     }
 }
 

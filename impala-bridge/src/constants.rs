@@ -297,3 +297,124 @@ pub const STELLAR_PUBNET_RPC_URL: &str = "https://soroban-rpc.stellar.org";
 
 /// Stellar public network (mainnet) passphrase.
 pub const STELLAR_PUBNET_PASSPHRASE: &str = "Public Global Stellar Network ; September 2015";
+
+// ── Exchange (OwlPay / Changelly) ──────────────────────────────────────
+
+/// Exchange provider identifier: OwlPay Harbor (fiat<->USDC on/off-ramp).
+pub const EXCHANGE_PROVIDER_OWLPAY: &str = "owlpay";
+
+/// Exchange provider identifier: Changelly Exchange API v2 (crypto->crypto
+/// swaps, e.g. XLM -> usdcxlm).
+pub const EXCHANGE_PROVIDER_CHANGELLY_CRYPTO: &str = "changelly_crypto";
+
+/// Exchange provider identifier: Changelly Fiat API (fiat<->crypto through
+/// aggregated on/off-ramp providers such as MoonPay).
+pub const EXCHANGE_PROVIDER_CHANGELLY_FIAT: &str = "changelly_fiat";
+
+/// Valid exchange providers (mirrors the `chk_exchange_order_provider` DB CHECK).
+pub const VALID_EXCHANGE_PROVIDERS: &[&str] = &[
+    EXCHANGE_PROVIDER_OWLPAY,
+    EXCHANGE_PROVIDER_CHANGELLY_CRYPTO,
+    EXCHANGE_PROVIDER_CHANGELLY_FIAT,
+];
+
+/// Exchange direction: fiat in, crypto out (on-ramp).
+pub const EXCHANGE_DIRECTION_FIAT_TO_CRYPTO: &str = "fiat_to_crypto";
+
+/// Exchange direction: crypto in, fiat out (off-ramp).
+pub const EXCHANGE_DIRECTION_CRYPTO_TO_FIAT: &str = "crypto_to_fiat";
+
+/// Exchange direction: crypto in, crypto out (swap).
+pub const EXCHANGE_DIRECTION_CRYPTO_TO_CRYPTO: &str = "crypto_to_crypto";
+
+/// Valid exchange directions (mirrors the `chk_exchange_order_direction` DB CHECK).
+pub const VALID_EXCHANGE_DIRECTIONS: &[&str] = &[
+    EXCHANGE_DIRECTION_FIAT_TO_CRYPTO,
+    EXCHANGE_DIRECTION_CRYPTO_TO_FIAT,
+    EXCHANGE_DIRECTION_CRYPTO_TO_CRYPTO,
+];
+
+// Internal exchange-order lifecycle vocabulary. Provider-specific raw statuses
+// are mapped onto these eight (the map_* fns in src/exchange/) and the raw
+// string is preserved in exchange_order.provider_status.
+/// Order accepted by the provider; nothing has moved yet.
+pub const EXCHANGE_STATUS_CREATED: &str = "created";
+
+/// Waiting for the customer's pay-in (crypto deposit / wire) to arrive.
+pub const EXCHANGE_STATUS_AWAITING_DEPOSIT: &str = "awaiting_deposit";
+
+/// Provider is confirming / exchanging / sending.
+pub const EXCHANGE_STATUS_PROCESSING: &str = "processing";
+
+/// Held by the provider (KYC/AML review); may still complete or refund.
+pub const EXCHANGE_STATUS_ON_HOLD: &str = "on_hold";
+
+/// Terminal: payout delivered.
+pub const EXCHANGE_STATUS_COMPLETED: &str = "completed";
+
+/// Terminal: order failed.
+pub const EXCHANGE_STATUS_FAILED: &str = "failed";
+
+/// Terminal: pay-in returned to the customer.
+pub const EXCHANGE_STATUS_REFUNDED: &str = "refunded";
+
+/// Terminal: pay-in window elapsed without a deposit.
+pub const EXCHANGE_STATUS_EXPIRED: &str = "expired";
+
+/// Valid exchange-order statuses (mirrors the `chk_exchange_order_status` DB
+/// CHECK, in DDL order).
+pub const VALID_EXCHANGE_STATUSES: &[&str] = &[
+    EXCHANGE_STATUS_CREATED,
+    EXCHANGE_STATUS_AWAITING_DEPOSIT,
+    EXCHANGE_STATUS_PROCESSING,
+    EXCHANGE_STATUS_ON_HOLD,
+    EXCHANGE_STATUS_COMPLETED,
+    EXCHANGE_STATUS_FAILED,
+    EXCHANGE_STATUS_REFUNDED,
+    EXCHANGE_STATUS_EXPIRED,
+];
+
+/// Terminal exchange-order statuses. Webhooks and the reconcile poller must
+/// never regress an order out of these (guard: `AND NOT (status = ANY(...))`).
+pub const TERMINAL_EXCHANGE_STATUSES: &[&str] = &[
+    EXCHANGE_STATUS_COMPLETED,
+    EXCHANGE_STATUS_FAILED,
+    EXCHANGE_STATUS_REFUNDED,
+    EXCHANGE_STATUS_EXPIRED,
+];
+
+/// Default OwlPay Harbor API base URL (sandbox). Production base URLs are
+/// issued per-tenant by OwlPay — set OWLPAY_API_URL to yours.
+pub const DEFAULT_OWLPAY_API_URL: &str = "https://harbor-sandbox.owlpay.com";
+
+/// Default Changelly Exchange API v2 (crypto swap) base URL.
+pub const DEFAULT_CHANGELLY_API_URL: &str = "https://api.changelly.com/v2";
+
+/// Default Changelly Fiat API base URL.
+pub const DEFAULT_CHANGELLY_FIAT_API_URL: &str = "https://fiat-api.changelly.com/v1";
+
+/// Default poll interval (seconds) for the exchange-order reconcile loop.
+pub const DEFAULT_EXCHANGE_POLL_SECS: u64 = 60;
+
+/// Reconcile loop: max due orders refreshed per tick.
+pub const EXCHANGE_POLL_BATCH_LIMIT: i64 = 50;
+
+/// Inbound exchange webhooks: max signed-timestamp skew (seconds) before a
+/// delivery is rejected as a replay.
+pub const EXCHANGE_WEBHOOK_REPLAY_WINDOW_SECS: i64 = 300;
+
+/// Inbound exchange webhooks: max requests per `RATE_LIMIT_WINDOW_SECS`.
+/// Global scope per provider — the webhook endpoints are unauthenticated.
+pub const EXCHANGE_WEBHOOK_RATE_LIMIT_MAX: u64 = 120;
+
+/// Max length for an exchange currency/ticker code (mirrors the VARCHAR(24) columns).
+pub const MAX_EXCHANGE_CURRENCY_LEN: usize = 24;
+
+/// Max length for a decimal amount string (mirrors the VARCHAR(40) columns).
+pub const MAX_EXCHANGE_AMOUNT_LEN: usize = 40;
+
+/// Max length for a payout/refund address.
+pub const MAX_EXCHANGE_ADDRESS_LEN: usize = 128;
+
+/// Max length for a payout/refund extra id (destination tag / memo).
+pub const MAX_EXCHANGE_EXTRA_ID_LEN: usize = 64;
