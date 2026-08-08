@@ -1,0 +1,16 @@
+# Compiled binary
+/impalactl
+*.exe
+*.test
+*.out
+coverage.*
+
+# Secrets — NEVER commit key material or tokens
+*.key
+*.seed
+*.secret
+*.jwt
+credentials.json
+secrets/
+.env
+.env.*

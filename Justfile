@@ -28,11 +28,15 @@ logs:
 # ---------------------------------------------------------------------------
 
 # Run every sub-project's test suite.
-test: test-bridge test-card test-lib test-demo test-soroban test-ui
+test: test-bridge test-cli test-card test-lib test-demo test-soroban test-ui
 
 # impala-bridge unit + integration tests.
 test-bridge:
     cd impala-bridge && cargo test
+
+# impalactl (bridge CLI) tests.
+test-cli:
+    cd impalactl && go test ./...
 
 # impala-card SDK tests (JVM target, jcardsim-backed). Needs JDK 17 (JAVA_HOME).
 test-card:
@@ -87,10 +91,13 @@ fmt:
 # ---------------------------------------------------------------------------
 
 # Build every sub-project (debug).
-build: build-bridge build-card build-soroban build-demo build-lib
+build: build-bridge build-cli build-card build-soroban build-demo build-lib
 
 build-bridge:
     cd impala-bridge && cargo build
+
+build-cli:
+    cd impalactl && go build -o impalactl .
 
 build-card:
     cd impala-card && ./gradlew :sdk:jvmJar
