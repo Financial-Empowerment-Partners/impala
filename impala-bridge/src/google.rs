@@ -40,6 +40,8 @@ pub struct GoogleProvider {
     pub jwks: Arc<RwLock<JwksResponse>>,
     pub client_id: String,
     pub http_client: reqwest::Client,
+    /// Debounce for the unauthenticated on-demand JWKS refetch path.
+    pub refresh_cooldown: crate::oidc::RefreshCooldown,
 }
 
 /// Initialize the Google provider if configured. Returns `None` if
@@ -72,6 +74,7 @@ pub async fn init_google_provider(config: &Config) -> Option<Arc<GoogleProvider>
         jwks: Arc::new(RwLock::new(jwks)),
         client_id: client_id.clone(),
         http_client,
+        refresh_cooldown: crate::oidc::RefreshCooldown::new(),
     }))
 }
 
@@ -159,7 +162,18 @@ pub async fn validate_google_id_token(
     match claims {
         Ok(c) => Ok(c),
         Err(_) if !kid.is_empty() => {
-            // Key not found or validation failed — try refreshing JWKS once
+            // Key not found or validation failed — try refreshing JWKS once,
+            // subject to the cooldown (see crate::oidc::RefreshCooldown): this
+            // path is reachable unauthenticated with an attacker-chosen kid.
+            if !provider
+                .refresh_cooldown
+                .try_acquire(std::time::Duration::from_secs(
+                    crate::constants::JWKS_ON_DEMAND_COOLDOWN_SECS,
+                ))
+            {
+                debug!("google: skipping JWKS refresh for kid={} (cooldown)", kid);
+                return Err(AppError::Unauthorized);
+            }
             debug!(
                 "google: key kid={} not found in cache, refreshing JWKS",
                 kid

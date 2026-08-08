@@ -124,7 +124,7 @@ where
         .collect()
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 #[allow(dead_code)] // config surface; several fields are populated from env but not yet read
 pub struct Config {
     #[allow(dead_code)] // loaded config, not currently read in code paths
@@ -194,6 +194,10 @@ pub struct Config {
     /// Mark session cookies `Secure` (+ `__Host-` name prefix). Default true;
     /// the plain-HTTP local compose stack sets SESSION_COOKIE_SECURE=false.
     pub session_cookie_secure: bool,
+    /// Whether `POST /authenticate` may set a password on an existing account
+    /// that has no credentials yet. Default **false** (fail closed) — see the
+    /// account-claiming note in `handlers::authenticate`.
+    pub allow_open_registration: bool,
     /// deadpool-redis pool size (REDIS_POOL_SIZE).
     pub redis_pool_size: usize,
     /// Global HTTP request timeout in seconds (REQUEST_TIMEOUT_SECS).
@@ -219,6 +223,70 @@ pub struct Config {
     pub changelly_fiat_api_url: String,
     /// Poll interval (seconds) for the exchange-order reconcile loop.
     pub exchange_poll_secs: u64,
+}
+
+/// Render an optional secret as its presence, never its value.
+fn secret_state(value: &Option<String>) -> &'static str {
+    match value {
+        Some(_) => "<set:redacted>",
+        None => "<unset>",
+    }
+}
+
+/// Hand-written so that `{:?}` on a `Config` can never print a credential.
+///
+/// This was a derive, and `main.rs` logs `Config: {:?}` at startup under
+/// `DEBUG_MODE` — which wrote `ldap_bind_password`, `twilio_token`,
+/// `github_client_secret` and `fcm_service_account_key` verbatim into syslog
+/// and, when OTEL is configured, into a centrally-readable trace pipeline.
+/// Seed-protection and exchange credentials were already kept out of this
+/// struct for exactly that reason; these four had been left in.
+///
+/// Listing fields explicitly also makes the safe direction the default: a
+/// secret added to `Config` later is invisible here until someone opts it in,
+/// rather than being logged the moment it is introduced.
+impl std::fmt::Debug for Config {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Config")
+            .field("public_endpoint", &self.public_endpoint)
+            .field("service_address", &self.service_address)
+            .field("debug_mode", &self.debug_mode)
+            .field("cors_allowed_origins", &self.cors_allowed_origins)
+            .field("stellar_network", &self.stellar_network)
+            .field("stellar_horizon_url", &self.stellar_horizon_url)
+            .field("stellar_rpc_url", &self.stellar_rpc_url)
+            .field("soroban_contract_id", &self.soroban_contract_id)
+            .field("db_max_connections", &self.db_max_connections)
+            .field("db_acquire_timeout_secs", &self.db_acquire_timeout_secs)
+            .field("redis_pool_size", &self.redis_pool_size)
+            .field("request_timeout_secs", &self.request_timeout_secs)
+            .field("http_client_timeout_secs", &self.http_client_timeout_secs)
+            .field("session_cookie_secure", &self.session_cookie_secure)
+            .field("admin_account_ids", &self.admin_account_ids.len())
+            .field("seed_protection_backend", &self.seed_protection_backend)
+            .field("sso_providers", &self.sso_providers.len())
+            .field("okta_issuer_url", &self.okta_issuer_url)
+            .field("github_auth_enabled", &self.github_auth_enabled)
+            .field("worker_concurrency", &self.worker_concurrency)
+            .field("otel_exporter_endpoint", &self.otel_exporter_endpoint)
+            .field("exchange_poll_secs", &self.exchange_poll_secs)
+            // Presence only — never the value.
+            .field("twilio_sid", &secret_state(&self.twilio_sid))
+            .field("twilio_token", &secret_state(&self.twilio_token))
+            .field(
+                "ldap_bind_password",
+                &secret_state(&self.ldap_bind_password),
+            )
+            .field(
+                "github_client_secret",
+                &secret_state(&self.github_client_secret),
+            )
+            .field(
+                "fcm_service_account_key",
+                &secret_state(&self.fcm_service_account_key),
+            )
+            .finish_non_exhaustive()
+    }
 }
 
 /// Hard policy gate: wildcard CORS is forbidden on pubnet. `Ok(())` otherwise.
@@ -539,6 +607,14 @@ pub fn load_config() -> Config {
         .map(|v| v != "false" && v != "0")
         .unwrap_or(true);
 
+    // Defaults to false: first-touch registration on an existing account is a
+    // way to claim one, so it has to be turned on deliberately.
+    let allow_open_registration = env::var("ALLOW_OPEN_REGISTRATION")
+        .ok()
+        .or_else(|| from_file("allow_open_registration"))
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(false);
+
     let redis_pool_size = env::var("REDIS_POOL_SIZE")
         .ok()
         .or_else(|| from_file("redis_pool_size"))
@@ -660,6 +736,7 @@ pub fn load_config() -> Config {
         admin_webhook_disable_threshold,
         admin_webhook_poll_secs,
         session_cookie_secure,
+        allow_open_registration,
         redis_pool_size,
         request_timeout_secs,
         db_acquire_timeout_secs,
@@ -726,6 +803,7 @@ pub(crate) fn test_config() -> Config {
         admin_webhook_disable_threshold: DEFAULT_ADMIN_WEBHOOK_DISABLE_THRESHOLD,
         admin_webhook_poll_secs: DEFAULT_ADMIN_WEBHOOK_POLL_SECS,
         session_cookie_secure: false,
+        allow_open_registration: false,
         redis_pool_size: DEFAULT_REDIS_POOL_SIZE,
         request_timeout_secs: REQUEST_TIMEOUT_SECS,
         db_acquire_timeout_secs: DB_ACQUIRE_TIMEOUT_SECS,
@@ -755,6 +833,47 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `main.rs` logs `Config: {:?}` at startup under DEBUG_MODE, so the
+    /// `Debug` impl is a log sink for anything it prints. Pin that no secret
+    /// value can reach it — a derived `Debug` used to print all of these.
+    #[test]
+    fn debug_never_prints_secret_values() {
+        let mut config = test_config();
+        config.twilio_sid = Some("AC-sid-must-not-appear".to_string());
+        config.twilio_token = Some("twilio-token-must-not-appear".to_string());
+        config.ldap_bind_password = Some("ldap-password-must-not-appear".to_string());
+        config.github_client_secret = Some("gh-secret-must-not-appear".to_string());
+        config.fcm_service_account_key = Some("{\"private_key\":\"must-not-appear\"}".to_string());
+
+        let rendered = format!("{:?}", config);
+
+        for secret in [
+            "AC-sid-must-not-appear",
+            "twilio-token-must-not-appear",
+            "ldap-password-must-not-appear",
+            "gh-secret-must-not-appear",
+            "must-not-appear",
+        ] {
+            assert!(
+                !rendered.contains(secret),
+                "Config Debug leaked a secret value: {rendered}"
+            );
+        }
+
+        // Presence is still reported, so the log stays operationally useful.
+        assert!(rendered.contains("<set:redacted>"));
+        assert!(rendered.contains("service_address"));
+    }
+
+    #[test]
+    fn debug_reports_absent_secrets_as_unset() {
+        let mut config = test_config();
+        config.twilio_token = None;
+        config.ldap_bind_password = None;
+        let rendered = format!("{:?}", config);
+        assert!(rendered.contains("<unset>"), "{rendered}");
+    }
 
     #[test]
     fn cors_wildcard_rejected_on_pubnet() {

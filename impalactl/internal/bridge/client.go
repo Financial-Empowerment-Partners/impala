@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -43,7 +44,14 @@ type Client struct {
 // New returns a client for the bridge at endpoint. The endpoint must be an
 // absolute http(s) URL; any trailing slash is trimmed so paths concatenate
 // cleanly.
-func New(endpoint string, timeout time.Duration) (*Client, error) {
+//
+// Plain http:// is refused for non-loopback hosts unless allowInsecure is set.
+// Everything this client sends is a bearer credential — the login password, a
+// single-use refresh token on every rotation, the temporal JWT on every call,
+// and (on import) a Stellar secret seed — so an unnoticed http:// endpoint
+// hands all of it to anyone on the network path. The loopback carve-out keeps
+// the http://localhost:8080 development default working.
+func New(endpoint string, timeout time.Duration, allowInsecure bool) (*Client, error) {
 	trimmed := strings.TrimRight(strings.TrimSpace(endpoint), "/")
 	if trimmed == "" {
 		return nil, errors.New("endpoint must not be empty")
@@ -58,11 +66,34 @@ func New(endpoint string, timeout time.Duration) (*Client, error) {
 	if u.Host == "" {
 		return nil, fmt.Errorf("invalid endpoint %q: missing host", endpoint)
 	}
+	if u.Scheme == "http" && !allowInsecure && !isLoopbackHost(u.Hostname()) {
+		return nil, fmt.Errorf(
+			"refusing to send credentials to %s over plain HTTP: use https://, "+
+				"or pass --insecure-http (or set %s=1) if this endpoint is genuinely trusted",
+			u.Host, EnvAllowHTTP)
+	}
 	return &Client{
 		endpoint: u.String(),
 		http:     &http.Client{Timeout: timeout},
 		agent:    "impalactl",
 	}, nil
+}
+
+// EnvAllowHTTP opts in to plain-HTTP endpoints on non-loopback hosts.
+const EnvAllowHTTP = "IMPALA_ALLOW_HTTP"
+
+// isLoopbackHost reports whether host is a literal loopback address or the
+// name "localhost".
+//
+// Deliberately literal: resolving the name would add a DNS lookup to client
+// construction and could be pointed at a non-loopback address, which is the
+// gap this check exists to close.
+func isLoopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // Endpoint returns the normalized base URL this client talks to.

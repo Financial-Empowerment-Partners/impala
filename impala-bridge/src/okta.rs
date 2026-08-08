@@ -59,6 +59,8 @@ pub struct OktaProvider {
     pub client_id: String,
     pub issuer_url: String,
     pub http_client: reqwest::Client,
+    /// Debounce for the unauthenticated on-demand JWKS refetch path.
+    pub refresh_cooldown: crate::oidc::RefreshCooldown,
 }
 
 /// Fetch the OIDC discovery document from the authorization server.
@@ -184,6 +186,7 @@ pub async fn init_okta_provider(config: &Config) -> Option<Arc<OktaProvider>> {
         client_id,
         issuer_url: issuer_url.clone(),
         http_client,
+        refresh_cooldown: crate::oidc::RefreshCooldown::new(),
     };
 
     Some(Arc::new(provider))
@@ -276,7 +279,18 @@ pub async fn validate_okta_token(
     match claims {
         Ok(c) => Ok(c),
         Err(_) if !kid.is_empty() => {
-            // Key not found or validation failed — try refreshing JWKS once
+            // Key not found or validation failed — try refreshing JWKS once,
+            // subject to the cooldown (see crate::oidc::RefreshCooldown): this
+            // path is reachable unauthenticated with an attacker-chosen kid.
+            if !provider
+                .refresh_cooldown
+                .try_acquire(std::time::Duration::from_secs(
+                    crate::constants::JWKS_ON_DEMAND_COOLDOWN_SECS,
+                ))
+            {
+                debug!("okta: skipping JWKS refresh for kid={} (cooldown)", kid);
+                return Err(AppError::Unauthorized);
+            }
             debug!("okta: key kid={} not found in cache, refreshing JWKS", kid);
             match fetch_jwks(&provider.http_client, &provider.discovery.jwks_uri).await {
                 Ok(new_jwks) => {

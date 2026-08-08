@@ -40,10 +40,11 @@ struct DueDelivery {
 
 /// Worker entry point. Loops until `cancel` fires.
 pub async fn run(pool: PgPool, cfg: DeliveryConfig, cancel: CancellationToken) {
-    let client = match reqwest::Client::builder()
-        .timeout(Duration::from_secs(DEFAULT_HTTP_CLIENT_TIMEOUT_SECS))
-        .build()
-    {
+    // Webhook URLs are caller-supplied, so this client dials through the SSRF
+    // egress guard (vets every resolved address) and refuses redirects — a
+    // followed 302 would otherwise walk a validated URL straight to an
+    // internal address with no DNS control needed.
+    let client = match crate::ssrf::guarded_client(DEFAULT_HTTP_CLIENT_TIMEOUT_SECS) {
         Ok(c) => c,
         Err(e) => {
             error!("admin_webhook_delivery: failed to build HTTP client: {}", e);

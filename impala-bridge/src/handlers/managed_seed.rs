@@ -16,7 +16,7 @@ use log::{error, info};
 use sqlx::PgPool;
 use std::sync::Arc;
 use uuid::Uuid;
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::auth::AuthenticatedUser;
 use crate::constants::{
@@ -200,7 +200,7 @@ pub async fn import_managed_account(
     Extension(redis_pool): Extension<Arc<deadpool_redis::Pool>>,
     Extension(protector): Extension<Arc<dyn SeedProtector>>,
     Extension(signer): Extension<Arc<dyn StellarSigner>>,
-    Json(payload): Json<ImportManagedAccountRequest>,
+    Json(mut payload): Json<ImportManagedAccountRequest>,
 ) -> Result<Json<ManagedAccountResponse>, AppError> {
     crate::auth::require_owner(&user, &payload.payala_account_id)?;
     crate::redis_helpers::check_rate_limit(
@@ -215,8 +215,19 @@ pub async fn import_managed_account(
 
     info!("POST /managed-account/import: account={}", user.account_id);
 
-    // Hold the incoming seed in a zeroizing buffer and scrub the original ASAP.
-    let secret_seed = Zeroizing::new(payload.secret_seed.clone());
+    // Move the seed into a zeroizing buffer and scrub the original in place.
+    //
+    // `payload.secret_seed` is a plain `String` on a struct with no
+    // ZeroizeOnDrop, so taking only a clone (as this did) left the plaintext
+    // strkey sitting in a heap allocation that was freed unscrubbed — visible
+    // afterwards in a core dump, in swap, or to any memory-disclosure bug.
+    // `mem::take` + `zeroize` overwrites it rather than merely dropping it.
+    //
+    // This narrows the window; it cannot close it entirely, because axum's
+    // buffered request body and serde's unescape scratch space also hold the
+    // seed transiently and are not reachable from here.
+    let secret_seed = Zeroizing::new(std::mem::take(&mut payload.secret_seed));
+    payload.secret_seed.zeroize();
     crate::validate::validate_stellar_secret_seed(&secret_seed)?;
     let seed = signer.seed_from_strkey(&secret_seed)?;
     let stellar_account_id = signer.public_address(seed.as_slice())?;
@@ -345,7 +356,16 @@ pub async fn sign_and_submit(
     // `seed` zeroizes on drop here.
 
     // Record the on-ledger transaction (reusing the existing transaction table).
-    let btxid = sqlx::query_scalar::<_, Uuid>(
+    //
+    // PAST THIS POINT THE PAYMENT HAS SETTLED ON-CHAIN AND CANNOT BE UNDONE.
+    // A failure here is a bookkeeping miss, not a failed payment, so it must
+    // NOT be reported as an error: a 500 tells the caller the transfer did not
+    // happen, and the natural response — retry — submits a second real
+    // payment. (`fetch_sequence` re-reads the account's advanced sequence on
+    // every call, so a sequential retry builds a *distinct*, network-valid
+    // transaction; Stellar's tx_bad_seq only stops concurrent duplicates.)
+    // Surface success with the on-chain hash, and shout about the missing row.
+    let btxid = match sqlx::query_scalar::<_, Uuid>(
         r#"
         INSERT INTO transaction (stellar_tx_id, stellar_hash, source_account, memo)
         VALUES ($1, $2, $3, $4)
@@ -358,13 +378,21 @@ pub async fn sign_and_submit(
     .bind(&payload.memo)
     .fetch_one(&pool)
     .await
-    .map_err(|e| {
-        // The payment already submitted; surface success but log the bookkeeping miss.
-        error!("sign_and_submit: transaction record insert failed: {}", e);
-        AppError::InternalError("Database error".to_string())
-    })?;
-
-    metrics.transactions_created.add(1, &[]);
+    {
+        Ok(id) => {
+            metrics.transactions_created.add(1, &[]);
+            Some(id)
+        }
+        Err(e) => {
+            error!(
+                "sign_and_submit: SETTLED PAYMENT NOT RECORDED — account={} hash={} to={} amount={}: {}. \
+                 Reconcile this transaction into the ledger manually.",
+                user.account_id, submitted.stellar_hash, payload.destination, payload.amount, e
+            );
+            metrics.unrecorded_settled_payments.add(1, &[]);
+            None
+        }
+    };
 
     let sns_c = sns_client.as_ref().map(|e| &e.0);
     let sns_a = sns_topic_arn.as_ref().map(|e| &e.0);
@@ -382,14 +410,14 @@ pub async fn sign_and_submit(
     .await;
 
     info!(
-        "sign_and_submit: submitted tx hash={} btxid={}",
+        "sign_and_submit: submitted tx hash={} btxid={:?}",
         submitted.stellar_hash, btxid
     );
     Ok(Json(SignSubmitResponse {
         success: true,
         message: "Payment signed and submitted".to_string(),
         stellar_hash: Some(submitted.stellar_hash),
-        btxid: Some(btxid),
+        btxid,
     }))
 }
 

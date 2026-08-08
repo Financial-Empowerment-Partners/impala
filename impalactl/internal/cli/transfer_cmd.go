@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"math"
 	"strings"
 
 	"impalactl/internal/bridge"
@@ -67,6 +68,12 @@ func (a *App) runTransferSend(opts options, args []string) int {
 	if *fee < 0 {
 		return a.usageErr("--fee must not be negative")
 	}
+	// The wire field is a uint32; converting without this bound wraps silently
+	// (--fee 4294967296 becomes 0), and the confirmation prompt would show the
+	// intended figure while a different one was sent.
+	if *fee > math.MaxUint32 {
+		return a.usageErr("--fee must not exceed %d stroops", uint32(math.MaxUint32))
+	}
 
 	payalaID := a.resolveOwnerAccount(opts, *account)
 	if payalaID == "" {
@@ -89,6 +96,10 @@ func (a *App) runTransferSend(opts options, args []string) int {
 	fmt.Fprintf(a.err, "Bridge:  %s\nNetwork: %s\n", c.Endpoint(), network)
 
 	summary := fmt.Sprintf("send %s XLM from %s to %s", amt, payalaID, dest)
+	if *fee > 0 {
+		// Show the fee too: it is real money and it is easy to fat-finger.
+		summary += fmt.Sprintf(" (fee %d stroops)", *fee)
+	}
 	if err := a.confirm(network, summary, opts.yes); err != nil {
 		return a.fail("%v", err)
 	}

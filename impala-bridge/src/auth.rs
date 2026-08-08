@@ -43,6 +43,19 @@ impl AuthContext {
     }
 }
 
+/// Narrow authentication policy carried as shared state.
+///
+/// Deliberately a small struct rather than the whole `Config` (same reasoning
+/// as `SessionConfig` and `LdapConfig`): handlers get the one flag they need
+/// and no credentials ride along into a broadly-shared extension.
+#[derive(Debug, Clone)]
+pub struct AuthPolicy {
+    /// Whether `POST /authenticate` may set a password on an existing account
+    /// that has no credentials yet. Off by default — turning it on makes any
+    /// credential-less account claimable by whoever knows its id.
+    pub allow_open_registration: bool,
+}
+
 /// Represents an authenticated user (bearer JWT or cookie session).
 #[derive(Debug, Clone)]
 pub struct AuthenticatedUser {
@@ -391,6 +404,11 @@ mod tests {
     async fn valid_bearer_fails_closed_when_redis_unreachable() {
         // The JWT itself is valid, but the revocation check cannot run — the
         // request must be rejected, never silently allowed.
+        //
+        // It must ALSO not be rejected as 401: clients treat 401 as "this
+        // credential is dead" and discard it, so answering a Redis outage that
+        // way makes them throw away tokens that are still valid once Redis
+        // recovers (impalactl deletes its stored refresh token on 401).
         let keys = JwtKeys::new(TEST_SECRET.to_string(), None).unwrap();
         let (_refresh, temporal) = encode_token_pair(&keys, "alice", ROLE_VIEW_ONLY).unwrap();
         let mut parts = parts_with_extensions(
@@ -399,7 +417,11 @@ mod tests {
                 .header("Authorization", format!("Bearer {temporal}")),
         );
         let result = AuthenticatedUser::from_request_parts(&mut parts, &()).await;
-        assert!(matches!(result, Err(AppError::Unauthorized)));
+        assert!(result.is_err(), "must fail closed");
+        assert!(
+            matches!(result, Err(AppError::InternalError(_))),
+            "an infrastructure outage must not be reported as an auth failure"
+        );
     }
 
     #[tokio::test]
@@ -423,7 +445,11 @@ mod tests {
                 .header("Cookie", "impala_session=somesid"),
         );
         let result = AuthenticatedUser::from_request_parts(&mut parts, &()).await;
-        assert!(matches!(result, Err(AppError::Unauthorized)));
+        assert!(result.is_err(), "must fail closed");
+        assert!(
+            matches!(result, Err(AppError::InternalError(_))),
+            "an infrastructure outage must not be reported as an auth failure"
+        );
     }
 
     #[test]

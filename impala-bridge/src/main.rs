@@ -20,6 +20,7 @@ mod redis_helpers;
 mod seed_protect;
 mod session;
 mod sns;
+mod ssrf;
 mod stellar;
 mod streams;
 mod telemetry;
@@ -215,6 +216,20 @@ async fn run_server(
     if session_config.cookie_secure && config.public_endpoint.starts_with("http://") {
         warn!(
             "SESSION_COOKIE_SECURE is on but PUBLIC_ENDPOINT is plain HTTP — browsers will drop the session cookie; set SESSION_COOKIE_SECURE=false for local HTTP development"
+        );
+    }
+
+    // Authentication policy. Open registration is off unless explicitly
+    // enabled: with it on, POST /authenticate lets anyone who knows an account
+    // id set the password on any account that has no credentials yet.
+    let auth_policy = Arc::new(auth::AuthPolicy {
+        allow_open_registration: config.allow_open_registration,
+    });
+    if auth_policy.allow_open_registration {
+        warn!(
+            "ALLOW_OPEN_REGISTRATION is on — POST /authenticate will set a password on any \
+             existing account that has no credentials yet, including custodial and SSO-only \
+             accounts. Leave this off unless registration is intentionally public."
         );
     }
 
@@ -543,6 +558,10 @@ async fn run_server(
         .layer(Extension(redis_pool.clone()))
         .layer(Extension(jwt_keys))
         .layer(Extension(session_config))
+        .layer(Extension(auth_policy))
+        // Registry of running stream tasks, so repeated POST /subscribe calls
+        // are idempotent instead of accumulating tasks and sockets.
+        .layer(Extension(Arc::new(subscribe::ActiveStreams::default())))
         .layer(Extension(stellar_config.clone()))
         .layer(Extension(admin_ids.clone()))
         .layer(Extension(seed_protector))

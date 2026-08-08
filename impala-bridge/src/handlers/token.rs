@@ -104,9 +104,25 @@ pub async fn token(
         )
         .await?;
 
-        // 3. Reuse detection: a rotated-out refresh token presented again is
-        // the theft signal — revoke the entire family and reject.
-        if crate::redis_helpers::is_refresh_rotated(&redis_pool, &claims.jti).await? {
+        // 3. Strict rotation + reuse detection, as ONE atomic claim: burn the
+        // presented token before minting, and let the outcome of that burn be
+        // the reuse signal. Splitting this into a read followed by a write let
+        // concurrent presentations of the same token all observe "not yet
+        // rotated" and each mint a live pair, forking a stolen token into
+        // several lineages without ever tripping the alarm.
+        //
+        // If the claim fails outright we mint nothing (two live refresh tokens
+        // must never coexist); if minting fails after a won claim, the user
+        // re-logs in — the safe failure direction.
+        let now = chrono::Utc::now().timestamp() as usize;
+        let remaining = claims.exp.saturating_sub(now).max(1);
+        let won_claim =
+            crate::redis_helpers::claim_refresh_rotation(&redis_pool, &claims.jti, remaining)
+                .await?;
+        if !won_claim {
+            // Someone already burned this jti — either a genuine replay or the
+            // loser of a race against the legitimate holder. Both are treated
+            // as theft: revoke the entire family and reject.
             crate::redis_helpers::revoke_token_family(
                 &redis_pool,
                 &claims.fid,
@@ -121,15 +137,7 @@ pub async fn token(
             return Err(AppError::Unauthorized);
         }
 
-        // 4. Strict rotation: burn the presented token BEFORE minting. If the
-        // marker write fails we mint nothing (two live refresh tokens must
-        // never coexist); if minting fails after the burn, the user re-logs
-        // in — the safe failure direction.
-        let now = chrono::Utc::now().timestamp() as usize;
-        let remaining = claims.exp.saturating_sub(now).max(1);
-        crate::redis_helpers::mark_refresh_rotated(&redis_pool, &claims.jti, remaining).await?;
-
-        // 5. Mint the replacement pair inside the same token family.
+        // 4. Mint the replacement pair inside the same token family.
         // The role is re-derived at every rotation (never trusted from the
         // presented token): current DB role, with the ADMIN_ACCOUNT_IDS
         // allowlist overriding to admin — so grants/revocations take effect

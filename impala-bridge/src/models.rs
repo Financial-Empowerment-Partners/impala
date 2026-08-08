@@ -52,12 +52,23 @@ pub(crate) fn default_per_page() -> u64 {
     20
 }
 
+/// Upper bound on `page`, chosen so `(page - 1) * per_page` cannot come close
+/// to overflowing `i64` at the maximum `per_page` of 100. Paging this deep is
+/// already pathological — the client wants a filter, not page ten million.
+pub(crate) const MAX_PAGE: u64 = 10_000_000;
+
 impl PaginationParams {
     /// Return clamped `(per_page, offset)` suitable for SQL LIMIT/OFFSET.
-    /// `per_page` is clamped to `[1, 100]`, `page` to `[1, ..)`.
+    /// `per_page` is clamped to `[1, 100]`, `page` to `[1, MAX_PAGE]`.
+    ///
+    /// The page bound is load-bearing, not cosmetic: `page` is a client-
+    /// supplied `u64`, and casting an unbounded one to `i64` wraps negative
+    /// (`u64::MAX as i64 == -1`), which produced a negative OFFSET that
+    /// Postgres rejects — turning a query parameter into a 500. Clamping in
+    /// the `u64` domain before the cast keeps the arithmetic in range.
     pub fn clamped(&self) -> (i64, i64) {
         let per_page = self.per_page.clamp(1, 100) as i64;
-        let page = self.page.max(1) as i64;
+        let page = self.page.clamp(1, MAX_PAGE) as i64;
         let offset = (page - 1) * per_page;
         (per_page, offset)
     }
@@ -518,13 +529,33 @@ pub struct MfaResponse {
     pub provisioning_uri: Option<String>,
 }
 
-#[derive(Serialize, Deserialize, sqlx::FromRow)]
+/// Internal enrollment row, including the TOTP shared secret. Used only by the
+/// verification path — deliberately NOT `Serialize`, so it cannot be returned
+/// from a handler by accident.
+#[derive(Deserialize, sqlx::FromRow)]
+#[allow(dead_code)] // full row shape; the verify path reads only `secret`
 pub struct MfaEnrollment {
     pub account_id: String,
     pub mfa_type: String,
     pub secret: Option<String>,
     pub phone_number: Option<String>,
     pub enabled: bool,
+}
+
+/// What `GET /mfa` returns: enrollment state without the second factor itself.
+///
+/// The TOTP secret is write-once — it is shown at enrollment (inside the
+/// provisioning URI) and never again. Returning it from a readable endpoint
+/// would let anyone holding a token for the account, including a stolen
+/// short-lived one or a least-privilege role, clone the second factor
+/// permanently and survive a password reset.
+#[derive(Serialize, sqlx::FromRow)]
+pub struct MfaEnrollmentView {
+    pub account_id: String,
+    pub mfa_type: String,
+    pub enabled: bool,
+    /// Whether a shared secret is on file, without disclosing it.
+    pub configured: bool,
 }
 
 #[derive(Deserialize)]
@@ -1109,6 +1140,27 @@ mod tests {
         };
         let (_, offset) = p.clamped();
         assert_eq!(offset, 0);
+    }
+
+    /// A client-supplied `page` is a `u64`; casting an unbounded one to `i64`
+    /// wraps negative and Postgres rejects the resulting OFFSET, turning a
+    /// query parameter into a 500. The offset must stay non-negative and in
+    /// range for every input, including the extremes.
+    #[test]
+    fn test_pagination_extreme_page_cannot_wrap_offset() {
+        for page in [u64::MAX, u64::MAX - 1, i64::MAX as u64, i64::MAX as u64 + 1] {
+            let p = PaginationParams {
+                page,
+                per_page: 100,
+            };
+            let (per_page, offset) = p.clamped();
+            assert_eq!(per_page, 100);
+            assert!(
+                offset >= 0,
+                "page {page} produced a negative offset {offset}"
+            );
+            assert_eq!(offset, (MAX_PAGE as i64 - 1) * 100);
+        }
     }
 
     #[test]

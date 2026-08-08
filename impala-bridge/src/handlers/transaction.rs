@@ -292,8 +292,14 @@ pub async fn list_transactions(
         crate::validate::validate_rfc3339_timestamp(t, "to")?;
     }
 
-    let per_page = params.per_page.clamp(1, 100) as i64;
-    let offset = (params.page.max(1) - 1) as i64 * per_page;
+    // Via the shared helper so the page bound applies here too: computing the
+    // offset from an unclamped client `page` let `u64::MAX` wrap to a negative
+    // OFFSET and 500 the request.
+    let (per_page, offset) = crate::models::PaginationParams {
+        page: params.page,
+        per_page: params.per_page,
+    }
+    .clamped();
 
     let (where_sql, binds) = build_tx_filters(&params, user.is_admin(), &user.account_id);
     let n_limit = binds.len() + 1;

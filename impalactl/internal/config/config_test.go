@@ -183,34 +183,59 @@ func TestLockExcludesSecondHolder(t *testing.T) {
 
 	release()
 
+	// Releasing must hand the lock to the next caller.
 	release2, err := store.Lock(time.Second)
 	if err != nil {
 		t.Fatalf("Lock after release: %v", err)
 	}
 	release2()
+}
 
-	if _, err := os.Stat(filepath.Join(store.Dir(), lockFile)); !os.IsNotExist(err) {
-		t.Error("lock file survived release")
+// A held lock must never be handed to a second caller just because it has been
+// held a while. The previous sentinel scheme aged locks out after 30s, so a
+// refresh slower than that had its lock stolen — and the two processes then
+// both presented the same single-use refresh token, which the bridge treats as
+// theft and answers by revoking the whole token family.
+func TestHeldLockIsNotStolenOverTime(t *testing.T) {
+	store := newTempStore(t)
+
+	release, err := store.Lock(time.Second)
+	if err != nil {
+		t.Fatalf("Lock: %v", err)
+	}
+	defer release()
+
+	// Backdate the lock file well past any plausible staleness window. With a
+	// kernel lock this is irrelevant, which is exactly the point.
+	old := time.Now().Add(-24 * time.Hour)
+	if err := os.Chtimes(filepath.Join(store.Dir(), lockFile), old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := store.Lock(50 * time.Millisecond); err == nil {
+		t.Error("an old but still-held lock was stolen by a second caller")
 	}
 }
 
-func TestLockTakesOverStaleLock(t *testing.T) {
+// An abandoned lock file must not wedge the CLI forever: the kernel drops the
+// lock when its holder goes away, so a leftover file is always re-acquirable.
+func TestStaleLockFileDoesNotBlockAcquisition(t *testing.T) {
 	store := newTempStore(t)
 	if err := os.MkdirAll(store.Dir(), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	stale := filepath.Join(store.Dir(), lockFile)
-	if err := os.WriteFile(stale, nil, 0o600); err != nil {
+	leftover := filepath.Join(store.Dir(), lockFile)
+	if err := os.WriteFile(leftover, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	old := time.Now().Add(-2 * lockStaleAfter)
-	if err := os.Chtimes(stale, old, old); err != nil {
+	old := time.Now().Add(-24 * time.Hour)
+	if err := os.Chtimes(leftover, old, old); err != nil {
 		t.Fatal(err)
 	}
 
 	release, err := store.Lock(time.Second)
 	if err != nil {
-		t.Fatalf("Lock did not take over a stale lock: %v", err)
+		t.Fatalf("a leftover lock file blocked acquisition: %v", err)
 	}
 	release()
 }

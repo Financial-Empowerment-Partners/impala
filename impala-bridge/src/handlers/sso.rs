@@ -12,6 +12,26 @@ use crate::error::AppError;
 use crate::models::{SsoConfigResponse, SsoTokenExchangeRequest, TokenResponse};
 use crate::oidc::{self, ProviderRegistry};
 
+/// Derive the local account id for an SSO subject.
+///
+/// Unifies on email ONLY when the IdP positively asserts the address is
+/// verified; anything else falls back to a provider-namespaced subject.
+///
+/// The bar is `Some(true)`, not "not explicitly false": every configured IdP
+/// shares one account namespace, so an *absent* `email_verified` — the norm
+/// for providers that let a subject self-assert the claim — would let a token
+/// from the weakest configured IdP claim `victim@corp.com` and land on the
+/// victim's bridge account, ADMIN_ACCOUNT_IDS matching included. This mirrors
+/// `handlers::google::derive_google_account_id`.
+fn derive_sso_account_id(provider_name: &str, claims: &oidc::OidcTokenClaims) -> String {
+    match claims.email.as_deref() {
+        Some(email) if !email.trim().is_empty() && claims.email_verified == Some(true) => {
+            email.trim().to_lowercase()
+        }
+        _ => format!("{}:{}", provider_name, claims.sub).to_lowercase(),
+    }
+}
+
 /// `POST /auth/sso/:provider` — Exchange an OIDC token for local JWT tokens.
 ///
 /// Looks the provider up in the registry, validates the token it expects
@@ -53,18 +73,7 @@ pub async fn sso_token_exchange(
     // Validate the OIDC token against the provider's JWKS (RS256, iss, aud).
     let claims = oidc::validate_token(&provider, token).await?;
 
-    // Derive the account id. Only unify on email when the IdP has not marked it
-    // unverified — otherwise a user at one IdP could take over an account keyed
-    // by the same email at another. When email is absent or explicitly
-    // unverified, fall back to a provider-namespaced subject. (Configured IdPs
-    // are treated as one trust domain; to harden, require `email_verified ==
-    // Some(true)` here.)
-    let account_id = match claims.email.as_deref() {
-        Some(email) if !email.trim().is_empty() && claims.email_verified != Some(false) => {
-            email.trim().to_lowercase()
-        }
-        _ => format!("{}:{}", provider.name, claims.sub).to_lowercase(),
-    };
+    let account_id = derive_sso_account_id(&provider.name, &claims);
 
     if account_id.is_empty() {
         warn!(
@@ -245,4 +254,66 @@ pub async fn sso_providers(
     Extension(registry): Extension<Arc<ProviderRegistry>>,
 ) -> Json<Vec<String>> {
     Json(registry.names())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn claims(email: Option<&str>, verified: Option<bool>) -> oidc::OidcTokenClaims {
+        oidc::OidcTokenClaims {
+            sub: "00u1abcdEFGH".to_string(),
+            iss: "https://idp.example.com".to_string(),
+            aud: serde_json::json!("impala"),
+            exp: 0,
+            iat: 0,
+            uid: None,
+            email: email.map(str::to_string),
+            email_verified: verified,
+            preferred_username: None,
+        }
+    }
+
+    #[test]
+    fn verified_email_keys_the_shared_account() {
+        let id = derive_sso_account_id("okta", &claims(Some("User@Example.com"), Some(true)));
+        assert_eq!(id, "user@example.com");
+    }
+
+    /// The load-bearing case: a missing `email_verified` must NOT be trusted.
+    /// Configured IdPs share one account namespace, so treating "absent" as
+    /// "verified" would let a token from any provider that lets its subject
+    /// set the claim take over an email-keyed account at another.
+    #[test]
+    fn absent_email_verified_falls_back_to_namespaced_subject() {
+        let id = derive_sso_account_id("duo", &claims(Some("victim@corp.com"), None));
+        assert_eq!(id, "duo:00u1abcdefgh");
+    }
+
+    #[test]
+    fn explicitly_unverified_email_falls_back_to_namespaced_subject() {
+        let id = derive_sso_account_id("auth0", &claims(Some("victim@corp.com"), Some(false)));
+        assert_eq!(id, "auth0:00u1abcdefgh");
+    }
+
+    #[test]
+    fn missing_or_blank_email_falls_back_to_namespaced_subject() {
+        assert_eq!(
+            derive_sso_account_id("okta", &claims(None, Some(true))),
+            "okta:00u1abcdefgh"
+        );
+        assert_eq!(
+            derive_sso_account_id("okta", &claims(Some("   "), Some(true))),
+            "okta:00u1abcdefgh"
+        );
+    }
+
+    /// Two providers asserting the same verified email intentionally collapse
+    /// onto one account; the namespaced fallback must stay per-provider.
+    #[test]
+    fn namespaced_fallback_is_per_provider() {
+        let a = derive_sso_account_id("okta", &claims(None, None));
+        let b = derive_sso_account_id("duo", &claims(None, None));
+        assert_ne!(a, b);
+    }
 }

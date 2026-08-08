@@ -17,7 +17,13 @@ use crate::telemetry::AppMetrics;
 pub struct WorkerContext {
     pub pool: PgPool,
     pub redis_pool: Arc<deadpool_redis::Pool>,
+    /// Client for trusted, fixed provider endpoints (Twilio, FCM).
     pub http_client: reqwest::Client,
+    /// Client for caller-supplied notification webhook URLs. Separate from
+    /// `http_client` because it dials through the SSRF egress guard and
+    /// refuses redirects — restrictions that must not apply to the provider
+    /// APIs above (see `crate::ssrf`).
+    pub webhook_client: reqwest::Client,
     pub config: Config,
     pub stellar_rpc_url: String,
     #[allow(dead_code)] // kept for parity with server config; jobs use stellar_rpc_url
@@ -97,6 +103,8 @@ pub async fn run(
             .timeout(Duration::from_secs(DEFAULT_HTTP_CLIENT_TIMEOUT_SECS))
             .build()
             .expect("Failed to create HTTP client"),
+        webhook_client: crate::ssrf::guarded_client(DEFAULT_HTTP_CLIENT_TIMEOUT_SECS)
+            .expect("Failed to create guarded webhook client"),
         config: config.clone(),
         stellar_rpc_url,
         horizon_url,

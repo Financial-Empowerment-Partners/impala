@@ -57,6 +57,43 @@ pub struct OidcTokenClaims {
     pub preferred_username: Option<String>,
 }
 
+/// Debounces on-demand JWKS refetches so a burst of unverifiable tokens cannot
+/// be amplified into a burst of outbound requests to the IdP.
+///
+/// Shared by the OIDC registry, the legacy Okta provider and the Google
+/// provider, all of which have the same unauthenticated "unknown kid" path.
+/// Uses a std mutex deliberately: the critical section is a timestamp compare
+/// with no `.await` inside it.
+#[derive(Debug, Default)]
+pub struct RefreshCooldown {
+    last: std::sync::Mutex<Option<std::time::Instant>>,
+}
+
+impl RefreshCooldown {
+    pub fn new() -> Self {
+        Self {
+            last: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// Claim the right to perform a refresh, returning false when one happened
+    /// within `cooldown`. Records the attempt when it returns true, so
+    /// concurrent callers cannot all pass.
+    pub fn try_acquire(&self, cooldown: std::time::Duration) -> bool {
+        let now = std::time::Instant::now();
+        // A poisoned lock only guards a timestamp; recover rather than fail
+        // token validation over it.
+        let mut last = self.last.lock().unwrap_or_else(|e| e.into_inner());
+        match *last {
+            Some(prev) if now.duration_since(prev) < cooldown => false,
+            _ => {
+                *last = Some(now);
+                true
+            }
+        }
+    }
+}
+
 /// Shared per-provider OIDC state (one per configured IdP).
 pub struct OidcProvider {
     /// Provider name (`okta` | `auth0` | `duo` | …). Drives `profile_source`,
@@ -80,6 +117,8 @@ pub struct OidcProvider {
     /// bridge can reach the IdP on its internal address (split-horizon dev
     /// setups, e.g. the docker-compose OpenBao test IdP).
     pub jwks_fetch_uri: String,
+    /// Debounce for the unauthenticated on-demand JWKS refetch path.
+    pub refresh_cooldown: RefreshCooldown,
 }
 
 /// Registry of all configured OIDC providers, shared as a single Axum extension.
@@ -329,6 +368,7 @@ pub async fn init_provider(
         jwks_refresh_secs: cfg.jwks_refresh_secs,
         http_client,
         jwks_fetch_uri,
+        refresh_cooldown: RefreshCooldown::new(),
     }))
 }
 
@@ -457,7 +497,22 @@ pub async fn validate_token(
     match claims {
         Ok(c) => Ok(c),
         Err(_) if !kid.is_empty() => {
-            // Key not found or validation failed — try refreshing JWKS once
+            // Key not found or validation failed — try refreshing JWKS once,
+            // but only if we have not just done so. `kid` comes from an
+            // unverified token header on an unauthenticated endpoint, so
+            // without this every junk token would force an outbound fetch.
+            if !provider
+                .refresh_cooldown
+                .try_acquire(std::time::Duration::from_secs(
+                    crate::constants::JWKS_ON_DEMAND_COOLDOWN_SECS,
+                ))
+            {
+                debug!(
+                    "oidc[{}]: skipping JWKS refresh for kid={} (cooldown)",
+                    provider.name, kid
+                );
+                return Err(AppError::Unauthorized);
+            }
             debug!(
                 "oidc[{}]: key kid={} not found in cache, refreshing JWKS",
                 provider.name, kid
@@ -543,6 +598,34 @@ fn try_validate_with_jwks(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The on-demand JWKS refetch is reachable unauthenticated with an
+    /// attacker-chosen `kid`, so a burst of junk tokens must collapse to a
+    /// single outbound fetch rather than one per request.
+    #[test]
+    fn refresh_cooldown_admits_one_then_blocks() {
+        let cooldown = RefreshCooldown::new();
+        let window = std::time::Duration::from_secs(60);
+
+        assert!(cooldown.try_acquire(window), "first refresh must proceed");
+        for _ in 0..100 {
+            assert!(
+                !cooldown.try_acquire(window),
+                "a burst must not amplify into repeated outbound fetches"
+            );
+        }
+    }
+
+    #[test]
+    fn refresh_cooldown_admits_again_once_the_window_passes() {
+        let cooldown = RefreshCooldown::new();
+        // A zero-length window is always elapsed, standing in for "later".
+        assert!(cooldown.try_acquire(std::time::Duration::from_secs(60)));
+        assert!(
+            cooldown.try_acquire(std::time::Duration::ZERO),
+            "a genuine key rotation must still be fetchable after the window"
+        );
+    }
 
     #[test]
     fn test_oidc_discovery_deserialize() {

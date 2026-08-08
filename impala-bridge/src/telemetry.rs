@@ -29,6 +29,9 @@ pub struct AppMetrics {
 
     // Transactions
     pub transactions_created: Counter<u64>,
+    /// Payments that settled on-chain but whose ledger row failed to insert.
+    /// Any non-zero value needs manual reconciliation — alert on it.
+    pub unrecorded_settled_payments: Counter<u64>,
 
     // MFA
     pub mfa_enrollments: Counter<u64>,
@@ -96,6 +99,13 @@ impl AppMetrics {
             transactions_created: meter
                 .u64_counter("transaction.created")
                 .with_description("Transactions created")
+                .build(),
+
+            unrecorded_settled_payments: meter
+                .u64_counter("payment.settled_unrecorded")
+                .with_description(
+                    "Custodial payments that settled on-chain but were not recorded in the ledger",
+                )
                 .build(),
 
             mfa_enrollments: meter

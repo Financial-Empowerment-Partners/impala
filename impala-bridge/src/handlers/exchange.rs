@@ -1382,7 +1382,10 @@ pub async fn list_orders(
     };
 
     let per_page = q.per_page.clamp(1, 100);
-    let page = q.page.max(1);
+    // Upper-bound the page as well as the lower: `(page - 1) * per_page` on an
+    // unbounded client-supplied page overflows i64 (a panic in debug builds, a
+    // wrapped negative OFFSET in release).
+    let page = q.page.clamp(1, crate::models::MAX_PAGE as i64);
     let offset = (page - 1) * per_page;
 
     let (where_sql, binds) = build_order_filters(

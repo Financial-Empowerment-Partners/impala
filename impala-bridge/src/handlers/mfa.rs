@@ -7,7 +7,9 @@ use totp_rs::{Algorithm, Secret, TOTP};
 
 use crate::auth::AuthenticatedUser;
 use crate::error::AppError;
-use crate::models::{EnrollMfaRequest, MfaEnrollment, MfaQuery, MfaResponse, VerifyMfaRequest};
+use crate::models::{
+    EnrollMfaRequest, MfaEnrollment, MfaEnrollmentView, MfaQuery, MfaResponse, VerifyMfaRequest,
+};
 use crate::telemetry::AppMetrics;
 use opentelemetry::KeyValue;
 
@@ -144,11 +146,15 @@ pub async fn get_mfa(
     user: AuthenticatedUser,
     Extension(pool): Extension<PgPool>,
     Query(params): Query<MfaQuery>,
-) -> Result<Json<Vec<MfaEnrollment>>, AppError> {
+) -> Result<Json<Vec<MfaEnrollmentView>>, AppError> {
     crate::auth::require_owner(&user, &params.account_id)?;
     debug!("GET /mfa: account_id={}", params.account_id);
-    let rows = sqlx::query_as::<_, MfaEnrollment>(
-        "SELECT account_id, mfa_type, secret, phone_number, enabled
+    // Never project `secret` or `phone_number` here: this endpoint is a plain
+    // readable GET, so anything it returns is retrievable for the life of any
+    // token bound to the account. `configured` conveys enrollment state
+    // without handing back the factor itself.
+    let rows = sqlx::query_as::<_, MfaEnrollmentView>(
+        "SELECT account_id, mfa_type, enabled, (secret IS NOT NULL) AS configured
          FROM impala_mfa WHERE account_id = $1",
     )
     .bind(&params.account_id)

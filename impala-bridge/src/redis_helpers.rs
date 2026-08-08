@@ -5,8 +5,28 @@ use redis::AsyncCommands;
 use crate::constants::LOCKOUT_DURATION_SECS;
 use crate::error::AppError;
 
+/// Fixed-window counter step, executed server-side so the increment and the
+/// window's TTL land in a single atomic operation.
+///
+/// A GET-then-INCR pair would let every request of a concurrent burst observe
+/// the same pre-increment value and slip past the cap together; incrementing
+/// first makes each caller's own count authoritative. `EXPIRE` is applied only
+/// when the counter is created (`== 1`) so the window is fixed rather than
+/// sliding — and because it rides the same script, a counter can never be left
+/// without a TTL (which would lock the identity out permanently).
+const RATE_LIMIT_SCRIPT: &str = r#"
+local count = redis.call('INCR', KEYS[1])
+if count == 1 then
+  redis.call('EXPIRE', KEYS[1], ARGV[1])
+end
+return count
+"#;
+
 /// Check whether the caller has exceeded the rate limit for the given scope and
 /// identity.  When Redis is unavailable the request is **rejected** (fail-closed).
+///
+/// The counter is incremented *before* the comparison, so `max_requests`
+/// concurrent callers cannot each read a stale count and all be admitted.
 pub async fn check_rate_limit(
     pool: &RedisPool,
     scope: &str,
@@ -21,32 +41,23 @@ pub async fn check_rate_limit(
 
     let key = format!("impala:rate:{scope}:{id}");
 
-    // A missing key (Nil) means zero prior requests; only a real Redis error is
-    // fail-closed. Decoding Nil straight into u64 would error, so read Option.
-    let count: u64 = conn
-        .get::<_, Option<u64>>(&key)
+    let count: u64 = redis::Script::new(RATE_LIMIT_SCRIPT)
+        .key(&key)
+        .arg(window_secs as i64)
+        .invoke_async(&mut *conn)
         .await
         .map_err(|e| {
-            warn!("check_rate_limit: Redis GET failed for {}: {}", key, e);
+            warn!("check_rate_limit: Redis script failed for {}: {}", key, e);
             AppError::InternalError("Service temporarily unavailable".to_string())
-        })?
-        .unwrap_or(0);
+        })?;
 
-    if count >= max_requests {
+    // `count` includes this request, so the Nth caller within the window sees
+    // `count == N`; rejecting at `> max_requests` admits exactly `max_requests`.
+    if count > max_requests {
         return Err(AppError::RateLimited {
             retry_after: window_secs as u64,
         });
     }
-
-    let _: i64 = conn.incr(&key, 1u64).await.map_err(|e| {
-        warn!("check_rate_limit: Redis INCR failed for {}: {}", key, e);
-        AppError::InternalError("Service temporarily unavailable".to_string())
-    })?;
-
-    let _: bool = conn.expire(&key, window_secs as i64).await.map_err(|e| {
-        warn!("check_rate_limit: Redis EXPIRE failed for {}: {}", key, e);
-        AppError::InternalError("Service temporarily unavailable".to_string())
-    })?;
 
     Ok(())
 }
@@ -291,17 +302,28 @@ pub async fn revoke_token_strict(
         })
 }
 
-/// Record that a refresh token's JTI has been rotated out (single-use refresh
-/// tokens). Fail-closed by design: the marker write must succeed **before** a
-/// replacement pair is minted, so two live refresh tokens can never coexist.
-pub async fn mark_refresh_rotated(
+/// Atomically claim a refresh token's JTI as rotated out (single-use refresh
+/// tokens). Returns `true` when this caller won the claim and may mint a
+/// replacement pair, `false` when the JTI had already been rotated — which is
+/// the reuse signal.
+///
+/// The claim is a single `SET NX EX`, not a check followed by a write: an
+/// unconditional write always "succeeds" and so cannot tell the caller whether
+/// it was the one that burned the token. Under concurrency that let several
+/// presentations of the same refresh token each mint a live pair while reuse
+/// detection stayed silent. Exactly one caller can now win, and every other
+/// presentation is reported as reuse.
+///
+/// Fail-closed by design: the claim must succeed **before** a replacement pair
+/// is minted, so two live refresh tokens can never coexist.
+pub async fn claim_refresh_rotation(
     pool: &RedisPool,
     jti: &str,
     ttl_secs: usize,
-) -> Result<(), AppError> {
+) -> Result<bool, AppError> {
     let mut conn = pool.get().await.map_err(|e| {
         error!(
-            "mark_refresh_rotated: failed to get Redis connection: {}",
+            "claim_refresh_rotation: failed to get Redis connection: {}",
             e
         );
         AppError::InternalError("Service temporarily unavailable".to_string())
@@ -309,32 +331,31 @@ pub async fn mark_refresh_rotated(
 
     let key = format!("impala:rotated:{jti}");
 
-    conn.set_ex::<_, &str, ()>(&key, "1", ttl_secs as u64)
+    // `SET key 1 NX EX ttl` replies OK to the winner and Nil to everyone else.
+    let claimed: Option<String> = redis::cmd("SET")
+        .arg(&key)
+        .arg("1")
+        .arg("NX")
+        .arg("EX")
+        .arg(ttl_secs as u64)
+        .query_async(&mut *conn)
         .await
         .map_err(|e| {
             warn!(
-                "mark_refresh_rotated: Redis SET_EX failed for {}: {}",
+                "claim_refresh_rotation: Redis SET NX failed for {}: {}",
                 key, e
             );
             AppError::InternalError("Service temporarily unavailable".to_string())
-        })
+        })?;
+
+    Ok(claimed.is_some())
 }
 
-/// Check whether a refresh token's JTI was already rotated out (reuse).
-/// Fails closed: a Redis error rejects the exchange.
-pub async fn is_refresh_rotated(pool: &RedisPool, jti: &str) -> Result<bool, AppError> {
-    let mut conn = pool.get().await.map_err(|e| {
-        error!("is_refresh_rotated: failed to get Redis connection: {}", e);
-        AppError::Unauthorized
-    })?;
-
-    let key = format!("impala:rotated:{jti}");
-
-    conn.exists(&key).await.map_err(|e| {
-        warn!("is_refresh_rotated: Redis EXISTS failed for {}: {}", key, e);
-        AppError::Unauthorized
-    })
-}
+// NOTE: there is deliberately no `is_refresh_rotated` read helper. Checking
+// the marker and then writing it is two round trips, and the window between
+// them is exactly where concurrent reuse slipped through undetected.
+// `claim_refresh_rotation` answers "was it already rotated?" and burns it in
+// one atomic step; route every rotation through that.
 
 /// Revoke an entire refresh-token family (reuse detection): every token
 /// carrying this `fid` — refresh and temporal alike — is rejected from now on.
@@ -391,14 +412,14 @@ pub async fn bump_auth_epoch(
 pub async fn get_auth_epoch(pool: &RedisPool, account_id: &str) -> Result<Option<u64>, AppError> {
     let mut conn = pool.get().await.map_err(|e| {
         error!("get_auth_epoch: failed to get Redis connection: {}", e);
-        AppError::Unauthorized
+        AppError::InternalError("Service temporarily unavailable".to_string())
     })?;
 
     let key = format!("impala:auth_epoch:{account_id}");
 
     conn.get::<_, Option<u64>>(&key).await.map_err(|e| {
         warn!("get_auth_epoch: Redis GET failed for {}: {}", key, e);
-        AppError::Unauthorized
+        AppError::InternalError("Service temporarily unavailable".to_string())
     })
 }
 
@@ -424,7 +445,12 @@ pub async fn check_bearer_token_validity(
             "check_bearer_token_validity: failed to get Redis connection: {}",
             e
         );
-        AppError::Unauthorized
+        // Infrastructure failure, NOT a revoked token. Still fail-closed (the
+        // request is rejected), but it must not masquerade as 401: callers
+        // treat 401 as "this credential is dead" and discard it, so reporting
+        // a Redis outage that way makes clients throw away tokens that are
+        // still perfectly valid once Redis returns.
+        AppError::InternalError("Service temporarily unavailable".to_string())
     })?;
 
     let (jti_revoked, family_revoked, epoch): (bool, bool, Option<u64>) = redis::pipe()
@@ -438,7 +464,7 @@ pub async fn check_bearer_token_validity(
         .await
         .map_err(|e| {
             warn!("check_bearer_token_validity: Redis pipeline failed: {}", e);
-            AppError::Unauthorized
+            AppError::InternalError("Service temporarily unavailable".to_string())
         })?;
 
     if jti_revoked || family_revoked || is_iat_revoked(iat, epoch) {
@@ -512,14 +538,14 @@ pub async fn get_session(
 ) -> Result<Option<SessionRecord>, AppError> {
     let mut conn = pool.get().await.map_err(|e| {
         error!("get_session: failed to get Redis connection: {}", e);
-        AppError::Unauthorized
+        AppError::InternalError("Service temporarily unavailable".to_string())
     })?;
 
     let key = session_key(sid_hash);
 
     let map: std::collections::HashMap<String, String> = conn.hgetall(&key).await.map_err(|e| {
         warn!("get_session: Redis HGETALL failed for {}: {}", key, e);
-        AppError::Unauthorized
+        AppError::InternalError("Service temporarily unavailable".to_string())
     })?;
 
     if map.is_empty() {

@@ -13,8 +13,14 @@
  *  - X-Request-Nonce header on all requests (server-side dedup)
  *  - Error message sanitization (strips HTML/SQL, maps status codes)
  *  - Exponential backoff retry (GET: network + 5xx; mutating: network only)
- *  - One-shot CSRF self-heal: a 403 on a mutation refetches /session/me and
- *    retries once (covers a rotated/lost in-memory token)
+ *
+ * Authentication is bearer-token only: every mutation carries an Authorization
+ * header, so no ambient credential is attached and these requests are not
+ * CSRF-reachable. There is deliberately no X-CSRF-Token handling here — the
+ * bridge enforces CSRF on its cookie-session path, which this client does not
+ * use (`rawPost` sends cookies but is only used for body-credentialed login
+ * endpoints). See test/api-csrf.test.js for the cookie-session surface that
+ * would need to exist first.
  *
  * @module API
  */

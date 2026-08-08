@@ -181,14 +181,21 @@ pub fn validate_callback_url(url: &str) -> Result<(), AppError> {
 
     // Block private/reserved IPs. `host_str()` returns IPv6 literals in
     // bracketed form (e.g. "[fc00::1]"), which `IpAddr::from_str` rejects, so
-    // strip the brackets first — otherwise the IPv6 arm of `is_private_ip`
-    // below is unreachable and link-local/ULA/IPv6-metadata hosts slip through.
+    // strip the brackets first — otherwise the IPv6 arm of the predicate below
+    // is unreachable and link-local/ULA/IPv6-metadata hosts slip through.
+    //
+    // This only sees IP *literals*: a hostname that resolves to an internal
+    // address passes here by design. Enforcement against resolved addresses
+    // (and against DNS rebinding) is `crate::ssrf::EgressGuard`, installed as
+    // the DNS resolver on every client that fetches one of these URLs. This
+    // check stays because it turns the common mistake into an immediate 400
+    // instead of a delivery failure discovered later.
     let host_ip = host
         .strip_prefix('[')
         .and_then(|h| h.strip_suffix(']'))
         .unwrap_or(host);
     if let Ok(ip) = host_ip.parse::<IpAddr>() {
-        if is_private_ip(&ip) {
+        if crate::ssrf::is_blocked_ip(&ip) {
             return Err(AppError::BadRequest(
                 "Callback URL must not target private IP addresses".to_string(),
             ));
@@ -205,30 +212,10 @@ pub fn validate_callback_url(url: &str) -> Result<(), AppError> {
     Ok(())
 }
 
-fn is_private_ip(ip: &IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(v4) => {
-            let octets = v4.octets();
-            // 10.0.0.0/8
-            octets[0] == 10
-            // 172.16.0.0/12
-            || (octets[0] == 172 && (16..=31).contains(&octets[1]))
-            // 192.168.0.0/16
-            || (octets[0] == 192 && octets[1] == 168)
-            // 127.0.0.0/8 (loopback)
-            || octets[0] == 127
-            // 169.254.0.0/16 (link-local)
-            || (octets[0] == 169 && octets[1] == 254)
-            // 0.0.0.0
-            || (octets[0] == 0 && octets[1] == 0 && octets[2] == 0 && octets[3] == 0)
-        }
-        IpAddr::V6(v6) => {
-            v6.is_loopback()
-            || v6.segments()[0] == 0xfe80 // link-local
-            || v6.segments()[0] & 0xfe00 == 0xfc00 // unique local
-        }
-    }
-}
+// The address predicate lives in `crate::ssrf` so the registration-time gate
+// here and the connection-time resolver enforce exactly the same policy. The
+// former local copy missed CGNAT, reserved and IPv4-in-IPv6 ranges, and only
+// matched fe80::/16 rather than the full fe80::/10 link-local block.
 
 /// Validate a transaction ID: non-empty, max 128 chars, alphanumeric/hex.
 pub fn validate_transaction_id(id: &str) -> Result<(), AppError> {

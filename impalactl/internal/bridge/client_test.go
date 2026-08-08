@@ -17,7 +17,7 @@ func newTestClient(t *testing.T, handler http.HandlerFunc) *Client {
 	t.Helper()
 	srv := httptest.NewServer(handler)
 	t.Cleanup(srv.Close)
-	c, err := New(srv.URL, 5*time.Second)
+	c, err := New(srv.URL, 5*time.Second, false)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -26,14 +26,14 @@ func newTestClient(t *testing.T, handler http.HandlerFunc) *Client {
 
 func TestNewRejectsInvalidEndpoints(t *testing.T) {
 	for _, endpoint := range []string{"", "   ", "localhost:8080", "ftp://host", "http://"} {
-		if _, err := New(endpoint, time.Second); err == nil {
+		if _, err := New(endpoint, time.Second, false); err == nil {
 			t.Errorf("New(%q) = nil error, want an error", endpoint)
 		}
 	}
 }
 
 func TestNewNormalizesEndpoint(t *testing.T) {
-	c, err := New("  https://bridge.example.com/  ", time.Second)
+	c, err := New("  https://bridge.example.com/  ", time.Second, false)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -334,5 +334,46 @@ func TestResultErr(t *testing.T) {
 	}
 	if err := (Result{}).Err(); err == nil {
 		t.Error("failure Result with no message returned nil")
+	}
+}
+
+func TestNewRefusesCleartextToNonLoopback(t *testing.T) {
+	// Every request carries a bearer credential — the login password, the
+	// single-use refresh token, the temporal JWT, or an imported seed — so a
+	// plain-HTTP endpoint on the network must not be reachable by accident.
+	for _, endpoint := range []string{
+		"http://bridge.internal.example.com:8080",
+		"http://10.0.0.5:8080",
+		"http://192.168.1.10",
+	} {
+		if _, err := New(endpoint, time.Second, false); err == nil {
+			t.Errorf("New(%q) allowed cleartext to a non-loopback host", endpoint)
+		}
+	}
+}
+
+func TestNewAllowsCleartextToLoopback(t *testing.T) {
+	// The documented development default must keep working.
+	for _, endpoint := range []string{
+		"http://localhost:8080",
+		"http://LocalHost:8080",
+		"http://127.0.0.1:8080",
+		"http://[::1]:8080",
+	} {
+		if _, err := New(endpoint, time.Second, false); err != nil {
+			t.Errorf("New(%q) = %v, want it allowed", endpoint, err)
+		}
+	}
+}
+
+func TestNewAllowsCleartextWithExplicitOptIn(t *testing.T) {
+	if _, err := New("http://bridge.internal.example.com", time.Second, true); err != nil {
+		t.Errorf("explicit opt-in still refused: %v", err)
+	}
+}
+
+func TestNewAlwaysAllowsHTTPS(t *testing.T) {
+	if _, err := New("https://bridge.example.com", time.Second, false); err != nil {
+		t.Errorf("https endpoint refused: %v", err)
 	}
 }

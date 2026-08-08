@@ -36,9 +36,10 @@ const (
 const (
 	credentialsFile = "credentials.json"
 	lockFile        = "credentials.lock"
-	// lockStaleAfter bounds how long a crashed process can wedge a refresh.
-	lockStaleAfter = 30 * time.Second
-	lockPollEvery  = 25 * time.Millisecond
+	// How often to retry while another process holds the lock. There is no
+	// staleness timeout: the kernel releases a flock when its holder exits, so
+	// a crashed process cannot wedge a refresh.
+	lockPollEvery = 25 * time.Millisecond
 )
 
 // Credentials is the persisted result of a successful login.
@@ -153,6 +154,9 @@ func (s *Store) Clear() error {
 	return nil
 }
 
+// errTimedOut is returned by lockFileExclusive when wait elapses.
+var errTimedOut = errors.New("timed out waiting for the credential lock")
+
 // Lock takes an exclusive advisory lock over the credential file, waiting up
 // to wait for a competing holder.
 //
@@ -162,32 +166,35 @@ func (s *Store) Clear() error {
 // the store after acquiring so the loser of a race adopts the winner's tokens
 // instead of burning its own.
 //
+// The lock is a kernel advisory lock (flock) on a dedicated file, not a
+// sentinel whose age is used to guess whether the holder died. The kernel
+// drops it when the process exits, so a slow refresh can no longer have its
+// lock stolen mid-flight.
+//
 // The returned release function is always safe to call, including on error.
 func (s *Store) Lock(wait time.Duration) (func(), error) {
 	if err := os.MkdirAll(s.dir, 0o700); err != nil {
 		return func() {}, fmt.Errorf("create %s: %w", s.dir, err)
 	}
 	path := filepath.Join(s.dir, lockFile)
-	deadline := time.Now().Add(wait)
 
-	for {
-		f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-		if err == nil {
-			f.Close()
-			return func() { os.Remove(path) }, nil
-		}
-		if !errors.Is(err, os.ErrExist) {
-			return func() {}, fmt.Errorf("acquire lock %s: %w", path, err)
-		}
-
-		// Take over a lock abandoned by a crashed process.
-		if info, statErr := os.Stat(path); statErr == nil && time.Since(info.ModTime()) > lockStaleAfter {
-			os.Remove(path)
-			continue
-		}
-		if time.Now().After(deadline) {
-			return func() {}, fmt.Errorf("timed out waiting for %s (remove it if no impalactl is running)", path)
-		}
-		time.Sleep(lockPollEvery)
+	// The lock file persists; it carries no content and is never removed, so
+	// no holder can delete a file another process is holding a lock on.
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return func() {}, fmt.Errorf("open lock %s: %w", path, err)
 	}
+
+	if err := lockFileExclusive(f, wait); err != nil {
+		f.Close()
+		if errors.Is(err, errTimedOut) {
+			return func() {}, fmt.Errorf("timed out waiting for %s — another impalactl is refreshing", path)
+		}
+		return func() {}, fmt.Errorf("acquire lock %s: %w", path, err)
+	}
+
+	return func() {
+		unlockFile(f)
+		f.Close()
+	}, nil
 }

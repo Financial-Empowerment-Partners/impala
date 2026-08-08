@@ -69,6 +69,8 @@ Global flags (may appear before or after the command):
   --timeout <dur>      Per-request timeout (default %s)
   --json               Print the server's raw JSON instead of a summary
   --yes                Skip confirmation prompts (needed for scripted transfers)
+  --insecure-http      Allow plain HTTP to a non-loopback endpoint
+                       (credentials travel in cleartext; or $%s)
 
 Credentials from ` + "`login`" + ` are stored with 0600 permissions under
 $XDG_CONFIG_HOME/impalactl (override with $%s) and are
@@ -93,11 +95,12 @@ type App struct {
 
 // options are the global flags, resolved against the environment when used.
 type options struct {
-	endpoint string
-	token    string
-	timeout  time.Duration
-	json     bool
-	yes      bool
+	endpoint     string
+	token        string
+	timeout      time.Duration
+	json         bool
+	yes          bool
+	insecureHTTP bool
 }
 
 // Run is the process entry point. It returns the exit code.
@@ -109,6 +112,7 @@ func Run(args []string) int {
 func (a *App) printUsage(w io.Writer) {
 	fmt.Fprintf(w, usage,
 		config.EnvEndpoint, bridge.DefaultEndpoint, config.EnvToken, defaultTimeout,
+		bridge.EnvAllowHTTP,
 		config.EnvConfigDir, config.EnvPassword, config.EnvSecretSeed)
 }
 
@@ -171,6 +175,8 @@ func bindGlobalFlags(fs *flag.FlagSet, opts *options) {
 	fs.DurationVar(&opts.timeout, "timeout", opts.timeout, "per-request timeout")
 	fs.BoolVar(&opts.json, "json", opts.json, "print the server's raw JSON response")
 	fs.BoolVar(&opts.yes, "yes", opts.yes, "skip confirmation prompts")
+	fs.BoolVar(&opts.insecureHTTP, "insecure-http", opts.insecureHTTP,
+		"allow plain HTTP to a non-loopback endpoint (sends credentials in cleartext)")
 }
 
 // fail prints an error to stderr and returns the error exit code.

@@ -73,11 +73,10 @@ where
 /// `cron_sync` table, invokes each one, and stores the JSON response back
 /// into the `callback_result` column.  Respects cancellation for graceful shutdown.
 pub async fn cron_sync_task(pool: PgPool, cancel: CancellationToken) {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(
-            DEFAULT_HTTP_CLIENT_TIMEOUT_SECS,
-        ))
-        .build()
+    // cron_sync callback URIs are fetched from the database and dialed by the
+    // server, so this client goes through the SSRF egress guard and does not
+    // follow redirects (see crate::ssrf).
+    let client = crate::ssrf::guarded_client(DEFAULT_HTTP_CLIENT_TIMEOUT_SECS)
         .expect("Failed to create HTTP client");
     loop {
         // Bounded fetch: a runaway cron_sync table must not turn one tick

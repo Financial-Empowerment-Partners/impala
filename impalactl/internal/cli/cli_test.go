@@ -579,3 +579,36 @@ func TestLogoutAllUsesTheEverywhereEndpoint(t *testing.T) {
 		t.Errorf("called %q, want /logout/all", called)
 	}
 }
+
+// A transient bridge failure during refresh must not destroy a live refresh
+// token. The bridge validates the presented token before burning it, so a 5xx
+// leaves it unrotated and still usable once the outage clears; deleting it
+// locally would force an unnecessary interactive re-login.
+func TestTransientRefreshFailureKeepsCredentials(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /token", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(`{"error":{"code":"internal_error","message":"Service temporarily unavailable"}}`))
+	})
+
+	h := newHarness(t, "", mux)
+	h.seedCredentials(t, &config.Credentials{
+		AccountID:     "alice",
+		TemporalToken: token(t, "alice", "admin", -time.Minute), // forces a refresh
+		RefreshToken:  "still-valid",
+	})
+
+	if code := h.run("account", "list"); code != 1 {
+		t.Fatalf("exit = %d, want 1", code)
+	}
+	creds, err := h.store(t).Load()
+	if err != nil || creds == nil {
+		t.Fatalf("credentials were deleted on a transient failure: (%v, %v)", creds, err)
+	}
+	if creds.RefreshToken != "still-valid" {
+		t.Errorf("refresh token = %q, want it preserved", creds.RefreshToken)
+	}
+	if !strings.Contains(h.stderr(), "credentials kept") {
+		t.Errorf("stderr = %q, want it to say credentials were kept", h.stderr())
+	}
+}

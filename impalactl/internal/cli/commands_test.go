@@ -795,3 +795,61 @@ func TestJSONOutputIsVerbatim(t *testing.T) {
 		t.Errorf("output = %q, want the unmodelled field preserved", h.stdout())
 	}
 }
+
+func TestTransferSendRejectsOutOfRangeFee(t *testing.T) {
+	// The wire field is uint32; an unchecked conversion wraps silently, so a
+	// fat-fingered fee would be sent as a different number than the operator
+	// saw at the prompt.
+	rec := &recorder{}
+	h := authed(t, "", transferMux("testnet", rec))
+
+	if code := h.run("transfer", "send", "--to", testStellarID, "--amount", "1", "--fee", "4294967296"); code != 2 {
+		t.Fatalf("exit = %d, want 2", code)
+	}
+	if rec.calls != 0 {
+		t.Error("a payment with an out-of-range fee was submitted")
+	}
+}
+
+func TestTransferSendAcceptsMaxFee(t *testing.T) {
+	rec := &recorder{}
+	h := authed(t, "", transferMux("testnet", rec))
+
+	if code := h.run("transfer", "send", "--to", testStellarID, "--amount", "1", "--fee", "4294967295"); code != 0 {
+		t.Fatalf("exit = %d: %s", code, h.stderr())
+	}
+	var body map[string]any
+	json.Unmarshal([]byte(rec.body), &body)
+	if body["fee"] != float64(4294967295) {
+		t.Errorf("fee = %v, want 4294967295", body["fee"])
+	}
+}
+
+func TestCleartextEndpointIsRefused(t *testing.T) {
+	// Guards the whole CLI, not just login: the bearer token rides every call.
+	h := newHarness(t, "", nil)
+	h.env[config.EnvEndpoint] = "http://bridge.internal.example.com:8080"
+	h.env[config.EnvToken] = token(t, "alice", "admin", time.Hour)
+
+	if code := h.run("account", "list"); code != 1 {
+		t.Fatalf("exit = %d, want 1", code)
+	}
+	if !strings.Contains(h.stderr(), "plain HTTP") {
+		t.Errorf("stderr = %q, want the cleartext refusal", h.stderr())
+	}
+}
+
+func TestCleartextEndpointAllowedWithOptIn(t *testing.T) {
+	rec := &recorder{response: `{"data":[],"page":1,"per_page":20,"total":0}`}
+	h := newHarness(t, "", rec.handler())
+	h.env[config.EnvToken] = token(t, "alice", "admin", time.Hour)
+
+	// The stub is on loopback, so exercise the opt-in path via the flag: it
+	// must not interfere with an otherwise valid request.
+	if code := h.run("account", "list", "--insecure-http"); code != 0 {
+		t.Fatalf("exit = %d: %s", code, h.stderr())
+	}
+	if rec.calls != 1 {
+		t.Errorf("calls = %d, want 1", rec.calls)
+	}
+}

@@ -142,8 +142,14 @@ resource "aws_db_instance" "main" {
   final_snapshot_identifier = "${local.name_prefix}-db-final"
   copy_tags_to_snapshot     = true
 
-  # Deletion protection for production
-  deletion_protection = var.environment == "production"
+  # Deletion protection is unconditional: this instance holds custodial account
+  # data and seed ciphertext, and CI runs `terraform apply -auto-approve` with
+  # the default environment label ("staging"). Gating the guard on the label
+  # meant every non-"production" deployment ran the custodial database with no
+  # delete protection at all. Matches live.tf / testnet.tf, which already force
+  # it on. Tearing down a disposable stack is now a deliberate two-step: flip
+  # this to false, apply, then destroy.
+  deletion_protection = true
 
   apply_immediately = true
 

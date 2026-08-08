@@ -37,7 +37,17 @@ func (a *App) newClient(opts options) (*bridge.Client, error) {
 	if timeout <= 0 {
 		timeout = defaultTimeout
 	}
-	return bridge.New(a.resolveEndpoint(opts), timeout)
+	return bridge.New(a.resolveEndpoint(opts), timeout, a.allowInsecureHTTP(opts))
+}
+
+// allowInsecureHTTP reports whether plain HTTP to a non-loopback host is
+// permitted, via the --insecure-http flag or $IMPALA_ALLOW_HTTP.
+func (a *App) allowInsecureHTTP(opts options) bool {
+	if opts.insecureHTTP {
+		return true
+	}
+	v := strings.TrimSpace(a.getenv(bridge.EnvAllowHTTP))
+	return v == "1" || strings.EqualFold(v, "true")
 }
 
 // authClient builds a client carrying a bearer token, resolved as
@@ -117,10 +127,19 @@ func (a *App) refreshIfNeeded(c *bridge.Client, store *config.Store, creds *conf
 		if bridge.IsUnauthorized(err) {
 			// Expired, revoked, or a family killed by reuse detection. Drop the
 			// dead credentials so the next command says "log in" plainly.
+			//
+			// Only 401 is treated as final. Anything else — a 5xx, a timeout, a
+			// connection refused — may well be a transient bridge or Redis
+			// problem, and the refresh token is still live on the server: the
+			// bridge validates the token before burning it, so a failure at that
+			// stage leaves it unrotated. Deleting it here would force an
+			// interactive re-login across a whole fleet over a blip.
 			_ = store.Clear()
 			return nil, fmt.Errorf("session expired or revoked (%v): run `impalactl login`", err)
 		}
-		return nil, fmt.Errorf("refresh token: %w", err)
+		return nil, fmt.Errorf(
+			"could not refresh the session (%w) — credentials kept; retry, or run `impalactl login` if this persists",
+			err)
 	}
 
 	updated := *creds

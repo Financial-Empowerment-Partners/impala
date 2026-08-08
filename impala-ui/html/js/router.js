@@ -16,10 +16,11 @@ var Router = (function () {
      * Escape a string for safe insertion into an HTML context.
      * Uses a text node to ensure all special characters are entity-encoded.
      */
+    // Delegates to the shared escaper: a text-node round trip escapes & < >
+    // but NOT quotes, so values interpolated into double-quoted attributes
+    // (value="...", title="...") could break out and inject attributes.
     function escapeHtml(str) {
-        var div = document.createElement('div');
-        div.appendChild(document.createTextNode(str));
-        return div.innerHTML;
+        return EscapeHtml.escape(str);
     }
 
     /**

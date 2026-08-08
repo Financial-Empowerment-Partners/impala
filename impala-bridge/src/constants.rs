@@ -118,6 +118,17 @@ pub const TOKEN_TYPE_TEMPORAL: &str = "temporal";
 /// Default JWKS refresh interval in seconds (1 hour).
 pub const DEFAULT_JWKS_REFRESH_SECS: u64 = 3600;
 
+/// Minimum spacing between *on-demand* JWKS refetches (the "unknown kid" path).
+///
+/// That path is reachable unauthenticated: the `kid` comes from an unverified
+/// JWT header, and federated token validation runs before any rate limit (the
+/// per-account limit keys on an account id that a bogus token never yields).
+/// Without spacing, each junk token forces one outbound fetch to the IdP —
+/// amplification that can get the bridge throttled by the IdP and take down
+/// SSO for everyone. Scheduled rotations are still picked up by the background
+/// refresh task, so a short cooldown costs nothing operationally.
+pub const JWKS_ON_DEMAND_COOLDOWN_SECS: u64 = 60;
+
 // Canonical OIDC provider identifiers. Provider names are config-driven
 // (`SSO_PROVIDERS`), so the SSO handler binds the configured name directly;
 // these constants document the well-known vocabulary and are referenced by the

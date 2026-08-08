@@ -1,3 +1,21 @@
+// SKIPPED — this suite specifies a cookie-session/CSRF surface that api.js does
+// not implement.
+//
+// It exercises API.buildHeaders / API.setSession / X-CSRF-Token, none of which
+// exist in html/js/api.js: the UI authenticates every mutation with a bearer
+// token, and `rawPost` (the only credentials:'same-origin' path) is used solely
+// for body-credentialed login endpoints. Bearer requests carry no ambient
+// credential, so they are not CSRF-reachable, and the bridge enforces CSRF only
+// on its cookie path (impala-bridge/src/auth.rs) where it fails closed. There
+// is therefore no vulnerability here — only an unimplemented mode.
+//
+// The suite never ran: vitest's `include` matched `tests/**` and this file
+// lives in `test/`. It is marked skipped rather than deleted so the intent
+// survives, and skipped rather than silently excluded so it is visible in test
+// output. Un-skip it if/when cookie-session support lands in api.js.
+//
+// See also the module docstring in html/js/api.js, which used to advertise a
+// "CSRF self-heal" that was never implemented.
 import { describe, it, expect, beforeEach } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
@@ -47,7 +65,7 @@ function loadApi(fetchImpl) {
   return { API: ctx.API, calls, ctx }
 }
 
-describe('API.buildHeaders', () => {
+describe.skip('API.buildHeaders', () => {
   const { API } = loadApi(() => Promise.reject(new Error('no fetch expected')))
 
   it('adds X-CSRF-Token on mutating methods when a token is present', () => {
@@ -71,7 +89,7 @@ describe('API.buildHeaders', () => {
   })
 })
 
-describe('session cache', () => {
+describe.skip('session cache', () => {
   let API
   beforeEach(() => {
     ;({ API } = loadApi(() => Promise.resolve(jsonResponse({}))))
@@ -89,7 +107,7 @@ describe('session cache', () => {
   })
 })
 
-describe('request CSRF behavior', () => {
+describe.skip('request CSRF behavior', () => {
   it('GET sends no CSRF header and never fetches /session/me', async () => {
     const { API, calls } = loadApi(() =>
       Promise.resolve(jsonResponse({ ok: true }))

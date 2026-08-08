@@ -106,8 +106,10 @@ async fn send_webhook(
         "message": payload.message_body,
     });
 
+    // Caller-supplied URL: dial through the guarded client, never the shared
+    // provider client.
     let response = ctx
-        .http_client
+        .webhook_client
         .post(url)
         .json(&body)
         .send()

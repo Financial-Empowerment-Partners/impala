@@ -23,6 +23,7 @@ pub async fn authenticate(
     Extension(pool): Extension<PgPool>,
     Extension(redis_pool): Extension<Arc<deadpool_redis::Pool>>,
     Extension(metrics): Extension<Arc<AppMetrics>>,
+    Extension(auth_policy): Extension<Arc<crate::auth::AuthPolicy>>,
     sns_client: Option<Extension<Arc<aws_sdk_sns::Client>>>,
     sns_topic_arn: Option<Extension<crate::sns::SnsTopicArn>>,
     Json(payload): Json<AuthenticateRequest>,
@@ -100,6 +101,41 @@ pub async fn authenticate(
 
     match existing_auth {
         Ok(None) => {
+            // The account row exists but carries no credentials. Setting a
+            // password here is *claiming* the account, and this endpoint is
+            // unauthenticated — the caller has proven nothing beyond knowing
+            // an account id.
+            //
+            // Credential-less rows are routine: `create_account`,
+            // `managed-account/generate` and directory sync all create an
+            // `impala_account` without an `impala_auth`. Custodial accounts
+            // are the dangerous case — claiming one yields tokens that
+            // `/managed-account/sign` accepts to decrypt the seed and move
+            // funds. Accounts meant for SSO- or card-only login are worse
+            // still: they never set a local password, so they stay claimable
+            // indefinitely.
+            //
+            // So this is opt-in and off by default. When disabled, answer with
+            // the same generic failure used for a wrong password, so the
+            // response cannot be used to enumerate which accounts are
+            // unclaimed.
+            if !auth_policy.allow_open_registration {
+                crate::password::dummy_verify().await;
+                warn!(
+                    "authenticate: refused to claim credential-less account_id={} \
+                     (open registration disabled)",
+                    payload.account_id
+                );
+                metrics
+                    .auth_attempts
+                    .add(1, &[KeyValue::new("outcome", "registration_refused")]);
+                return Ok(Json(AuthenticateResponse {
+                    success: false,
+                    message: "Invalid credentials".to_string(),
+                    action: "".to_string(),
+                }));
+            }
+
             // No credentials exist - register new user
             let password_hash = crate::password::hash_password(payload.password.clone()).await?;
 
