@@ -44,9 +44,14 @@ pub struct ReconcileConfig {
 /// Due-order claim shape, lifted to a const so the test below pins the
 /// batched, index-friendly scan (idx_exchange_order_pending) and the
 /// `ORDER BY next_poll_at LIMIT` bound.
+/// `provider <> 'reserve'`: reserve-diverted rows share the table and the
+/// pending index but are driven by the reserve watcher — this poller has no
+/// provider to ask about them and its unknown-provider arm would defer them
+/// forever.
 const DUE_ORDERS_SQL: &str = "SELECT order_id, provider, provider_order_id, poll_count \
      FROM exchange_order \
-     WHERE status = ANY($1) AND next_poll_at <= CURRENT_TIMESTAMP \
+     WHERE status = ANY($1) AND provider <> 'reserve' \
+       AND next_poll_at <= CURRENT_TIMESTAMP \
      ORDER BY next_poll_at LIMIT $2";
 
 /// Provider→row refresh UPDATE. `$8` binds the terminal statuses — the
@@ -441,7 +446,9 @@ async fn fetch_provider_snapshot(
             }
         }
         other => {
-            // Unreachable: the DB CHECK constrains provider. Defensive only.
+            // 'reserve' rows are excluded by DUE_ORDERS_SQL and the refresh
+            // handler; anything else is a DB-CHECK-constrained value this
+            // match forgot. Defensive only.
             error!("exchange_reconcile: unknown provider '{}'", other);
             Ok(None)
         }
@@ -723,10 +730,14 @@ mod tests {
 
     // ── SQL shape pins ─────────────────────────────────────────────────
 
-    /// Pins the batched due-order scan: one bounded, ordered claim per tick.
+    /// Pins the batched due-order scan: one bounded, ordered claim per tick,
+    /// and — load-bearing — the reserve exclusion: without it every
+    /// non-terminal reserve order lands in the unknown-provider defer path,
+    /// stamping last_error and pushing the watcher's own schedule column.
     #[test]
     fn test_due_orders_sql_shape() {
         assert!(DUE_ORDERS_SQL.contains("status = ANY($1)"));
+        assert!(DUE_ORDERS_SQL.contains("provider <> 'reserve'"));
         assert!(DUE_ORDERS_SQL.contains("next_poll_at <= CURRENT_TIMESTAMP"));
         assert!(DUE_ORDERS_SQL.contains("ORDER BY next_poll_at LIMIT $2"));
     }

@@ -48,7 +48,7 @@ use tower_http::trace::TraceLayer;
 
 use config::load_config;
 use handlers::{
-    account, admin, admin_webhook, authenticate, card, card_auth, device_token,
+    account, admin, admin_reserve, admin_webhook, authenticate, card, card_auth, device_token,
     exchange as exchange_handler, exchange_webhook, github as github_handler,
     google as google_handler, health, logout, managed_seed, mfa, network,
     notification_subscription, notify, okta as okta_handler, session as session_handler,
@@ -324,6 +324,22 @@ async fn run_server(
     );
     let stellar_signer = stellar::build_signer(&stellar_config);
 
+    // Conversion reserve (bridge service reserve for small exchange orders).
+    // Fail closed: a designated reserve account whose seed the bridge cannot
+    // sign for is a misconfigured money path.
+    let conversion_reserve = exchange::reserve::init_conversion_reserve(&config, &pool)
+        .await
+        .unwrap_or_else(|e| {
+            error!("Failed to initialize conversion reserve: {}", e);
+            std::process::exit(1);
+        });
+    if let Some(ref r) = conversion_reserve {
+        info!(
+            "Conversion reserve enabled: account={} address={} usdc={}:{}",
+            r.reserve_account_id, r.stellar_address, r.usdc_code, r.usdc_issuer
+        );
+    }
+
     // Shared HTTP client for read-only on-chain Horizon lookups
     // (`GET /account/onchain`).
     let http_client = Arc::new(
@@ -376,6 +392,21 @@ async fn run_server(
     // Keep a handle for the exchange reconcile loop; `metrics` itself is
     // moved into the router's Extension layer below.
     let exchange_metrics = metrics.clone();
+
+    // Everything the conversion-reserve watcher needs, captured before the
+    // Extension layers below take ownership of the shared handles.
+    let reserve_watch_deps =
+        conversion_reserve
+            .as_ref()
+            .map(|r| exchange::reserve_watch::ReserveWatchDeps {
+                pool: pool.clone(),
+                http: http_client.clone(),
+                horizon_url: config.stellar_horizon_url.clone(),
+                reserve: r.clone(),
+                signer: stellar_signer.clone(),
+                protector: seed_protector.clone(),
+                metrics: metrics.clone(),
+            });
 
     // Shared by the reconcile loop and the `?refresh=true` handler path so
     // both schedule the next poll on the same configured cadence.
@@ -492,6 +523,39 @@ async fn run_server(
             post(admin_webhook::test_webhook),
         )
         .route("/admin/events", get(admin_webhook::list_events))
+        // Conversion-reserve management (all AdminUser-gated): pool status,
+        // per-provider routing policies ($20-$200 thresholds), the manual
+        // ledger, stray-inflow queue, utilization forecast, and resolution of
+        // orders waiting on an admin (fiat disbursement / frozen payouts).
+        .route("/admin/exchange-reserve", get(admin_reserve::get_status))
+        .route(
+            "/admin/exchange-reserve/policies/{provider}",
+            axum::routing::put(admin_reserve::update_policy),
+        )
+        .route(
+            "/admin/exchange-reserve/buckets/{currency}",
+            axum::routing::put(admin_reserve::update_bucket),
+        )
+        .route(
+            "/admin/exchange-reserve/entries",
+            post(admin_reserve::create_entry).get(admin_reserve::list_entries),
+        )
+        .route(
+            "/admin/exchange-reserve/unmatched",
+            get(admin_reserve::list_unmatched),
+        )
+        .route(
+            "/admin/exchange-reserve/forecast",
+            get(admin_reserve::get_forecast),
+        )
+        .route(
+            "/admin/exchange-reserve/orders/{order_id}/disburse",
+            post(admin_reserve::disburse_order),
+        )
+        .route(
+            "/admin/exchange-reserve/orders/{order_id}/resolve",
+            post(admin_reserve::resolve_order),
+        )
         // Exchange: fiat<->USDC on/off-ramp (OwlPay Harbor, Changelly Fiat)
         // and crypto->USDC swaps (Changelly). The /webhooks/* callbacks are
         // deliberately unauthenticated — each verifies its provider's own
@@ -642,6 +706,13 @@ async fn run_server(
     } else {
         app
     };
+    // Conversion reserve handle (same optional pattern; the handle also
+    // quarantines the reserve account inside managed-seed endpoints).
+    let app = if let Some(ref reserve) = conversion_reserve {
+        app.layer(Extension(reserve.clone()))
+    } else {
+        app
+    };
 
     // LDAP directory sync
     ldap::directory_sync(&pool, &config).await;
@@ -688,6 +759,17 @@ async fn run_server(
                 ex_cancel,
             )
             .await;
+        });
+    }
+
+    // Spawn the conversion-reserve watcher: deposit matching on the reserve
+    // Stellar account, automatic USDC payouts, stale-payout freezing, and
+    // pay-in-window expiry. Cross-instance duplication is suppressed by an
+    // advisory lock inside each tick.
+    if let Some(deps) = reserve_watch_deps {
+        let rw_cancel = cancel.clone();
+        tokio::spawn(async move {
+            exchange::reserve_watch::run(deps, rw_cancel).await;
         });
     }
 

@@ -1,5 +1,6 @@
 pub mod account;
 pub mod admin;
+pub mod admin_reserve;
 pub mod admin_webhook;
 pub mod authenticate;
 pub mod card;

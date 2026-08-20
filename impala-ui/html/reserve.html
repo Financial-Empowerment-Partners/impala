@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Impala - Conversion Reserve</title>
+    <link rel="stylesheet" href="vendor/foundation.min.css" integrity="sha384-2ZAo6d0r9zxtxn7DvMBmpd3hscGP+LkxQ/kMShaUz/TqqsBPtbtZ1K3+3/CgndDu">
+    <link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+    <div class="top-bar" id="main-nav"></div>
+    <div id="toast-container" class="toast-container"></div>
+
+    <div class="grid-container">
+        <div class="page-header">
+            <h3>Conversion Reserve</h3>
+            <p class="text-muted">Bridge-held pool serving exchange orders under the per-provider threshold ($20&ndash;$200). Balances are ledger values; on-chain shows the live Stellar account for drift checks.</p>
+        </div>
+
+        <div id="reserve-unconfigured" class="card" hidden>
+            <div class="card-section">
+                <h5>Not configured</h5>
+                <p class="text-muted">No <code>RESERVE_ACCOUNT_ID</code> is set on this bridge. Policies and history below remain visible; diversion is off.</p>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-section">
+                <h5>Buckets</h5>
+                <div id="reserve-buckets"><p class="text-muted">Loading&hellip;</p></div>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-section">
+                <h5>Routing Policies</h5>
+                <p class="text-muted">Orders divert to the reserve only when the provider&rsquo;s policy is enabled and the order is at or under its threshold. Everything else passes through to the provider unchanged.</p>
+                <div id="reserve-policies"></div>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-section">
+                <h5>Utilization &amp; Forecast</h5>
+                <div class="filter-bar">
+                    <label>Window
+                        <select id="forecast-window">
+                            <option value="7">7 days</option>
+                            <option value="30" selected>30 days</option>
+                            <option value="90">90 days</option>
+                        </select>
+                    </label>
+                </div>
+                <div id="reserve-forecast"><p class="text-muted">Loading&hellip;</p></div>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-section">
+                <h5>Work Queues</h5>
+                <p class="text-muted">Orders waiting on an admin: fiat disbursements to pay from the USD float, and frozen payouts to resolve after checking the chain.</p>
+                <div id="reserve-queues"></div>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-section">
+                <div style="display:flex;justify-content:space-between;align-items:center;gap:1rem;flex-wrap:wrap;">
+                    <h5 style="margin:0;">Ledger</h5>
+                    <div style="display:flex;gap:0.5rem;align-items:center;">
+                        <select id="ledger-kind" aria-label="Filter by kind">
+                            <option value="">All kinds</option>
+                        </select>
+                        <button type="button" class="button small" id="entry-btn">Record entry</button>
+                    </div>
+                </div>
+                <div id="reserve-ledger"></div>
+                <div id="ledger-pagination"></div>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-section">
+                <h5>Unmatched Deposits</h5>
+                <p class="text-muted">Inflows to the reserve account that no order could accept (late, underpaid, wrong asset, unknown memo). Known assets are already credited to inventory; disposition is per runbook.</p>
+                <div id="reserve-unmatched"></div>
+                <div id="unmatched-pagination"></div>
+            </div>
+        </div>
+    </div>
+
+    <script src="config.js"></script>
+    <script src="js/escape-html.js"></script>
+    <script src="js/api.js"></script>
+    <script src="js/theme.js"></script>
+    <script src="js/roles.js"></script>
+    <script src="js/auth.js"></script>
+    <script src="js/net-config.js"></script>
+    <script src="js/net.js"></script>
+    <script src="js/session-timer.js"></script>
+    <script src="js/router.js"></script>
+    <script src="js/modal.js"></script>
+    <script src="js/paginate.js"></script>
+    <script src="js/reserve-math.js"></script>
+    <script src="js/reserve.js"></script>
+</body>
+</html>

@@ -1097,6 +1097,210 @@ pub struct ExchangeReferenceResponse {
     pub data: Option<serde_json::Value>,
 }
 
+// ── Conversion reserve (admin API) ─────────────────────────────────────
+//
+// Same Serialize/Deserialize asymmetry as the exchange models: admin
+// request bodies are Deserialize-only, ledger/status projections are
+// Serialize-only (+ FromRow), so clients can never inject server-set fields.
+// All amounts are i64 minor units of the named currency (migration 031).
+
+/// `PUT /admin/exchange-reserve/policies/{provider}` body.
+#[derive(Debug, Deserialize)]
+pub struct ReservePolicyUpdateRequest {
+    pub enabled: bool,
+    /// USD cents; validated against [2000, 20000] (the $20-$200 band).
+    pub threshold_usd_cents: i64,
+}
+
+/// `PUT /admin/exchange-reserve/buckets/{currency}` body.
+#[derive(Debug, Deserialize)]
+pub struct ReserveBucketUpdateRequest {
+    pub low_water_minor: i64,
+}
+
+/// `POST /admin/exchange-reserve/entries` body (manual ledger operation).
+#[derive(Debug, Deserialize)]
+pub struct ReserveEntryRequest {
+    pub currency: String,
+    /// One of RESERVE_ADMIN_ENTRY_KINDS.
+    pub kind: String,
+    /// Positive magnitude for topup/withdrawal; signed for adjustments.
+    pub amount_minor: i64,
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
+/// `POST /admin/exchange-reserve/orders/{order_id}/disburse` body.
+#[derive(Debug, Deserialize)]
+pub struct ReserveDisburseRequest {
+    /// Actual USD amount disbursed (cents).
+    pub amount_usd_cents: i64,
+    #[serde(default)]
+    pub external_ref: Option<String>,
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
+/// `POST /admin/exchange-reserve/orders/{order_id}/resolve` body.
+#[derive(Debug, Deserialize)]
+pub struct ReserveResolveRequest {
+    /// "complete" (payout verified on-chain) or "fail" (release the hold).
+    pub action: String,
+    #[serde(default)]
+    pub stellar_tx_hash: Option<String>,
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
+/// `GET /admin/exchange-reserve/forecast` query.
+#[derive(Debug, Deserialize)]
+pub struct ReserveForecastQuery {
+    #[serde(default = "default_forecast_window")]
+    pub window_days: i64,
+    #[serde(default = "default_forecast_window")]
+    pub target_days: i64,
+}
+
+pub(crate) fn default_forecast_window() -> i64 {
+    30
+}
+
+/// One reserve bucket in the status view.
+#[derive(Debug, Serialize, sqlx::FromRow)]
+pub struct ReserveBucketView {
+    pub currency: String,
+    pub minor_scale: i16,
+    pub available_minor: i64,
+    pub held_minor: i64,
+    pub low_water_minor: i64,
+    /// Live on-chain balance of the matching asset (best-effort; None when
+    /// Horizon is unreachable). Lets admins see ledger-vs-chain drift.
+    #[sqlx(skip)]
+    pub onchain_balance: Option<String>,
+}
+
+/// One provider policy in the status view.
+#[derive(Debug, Serialize, sqlx::FromRow)]
+pub struct ReservePolicyView {
+    pub provider: String,
+    pub enabled: bool,
+    pub threshold_usd_cents: i64,
+    /// False for providers with no buildable fulfillment path
+    /// (changelly_fiat) — enabling them is refused.
+    #[sqlx(skip)]
+    pub supported: bool,
+    pub updated_at: String,
+}
+
+/// Non-terminal reserve order counts (the admin work queues).
+#[derive(Debug, Default, Serialize)]
+pub struct ReservePendingCounts {
+    pub awaiting_deposit: i64,
+    pub processing: i64,
+    pub on_hold: i64,
+    /// processing orders waiting on an admin fiat disbursement.
+    pub awaiting_disbursement: i64,
+}
+
+/// `GET /admin/exchange-reserve` response.
+#[derive(Debug, Serialize)]
+pub struct ReserveStatusResponse {
+    pub configured: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stellar_address: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deposit_ttl_secs: Option<u64>,
+    pub buckets: Vec<ReserveBucketView>,
+    pub policies: Vec<ReservePolicyView>,
+    pub pending: ReservePendingCounts,
+}
+
+/// One journal row (`GET /admin/exchange-reserve/entries`).
+#[derive(Debug, Serialize, sqlx::FromRow)]
+pub struct ReserveEntryView {
+    pub entry_id: Uuid,
+    pub currency: String,
+    pub kind: String,
+    pub delta: i64,
+    pub held_delta: i64,
+    pub balance_after: i64,
+    pub held_after: i64,
+    pub order_id: Option<Uuid>,
+    pub diverted_provider: Option<String>,
+    pub stellar_tx_hash: Option<String>,
+    pub admin_account_id: Option<String>,
+    pub note: Option<String>,
+    pub created_at: String,
+}
+
+/// One stray-inflow row (`GET /admin/exchange-reserve/unmatched`).
+#[derive(Debug, Serialize, sqlx::FromRow)]
+pub struct ReserveUnmatchedView {
+    pub paging_token: String,
+    pub tx_hash: String,
+    pub op_type: String,
+    pub asset_code: Option<String>,
+    pub asset_issuer: Option<String>,
+    pub amount: String,
+    pub amount_minor: Option<i64>,
+    pub memo: Option<String>,
+    pub matched_order_id: Option<Uuid>,
+    pub reason: String,
+    pub seen_at: String,
+}
+
+/// One day of net flow for the utilization chart.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ReserveDailyFlow {
+    /// ISO date (UTC day bucket).
+    pub day: String,
+    pub outflow_minor: i64,
+    pub inflow_minor: i64,
+}
+
+/// Per-currency utilization forecast. All projections are integer minor
+/// units / whole days — floats never touch money here.
+#[derive(Debug, Serialize)]
+pub struct ReserveCurrencyForecast {
+    pub currency: String,
+    pub minor_scale: i16,
+    pub available_minor: i64,
+    pub held_minor: i64,
+    pub low_water_minor: i64,
+    pub low_water_breached: bool,
+    pub avg_daily_outflow_minor: i64,
+    /// Exponentially weighted (alpha 0.3) daily outflow — the depletion basis.
+    pub ewma_daily_outflow_minor: i64,
+    /// Least-squares slope of daily outflow (minor units per day): positive
+    /// means utilization is growing.
+    pub trend_minor_per_day: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub projected_days_to_depletion: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub projected_depletion_date: Option<String>,
+    /// Top-up needed to sustain `target_days` of EWMA outflow.
+    pub suggested_topup_minor: i64,
+    pub daily: Vec<ReserveDailyFlow>,
+}
+
+/// Per-provider diversion attribution over the window.
+#[derive(Debug, Serialize, sqlx::FromRow)]
+pub struct ReserveProviderUtilization {
+    pub provider: String,
+    pub orders: i64,
+    pub volume_minor: i64,
+}
+
+/// `GET /admin/exchange-reserve/forecast` response.
+#[derive(Debug, Serialize)]
+pub struct ReserveForecastResponse {
+    pub window_days: i64,
+    pub target_days: i64,
+    pub as_of: String,
+    pub currencies: Vec<ReserveCurrencyForecast>,
+    pub provider_utilization: Vec<ReserveProviderUtilization>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1570,12 +1774,81 @@ mod tests {
     // ── Exchange constants ↔ migration 029 DDL drift guards ────────────
 
     #[test]
-    fn test_valid_exchange_providers_match_ddl() {
-        // Mirrors chk_exchange_order_provider in 029_create_exchange_order.sql.
+    fn test_valid_exchange_providers_match_request_vocabulary() {
+        // The REQUEST vocabulary: what create/quote accept. Deliberately
+        // narrower than the DB CHECK — clients can never request 'reserve'.
         assert_eq!(
             crate::constants::VALID_EXCHANGE_PROVIDERS,
             &["owlpay", "changelly_crypto", "changelly_fiat"]
         );
+    }
+
+    #[test]
+    fn test_exchange_order_row_providers_match_ddl() {
+        // Mirrors chk_exchange_order_provider after 031 (029 base + the
+        // internal 'reserve' provider). Rows and list filters use this set.
+        assert_eq!(
+            crate::constants::EXCHANGE_ORDER_ROW_PROVIDERS,
+            &["owlpay", "changelly_crypto", "changelly_fiat", "reserve"]
+        );
+        for p in crate::constants::VALID_EXCHANGE_PROVIDERS {
+            assert!(
+                crate::constants::EXCHANGE_ORDER_ROW_PROVIDERS.contains(p),
+                "row vocabulary must be a superset of the request vocabulary"
+            );
+        }
+        // Reserve policies may only cover providers whose orders can
+        // actually be reserve-fulfilled, and never the reserve itself.
+        for p in crate::constants::RESERVE_SUPPORTED_POLICY_PROVIDERS {
+            assert!(crate::constants::VALID_EXCHANGE_PROVIDERS.contains(p));
+        }
+    }
+
+    #[test]
+    fn test_reserve_entry_kinds_match_ddl() {
+        // Mirrors chk_conversion_reserve_entry_kind in
+        // 031_create_conversion_reserve.sql, in DDL order.
+        assert_eq!(
+            crate::constants::VALID_RESERVE_ENTRY_KINDS,
+            &[
+                "hold",
+                "hold_release",
+                "deposit",
+                "unmatched_deposit",
+                "payout_attempt",
+                "fulfillment",
+                "disbursement",
+                "topup",
+                "withdrawal",
+                "adjustment",
+                "held_adjustment"
+            ]
+        );
+        // Admin-writable kinds are a strict subset: order-linked lifecycle
+        // kinds may only ever be written by the diversion/watcher flows.
+        for k in crate::constants::RESERVE_ADMIN_ENTRY_KINDS {
+            assert!(crate::constants::VALID_RESERVE_ENTRY_KINDS.contains(k));
+        }
+        for lifecycle in ["hold", "deposit", "payout_attempt", "fulfillment"] {
+            assert!(!crate::constants::RESERVE_ADMIN_ENTRY_KINDS.contains(&lifecycle));
+        }
+    }
+
+    #[test]
+    fn test_reserve_unmatched_reasons_match_ddl() {
+        // Mirrors chk_conversion_reserve_unmatched_reason in 031.
+        assert_eq!(
+            crate::constants::VALID_RESERVE_UNMATCHED_REASONS,
+            &["late", "underpaid", "wrong_asset", "no_match"]
+        );
+    }
+
+    #[test]
+    fn test_reserve_threshold_band_matches_ddl_and_requirement() {
+        // Mirrors the threshold_usd_cents CHECK in 031 — the "$20 to $200"
+        // band from the product requirement.
+        assert_eq!(crate::constants::RESERVE_THRESHOLD_MIN_USD_CENTS, 2000);
+        assert_eq!(crate::constants::RESERVE_THRESHOLD_MAX_USD_CENTS, 20000);
     }
 
     #[test]

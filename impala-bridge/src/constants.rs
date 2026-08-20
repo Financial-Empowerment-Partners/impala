@@ -429,3 +429,124 @@ pub const MAX_EXCHANGE_ADDRESS_LEN: usize = 128;
 
 /// Max length for a payout/refund extra id (destination tag / memo).
 pub const MAX_EXCHANGE_EXTRA_ID_LEN: usize = 64;
+
+// ── Conversion reserve (bridge service reserve for small orders) ───────
+
+/// Internal exchange "provider" for orders fulfilled from the bridge's own
+/// conversion reserve instead of an external provider. Row/filter vocabulary
+/// only — never accepted in create/quote requests.
+pub const EXCHANGE_PROVIDER_RESERVE: &str = "reserve";
+
+/// Every provider value an `exchange_order` ROW may carry (mirrors the
+/// `chk_exchange_order_provider` DB CHECK after 031). Superset of
+/// [`VALID_EXCHANGE_PROVIDERS`], which stays request-side only so clients
+/// cannot request `reserve` directly.
+pub const EXCHANGE_ORDER_ROW_PROVIDERS: &[&str] = &[
+    EXCHANGE_PROVIDER_OWLPAY,
+    EXCHANGE_PROVIDER_CHANGELLY_CRYPTO,
+    EXCHANGE_PROVIDER_CHANGELLY_FIAT,
+    EXCHANGE_PROVIDER_RESERVE,
+];
+
+/// Providers whose orders have a buildable reserve-fulfillment path and may
+/// therefore have their policy enabled: changelly_crypto (automatic on-chain
+/// USDC payout) and owlpay (USDC pay-in + admin fiat disbursement queue).
+/// changelly_fiat orders carry no payout coordinates the bridge could serve
+/// (bank details live on the provider's hosted page), so enabling it is
+/// refused rather than silently doing nothing.
+pub const RESERVE_SUPPORTED_POLICY_PROVIDERS: &[&str] =
+    &[EXCHANGE_PROVIDER_CHANGELLY_CRYPTO, EXCHANGE_PROVIDER_OWLPAY];
+
+/// Reserve threshold band in USD cents — the "$20 to $200" requirement.
+/// Mirrors the `threshold_usd_cents` CHECK in 031.
+pub const RESERVE_THRESHOLD_MIN_USD_CENTS: i64 = 2_000;
+/// Upper bound of the reserve threshold band (USD cents).
+pub const RESERVE_THRESHOLD_MAX_USD_CENTS: i64 = 20_000;
+
+/// Reserve bucket keys (canonical uppercase; mirrors the 031 seed rows).
+pub const RESERVE_CURRENCY_USDC: &str = "USDC";
+/// USD float bucket for admin fiat disbursements.
+pub const RESERVE_CURRENCY_USD: &str = "USD";
+/// Accumulated pay-in inventory bucket (native XLM).
+pub const RESERVE_CURRENCY_XLM: &str = "XLM";
+
+/// Minor-unit scale for Stellar-native asset buckets (USDC/XLM, 7 dp).
+pub const RESERVE_SCALE_STELLAR: u8 = 7;
+/// Minor-unit scale for the USD bucket (cents).
+pub const RESERVE_SCALE_USD: u8 = 2;
+
+/// Exchange ticker for native XLM pay-ins (compared case-insensitively).
+pub const RESERVE_TICKER_XLM: &str = "xlm";
+/// Exchange tickers meaning "USDC on Stellar" — the only USDC forms the
+/// reserve can serve. Bare "usdc" is deliberately absent: on Changelly it
+/// commonly denotes ERC-20 USDC with a non-Stellar payout address.
+pub const RESERVE_STELLAR_USDC_TICKERS: &[&str] = &["usdcxlm"];
+/// Exchange tickers meaning US dollars for the owlpay disbursement path.
+pub const RESERVE_USD_TICKERS: &[&str] = &["usd"];
+
+/// Conversion-reserve journal entry kinds (mirrors
+/// `chk_conversion_reserve_entry_kind` in 031, in DDL order).
+pub const VALID_RESERVE_ENTRY_KINDS: &[&str] = &[
+    "hold",
+    "hold_release",
+    "deposit",
+    "unmatched_deposit",
+    "payout_attempt",
+    "fulfillment",
+    "disbursement",
+    "topup",
+    "withdrawal",
+    "adjustment",
+    "held_adjustment",
+];
+
+/// Entry kinds an admin may write via POST /admin/exchange-reserve/entries.
+pub const RESERVE_ADMIN_ENTRY_KINDS: &[&str] =
+    &["topup", "withdrawal", "adjustment", "held_adjustment"];
+
+/// Stray-inflow reasons (mirrors `chk_conversion_reserve_unmatched_reason`).
+/// Vocabulary-only: values are written as literals by the watcher and pinned
+/// against the DDL by a models.rs drift-guard test.
+#[allow(dead_code)]
+pub const VALID_RESERVE_UNMATCHED_REASONS: &[&str] =
+    &["late", "underpaid", "wrong_asset", "no_match"];
+
+/// Default deposit window for reserve orders (seconds). Doubles as the
+/// price-validity window: the order-time quote is honored only within it, so
+/// a long TTL would hand out a free price option on the whole pool (deposit
+/// only when the market moved your way, walk away otherwise). 30 minutes
+/// mirrors provider payTill windows; clamped to [300, 7200] at load.
+pub const DEFAULT_RESERVE_DEPOSIT_TTL_SECS: u64 = 1_800;
+/// Lower clamp for RESERVE_DEPOSIT_TTL_SECS.
+pub const RESERVE_DEPOSIT_TTL_MIN_SECS: u64 = 300;
+/// Upper clamp for RESERVE_DEPOSIT_TTL_SECS.
+pub const RESERVE_DEPOSIT_TTL_MAX_SECS: u64 = 7_200;
+
+/// Default reserve watcher cadence (seconds); clamped to >= 5 at load.
+pub const DEFAULT_RESERVE_WATCH_SECS: u64 = 30;
+
+/// Max Horizon payment records per watcher page.
+pub const RESERVE_WATCH_PAGE_LIMIT: u32 = 200;
+
+/// Max concurrently open (non-terminal) reserve orders per account — with
+/// the hold-fraction guard, bounds how much of the pool one actor can lock.
+pub const RESERVE_MAX_OPEN_ORDERS_PER_ACCOUNT: i64 = 3;
+
+/// Max on-chain payout submissions per order under one write-ahead intent.
+/// Only definitively-rejected submissions (Horizon 400 with result codes —
+/// the tx provably did not land) are retried; ambiguous outcomes freeze the
+/// order for admin resolution instead.
+pub const RESERVE_MAX_PAYOUT_ATTEMPTS: i32 = 5;
+
+/// Min age of a payout_attempt intent before `resolve {action: fail}` is
+/// accepted: the signed tx is valid for 300s (signer TX_TIMEOUT_SECS), so an
+/// earlier fail could release a hold that an in-flight payment then spends.
+pub const RESERVE_RESOLVE_FAIL_MIN_INTENT_AGE_SECS: i64 = 600;
+
+/// Admin fat-finger bound: a fiat disbursement may not exceed this multiple
+/// of the order's recorded hold.
+pub const RESERVE_DISBURSE_MAX_MULTIPLE: i64 = 2;
+
+/// Advisory-lock key serializing the reserve watcher tick across instances
+/// (pg_try_advisory_lock; losers skip the tick). Arbitrary but stable.
+pub const RESERVE_WATCHER_LOCK_KEY: i64 = 0x494d_5052_5352_5645;

@@ -59,7 +59,7 @@ const OWLPAY_CUSTOMER_TYPES: &[&str] = &[OWLPAY_CUSTOMER_TYPE_INDIVIDUAL, "busin
 /// Order INSERT shape, lifted to a const so the test below pins the explicit
 /// `order_id` column (the id must be the pre-generated provider reference,
 /// never a DB-side default) and the initial `next_poll_at`.
-const CREATE_ORDER_INSERT_SQL: &str = "INSERT INTO exchange_order \
+pub(crate) const CREATE_ORDER_INSERT_SQL: &str = "INSERT INTO exchange_order \
      (order_id, payala_account_id, provider, direction, from_currency, to_currency, \
       amount_from, amount_to, status, provider_status, provider_order_id, \
       payin_address, payin_extra_id, payout_address, payout_extra_id, redirect_url, \
@@ -1104,6 +1104,9 @@ pub async fn create_order(
     owlpay: Option<Extension<Arc<OwlPayProvider>>>,
     changelly_crypto: Option<Extension<Arc<ChangellyCrypto>>>,
     changelly_fiat: Option<Extension<Arc<ChangellyFiat>>>,
+    reserve: Option<Extension<Arc<crate::exchange::reserve::ConversionReserve>>>,
+    Extension(stellar_config): Extension<Arc<crate::config::StellarConfig>>,
+    Extension(http): Extension<Arc<reqwest::Client>>,
     headers: HeaderMap,
     Json(payload): Json<CreateExchangeOrderRequest>,
 ) -> Result<Json<ExchangeOrderResponse>, AppError> {
@@ -1131,6 +1134,25 @@ pub async fn create_order(
     .await?;
 
     validate_order_request(&payload)?;
+
+    // Conversion reserve: orders under the per-provider threshold whose
+    // shape the pool can serve end-to-end are fulfilled from the bridge's
+    // own reserve instead of the provider. Every miss (shape, policy,
+    // threshold, funds, quote, trustline) falls through to the normal
+    // provider path below — the reserve must never break it.
+    if let Some(Extension(ref reserve)) = reserve {
+        let ctx = crate::exchange::reserve::DivertContext {
+            pool: &pool,
+            metrics: &metrics,
+            reserve,
+            changelly_crypto: changelly_crypto.as_ref().map(|ext| &ext.0),
+            http: &http,
+            horizon_url: &stellar_config.horizon_url,
+        };
+        if let Some(response) = crate::exchange::reserve::try_divert_order(&ctx, &payload).await? {
+            return Ok(Json(response));
+        }
+    }
 
     // Fail fast (clean 400, no provider_error metric) when unconfigured.
     match payload.provider.as_str() {
@@ -1366,8 +1388,17 @@ pub async fn list_orders(
             )));
         }
     }
+    // The list filter accepts the ROW vocabulary — one wider than the
+    // request vocabulary, because reserve-diverted orders exist as rows with
+    // provider='reserve' even though clients can never request that value.
     if let Some(ref p) = q.provider {
-        validate_provider(p)?;
+        if !crate::constants::EXCHANGE_ORDER_ROW_PROVIDERS.contains(&p.as_str()) {
+            return Err(AppError::BadRequest(format!(
+                "Invalid provider '{}'. Must be one of: {}",
+                p,
+                crate::constants::EXCHANGE_ORDER_ROW_PROVIDERS.join(", ")
+            )));
+        }
     }
 
     // Owner scoping: admins may filter by any account; everyone else is
@@ -1481,7 +1512,14 @@ pub async fn get_order(
         .await?
         .ok_or_else(|| AppError::NotFound("Exchange order not found".to_string()))?;
 
-    let detail = if q.refresh && !is_terminal_exchange_status(&detail.status) {
+    // Reserve orders have no provider to poll: state is driven by the
+    // deposit watcher. A refresh must NOT reach refresh_order_once — its
+    // unknown-provider defer path would stamp last_error and push
+    // next_poll_at (the very column the watcher schedules on) forward.
+    let refreshable = q.refresh
+        && detail.provider != crate::constants::EXCHANGE_PROVIDER_RESERVE
+        && !is_terminal_exchange_status(&detail.status);
+    let detail = if refreshable {
         // A refresh reaches the provider, so it carries the same per-account
         // budget as every other provider-touching endpoint here — the global
         // 100/60s auth limit alone would allow bursts well past Changelly's
@@ -1628,7 +1666,9 @@ mod tests {
 
     #[test]
     fn test_valid_exchange_vocab_matches_ddl() {
-        // Mirrors the chk_exchange_order_* DB CHECKs in migration 029.
+        // Request-side provider vocabulary stays the three externals (the
+        // row CHECK in 031 additionally admits 'reserve'; see
+        // EXCHANGE_ORDER_ROW_PROVIDERS drift guard in models.rs).
         assert_eq!(VALID_EXCHANGE_PROVIDERS.len(), 3);
         for p in ["owlpay", "changelly_crypto", "changelly_fiat"] {
             assert!(VALID_EXCHANGE_PROVIDERS.contains(&p));

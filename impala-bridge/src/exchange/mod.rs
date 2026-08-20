@@ -12,6 +12,13 @@
 //! - [`reconcile`] — in-process poll loop that advances non-terminal
 //!   `exchange_order` rows by asking the owning provider for current status.
 
+//! - [`reserve`]/[`reserve_watch`] — the conversion reserve: a bridge-owned
+//!   pool that fulfills orders under a per-provider $20-$200 threshold
+//!   instead of routing them out, plus the deposit watcher that matches
+//!   pay-ins on the reserve Stellar account and drives fulfillment.
+
 pub mod changelly;
 pub mod owlpay;
 pub mod reconcile;
+pub mod reserve;
+pub mod reserve_watch;

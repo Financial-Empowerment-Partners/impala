@@ -66,6 +66,66 @@ pub enum AccountEvent {
         status: String,
         provider_status: String,
     },
+    // Conversion-reserve events. Payloads carry currencies, minor-unit
+    // amounts, and statuses only — never pay-in/payout addresses, memos, or
+    // beneficiary details (module privacy rule below).
+    ReserveDepositMatched {
+        account_id: String,
+        order_id: String,
+        currency: String,
+        amount_minor: i64,
+    },
+    ReserveFulfilled {
+        account_id: String,
+        order_id: String,
+        currency: String,
+        amount_minor: i64,
+    },
+    /// A payout could not be completed automatically; funds are frozen for
+    /// admin resolution (`reason` = submit_failed|stale_intent|max_attempts).
+    ReservePayoutPending {
+        account_id: String,
+        order_id: String,
+        reason: String,
+    },
+    ReserveDisbursementPending {
+        account_id: String,
+        order_id: String,
+        amount_usd_cents: i64,
+    },
+    ReserveOrderExpired {
+        account_id: String,
+        order_id: String,
+    },
+    /// Stray inflow to the reserve account (late/underpaid/unknown memo).
+    /// account_id is the reserve account: stray funds have no known owner.
+    ReserveUnmatchedDeposit {
+        account_id: String,
+        currency: String,
+        amount_minor: i64,
+        reason: String,
+    },
+    /// `available` crossed below the admin-set low-water mark.
+    ReserveLowWater {
+        account_id: String,
+        currency: String,
+        available_minor: i64,
+        low_water_minor: i64,
+    },
+    /// Admin edited a reserve policy. account_id is the acting admin.
+    ReservePolicyUpdated {
+        account_id: String,
+        provider: String,
+        enabled: bool,
+        threshold_usd_cents: i64,
+    },
+    /// Admin-recorded manual ledger entry. account_id is the acting admin.
+    ReserveEntryRecorded {
+        account_id: String,
+        currency: String,
+        kind: String,
+        amount_minor: i64,
+    },
 }
 
 impl AccountEvent {
@@ -82,6 +142,15 @@ impl AccountEvent {
             AccountEvent::DeviceTokenDeleted { .. } => "device_token.deleted",
             AccountEvent::ExchangeOrderCreated { .. } => "exchange.order_created",
             AccountEvent::ExchangeOrderUpdated { .. } => "exchange.order_updated",
+            AccountEvent::ReserveDepositMatched { .. } => "reserve.deposit_matched",
+            AccountEvent::ReserveFulfilled { .. } => "reserve.fulfilled",
+            AccountEvent::ReservePayoutPending { .. } => "reserve.payout_pending",
+            AccountEvent::ReserveDisbursementPending { .. } => "reserve.disbursement_pending",
+            AccountEvent::ReserveOrderExpired { .. } => "reserve.order_expired",
+            AccountEvent::ReserveUnmatchedDeposit { .. } => "reserve.unmatched_deposit",
+            AccountEvent::ReserveLowWater { .. } => "reserve.low_water",
+            AccountEvent::ReservePolicyUpdated { .. } => "reserve.policy_updated",
+            AccountEvent::ReserveEntryRecorded { .. } => "reserve.entry_recorded",
         }
     }
 
@@ -96,7 +165,16 @@ impl AccountEvent {
             | AccountEvent::DeviceTokenRegistered { account_id, .. }
             | AccountEvent::DeviceTokenDeleted { account_id }
             | AccountEvent::ExchangeOrderCreated { account_id, .. }
-            | AccountEvent::ExchangeOrderUpdated { account_id, .. } => account_id,
+            | AccountEvent::ExchangeOrderUpdated { account_id, .. }
+            | AccountEvent::ReserveDepositMatched { account_id, .. }
+            | AccountEvent::ReserveFulfilled { account_id, .. }
+            | AccountEvent::ReservePayoutPending { account_id, .. }
+            | AccountEvent::ReserveDisbursementPending { account_id, .. }
+            | AccountEvent::ReserveOrderExpired { account_id, .. }
+            | AccountEvent::ReserveUnmatchedDeposit { account_id, .. }
+            | AccountEvent::ReserveLowWater { account_id, .. }
+            | AccountEvent::ReservePolicyUpdated { account_id, .. }
+            | AccountEvent::ReserveEntryRecorded { account_id, .. } => account_id,
         }
     }
 
@@ -154,6 +232,73 @@ impl AccountEvent {
                 "provider": provider,
                 "status": status,
                 "provider_status": provider_status,
+            }),
+            AccountEvent::ReserveDepositMatched {
+                order_id,
+                currency,
+                amount_minor,
+                ..
+            }
+            | AccountEvent::ReserveFulfilled {
+                order_id,
+                currency,
+                amount_minor,
+                ..
+            } => json!({
+                "order_id": order_id,
+                "currency": currency,
+                "amount_minor": amount_minor,
+            }),
+            AccountEvent::ReservePayoutPending {
+                order_id, reason, ..
+            } => json!({ "order_id": order_id, "reason": reason }),
+            AccountEvent::ReserveDisbursementPending {
+                order_id,
+                amount_usd_cents,
+                ..
+            } => json!({ "order_id": order_id, "amount_usd_cents": amount_usd_cents }),
+            AccountEvent::ReserveOrderExpired { order_id, .. } => {
+                json!({ "order_id": order_id })
+            }
+            AccountEvent::ReserveUnmatchedDeposit {
+                currency,
+                amount_minor,
+                reason,
+                ..
+            } => json!({
+                "currency": currency,
+                "amount_minor": amount_minor,
+                "reason": reason,
+            }),
+            AccountEvent::ReserveLowWater {
+                currency,
+                available_minor,
+                low_water_minor,
+                ..
+            } => json!({
+                "currency": currency,
+                "available_minor": available_minor,
+                "low_water_minor": low_water_minor,
+            }),
+            AccountEvent::ReservePolicyUpdated {
+                provider,
+                enabled,
+                threshold_usd_cents,
+                ..
+            } => json!({
+                "provider": provider,
+                "enabled": enabled,
+                "threshold_usd_cents": threshold_usd_cents,
+            }),
+            AccountEvent::ReserveEntryRecorded {
+                currency,
+                kind,
+                amount_minor,
+                ..
+            } => json!({
+                "currency": currency,
+                "kind": kind,
+                "amount_minor": amount_minor,
             }),
         }
     }

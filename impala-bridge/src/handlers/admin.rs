@@ -265,6 +265,7 @@ pub async fn set_sync_mode(
 pub async fn delete_account(
     user: AuthenticatedUser,
     Extension(pool): Extension<PgPool>,
+    reserve: Option<Extension<Arc<crate::exchange::reserve::ConversionReserve>>>,
     Path(account_id): Path<String>,
 ) -> Result<Json<DeleteAccountResponse>, AppError> {
     require_admin(&user)?;
@@ -273,6 +274,40 @@ pub async fn delete_account(
         return Err(AppError::BadRequest(
             "Admins cannot delete their own account".to_string(),
         ));
+    }
+
+    // The conversion-reserve account's seed signs pool payouts; deleting it
+    // (managed_seed goes with the account) would brick every reserve payout.
+    if let Some(Extension(ref r)) = reserve {
+        if r.reserve_account_id == account_id {
+            return Err(AppError::Conflict(
+                "This account is the configured conversion reserve; unset RESERVE_ACCOUNT_ID first"
+                    .to_string(),
+            ));
+        }
+    }
+
+    // In-flight reserve orders hold pool funds keyed to their order rows;
+    // exchange_order is ON DELETE CASCADE from impala_account, so deleting
+    // now would strand those holds with no releasable order. Resolve or let
+    // them expire first (matches the nonzero-balance sync-mode precedent).
+    let open_reserve_orders: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM exchange_order \
+         WHERE payala_account_id = $1 AND provider = 'reserve' \
+           AND status IN ('created', 'awaiting_deposit', 'processing', 'on_hold')",
+    )
+    .bind(&account_id)
+    .fetch_one(&pool)
+    .await
+    .map_err(|e| {
+        error!("delete_account: reserve order count error: {}", e);
+        AppError::InternalError("Database error".to_string())
+    })?;
+    if open_reserve_orders > 0 {
+        return Err(AppError::Conflict(format!(
+            "Account has {} in-flight conversion-reserve order(s); resolve or expire them first",
+            open_reserve_orders
+        )));
     }
 
     // Block deleting the last remaining admin.

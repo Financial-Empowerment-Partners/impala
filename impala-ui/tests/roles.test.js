@@ -17,6 +17,7 @@ describe('Roles.DEFINITIONS', () => {
 describe('Roles.roleHasPermission', () => {
     it('admin has every new permission', () => {
         expect(Roles.roleHasPermission('admin', 'manage_roles')).toBe(true);
+        expect(Roles.roleHasPermission('admin', 'manage_reserve')).toBe(true);
         expect(Roles.roleHasPermission('admin', 'delete_accounts')).toBe(true);
         expect(Roles.roleHasPermission('admin', 'sync_profile')).toBe(true);
         expect(Roles.roleHasPermission('admin', 'review_transactions')).toBe(true);
@@ -26,6 +27,7 @@ describe('Roles.roleHasPermission', () => {
         expect(Roles.roleHasPermission('token', 'review_transactions')).toBe(true);
         expect(Roles.roleHasPermission('token', 'delete_accounts')).toBe(false);
         expect(Roles.roleHasPermission('token', 'manage_roles')).toBe(false);
+        expect(Roles.roleHasPermission('token', 'manage_reserve')).toBe(false);
         expect(Roles.roleHasPermission('token', 'sync_profile')).toBe(false);
     });
 

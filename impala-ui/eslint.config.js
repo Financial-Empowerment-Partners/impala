@@ -65,7 +65,8 @@ export default [
                 Theme: 'writable',
                 Modal: 'writable',
                 Drawer: 'writable',
-                TxFilter: 'writable'
+                TxFilter: 'writable',
+                ReserveMath: 'writable'
             }
         },
         rules: {

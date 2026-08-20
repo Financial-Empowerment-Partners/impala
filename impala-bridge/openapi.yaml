@@ -52,6 +52,12 @@ tags:
     description: Account CRUD.
   - name: admin
     description: Admin-only cross-account management (list/delete/role/profile-sync).
+  - name: reserve
+    description: >
+      Conversion reserve — a bridge-owned pool that fulfills exchange orders
+      under a per-provider threshold ($20-$200) instead of routing them to the
+      external provider. Admin-only management, ledger, and utilization
+      forecasting.
   - name: managed-account
     description: Custodial Stellar accounts — server-side seed generation/import and sign+submit.
   - name: mfa
@@ -792,6 +798,242 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
 
+  /admin/exchange-reserve:
+    get:
+      tags: [reserve]
+      summary: Reserve status — buckets, policies, pending queues (admin only).
+      description: |
+        Per-currency buckets carry `available`/`held`/`low_water` in BIGINT
+        minor units (USDC/XLM 7 dp, USD cents) plus a best-effort live
+        on-chain balance so ledger-vs-chain drift is visible. `pending`
+        counts the admin work queues (on_hold payouts, fiat disbursements).
+      responses:
+        '200':
+          description: Reserve status.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ReserveStatusResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /admin/exchange-reserve/policies/{provider}:
+    put:
+      tags: [reserve]
+      summary: Set a provider's reserve routing policy (admin only).
+      description: |
+        `threshold_usd_cents` is DB-validated against [2000, 20000] — the
+        "$20 to $200 as appropriate for the service" band. Only providers
+        with a buildable fulfillment path accept a policy: `changelly_crypto`
+        (automatic on-chain USDC payout) and `owlpay` (USDC pay-in + admin
+        fiat disbursement queue); `changelly_fiat` is refused because its
+        orders carry no payout coordinates the bridge could serve.
+      parameters:
+        - in: path
+          name: provider
+          required: true
+          schema: { type: string, enum: [changelly_crypto, owlpay] }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ReservePolicyUpdateRequest' }
+      responses:
+        '200': { description: Policy updated. }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /admin/exchange-reserve/buckets/{currency}:
+    put:
+      tags: [reserve]
+      summary: Set a bucket's low-water alert mark (admin only).
+      parameters:
+        - in: path
+          name: currency
+          required: true
+          schema: { type: string, example: USDC }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                low_water_minor: { type: integer, format: int64, minimum: 0 }
+              required: [low_water_minor]
+      responses:
+        '200': { description: Bucket updated. }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /admin/exchange-reserve/entries:
+    post:
+      tags: [reserve]
+      summary: Record a manual ledger entry (admin only; rate limited 5/60s).
+      description: |
+        `topup`/`withdrawal` (positive magnitude) and signed `adjustment`
+        move `available`; `held_adjustment` repairs `held` drift. Record a
+        topup only AFTER the matching on-chain or bank funding actually
+        happened — the ledger tracks real value. Withdrawals and negative
+        adjustments are refused (409) rather than overdrawing.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ReserveEntryRequest' }
+      responses:
+        '200': { description: Entry recorded. }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { description: Unknown bucket, or the operation would overdraw it. }
+        '429': { $ref: '#/components/responses/RateLimited' }
+    get:
+      tags: [reserve]
+      summary: Paginated reserve journal (admin only).
+      parameters:
+        - in: query
+          name: page
+          schema: { type: integer, default: 1 }
+        - in: query
+          name: per_page
+          schema: { type: integer, default: 20 }
+        - in: query
+          name: currency
+          schema: { type: string }
+        - in: query
+          name: kind
+          schema:
+            type: string
+            enum: [hold, hold_release, deposit, unmatched_deposit, payout_attempt,
+                   fulfillment, disbursement, topup, withdrawal, adjustment, held_adjustment]
+      responses:
+        '200':
+          description: Journal page (newest first).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PaginatedReserveEntryList' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /admin/exchange-reserve/unmatched:
+    get:
+      tags: [reserve]
+      summary: Stray inflows to the reserve account (admin work queue).
+      description: |
+        Deposits that could not be credited to an order — late (after
+        expiry), underpaid, wrong asset, or unknown memo. Known assets are
+        credited to reserve inventory (`unmatched_deposit` journal entries)
+        so the ledger still tracks the chain; disposition (refund/absorb) is
+        an ops decision per the runbook.
+      parameters:
+        - in: query
+          name: page
+          schema: { type: integer, default: 1 }
+        - in: query
+          name: per_page
+          schema: { type: integer, default: 20 }
+      responses:
+        '200':
+          description: Unmatched inflow page (newest first).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PaginatedReserveUnmatchedList' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /admin/exchange-reserve/forecast:
+    get:
+      tags: [reserve]
+      summary: Reserve utilization forecast (admin only).
+      description: |
+        Integer-arithmetic projection over the journal's daily net flows:
+        mean and EWMA (alpha 0.3) daily outflow, least-squares trend,
+        projected days-to-depletion and date, suggested top-up for
+        `target_days` of coverage, per-day series for charting, and
+        per-provider diversion attribution.
+      parameters:
+        - in: query
+          name: window_days
+          schema: { type: integer, default: 30, minimum: 1, maximum: 365 }
+        - in: query
+          name: target_days
+          schema: { type: integer, default: 30, minimum: 1, maximum: 365 }
+      responses:
+        '200':
+          description: Forecast.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ReserveForecastResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /admin/exchange-reserve/orders/{order_id}/disburse:
+    post:
+      tags: [reserve]
+      summary: Complete a fiat disbursement order (admin only; rate limited 5/60s).
+      description: |
+        For reserve orders in `processing`/`awaiting_disbursement` (owlpay
+        USDC->USD off-ramps): records that `amount_usd_cents` was paid from
+        the USD float (bank/OwlPay balance), debits the USD bucket, releases
+        the hold, and completes the order. The amount may not exceed 2x the
+        recorded hold. Beneficiary details for the payout are in the order's
+        server-side provider_payload (never returned to clients).
+      parameters:
+        - in: path
+          name: order_id
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ReserveDisburseRequest' }
+      responses:
+        '200': { description: Disbursement recorded; order completed. }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { description: Order is not awaiting disbursement, or the float cannot cover it. }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /admin/exchange-reserve/orders/{order_id}/resolve:
+    post:
+      tags: [reserve]
+      summary: Resolve a reserve order waiting on an admin (rate limited 5/60s).
+      description: |
+        `complete` records a payout that did land on-chain (the server finds
+        the transaction by the order's memo, or accepts `stellar_tx_hash`) —
+        frozen (on_hold) auto-swap orders only. `fail` releases the hold:
+        for frozen payouts it is refused while the order changed state less
+        than 600s ago (every retry re-signs with a fresh ~300s validity
+        window), when a matching on-chain payout is found, or when the chain
+        cannot be checked (fail closed); for disbursement orders stuck in
+        `processing`/`awaiting_disbursement` it cancels the fiat leg and
+        releases the USD hold (their only other exit is a real
+        disbursement).
+      parameters:
+        - in: path
+          name: order_id
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ReserveResolveRequest' }
+      responses:
+        '200': { description: Order resolved. }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { description: Not resolvable yet (in-flight payout, or state changed). }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
   /sync:
     post:
       tags: [account]
@@ -1406,6 +1648,19 @@ paths:
         `exchange_order` ledger. Depending on provider/direction the response
         carries a crypto pay-in address (+ memo), a hosted redirect URL, or
         bank wire instructions. Rate limited per account (10 req / 60 s).
+
+        **Conversion reserve:** when an admin-enabled reserve policy covers
+        the requested provider and the order is under its $20-$200 threshold
+        with a shape the bridge can serve end-to-end (changelly_crypto
+        xlm->usdcxlm swaps to a trustline-holding Stellar address; owlpay
+        Stellar-USDC->USD off-ramps with beneficiary details), the order is
+        fulfilled from the bridge's own pool instead: the response's order has
+        `provider: reserve`, `payin_address` (the reserve Stellar account) and
+        a REQUIRED `payin_extra_id` text memo, and the quoted `amount_to` is
+        honored for the pay-in window (default 30 min) stated in `message`.
+        Clients should branch on `order.provider` — for `owlpay` requests this
+        replaces the usual `transfer_instructions` response shape. Every
+        reserve miss falls through to the provider transparently.
       requestBody:
         required: true
         content:
@@ -1440,7 +1695,7 @@ paths:
           name: provider
           schema:
             type: string
-            enum: [owlpay, changelly_crypto, changelly_fiat]
+            enum: [owlpay, changelly_crypto, changelly_fiat, reserve]
         - in: query
           name: account_id
           description: Admin-only filter.
@@ -2527,7 +2782,14 @@ components:
       properties:
         order_id: { type: string, format: uuid }
         payala_account_id: { type: string }
-        provider: { type: string, enum: [owlpay, changelly_crypto, changelly_fiat] }
+        provider:
+          type: string
+          enum: [owlpay, changelly_crypto, changelly_fiat, reserve]
+          description: >
+            `reserve` marks an order fulfilled from the bridge's conversion
+            reserve instead of an external provider (never requestable —
+            small orders are diverted server-side when a reserve policy
+            allows; such orders always carry payin_address + payin_extra_id).
         direction: { type: string, enum: [fiat_to_crypto, crypto_to_fiat, crypto_to_crypto] }
         from_currency: { type: string }
         to_currency: { type: string }
@@ -2586,3 +2848,181 @@ components:
         per_page: { type: integer }
         total: { type: integer, format: int64 }
       required: [data, page, per_page, total]
+
+    ReservePolicyUpdateRequest:
+      type: object
+      properties:
+        enabled: { type: boolean }
+        threshold_usd_cents:
+          type: integer
+          format: int64
+          minimum: 2000
+          maximum: 20000
+          description: The $20-$200 diversion threshold, in USD cents.
+      required: [enabled, threshold_usd_cents]
+
+    ReserveEntryRequest:
+      type: object
+      properties:
+        currency: { type: string, example: USDC }
+        kind:
+          type: string
+          enum: [topup, withdrawal, adjustment, held_adjustment]
+        amount_minor:
+          type: integer
+          format: int64
+          description: Positive magnitude for topup/withdrawal; signed otherwise.
+        note: { type: string, maxLength: 500 }
+      required: [currency, kind, amount_minor]
+
+    ReserveDisburseRequest:
+      type: object
+      properties:
+        amount_usd_cents: { type: integer, format: int64, minimum: 1 }
+        external_ref: { type: string, description: Bank/OwlPay reference of the fiat payment. }
+        note: { type: string }
+      required: [amount_usd_cents]
+
+    ReserveResolveRequest:
+      type: object
+      properties:
+        action: { type: string, enum: [complete, fail] }
+        stellar_tx_hash: { type: string, description: "complete: payout tx hash if the server cannot find it by memo." }
+        note: { type: string }
+      required: [action]
+
+    ReserveBucketView:
+      type: object
+      properties:
+        currency: { type: string }
+        minor_scale: { type: integer, description: Decimal places of the minor unit (USDC/XLM 7, USD 2). }
+        available_minor: { type: integer, format: int64 }
+        held_minor: { type: integer, format: int64 }
+        low_water_minor: { type: integer, format: int64 }
+        onchain_balance: { type: string, nullable: true, description: Live Horizon balance (best-effort). }
+      required: [currency, minor_scale, available_minor, held_minor, low_water_minor]
+
+    ReserveStatusResponse:
+      type: object
+      properties:
+        configured: { type: boolean }
+        stellar_address: { type: string, description: Reserve pay-in address. }
+        deposit_ttl_secs: { type: integer, format: int64 }
+        buckets:
+          type: array
+          items: { $ref: '#/components/schemas/ReserveBucketView' }
+        policies:
+          type: array
+          items:
+            type: object
+            properties:
+              provider: { type: string }
+              enabled: { type: boolean }
+              threshold_usd_cents: { type: integer, format: int64 }
+              supported: { type: boolean }
+              updated_at: { type: string }
+        pending:
+          type: object
+          properties:
+            awaiting_deposit: { type: integer, format: int64 }
+            processing: { type: integer, format: int64 }
+            on_hold: { type: integer, format: int64 }
+            awaiting_disbursement: { type: integer, format: int64 }
+      required: [configured, buckets, policies, pending]
+
+    ReserveEntryView:
+      type: object
+      properties:
+        entry_id: { type: string, format: uuid }
+        currency: { type: string }
+        kind: { type: string }
+        delta: { type: integer, format: int64, description: Signed effect on available. }
+        held_delta: { type: integer, format: int64, description: Signed effect on held. }
+        balance_after: { type: integer, format: int64 }
+        held_after: { type: integer, format: int64 }
+        order_id: { type: string, format: uuid, nullable: true }
+        diverted_provider: { type: string, nullable: true }
+        stellar_tx_hash: { type: string, nullable: true }
+        admin_account_id: { type: string, nullable: true }
+        note: { type: string, nullable: true }
+        created_at: { type: string }
+      required: [entry_id, currency, kind, delta, held_delta, balance_after, held_after, created_at]
+
+    PaginatedReserveEntryList:
+      type: object
+      properties:
+        data:
+          type: array
+          items: { $ref: '#/components/schemas/ReserveEntryView' }
+        page: { type: integer }
+        per_page: { type: integer }
+        total: { type: integer, format: int64 }
+      required: [data, page, per_page, total]
+
+    ReserveUnmatchedView:
+      type: object
+      properties:
+        paging_token: { type: string }
+        tx_hash: { type: string }
+        op_type: { type: string }
+        asset_code: { type: string, nullable: true }
+        asset_issuer: { type: string, nullable: true }
+        amount: { type: string }
+        amount_minor: { type: integer, format: int64, nullable: true }
+        memo: { type: string, nullable: true }
+        matched_order_id: { type: string, format: uuid, nullable: true }
+        reason: { type: string, enum: [late, underpaid, wrong_asset, no_match] }
+        seen_at: { type: string }
+      required: [paging_token, tx_hash, op_type, amount, reason, seen_at]
+
+    PaginatedReserveUnmatchedList:
+      type: object
+      properties:
+        data:
+          type: array
+          items: { $ref: '#/components/schemas/ReserveUnmatchedView' }
+        page: { type: integer }
+        per_page: { type: integer }
+        total: { type: integer, format: int64 }
+      required: [data, page, per_page, total]
+
+    ReserveForecastResponse:
+      type: object
+      properties:
+        window_days: { type: integer, format: int64 }
+        target_days: { type: integer, format: int64 }
+        as_of: { type: string, description: UTC date the projection is anchored to. }
+        currencies:
+          type: array
+          items:
+            type: object
+            properties:
+              currency: { type: string }
+              minor_scale: { type: integer }
+              available_minor: { type: integer, format: int64 }
+              held_minor: { type: integer, format: int64 }
+              low_water_minor: { type: integer, format: int64 }
+              low_water_breached: { type: boolean }
+              avg_daily_outflow_minor: { type: integer, format: int64 }
+              ewma_daily_outflow_minor: { type: integer, format: int64 }
+              trend_minor_per_day: { type: integer, format: int64 }
+              projected_days_to_depletion: { type: integer, format: int64, nullable: true }
+              projected_depletion_date: { type: string, nullable: true }
+              suggested_topup_minor: { type: integer, format: int64 }
+              daily:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    day: { type: string }
+                    outflow_minor: { type: integer, format: int64 }
+                    inflow_minor: { type: integer, format: int64 }
+        provider_utilization:
+          type: array
+          items:
+            type: object
+            properties:
+              provider: { type: string }
+              orders: { type: integer, format: int64 }
+              volume_minor: { type: integer, format: int64 }
+      required: [window_days, target_days, as_of, currencies, provider_utilization]

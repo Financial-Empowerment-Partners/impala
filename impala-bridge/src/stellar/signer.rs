@@ -29,10 +29,13 @@ use crate::seed_protect::SecretBytes;
 /// Transaction validity window (seconds) — bounds replay/stuck submissions.
 const TX_TIMEOUT_SECS: i64 = 300;
 
-/// Asset to transfer. Only native XLM is supported today.
+/// Asset to transfer: native XLM, or an issued asset (e.g. the conversion
+/// reserve's USDC payouts). `code` is 1-12 alphanumeric chars; `issuer` is
+/// the issuing account's `G...` address — both validated at build time.
 #[derive(Debug, Clone)]
 pub enum Asset {
     Native,
+    Credit { code: String, issuer: String },
 }
 
 /// Parameters for a single-operation payment.
@@ -156,13 +159,27 @@ impl StellarBaseSigner {
             .await
             .map_err(|e| signer_error("horizon submit response", e))?;
         if !status.is_success() {
-            // Surface Horizon result codes for diagnosability (no seed material).
-            let codes = body["extras"]["result_codes"].to_string();
-            error!("stellar submit rejected: HTTP {} codes={}", status, codes);
-            return Err(AppError::BadRequest(format!(
-                "Stellar transaction rejected: {}",
-                codes
-            )));
+            let codes = &body["extras"]["result_codes"];
+            // Outcome classification is load-bearing for callers (the
+            // conversion-reserve payout driver retries only DEFINITIVE
+            // rejections): exactly HTTP 400 with parsed result codes proves
+            // the transaction did not and cannot land -> BadRequest. Every
+            // other non-2xx — Horizon 504 submission timeouts, 503, 429 —
+            // means the transaction may still be queued and can land within
+            // its validity window, so it must read as ambiguous
+            // (InternalError), never as a safe-to-retry rejection.
+            if status == reqwest::StatusCode::BAD_REQUEST && !codes.is_null() {
+                let codes = codes.to_string();
+                error!("stellar submit rejected: HTTP 400 codes={}", codes);
+                return Err(AppError::BadRequest(format!(
+                    "Stellar transaction rejected: {}",
+                    codes
+                )));
+            }
+            return Err(signer_error(
+                "horizon submit",
+                format!("HTTP {} codes={}", status, codes),
+            ));
         }
         body["hash"]
             .as_str()
@@ -209,8 +226,14 @@ impl StellarSigner for StellarBaseSigner {
             .map_err(|_| AppError::BadRequest("invalid destination address".to_string()))?;
         let amount = Amount::from_str(&params.amount)
             .map_err(|_| AppError::BadRequest("invalid amount".to_string()))?;
-        let asset = match params.asset {
+        let asset = match &params.asset {
             Asset::Native => SbAsset::new_native(),
+            Asset::Credit { code, issuer } => {
+                let issuer_pk = PublicKey::from_account_id(issuer)
+                    .map_err(|_| AppError::BadRequest("invalid asset issuer".to_string()))?;
+                SbAsset::new_credit(code.clone(), issuer_pk)
+                    .map_err(|_| AppError::BadRequest("invalid asset code".to_string()))?
+            }
         };
 
         let payment = Operation::new_payment()

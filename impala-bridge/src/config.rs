@@ -223,6 +223,27 @@ pub struct Config {
     pub changelly_fiat_api_url: String,
     /// Poll interval (seconds) for the exchange-order reconcile loop.
     pub exchange_poll_secs: u64,
+
+    // Conversion reserve (bridge service reserve for small exchange orders).
+    // None of these are secrets — the reserve's signing seed stays in
+    // managed_seed behind the seed protector; thresholds/enablement live in
+    // the conversion_reserve_policy DB table (admin-editable at runtime).
+    /// payala_account_id of the managed-seed account designated as the
+    /// reserve. Presence enables the subsystem (init fails closed if the
+    /// account has no seed). This account is quarantined from user-facing
+    /// custodial endpoints.
+    pub reserve_account_id: Option<String>,
+    /// Stellar issuer (`G...`) of the USDC asset the reserve pays out and
+    /// recognizes as deposits. Required when the reserve is enabled.
+    pub reserve_usdc_issuer: Option<String>,
+    /// Asset code of that asset. ["USDC"]
+    pub reserve_usdc_code: String,
+    /// Deposit window for reserve orders (seconds) — also the price-validity
+    /// window (a long TTL is a free price option on the pool). Clamped to
+    /// [300, 7200]. [1800]
+    pub reserve_deposit_ttl_secs: u64,
+    /// Reserve deposit-watcher cadence (seconds), clamped to >= 5. [30]
+    pub reserve_watch_secs: u64,
 }
 
 /// Render an optional secret as its presence, never its value.
@@ -270,6 +291,11 @@ impl std::fmt::Debug for Config {
             .field("worker_concurrency", &self.worker_concurrency)
             .field("otel_exporter_endpoint", &self.otel_exporter_endpoint)
             .field("exchange_poll_secs", &self.exchange_poll_secs)
+            .field("reserve_account_id", &self.reserve_account_id)
+            .field("reserve_usdc_issuer", &self.reserve_usdc_issuer)
+            .field("reserve_usdc_code", &self.reserve_usdc_code)
+            .field("reserve_deposit_ttl_secs", &self.reserve_deposit_ttl_secs)
+            .field("reserve_watch_secs", &self.reserve_watch_secs)
             // Presence only — never the value.
             .field("twilio_sid", &secret_state(&self.twilio_sid))
             .field("twilio_token", &secret_state(&self.twilio_token))
@@ -688,6 +714,43 @@ pub fn load_config() -> Config {
         .unwrap_or(DEFAULT_EXCHANGE_POLL_SECS)
         .max(1);
 
+    let reserve_account_id = env::var("RESERVE_ACCOUNT_ID")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .or_else(|| from_file("reserve_account_id"))
+        .filter(|v| !v.is_empty());
+
+    let reserve_usdc_issuer = env::var("RESERVE_USDC_ISSUER")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .or_else(|| from_file("reserve_usdc_issuer"))
+        .filter(|v| !v.is_empty());
+
+    let reserve_usdc_code = env::var("RESERVE_USDC_CODE")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .or_else(|| from_file("reserve_usdc_code"))
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| "USDC".to_string());
+
+    // Clamped: too short races real deposits, too long hands out a free
+    // price option on the pool (the quote is honored for the whole window).
+    let reserve_deposit_ttl_secs = env::var("RESERVE_DEPOSIT_TTL_SECS")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .or_else(|| from_file("reserve_deposit_ttl_secs"))
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_RESERVE_DEPOSIT_TTL_SECS)
+        .clamp(RESERVE_DEPOSIT_TTL_MIN_SECS, RESERVE_DEPOSIT_TTL_MAX_SECS);
+
+    let reserve_watch_secs = env::var("RESERVE_WATCH_SECS")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .or_else(|| from_file("reserve_watch_secs"))
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_RESERVE_WATCH_SECS)
+        .max(5);
+
     Config {
         public_endpoint,
         service_address,
@@ -748,6 +811,11 @@ pub fn load_config() -> Config {
         changelly_api_url,
         changelly_fiat_api_url,
         exchange_poll_secs,
+        reserve_account_id,
+        reserve_usdc_issuer,
+        reserve_usdc_code,
+        reserve_deposit_ttl_secs,
+        reserve_watch_secs,
     }
 }
 
@@ -815,6 +883,11 @@ pub(crate) fn test_config() -> Config {
         changelly_api_url: DEFAULT_CHANGELLY_API_URL.to_string(),
         changelly_fiat_api_url: DEFAULT_CHANGELLY_FIAT_API_URL.to_string(),
         exchange_poll_secs: DEFAULT_EXCHANGE_POLL_SECS,
+        reserve_account_id: None,
+        reserve_usdc_issuer: None,
+        reserve_usdc_code: "USDC".to_string(),
+        reserve_deposit_ttl_secs: DEFAULT_RESERVE_DEPOSIT_TTL_SECS,
+        reserve_watch_secs: DEFAULT_RESERVE_WATCH_SECS,
     }
 }
 

@@ -5,6 +5,7 @@
 //! the shared `reqwest` client for Horizon sequence lookup and submission.
 
 pub mod account;
+pub mod horizon;
 mod signer;
 
 pub use account::{fetch_account_details, OnchainAccount};

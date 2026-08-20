@@ -38,7 +38,7 @@ var Roles = (function () {
         },
         'admin': {
             label: 'Admin',
-            permissions: ['view_accounts', 'manage_accounts', 'delete_accounts', 'sync_profile', 'view_mfa', 'manage_mfa', 'view_transactions', 'create_transactions', 'review_transactions', 'view_cards', 'manage_cards', 'manage_roles']
+            permissions: ['view_accounts', 'manage_accounts', 'delete_accounts', 'sync_profile', 'view_mfa', 'manage_mfa', 'view_transactions', 'create_transactions', 'review_transactions', 'view_cards', 'manage_cards', 'manage_roles', 'manage_reserve']
         }
     };
 

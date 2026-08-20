@@ -34,6 +34,29 @@ use crate::stellar::{Asset, PaymentParams, StellarSigner};
 use crate::telemetry::AppMetrics;
 
 /// Validate the profile name fields shared by generate/import.
+/// The configured conversion-reserve account is quarantined from user-facing
+/// custodial endpoints: its seed signs payouts from the bridge's own pool, so
+/// whoever holds that one account's *user* credential must not be able to
+/// drain it through /managed-account/sign (5/min, no reserve ledger entry —
+/// the pool would silently overstate available), nor rebind/overwrite its
+/// seed via generate/import. Ops movements go through the audited
+/// /admin/exchange-reserve flows instead. Fail closed on a match.
+fn require_not_reserve_account(
+    reserve: &Option<Extension<Arc<crate::exchange::reserve::ConversionReserve>>>,
+    payala_account_id: &str,
+) -> Result<(), AppError> {
+    if let Some(Extension(r)) = reserve {
+        if r.reserve_account_id == payala_account_id {
+            error!(
+                "managed-account endpoint refused for the conversion-reserve account '{}'",
+                payala_account_id
+            );
+            return Err(AppError::Forbidden);
+        }
+    }
+    Ok(())
+}
+
 fn validate_names(first_name: &str, last_name: &str) -> Result<(), AppError> {
     if first_name.trim().is_empty() || last_name.trim().is_empty() {
         return Err(AppError::BadRequest(
@@ -145,9 +168,11 @@ pub async fn generate_managed_account(
     Extension(redis_pool): Extension<Arc<deadpool_redis::Pool>>,
     Extension(protector): Extension<Arc<dyn SeedProtector>>,
     Extension(signer): Extension<Arc<dyn StellarSigner>>,
+    reserve: Option<Extension<Arc<crate::exchange::reserve::ConversionReserve>>>,
     Json(payload): Json<GenerateManagedAccountRequest>,
 ) -> Result<Json<ManagedAccountResponse>, AppError> {
     crate::auth::require_owner(&user, &payload.payala_account_id)?;
+    require_not_reserve_account(&reserve, &payload.payala_account_id)?;
     crate::redis_helpers::check_rate_limit(
         &redis_pool,
         "seedgen",
@@ -200,9 +225,11 @@ pub async fn import_managed_account(
     Extension(redis_pool): Extension<Arc<deadpool_redis::Pool>>,
     Extension(protector): Extension<Arc<dyn SeedProtector>>,
     Extension(signer): Extension<Arc<dyn StellarSigner>>,
+    reserve: Option<Extension<Arc<crate::exchange::reserve::ConversionReserve>>>,
     Json(mut payload): Json<ImportManagedAccountRequest>,
 ) -> Result<Json<ManagedAccountResponse>, AppError> {
     crate::auth::require_owner(&user, &payload.payala_account_id)?;
+    require_not_reserve_account(&reserve, &payload.payala_account_id)?;
     crate::redis_helpers::check_rate_limit(
         &redis_pool,
         "seedimport",
@@ -259,38 +286,15 @@ pub async fn import_managed_account(
     }))
 }
 
-/// Sign and submit a payment from a custodial account (`POST /managed-account/sign`).
-/// Synchronous and server-only so a retry cannot double-submit.
-#[allow(clippy::too_many_arguments)]
-pub async fn sign_and_submit(
-    user: AuthenticatedUser,
-    Extension(pool): Extension<PgPool>,
-    Extension(redis_pool): Extension<Arc<deadpool_redis::Pool>>,
-    Extension(metrics): Extension<Arc<AppMetrics>>,
-    Extension(protector): Extension<Arc<dyn SeedProtector>>,
-    Extension(signer): Extension<Arc<dyn StellarSigner>>,
-    sns_client: Option<Extension<Arc<aws_sdk_sns::Client>>>,
-    sns_topic_arn: Option<Extension<Arc<String>>>,
-    Json(payload): Json<SignSubmitRequest>,
-) -> Result<Json<SignSubmitResponse>, AppError> {
-    crate::auth::require_owner(&user, &payload.payala_account_id)?;
-    crate::redis_helpers::check_rate_limit(
-        &redis_pool,
-        "sign",
-        &user.account_id,
-        SIGN_RATE_LIMIT_MAX_REQUESTS,
-        SIGN_RATE_LIMIT_WINDOW_SECS,
-    )
-    .await?;
-
-    crate::validate::validate_stellar_account_id(&payload.destination)?;
-    if payload.amount.trim().is_empty() {
-        return Err(AppError::BadRequest("amount must not be empty".to_string()));
-    }
-
-    info!("POST /managed-account/sign: account={}", user.account_id);
-
-    // Load the protected seed for this owner's account.
+/// Load and decrypt the protected seed for an account. Shared by the sign
+/// endpoint and the conversion-reserve payout driver so the backend check
+/// and fail-closed behavior can never diverge between them. The returned
+/// [`SecretBytes`](crate::seed_protect::SecretBytes) zeroizes on drop.
+pub(crate) async fn load_protected_seed(
+    pool: &PgPool,
+    protector: &Arc<dyn SeedProtector>,
+    payala_account_id: &str,
+) -> Result<crate::seed_protect::SecretBytes, AppError> {
     let row = sqlx::query_as::<
         _,
         (
@@ -308,11 +312,11 @@ pub async fn sign_and_submit(
         WHERE payala_account_id = $1
         "#,
     )
-    .bind(&payload.payala_account_id)
-    .fetch_optional(&pool)
+    .bind(payala_account_id)
+    .fetch_optional(pool)
     .await
     .map_err(|e| {
-        error!("sign_and_submit: seed lookup failed: {}", e);
+        error!("load_protected_seed: seed lookup failed: {}", e);
         AppError::InternalError("Database error".to_string())
     })?;
 
@@ -324,7 +328,7 @@ pub async fn sign_and_submit(
     // Refuse to use a seed protected by a different backend than is configured.
     if backend != protector.backend() {
         error!(
-            "sign_and_submit: seed backend '{}' != configured backend '{}'",
+            "load_protected_seed: seed backend '{}' != configured backend '{}'",
             backend.as_str(),
             protector.backend().as_str()
         );
@@ -342,7 +346,44 @@ pub async fn sign_and_submit(
         key_version,
     };
 
-    let seed = protector.decrypt_seed(&protected).await?;
+    protector.decrypt_seed(&protected).await
+}
+
+/// Sign and submit a payment from a custodial account (`POST /managed-account/sign`).
+/// Synchronous and server-only so a retry cannot double-submit.
+#[allow(clippy::too_many_arguments)]
+pub async fn sign_and_submit(
+    user: AuthenticatedUser,
+    Extension(pool): Extension<PgPool>,
+    Extension(redis_pool): Extension<Arc<deadpool_redis::Pool>>,
+    Extension(metrics): Extension<Arc<AppMetrics>>,
+    Extension(protector): Extension<Arc<dyn SeedProtector>>,
+    Extension(signer): Extension<Arc<dyn StellarSigner>>,
+    sns_client: Option<Extension<Arc<aws_sdk_sns::Client>>>,
+    sns_topic_arn: Option<Extension<Arc<String>>>,
+    reserve: Option<Extension<Arc<crate::exchange::reserve::ConversionReserve>>>,
+    Json(payload): Json<SignSubmitRequest>,
+) -> Result<Json<SignSubmitResponse>, AppError> {
+    crate::auth::require_owner(&user, &payload.payala_account_id)?;
+    require_not_reserve_account(&reserve, &payload.payala_account_id)?;
+    crate::redis_helpers::check_rate_limit(
+        &redis_pool,
+        "sign",
+        &user.account_id,
+        SIGN_RATE_LIMIT_MAX_REQUESTS,
+        SIGN_RATE_LIMIT_WINDOW_SECS,
+    )
+    .await?;
+
+    crate::validate::validate_stellar_account_id(&payload.destination)?;
+    if payload.amount.trim().is_empty() {
+        return Err(AppError::BadRequest("amount must not be empty".to_string()));
+    }
+
+    info!("POST /managed-account/sign: account={}", user.account_id);
+
+    // Load and decrypt the protected seed for this owner's account.
+    let seed = load_protected_seed(&pool, &protector, &payload.payala_account_id).await?;
     let params = PaymentParams {
         destination: payload.destination.clone(),
         amount: payload.amount.clone(),

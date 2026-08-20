@@ -60,6 +60,18 @@ pub struct AppMetrics {
     // Exchange orders (OwlPay / Changelly)
     pub exchange_orders: Counter<u64>,
     pub exchange_order_updates: Counter<u64>,
+
+    // Conversion reserve (bridge service reserve for small orders)
+    pub reserve_orders_diverted: Counter<u64>,
+    pub reserve_fallbacks: Counter<u64>,
+    pub reserve_deposits_matched: Counter<u64>,
+    pub reserve_fulfillments: Counter<u64>,
+    /// Payout submissions that failed or froze for admin resolution. Any
+    /// sustained non-zero rate means user funds are waiting on ops — alert.
+    pub reserve_payout_failures: Counter<u64>,
+    pub reserve_expiries: Counter<u64>,
+    pub reserve_unmatched_deposits: Counter<u64>,
+    pub reserve_manual_entries: Counter<u64>,
 }
 
 impl AppMetrics {
@@ -170,6 +182,45 @@ impl AppMetrics {
                 .u64_counter("exchange.order_updates")
                 .with_description("Exchange order status updates by provider, status and source")
                 .build(),
+
+            reserve_orders_diverted: meter
+                .u64_counter("reserve.orders_diverted")
+                .with_description(
+                    "Orders fulfilled from the conversion reserve, by diverted provider",
+                )
+                .build(),
+            reserve_fallbacks: meter
+                .u64_counter("reserve.fallbacks")
+                .with_description(
+                    "Reserve-eligible checks that passed through to the provider, by reason",
+                )
+                .build(),
+            reserve_deposits_matched: meter
+                .u64_counter("reserve.deposits_matched")
+                .with_description("Reserve pay-ins matched to orders")
+                .build(),
+            reserve_fulfillments: meter
+                .u64_counter("reserve.fulfillments")
+                .with_description("Reserve orders completed (payout recorded)")
+                .build(),
+            reserve_payout_failures: meter
+                .u64_counter("reserve.payout_failures")
+                .with_description(
+                    "Reserve payout submissions failed or frozen for admin, by reason",
+                )
+                .build(),
+            reserve_expiries: meter
+                .u64_counter("reserve.expiries")
+                .with_description("Reserve orders expired without a matching deposit")
+                .build(),
+            reserve_unmatched_deposits: meter
+                .u64_counter("reserve.unmatched_deposits")
+                .with_description("Stray inflows to the reserve account recorded for admin review")
+                .build(),
+            reserve_manual_entries: meter
+                .u64_counter("reserve.manual_entries")
+                .with_description("Admin-recorded reserve ledger entries, by kind")
+                .build(),
         }
     }
 }
@@ -189,8 +240,11 @@ impl AppMetrics {
     }
 
     /// Record an exchange-order creation on the `exchange.orders_created`
-    /// counter (`provider` = owlpay|changelly_crypto|changelly_fiat, `outcome`
-    /// = success|provider_error|db_error).
+    /// counter (`provider` = owlpay|changelly_crypto|changelly_fiat|reserve,
+    /// `outcome` = success|provider_error|db_error). Reserve-diverted orders
+    /// count here with provider="reserve" so order dashboards stay complete;
+    /// `reserve.orders_diverted` additionally attributes them to the provider
+    /// they were diverted from.
     pub fn record_exchange_order(&self, provider: &str, outcome: &'static str) {
         self.exchange_orders.add(
             1,
@@ -203,7 +257,7 @@ impl AppMetrics {
 
     /// Record an exchange-order state change on the `exchange.order_updates`
     /// counter (`status` from `VALID_EXCHANGE_STATUSES`, `source` =
-    /// webhook|poll|refresh).
+    /// webhook|poll|refresh|reserve_watch|admin).
     pub fn record_exchange_order_update(&self, provider: &str, status: &str, source: &'static str) {
         self.exchange_order_updates.add(
             1,
@@ -213,6 +267,36 @@ impl AppMetrics {
                 KeyValue::new("source", source),
             ],
         );
+    }
+
+    /// Record a reserve diversion on `reserve.orders_diverted` (`provider` =
+    /// the external provider the order was diverted FROM).
+    pub fn record_reserve_diverted(&self, diverted_provider: &str) {
+        self.reserve_orders_diverted.add(
+            1,
+            &[KeyValue::new("provider", diverted_provider.to_string())],
+        );
+    }
+
+    /// Record a reserve pass-through on `reserve.fallbacks` (`reason` is a
+    /// low-cardinality static label, e.g. "insufficient"|"quote_failed"|
+    /// "payout_untrusted"|"open_order_cap").
+    pub fn record_reserve_fallback(&self, reason: &'static str) {
+        self.reserve_fallbacks
+            .add(1, &[KeyValue::new("reason", reason)]);
+    }
+
+    /// Record a frozen/failed reserve payout on `reserve.payout_failures`.
+    pub fn record_reserve_payout_failure(&self, reason: &'static str) {
+        self.reserve_payout_failures
+            .add(1, &[KeyValue::new("reason", reason)]);
+    }
+
+    /// Record an admin ledger entry on `reserve.manual_entries` (`kind` from
+    /// `RESERVE_ADMIN_ENTRY_KINDS`).
+    pub fn record_reserve_manual_entry(&self, kind: &str) {
+        self.reserve_manual_entries
+            .add(1, &[KeyValue::new("kind", kind.to_string())]);
     }
 }
 
