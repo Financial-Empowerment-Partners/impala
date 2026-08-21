@@ -48,8 +48,8 @@ use tower_http::trace::TraceLayer;
 
 use config::load_config;
 use handlers::{
-    account, admin, admin_reserve, admin_webhook, authenticate, card, card_auth, device_token,
-    exchange as exchange_handler, exchange_webhook, github as github_handler,
+    account, admin, admin_replenish, admin_reserve, admin_webhook, authenticate, card, card_auth,
+    device_token, exchange as exchange_handler, exchange_webhook, github as github_handler,
     google as google_handler, health, logout, managed_seed, mfa, network,
     notification_subscription, notify, okta as okta_handler, session as session_handler,
     sso as sso_handler, subscribe, sync, token, transaction,
@@ -406,6 +406,7 @@ async fn run_server(
                 signer: stellar_signer.clone(),
                 protector: seed_protector.clone(),
                 metrics: metrics.clone(),
+                changelly_crypto: changelly_crypto.clone(),
             });
 
     // Shared by the reconcile loop and the `?refresh=true` handler path so
@@ -543,6 +544,44 @@ async fn run_server(
         .route(
             "/admin/exchange-reserve/unmatched",
             get(admin_reserve::list_unmatched),
+        )
+        // Automated refunds: the queue, the master switch, a manual
+        // obligation for inflows the driver deliberately refuses, and
+        // resolution of anything frozen mid-flight.
+        .route(
+            "/admin/exchange-reserve/refunds",
+            get(admin_reserve::list_refunds).post(admin_reserve::create_refund),
+        )
+        .route(
+            "/admin/exchange-reserve/refunds/{refund_id}/resolve",
+            post(admin_reserve::resolve_refund),
+        )
+        .route(
+            "/admin/exchange-reserve/settings",
+            axum::routing::put(admin_reserve::update_settings),
+        )
+        // Automated replenishment: policies (caps default to 0 = refuse to
+        // run), a manual trigger that shares the watcher's advisory lock,
+        // and the fiat-receipt confirmation the bridge cannot observe.
+        .route(
+            "/admin/exchange-reserve/replenishment",
+            get(admin_replenish::get_status),
+        )
+        .route(
+            "/admin/exchange-reserve/replenishment/policies/{kind}",
+            axum::routing::put(admin_replenish::update_policy),
+        )
+        .route(
+            "/admin/exchange-reserve/replenishment/run",
+            post(admin_replenish::run_now),
+        )
+        .route(
+            "/admin/exchange-reserve/replenishment/{cycle_id}/confirm-fiat",
+            post(admin_replenish::confirm_fiat),
+        )
+        .route(
+            "/admin/exchange-reserve/replenishment/{cycle_id}/write-off",
+            post(admin_replenish::write_off),
         )
         .route(
             "/admin/exchange-reserve/forecast",

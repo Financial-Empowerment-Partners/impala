@@ -244,6 +244,11 @@ pub struct Config {
     pub reserve_deposit_ttl_secs: u64,
     /// Reserve deposit-watcher cadence (seconds), clamped to >= 5. [30]
     pub reserve_watch_secs: u64,
+    /// How long a bridge-issued price lock stays valid (seconds), clamped to
+    /// [60, 900]. Short by design: a quote hold delivers nothing to the
+    /// customer while it waits, so it is pure optionality against the pool.
+    /// [300]
+    pub reserve_quote_ttl_secs: u64,
 }
 
 /// Render an optional secret as its presence, never its value.
@@ -296,6 +301,7 @@ impl std::fmt::Debug for Config {
             .field("reserve_usdc_code", &self.reserve_usdc_code)
             .field("reserve_deposit_ttl_secs", &self.reserve_deposit_ttl_secs)
             .field("reserve_watch_secs", &self.reserve_watch_secs)
+            .field("reserve_quote_ttl_secs", &self.reserve_quote_ttl_secs)
             // Presence only — never the value.
             .field("twilio_sid", &secret_state(&self.twilio_sid))
             .field("twilio_token", &secret_state(&self.twilio_token))
@@ -751,6 +757,14 @@ pub fn load_config() -> Config {
         .unwrap_or(DEFAULT_RESERVE_WATCH_SECS)
         .max(5);
 
+    let reserve_quote_ttl_secs = env::var("RESERVE_QUOTE_TTL_SECS")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .or_else(|| from_file("reserve_quote_ttl_secs"))
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_RESERVE_QUOTE_TTL_SECS)
+        .clamp(RESERVE_QUOTE_TTL_MIN_SECS, RESERVE_QUOTE_TTL_MAX_SECS);
+
     Config {
         public_endpoint,
         service_address,
@@ -816,6 +830,7 @@ pub fn load_config() -> Config {
         reserve_usdc_code,
         reserve_deposit_ttl_secs,
         reserve_watch_secs,
+        reserve_quote_ttl_secs,
     }
 }
 
@@ -888,6 +903,7 @@ pub(crate) fn test_config() -> Config {
         reserve_usdc_code: "USDC".to_string(),
         reserve_deposit_ttl_secs: DEFAULT_RESERVE_DEPOSIT_TTL_SECS,
         reserve_watch_secs: DEFAULT_RESERVE_WATCH_SECS,
+        reserve_quote_ttl_secs: DEFAULT_RESERVE_QUOTE_TTL_SECS,
     }
 }
 

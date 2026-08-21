@@ -97,6 +97,40 @@ describe('depletionBadge', () => {
     });
 });
 
+describe('refundBadge', () => {
+    it('flags anything waiting on a human as red', () => {
+        // Both mean customer money is stuck, not that a request errored.
+        expect(ReserveMath.refundBadge('frozen')).toBe('error');
+        expect(ReserveMath.refundBadge('failed')).toBe('error');
+    });
+
+    it('maps the rest of the lifecycle', () => {
+        expect(ReserveMath.refundBadge('sent')).toBe('ok');
+        expect(ReserveMath.refundBadge('needs_review')).toBe('pending');
+        expect(ReserveMath.refundBadge('queued')).toBe('neutral');
+        expect(ReserveMath.refundBadge('inflight')).toBe('neutral');
+        expect(ReserveMath.refundBadge('cancelled')).toBe('neutral');
+        expect(ReserveMath.refundBadge('nonsense')).toBe('neutral');
+    });
+});
+
+describe('cycleBadge', () => {
+    it('shows in-transit fiat as unconfirmed, not complete', () => {
+        // The provider says it paid; nobody has seen the bank credit. Green
+        // here would claim money the bridge cannot verify.
+        expect(ReserveMath.cycleBadge('in_transit')).toBe('pending');
+        expect(ReserveMath.cycleBadge('completed')).toBe('ok');
+    });
+
+    it('maps the rest of the cycle states', () => {
+        expect(ReserveMath.cycleBadge('frozen')).toBe('error');
+        expect(ReserveMath.cycleBadge('failed')).toBe('error');
+        for (const s of ['planned', 'creating', 'created', 'sending', 'sent', 'settled', 'refunded']) {
+            expect(ReserveMath.cycleBadge(s)).toBe('neutral');
+        }
+    });
+});
+
 describe('chartData', () => {
     const daily = [
         { day: '2026-08-18', outflow_minor: 100, inflow_minor: 0 },

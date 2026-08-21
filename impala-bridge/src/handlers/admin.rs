@@ -310,6 +310,53 @@ pub async fn delete_account(
         )));
     }
 
+    // Live price locks hold pool capacity keyed to the quote row, which
+    // cascades with the account — deleting now would strand that capacity in
+    // `held` with no row left to release it.
+    // Deliberately NOT filtered on expires_at: an expired-but-unswept quote
+    // still holds its capacity until the watcher releases it, so deleting
+    // the account would strand that hold just as a live lock would.
+    let open_quotes: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM conversion_reserve_quote \
+         WHERE payala_account_id = $1 AND status = 'open'",
+    )
+    .bind(&account_id)
+    .fetch_one(&pool)
+    .await
+    .map_err(|e| {
+        error!("delete_account: reserve quote count error: {}", e);
+        AppError::InternalError("Database error".to_string())
+    })?;
+    if open_quotes > 0 {
+        return Err(AppError::Conflict(format!(
+            "Account has {} unreleased conversion-reserve price lock(s); wait for the watcher to sweep them",
+            open_quotes
+        )));
+    }
+
+    // A pending refund still owes this account's counterparty money. The
+    // obligation row survives the cascade (order_id is SET NULL), but the
+    // audit trail linking it to the account does not.
+    let pending_refunds: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM conversion_reserve_refund r \
+         JOIN exchange_order o ON o.order_id = r.order_id \
+         WHERE o.payala_account_id = $1 \
+           AND r.status IN ('needs_review', 'queued', 'inflight', 'frozen')",
+    )
+    .bind(&account_id)
+    .fetch_one(&pool)
+    .await
+    .map_err(|e| {
+        error!("delete_account: reserve refund count error: {}", e);
+        AppError::InternalError("Database error".to_string())
+    })?;
+    if pending_refunds > 0 {
+        return Err(AppError::Conflict(format!(
+            "Account has {} unresolved conversion-reserve refund(s); settle them first",
+            pending_refunds
+        )));
+    }
+
     // Block deleting the last remaining admin.
     let target_is_admin: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM impala_account WHERE payala_account_id = $1 AND role = 'admin'",

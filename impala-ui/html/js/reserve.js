@@ -31,9 +31,17 @@
         unmatchedPage: 1
     };
     var PER_PAGE = 10;
+    // Mirrors chk_conversion_reserve_entry_kind (migrations 031 + 032). A
+    // kind missing here silently disappears from the ledger filter.
     var ENTRY_KINDS = ['hold', 'hold_release', 'deposit', 'unmatched_deposit',
         'payout_attempt', 'fulfillment', 'disbursement', 'topup', 'withdrawal',
-        'adjustment', 'held_adjustment'];
+        'adjustment', 'held_adjustment',
+        'quote_hold', 'quote_release', 'quote_consume',
+        'replenish_hold', 'replenish_attempt', 'replenish_sent',
+        'replenish_credit', 'replenish_refund', 'replenish_release',
+        'offramp_hold', 'offramp_attempt', 'offramp_sent', 'offramp_refund',
+        'fiat_in_transit', 'fiat_confirmed', 'fiat_written_off',
+        'refund_intent', 'refund_sent', 'refund_reversal'];
     var ADMIN_KINDS = ['topup', 'withdrawal', 'adjustment', 'held_adjustment'];
 
     /* ---- status: buckets + policies -------------------------------------- */
@@ -501,18 +509,22 @@
         return API.get('/admin/exchange-reserve/unmatched?' + qs).then(function (res) {
             var rows = res.data || [];
             var html = '<div class="table-wrap"><table><thead><tr>' +
-                '<th>Seen</th><th>Reason</th><th>Amount</th><th>Asset</th><th>Memo</th><th>Order</th><th>Tx</th>' +
+                '<th>Seen</th><th>Reason</th><th>Amount</th><th>Asset</th><th>Sender</th>' +
+                '<th>Disposition</th><th>Memo</th><th>Tx</th>' +
                 '</tr></thead><tbody>';
             if (!rows.length) {
-                html += '<tr><td colspan="7" class="text-muted">No unmatched deposits.</td></tr>';
+                html += '<tr><td colspan="8" class="text-muted">No unmatched deposits.</td></tr>';
             }
             rows.forEach(function (u) {
                 html += '<tr><td>' + escapeHtml(u.seen_at) + '</td>' +
                     '<td><span class="badge pending">' + escapeHtml(u.reason) + '</span></td>' +
                     '<td>' + escapeHtml(u.amount) + '</td>' +
                     '<td class="mono">' + escapeHtml(u.asset_code || 'XLM') + '</td>' +
+                    '<td class="mono">' + escapeHtml(u.sender_address || (u.sender_muxed ? 'muxed' : '')) + '</td>' +
+                    '<td>' + (u.refund_id
+                        ? '<span class="badge ok">refund queued</span>'
+                        : escapeHtml(u.refund_skip_reason || '')) + '</td>' +
                     '<td class="mono">' + escapeHtml(u.memo || '') + '</td>' +
-                    '<td class="mono">' + escapeHtml(u.matched_order_id || '') + '</td>' +
                     '<td class="mono">' + escapeHtml(u.tx_hash) + '</td></tr>';
             });
             html += '</tbody></table></div>';
@@ -528,6 +540,213 @@
         });
     }
 
+    /* ---- refunds ----------------------------------------------------------- */
+
+    function loadRefunds() {
+        return API.get('/admin/exchange-reserve/refunds?page=1&per_page=' + PER_PAGE)
+            .then(function (res) {
+                var rows = res.data || [];
+                var html = '<div class="table-wrap"><table><thead><tr>' +
+                    '<th>When</th><th>Status</th><th>Reason</th><th>Amount</th>' +
+                    '<th>Destination</th><th>Detail</th><th></th>' +
+                    '</tr></thead><tbody>';
+                if (!rows.length) {
+                    html += '<tr><td colspan="7" class="text-muted">No refunds.</td></tr>';
+                }
+                rows.forEach(function (r) {
+                    var scale = state.scales[r.currency] !== undefined ? state.scales[r.currency] : 7;
+                    html += '<tr><td>' + escapeHtml(r.created_at) + '</td>' +
+                        '<td><span class="badge ' + ReserveMath.refundBadge(r.status) + '">' +
+                        escapeHtml(r.status) + '</span></td>' +
+                        '<td>' + escapeHtml(r.reason) + '</td>' +
+                        '<td>' + escapeHtml(ReserveMath.display(r.refund_minor, scale)) + ' ' +
+                        escapeHtml(r.currency) + '</td>' +
+                        '<td class="mono">' + escapeHtml(r.destination) + '</td>' +
+                        '<td>' + escapeHtml(r.last_error || r.skip_reason || '') + '</td>' +
+                        '<td>' + refundActions(r) + '</td></tr>';
+                });
+                html += '</tbody></table></div>';
+                var container = document.getElementById('reserve-refunds');
+                container.innerHTML = html;
+                container.querySelectorAll('.refund-action').forEach(function (btn) {
+                    btn.addEventListener('click', function () {
+                        openRefundModal(btn.getAttribute('data-id'),
+                            btn.getAttribute('data-action'));
+                    });
+                });
+            });
+    }
+
+    function refundActions(r) {
+        var btn = function (action, label, cls) {
+            return '<button type="button" class="button tiny ' + cls +
+                ' refund-action" data-id="' + escapeHtml(r.refund_id) +
+                '" data-action="' + action + '">' + label + '</button> ';
+        };
+        if (r.status === 'needs_review') {
+            return btn('approve', 'Approve', '') + btn('cancel', 'Cancel', 'secondary');
+        }
+        if (r.status === 'queued') return btn('cancel', 'Cancel', 'secondary');
+        if (r.status === 'frozen') {
+            return btn('sent', 'Mark sent', '') + btn('reverse', 'Reverse', 'alert');
+        }
+        return '';
+    }
+
+    function openRefundModal(refundId, action) {
+        var needsHash = action === 'sent';
+        var warn = action === 'reverse'
+            ? '<p class="text-muted">The bridge refuses this until 600s after the claim and only after verifying on-chain that no matching refund exists — reversing one that landed would credit money that left the chain.</p>'
+            : '';
+        var body = warn +
+            (needsHash
+                ? '<label>Stellar tx hash<input type="text" id="refund-hash" class="mono"></label>'
+                : '') +
+            '<label>Note<textarea id="refund-note" rows="2"></textarea></label>';
+        Modal.open({
+            title: 'Refund — ' + action,
+            bodyHtml: body,
+            confirmLabel: action,
+            onConfirm: function (dialog, helpers) {
+                var payload = { action: action };
+                if (needsHash) {
+                    payload.stellar_tx_hash = dialog.querySelector('#refund-hash').value.trim();
+                }
+                var note = dialog.querySelector('#refund-note').value.trim();
+                if (note) payload.note = note;
+                API.setButtonLoading(helpers.button, true);
+                API.post('/admin/exchange-reserve/refunds/' + encodeURIComponent(refundId) +
+                    '/resolve', payload)
+                    .then(function (res) {
+                        Router.showToast((res && res.message) || 'Refund resolved', 'success');
+                        helpers.close();
+                        refreshAll();
+                    })
+                    .catch(function (err) { Router.showToast('Error: ' + err.message, 'alert'); })
+                    .then(function () { API.setButtonLoading(helpers.button, false); });
+            }
+        });
+    }
+
+    /* ---- replenishment ------------------------------------------------------ */
+
+    function loadReplenishment() {
+        return API.get('/admin/exchange-reserve/replenishment').then(function (res) {
+            var html = '<div class="table-wrap"><table><thead><tr>' +
+                '<th>Kind</th><th>Enabled</th><th>Per cycle</th><th>Daily cap</th>' +
+                '<th>Min float</th><th></th></tr></thead><tbody>';
+            (res.policies || []).forEach(function (p) {
+                // 0 means unconfigured, which is NOT the same as unlimited.
+                var unset = p.max_spend_minor === 0 || p.daily_spend_cap_minor === 0;
+                var badge = p.enabled
+                    ? '<span class="badge ok">enabled</span>'
+                    : '<span class="badge neutral">disabled</span>';
+                if (unset) badge += ' <span class="badge pending">caps unset</span>';
+                var scale = p.kind === 'usdc_to_usd' ? 7 : 7;
+                html += '<tr><td class="mono">' + escapeHtml(p.kind) + '</td>' +
+                    '<td>' + badge + '</td>' +
+                    '<td>' + escapeHtml(ReserveMath.display(p.max_spend_minor, scale)) + '</td>' +
+                    '<td>' + escapeHtml(ReserveMath.display(p.daily_spend_cap_minor, scale)) + '</td>' +
+                    '<td>' + escapeHtml(ReserveMath.display(p.min_float_minor, scale)) + '</td>' +
+                    '<td><button type="button" class="button tiny replenish-run" data-kind="' +
+                    escapeHtml(p.kind) + '">Run now</button></td></tr>';
+            });
+            html += '</tbody></table></div>';
+
+            var cycles = res.cycles || [];
+            if (cycles.length) {
+                html += '<h6>Recent cycles</h6><div class="table-wrap"><table><thead><tr>' +
+                    '<th>When</th><th>Kind</th><th>State</th><th>Spend</th>' +
+                    '<th>Received</th><th>Detail</th><th></th></tr></thead><tbody>';
+                cycles.forEach(function (c) {
+                    var got = c.actual_recv_minor !== null && c.actual_recv_minor !== undefined
+                        ? ReserveMath.display(c.actual_recv_minor, 7) + ' ' + c.recv_currency
+                        : '—';
+                    var action = c.state === 'in_transit'
+                        ? '<button type="button" class="button tiny cycle-confirm" data-id="' +
+                          escapeHtml(c.cycle_id) + '">Confirm receipt</button>'
+                        : '';
+                    html += '<tr><td>' + escapeHtml(c.created_at) + '</td>' +
+                        '<td class="mono">' + escapeHtml(c.kind) + '</td>' +
+                        '<td><span class="badge ' + ReserveMath.cycleBadge(c.state) + '">' +
+                        escapeHtml(c.state) + '</span></td>' +
+                        '<td>' + escapeHtml(ReserveMath.display(c.spend_minor, 7)) + ' ' +
+                        escapeHtml(c.spend_currency) + '</td>' +
+                        '<td>' + escapeHtml(got) + '</td>' +
+                        '<td>' + escapeHtml(c.last_error || c.quote_pricing || '') + '</td>' +
+                        '<td>' + action + '</td></tr>';
+                });
+                html += '</tbody></table></div>';
+            }
+
+            var container = document.getElementById('reserve-replenishment');
+            container.innerHTML = html;
+            container.querySelectorAll('.replenish-run').forEach(function (btn) {
+                btn.addEventListener('click', function () {
+                    runReplenishment(btn.getAttribute('data-kind'), btn);
+                });
+            });
+            container.querySelectorAll('.cycle-confirm').forEach(function (btn) {
+                btn.addEventListener('click', function () {
+                    openConfirmFiatModal(btn.getAttribute('data-id'));
+                });
+            });
+        });
+    }
+
+    function runReplenishment(kind, btn) {
+        API.setButtonLoading(btn, true);
+        API.post('/admin/exchange-reserve/replenishment/run', { kind: kind })
+            .then(function (res) {
+                Router.showToast((res && res.message) || 'Cycle requested', 'success');
+                refreshAll();
+            })
+            .catch(function (err) { Router.showToast('Error: ' + err.message, 'alert'); })
+            .then(function () { API.setButtonLoading(btn, false); });
+    }
+
+    function openConfirmFiatModal(cycleId) {
+        var body =
+            '<p class="text-muted">The bridge can see the USDC leave and the provider&rsquo;s status, but never a bank credit. Confirm only what you have actually seen on the statement.</p>' +
+            '<label>Amount received (USD, optional override)<input type="text" id="fiat-amount"></label>' +
+            '<label>Bank reference<input type="text" id="fiat-ref"></label>' +
+            '<label>Note<textarea id="fiat-note" rows="2"></textarea></label>' +
+            '<p class="form-error" id="fiat-error" hidden></p>';
+        Modal.open({
+            title: 'Confirm bank receipt',
+            bodyHtml: body,
+            confirmLabel: 'Confirm receipt',
+            onConfirm: function (dialog, helpers) {
+                var payload = {};
+                var raw = dialog.querySelector('#fiat-amount').value.trim();
+                if (raw) {
+                    var check = ReserveMath.validateAmount(raw, 2);
+                    if (!check.ok) {
+                        var errEl = dialog.querySelector('#fiat-error');
+                        errEl.textContent = check.error;
+                        errEl.hidden = false;
+                        return;
+                    }
+                    payload.amount_usd_cents = check.minor;
+                }
+                var ref = dialog.querySelector('#fiat-ref').value.trim();
+                if (ref) payload.external_ref = ref;
+                var note = dialog.querySelector('#fiat-note').value.trim();
+                if (note) payload.note = note;
+                API.setButtonLoading(helpers.button, true);
+                API.post('/admin/exchange-reserve/replenishment/' +
+                    encodeURIComponent(cycleId) + '/confirm-fiat', payload)
+                    .then(function (res) {
+                        Router.showToast((res && res.message) || 'Confirmed', 'success');
+                        helpers.close();
+                        refreshAll();
+                    })
+                    .catch(function (err) { Router.showToast('Error: ' + err.message, 'alert'); })
+                    .then(function () { API.setButtonLoading(helpers.button, false); });
+            }
+        });
+    }
+
     /* ---- boot ------------------------------------------------------------- */
 
     function refreshAll() {
@@ -537,6 +756,8 @@
         loadQueues().catch(function (err) { Router.showToast('Error: ' + err.message, 'alert'); });
         loadLedger().catch(function (err) { Router.showToast('Error: ' + err.message, 'alert'); });
         loadUnmatched().catch(function (err) { Router.showToast('Error: ' + err.message, 'alert'); });
+        loadRefunds().catch(function (err) { Router.showToast('Error: ' + err.message, 'alert'); });
+        loadReplenishment().catch(function (err) { Router.showToast('Error: ' + err.message, 'alert'); });
     }
 
     var kindSelect = document.getElementById('ledger-kind');

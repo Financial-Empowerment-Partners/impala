@@ -485,7 +485,11 @@ pub const RESERVE_STELLAR_USDC_TICKERS: &[&str] = &["usdcxlm"];
 pub const RESERVE_USD_TICKERS: &[&str] = &["usd"];
 
 /// Conversion-reserve journal entry kinds (mirrors
-/// `chk_conversion_reserve_entry_kind` in 031, in DDL order).
+/// `chk_conversion_reserve_entry_kind` after 032, in DDL order).
+///
+/// `kind` is VARCHAR(24): an over-long name fails at RUNTIME (SQLSTATE
+/// 22001) on a money path, not at compile time. A models.rs drift test
+/// asserts both the exact list and the length bound.
 pub const VALID_RESERVE_ENTRY_KINDS: &[&str] = &[
     "hold",
     "hold_release",
@@ -498,6 +502,58 @@ pub const VALID_RESERVE_ENTRY_KINDS: &[&str] = &[
     "withdrawal",
     "adjustment",
     "held_adjustment",
+    // Reserved price quotes (032).
+    "quote_hold",
+    "quote_release",
+    "quote_consume",
+    // Automated replenishment (032).
+    "replenish_hold",
+    "replenish_attempt",
+    "replenish_sent",
+    "replenish_credit",
+    "replenish_refund",
+    "replenish_release",
+    "offramp_hold",
+    "offramp_attempt",
+    "offramp_sent",
+    "offramp_refund",
+    "fiat_in_transit",
+    "fiat_confirmed",
+    "fiat_written_off",
+    // Automated refunds (032).
+    "refund_intent",
+    "refund_sent",
+    "refund_reversal",
+];
+
+/// Max length of a journal `kind` (mirrors the VARCHAR(24) column).
+/// Vocabulary-only: values are written as literals by the code that owns
+/// them and pinned against the DDL by a models.rs drift-guard test.
+#[allow(dead_code)]
+pub const MAX_RESERVE_ENTRY_KIND_LEN: usize = 24;
+
+/// Treasury entry kinds: the bridge moving its OWN inventory between assets,
+/// never customer flow.
+///
+/// These are excluded from the utilization/forecast aggregates. Including
+/// them would be a runaway loop: `offramp_sent` (USDC leaving to be sold for
+/// fiat) reads as USDC outflow, which inflates the EWMA, which inflates the
+/// suggested top-up, which buys USDC to replace the USDC the bridge
+/// deliberately spent. The same applies to `replenish_sent` on XLM.
+pub const RESERVE_INTERNAL_ENTRY_KINDS: &[&str] = &[
+    "replenish_hold",
+    "replenish_attempt",
+    "replenish_sent",
+    "replenish_credit",
+    "replenish_refund",
+    "replenish_release",
+    "offramp_hold",
+    "offramp_attempt",
+    "offramp_sent",
+    "offramp_refund",
+    "fiat_in_transit",
+    "fiat_confirmed",
+    "fiat_written_off",
 ];
 
 /// Entry kinds an admin may write via POST /admin/exchange-reserve/entries.
@@ -550,3 +606,140 @@ pub const RESERVE_DISBURSE_MAX_MULTIPLE: i64 = 2;
 /// Advisory-lock key serializing the reserve watcher tick across instances
 /// (pg_try_advisory_lock; losers skip the tick). Arbitrary but stable.
 pub const RESERVE_WATCHER_LOCK_KEY: i64 = 0x494d_5052_5352_5645;
+
+// ── Reserved price quotes (032) ────────────────────────────────────────
+
+/// Quote lifecycle statuses (mirrors `chk_conversion_reserve_quote_status`).
+/// Vocabulary-only: values are written as literals by the code that owns
+/// them and pinned against the DDL by a models.rs drift-guard test.
+#[allow(dead_code)]
+pub const VALID_RESERVE_QUOTE_STATUSES: &[&str] = &["open", "consumed", "expired"];
+
+/// Divertable order shapes (mirrors `chk_conversion_reserve_quote_shape` and
+/// the `provider_payload.shape` literals the reserve writes).
+/// Vocabulary-only: values are written as literals by the code that owns
+/// them and pinned against the DDL by a models.rs drift-guard test.
+#[allow(dead_code)]
+pub const RESERVE_QUOTE_SHAPES: &[&str] = &["auto_swap", "disburse"];
+
+/// Default price-lock window (seconds).
+///
+/// Deliberately an order of magnitude shorter than the deposit window: a
+/// quote hold delivers nothing to the customer while it waits (no pay-in is
+/// in flight), so it is pure optionality against the pool and earns the
+/// tightest window of the three.
+pub const DEFAULT_RESERVE_QUOTE_TTL_SECS: u64 = 300;
+/// Lower clamp for RESERVE_QUOTE_TTL_SECS (below this a lock is useless).
+pub const RESERVE_QUOTE_TTL_MIN_SECS: u64 = 60;
+/// Upper clamp for RESERVE_QUOTE_TTL_SECS.
+pub const RESERVE_QUOTE_TTL_MAX_SECS: u64 = 900;
+
+/// Ceiling on TOTAL price-option exposure: the quote lock plus the deposit
+/// window. A client holds a fixed `amount_to` for that whole span and may
+/// walk away for free, so this is a free at-the-money option written against
+/// the pool. Capped at the value 031 already sanctioned for the deposit
+/// window alone, so adding locks cannot widen the option beyond what was
+/// reviewed. Enforced at startup against the CONFIGURED pair — the maxima
+/// alone would sum to 8100.
+pub const RESERVE_TOTAL_PRICE_WINDOW_MAX_SECS: u64 = 7_200;
+
+/// Max reserve quotes expired per watcher tick.
+pub const RESERVE_QUOTE_EXPIRE_BATCH: i64 = 100;
+
+// ── Automated replenishment (032) ──────────────────────────────────────
+
+/// Replenishment cycle kinds (mirrors `chk_crr_kind`).
+pub const VALID_REPLENISH_KINDS: &[&str] = &["xlm_to_usdc", "usdc_to_usd"];
+
+/// Cycle states (mirrors `chk_crr_state`, in DDL order).
+/// Vocabulary-only: values are written as literals by the code that owns
+/// them and pinned against the DDL by a models.rs drift-guard test.
+#[allow(dead_code)]
+pub const VALID_REPLENISH_STATES: &[&str] = &[
+    "planned",
+    "creating",
+    "created",
+    "sending",
+    "sent",
+    "settled",
+    "in_transit",
+    "completed",
+    "refunded",
+    "failed",
+    "frozen",
+];
+
+/// States that free the single-in-flight slot. MUST stay identical to the
+/// `uq_crr_inflight` partial-index predicate in 032 — a drift test asserts
+/// it, because a mismatch silently breaks the one-cycle-at-a-time guarantee.
+/// Note `frozen` and `in_transit` are deliberately absent: unknown on-chain
+/// state and unverified fiat must both keep blocking new spending.
+/// Vocabulary-only: values are written as literals by the code that owns
+/// them and pinned against the DDL by a models.rs drift-guard test.
+#[allow(dead_code)]
+pub const RESERVE_TERMINAL_CYCLE_STATES: &[&str] = &["completed", "failed", "refunded"];
+
+/// Reference notional (whole XLM) used to price a cycle before its real size
+/// is known, and to detect slippage once it is.
+pub const RESERVE_REPLENISH_REFERENCE_XLM: &str = "100";
+
+/// Max cycles advanced per watcher tick (each is provider + chain I/O held
+/// under the tick's advisory lock).
+pub const RESERVE_REPLENISH_MAX_PER_TICK: i64 = 2;
+
+/// Age at which a cycle stuck mid-submit is frozen for admin resolution.
+/// Must exceed the signed transaction's validity window (signer
+/// TX_TIMEOUT_SECS = 300) so "still in flight" is never mistaken for
+/// "crashed".
+pub const RESERVE_REPLENISH_STALE_SECS: i64 = 600;
+const _: () = assert!(RESERVE_REPLENISH_STALE_SECS >= 2 * 300);
+
+// ── Automated refunds (032) ────────────────────────────────────────────
+
+/// Refund obligation statuses (mirrors `chk_crr_refund_status`).
+pub const VALID_RESERVE_REFUND_STATUSES: &[&str] = &[
+    "needs_review",
+    "queued",
+    "inflight",
+    "sent",
+    "failed",
+    "frozen",
+    "cancelled",
+];
+
+/// Refund reasons (mirrors `chk_crr_refund_reason`).
+/// Vocabulary-only: values are written as literals by the code that owns
+/// them and pinned against the DDL by a models.rs drift-guard test.
+#[allow(dead_code)]
+pub const VALID_RESERVE_REFUND_REASONS: &[&str] = &["late", "underpaid", "order_failed", "manual"];
+
+/// Reasons the driver queues WITHOUT a human. `manual` is excluded by
+/// construction, and so are `no_match`/`wrong_asset` stray inflows: an
+/// unmemoed deposit is exactly how ops tops the pool up, so auto-refunding
+/// one would wire the float back to ops.
+pub const RESERVE_AUTO_REFUND_REASONS: &[&str] = &["late", "underpaid", "order_failed"];
+
+/// Max on-chain refund submissions per obligation. Only definitive
+/// rejections are retried; ambiguous outcomes freeze instead.
+pub const RESERVE_REFUND_MAX_ATTEMPTS: i32 = 3;
+
+/// Grace before a queued refund becomes eligible — an ops window to cancel a
+/// wrong auto-refund before value leaves the pool.
+pub const RESERVE_REFUND_COOLDOWN_SECS: i64 = 300;
+
+/// Refunds attempted per watcher tick. Small on purpose: each is two Horizon
+/// round-trips under the tick's advisory lock.
+pub const RESERVE_REFUND_MAX_PER_TICK: i64 = 5;
+
+/// Dust floor (0.1 unit at 7dp). Below it a refund is parked for review —
+/// never silently absorbed.
+pub const RESERVE_REFUND_MIN_MINOR: i64 = 1_000_000;
+
+/// Refund memo prefix.
+///
+/// The refund memo MUST NOT equal an order ref: `find_onchain_payout` treats
+/// any outgoing payment carrying the order ref as proof the payout landed,
+/// so a refund wearing that memo would make `resolve fail` refuse and
+/// `resolve complete` record the refund's hash as the fulfillment.
+pub const RESERVE_REFUND_MEMO_PREFIX: &str = "RF";
+const _: () = assert!(RESERVE_REFUND_MEMO_PREFIX.len() + 8 <= 28);

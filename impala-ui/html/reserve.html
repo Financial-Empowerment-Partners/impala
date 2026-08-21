@@ -81,6 +81,22 @@
 
         <div class="card">
             <div class="card-section">
+                <h5>Replenishment</h5>
+                <p class="text-muted">Sells accumulated float back into the asset the pool pays out. Caps of 0 mean <em>unconfigured</em> &mdash; a cycle refuses to run until they are set. The fiat leg books as <em>in transit</em> until someone confirms the bank credit, because the bridge cannot see one.</p>
+                <div id="reserve-replenishment"></div>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-section">
+                <h5>Refunds</h5>
+                <p class="text-muted">Deposits the reserve cannot use, returned to their payer. Frozen rows had an ambiguous submit &mdash; the payment may have landed, so nothing is retried automatically.</p>
+                <div id="reserve-refunds"></div>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-section">
                 <h5>Unmatched Deposits</h5>
                 <p class="text-muted">Inflows to the reserve account that no order could accept (late, underpaid, wrong asset, unknown memo). Known assets are already credited to inventory; disposition is per runbook.</p>
                 <div id="reserve-unmatched"></div>

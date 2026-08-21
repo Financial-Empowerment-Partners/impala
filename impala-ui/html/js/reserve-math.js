@@ -140,6 +140,36 @@ var ReserveMath = (function () {
     }
 
     /**
+     * Badge class for a refund obligation's status.
+     *
+     * `frozen` and `failed` are red because both mean customer money is
+     * waiting on a human, not because the request errored.
+     * @param {string} status
+     * @returns {string} 'ok' | 'error' | 'pending' | 'neutral'
+     */
+    function refundBadge(status) {
+        if (status === 'sent') return 'ok';
+        if (status === 'frozen' || status === 'failed') return 'error';
+        if (status === 'needs_review') return 'pending';
+        return 'neutral';
+    }
+
+    /**
+     * Badge class for a replenishment cycle's state.
+     *
+     * `in_transit` is amber rather than green: the provider says it paid,
+     * but nobody has confirmed the bank credit, so the money is not yet real.
+     * @param {string} state
+     * @returns {string} 'ok' | 'error' | 'pending' | 'neutral'
+     */
+    function cycleBadge(state) {
+        if (state === 'completed') return 'ok';
+        if (state === 'frozen' || state === 'failed') return 'error';
+        if (state === 'in_transit') return 'pending';
+        return 'neutral';
+    }
+
+    /**
      * Geometry for the utilization chart: outflow bars + an inflow line,
      * scaled into a width x height viewBox. Pure data — reserve.js turns it
      * into SVG markup.
@@ -188,6 +218,8 @@ var ReserveMath = (function () {
         validateThresholdDollars: validateThresholdDollars,
         validateAmount: validateAmount,
         depletionBadge: depletionBadge,
+        refundBadge: refundBadge,
+        cycleBadge: cycleBadge,
         chartData: chartData
     };
 })();

@@ -892,6 +892,17 @@ pub struct ExchangeQuoteRequest {
     /// changelly_crypto: "float" | "fixed".
     #[serde(default)]
     pub rate_type: Option<String>,
+    /// Ask the bridge to LOCK this price and reserve the pool capacity behind
+    /// it (conversion reserve only). Best-effort: when no lock is available
+    /// the response is exactly what it is today.
+    #[serde(default)]
+    pub reserve_lock: Option<bool>,
+    /// Required with `reserve_lock` for crypto->crypto shapes: the trustline
+    /// check and the lock are both bound to THIS address.
+    #[serde(default)]
+    pub payout_address: Option<String>,
+    #[serde(default)]
+    pub payout_extra_id: Option<String>,
     /// changelly_fiat.
     #[serde(default)]
     pub country: Option<String>,
@@ -924,6 +935,11 @@ pub struct ExchangeQuoteResponse {
     pub message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub quotes: Option<serde_json::Value>,
+    /// Present only when the bridge issued a price lock. Absent means "no
+    /// lock available" and nothing more — a reason string would leak pool
+    /// state, so reasons go to metrics instead.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reserve_quote: Option<ReserveQuoteView>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -948,6 +964,13 @@ pub struct CreateExchangeOrderRequest {
     /// changelly_crypto fixed-rate quotes.
     #[serde(default)]
     pub rate_id: Option<String>,
+    /// A bridge-issued conversion-reserve quote id.
+    ///
+    /// Deliberately NOT `rate_id`: that is an opaque PROVIDER contract, and
+    /// `divert_shape` refuses any order carrying one. Parsed explicitly so a
+    /// malformed value yields the house 400 rather than a serde rejection.
+    #[serde(default)]
+    pub reserve_quote_id: Option<String>,
     /// owlpay v2.
     #[serde(default)]
     pub quote_id: Option<String>,
@@ -1116,6 +1139,14 @@ pub struct ReservePolicyUpdateRequest {
 #[derive(Debug, Deserialize)]
 pub struct ReserveBucketUpdateRequest {
     pub low_water_minor: i64,
+    /// Per-refund ceiling; 0 disables automatic refunds for this bucket.
+    /// Absent leaves the current value (backward compatible).
+    #[serde(default)]
+    pub refund_max_minor: Option<i64>,
+    /// Rolling-24h refund ceiling; 0 disables. There is deliberately no way
+    /// to express "unlimited".
+    #[serde(default)]
+    pub refund_daily_max_minor: Option<i64>,
 }
 
 /// `POST /admin/exchange-reserve/entries` body (manual ledger operation).
@@ -1173,6 +1204,8 @@ pub struct ReserveBucketView {
     pub available_minor: i64,
     pub held_minor: i64,
     pub low_water_minor: i64,
+    pub refund_max_minor: i64,
+    pub refund_daily_max_minor: i64,
     /// Live on-chain balance of the matching asset (best-effort; None when
     /// Horizon is unreachable). Lets admins see ledger-vs-chain drift.
     #[sqlx(skip)]
@@ -1200,12 +1233,18 @@ pub struct ReservePendingCounts {
     pub on_hold: i64,
     /// processing orders waiting on an admin fiat disbursement.
     pub awaiting_disbursement: i64,
+    /// Refund obligations waiting on the driver or on an admin.
+    pub refunds_queued: i64,
+    pub refunds_needs_review: i64,
+    pub refunds_frozen: i64,
 }
 
 /// `GET /admin/exchange-reserve` response.
 #[derive(Debug, Serialize)]
 pub struct ReserveStatusResponse {
     pub configured: bool,
+    /// Master switch for automatic refunds (DB-backed, default false).
+    pub refunds_enabled: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stellar_address: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1233,6 +1272,166 @@ pub struct ReserveEntryView {
     pub created_at: String,
 }
 
+/// `PUT /admin/exchange-reserve/replenishment/policies/{kind}`.
+#[derive(Debug, Deserialize)]
+pub struct ReplenishPolicyUpdateRequest {
+    pub enabled: bool,
+    pub target_days: i32,
+    pub window_days: i32,
+    pub min_need_minor: i64,
+    /// 0 means unconfigured — the cycle refuses to run. Not "unlimited".
+    pub max_spend_minor: i64,
+    pub daily_spend_cap_minor: i64,
+    pub cooldown_secs: i32,
+    /// Float never spent: fees and the Stellar base reserve, or the payout
+    /// buffer.
+    pub min_float_minor: i64,
+    pub min_price_minor: i64,
+    pub max_slippage_bps: i32,
+}
+
+/// One replenishment policy as shown to admins.
+#[derive(Debug, Serialize, sqlx::FromRow)]
+pub struct ReplenishPolicyView {
+    pub kind: String,
+    pub enabled: bool,
+    pub target_days: i32,
+    pub window_days: i32,
+    pub min_need_minor: i64,
+    pub max_spend_minor: i64,
+    pub daily_spend_cap_minor: i64,
+    pub cooldown_secs: i32,
+    pub min_float_minor: i64,
+    pub min_price_minor: i64,
+    pub max_slippage_bps: i32,
+    pub updated_at: String,
+}
+
+/// One replenishment cycle.
+#[derive(Debug, Serialize, sqlx::FromRow)]
+pub struct ReplenishCycleView {
+    pub cycle_id: Uuid,
+    pub kind: String,
+    pub state: String,
+    pub trigger_source: String,
+    pub spend_currency: String,
+    pub spend_minor: i64,
+    pub recv_currency: String,
+    pub quoted_recv_minor: i64,
+    pub actual_recv_minor: Option<i64>,
+    pub quote_pricing: Option<String>,
+    pub provider: String,
+    pub provider_ref: Option<String>,
+    pub send_tx_hash: Option<String>,
+    /// USD cents booked in transit, awaiting an admin's confirmation that
+    /// the bank credit actually arrived.
+    pub fiat_minor: Option<i64>,
+    pub last_error: Option<String>,
+    pub created_at: String,
+}
+
+/// `GET /admin/exchange-reserve/replenishment` response.
+#[derive(Debug, Serialize)]
+pub struct ReplenishStatusResponse {
+    pub policies: Vec<ReplenishPolicyView>,
+    pub cycles: Vec<ReplenishCycleView>,
+}
+
+/// `POST /admin/exchange-reserve/replenishment/run`.
+#[derive(Debug, Deserialize)]
+pub struct ReplenishRunRequest {
+    pub kind: String,
+}
+
+/// `POST /admin/exchange-reserve/replenishment/{cycle_id}/confirm-fiat`.
+#[derive(Debug, Deserialize)]
+pub struct ReplenishConfirmFiatRequest {
+    /// Actual cents received, when it differs from what the provider
+    /// reported. Bounded against the in-transit amount.
+    #[serde(default)]
+    pub amount_usd_cents: Option<i64>,
+    #[serde(default)]
+    pub external_ref: Option<String>,
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
+/// A bridge-issued locked price.
+///
+/// Deliberately carries NO pool internals (hold currency/amount, pricing
+/// method): pool capacity is bridge-private, and echoing it would let a
+/// caller probe the reserve's size.
+#[derive(Debug, Serialize)]
+pub struct ReserveQuoteView {
+    pub quote_id: Uuid,
+    pub from_currency: String,
+    pub to_currency: String,
+    pub amount_from: String,
+    /// The locked payout. Creating an order with
+    /// `reserve_quote_id = quote_id` honors exactly this.
+    pub amount_to: String,
+    pub expires_in_secs: i64,
+}
+
+/// One refund obligation (`GET /admin/exchange-reserve/refunds`).
+#[derive(Debug, Serialize, sqlx::FromRow)]
+pub struct ReserveRefundView {
+    pub refund_id: Uuid,
+    pub source_tx_hash: String,
+    pub order_id: Option<Uuid>,
+    pub currency: String,
+    pub amount_minor: i64,
+    pub refund_minor: i64,
+    pub destination: String,
+    pub reason: String,
+    pub status: String,
+    pub attempts: i32,
+    pub stellar_tx_hash: Option<String>,
+    pub last_error: Option<String>,
+    pub skip_reason: Option<String>,
+    pub resolved_by: Option<String>,
+    pub created_at: String,
+}
+
+/// `POST /admin/exchange-reserve/refunds` — mint an obligation by hand for a
+/// stray inflow the driver will not touch (unknown memo, wrong asset, muxed
+/// or missing sender, or a pre-032 row). The destination is explicit
+/// precisely because the bridge could not infer a safe one.
+#[derive(Debug, Deserialize)]
+pub struct ReserveRefundCreateRequest {
+    pub paging_token: String,
+    pub destination: String,
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
+/// `POST /admin/exchange-reserve/refunds/{refund_id}/resolve`.
+#[derive(Debug, Deserialize)]
+pub struct ReserveRefundResolveRequest {
+    /// approve | cancel | sent | reverse
+    pub action: String,
+    /// Required for `sent`: the hash proving the refund landed.
+    #[serde(default)]
+    pub stellar_tx_hash: Option<String>,
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
+/// `PUT /admin/exchange-reserve/settings` — subsystem master switches.
+#[derive(Debug, Deserialize)]
+pub struct ReserveSettingsUpdateRequest {
+    pub refunds_enabled: bool,
+}
+
+/// `GET /admin/exchange-reserve/refunds` query.
+#[derive(Debug, Deserialize)]
+pub struct ReserveRefundListQuery {
+    #[serde(flatten)]
+    pub page: PaginationParams,
+    #[serde(default)]
+    pub status: Option<String>,
+}
+
 /// One stray-inflow row (`GET /admin/exchange-reserve/unmatched`).
 #[derive(Debug, Serialize, sqlx::FromRow)]
 pub struct ReserveUnmatchedView {
@@ -1246,6 +1445,10 @@ pub struct ReserveUnmatchedView {
     pub memo: Option<String>,
     pub matched_order_id: Option<Uuid>,
     pub reason: String,
+    pub sender_address: Option<String>,
+    pub sender_muxed: Option<String>,
+    pub refund_id: Option<Uuid>,
+    pub refund_skip_reason: Option<String>,
     pub seen_at: String,
 }
 
@@ -1628,6 +1831,7 @@ mod tests {
             success: false,
             message: "changelly_fiat is not configured".to_string(),
             quotes: None,
+            reserve_quote: None,
         };
         let json = serde_json::to_string(&resp).unwrap();
         assert!(!json.contains("quotes"));
@@ -1636,9 +1840,13 @@ mod tests {
             success: true,
             message: "ok".to_string(),
             quotes: Some(serde_json::json!([{"rate": "0.35"}])),
+            reserve_quote: None,
         };
         let json = serde_json::to_string(&resp).unwrap();
         assert!(json.contains("\"quotes\""));
+        // Backward compatibility: with no lock issued the response is
+        // byte-identical to what every existing client already parses.
+        assert!(!json.contains("reserve_quote"));
     }
 
     #[test]
@@ -1806,8 +2014,8 @@ mod tests {
 
     #[test]
     fn test_reserve_entry_kinds_match_ddl() {
-        // Mirrors chk_conversion_reserve_entry_kind in
-        // 031_create_conversion_reserve.sql, in DDL order.
+        // Mirrors chk_conversion_reserve_entry_kind after
+        // 032_reserve_replenish_quote_refund.sql, in DDL order.
         assert_eq!(
             crate::constants::VALID_RESERVE_ENTRY_KINDS,
             &[
@@ -1821,7 +2029,26 @@ mod tests {
                 "topup",
                 "withdrawal",
                 "adjustment",
-                "held_adjustment"
+                "held_adjustment",
+                "quote_hold",
+                "quote_release",
+                "quote_consume",
+                "replenish_hold",
+                "replenish_attempt",
+                "replenish_sent",
+                "replenish_credit",
+                "replenish_refund",
+                "replenish_release",
+                "offramp_hold",
+                "offramp_attempt",
+                "offramp_sent",
+                "offramp_refund",
+                "fiat_in_transit",
+                "fiat_confirmed",
+                "fiat_written_off",
+                "refund_intent",
+                "refund_sent",
+                "refund_reversal"
             ]
         );
         // Admin-writable kinds are a strict subset: order-linked lifecycle
@@ -1831,6 +2058,172 @@ mod tests {
         }
         for lifecycle in ["hold", "deposit", "payout_attempt", "fulfillment"] {
             assert!(!crate::constants::RESERVE_ADMIN_ENTRY_KINDS.contains(&lifecycle));
+        }
+    }
+
+    #[test]
+    fn test_reserve_entry_kinds_fit_the_column() {
+        // `kind` is VARCHAR(24): an over-long name fails at RUNTIME (22001)
+        // on a money path, not at compile time.
+        for k in crate::constants::VALID_RESERVE_ENTRY_KINDS {
+            assert!(
+                k.len() <= crate::constants::MAX_RESERVE_ENTRY_KIND_LEN,
+                "entry kind {} exceeds VARCHAR({})",
+                k,
+                crate::constants::MAX_RESERVE_ENTRY_KIND_LEN
+            );
+        }
+    }
+
+    #[test]
+    fn test_reserve_internal_kinds_are_treasury_only() {
+        // Internal kinds are the bridge moving its own inventory. They are
+        // excluded from utilization: counting them would inflate the EWMA
+        // that sizes the next replenishment cycle, so an off-ramp would buy
+        // USDC to replace the USDC it deliberately spent — a runaway loop.
+        for k in crate::constants::RESERVE_INTERNAL_ENTRY_KINDS {
+            assert!(
+                crate::constants::VALID_RESERVE_ENTRY_KINDS.contains(k),
+                "{} is not a valid entry kind",
+                k
+            );
+            assert!(
+                !crate::constants::RESERVE_ADMIN_ENTRY_KINDS.contains(k),
+                "{} must not be admin-writable",
+                k
+            );
+        }
+        // Customer-facing kinds must NEVER be excluded from utilization, or
+        // the forecast stops seeing real demand.
+        for customer in [
+            "hold",
+            "deposit",
+            "unmatched_deposit",
+            "fulfillment",
+            "disbursement",
+            "refund_intent",
+        ] {
+            assert!(!crate::constants::RESERVE_INTERNAL_ENTRY_KINDS.contains(&customer));
+        }
+    }
+
+    #[test]
+    fn test_reserve_quote_vocabularies_match_ddl() {
+        // Mirrors chk_conversion_reserve_quote_status / _shape in 032.
+        assert_eq!(
+            crate::constants::VALID_RESERVE_QUOTE_STATUSES,
+            &["open", "consumed", "expired"]
+        );
+        // Also the provider_payload.shape literals the reserve writes.
+        assert_eq!(
+            crate::constants::RESERVE_QUOTE_SHAPES,
+            &["auto_swap", "disburse"]
+        );
+    }
+
+    #[test]
+    fn test_reserve_quote_ttl_band_and_total_price_window() {
+        assert_eq!(crate::constants::DEFAULT_RESERVE_QUOTE_TTL_SECS, 300);
+        assert_eq!(crate::constants::RESERVE_QUOTE_TTL_MIN_SECS, 60);
+        assert_eq!(crate::constants::RESERVE_QUOTE_TTL_MAX_SECS, 900);
+        // The ceiling is the deposit window's own maximum: adding a lock must
+        // not widen total price exposure beyond what 031 sanctioned.
+        assert_eq!(
+            crate::constants::RESERVE_TOTAL_PRICE_WINDOW_MAX_SECS,
+            crate::constants::RESERVE_DEPOSIT_TTL_MAX_SECS
+        );
+        // The maxima alone exceed the ceiling, which is why the check must
+        // run at startup against the CONFIGURED pair rather than as a const
+        // assert. Compared through runtime values so the assertion is not
+        // constant-folded away.
+        let max_pair = [
+            crate::constants::RESERVE_QUOTE_TTL_MAX_SECS,
+            crate::constants::RESERVE_DEPOSIT_TTL_MAX_SECS,
+        ];
+        assert!(
+            max_pair.iter().sum::<u64>() > crate::constants::RESERVE_TOTAL_PRICE_WINDOW_MAX_SECS
+        );
+    }
+
+    #[test]
+    fn test_replenish_vocabularies_match_ddl() {
+        // Mirrors chk_crr_kind / chk_crr_state in 032, in DDL order.
+        assert_eq!(
+            crate::constants::VALID_REPLENISH_KINDS,
+            &["xlm_to_usdc", "usdc_to_usd"]
+        );
+        assert_eq!(
+            crate::constants::VALID_REPLENISH_STATES,
+            &[
+                "planned",
+                "creating",
+                "created",
+                "sending",
+                "sent",
+                "settled",
+                "in_transit",
+                "completed",
+                "refunded",
+                "failed",
+                "frozen"
+            ]
+        );
+    }
+
+    #[test]
+    fn test_terminal_cycle_states_match_inflight_index() {
+        // MUST equal the uq_crr_inflight partial-index predicate in 032:
+        // that index is what enforces one cycle in flight per kind, so a
+        // mismatch silently breaks the guarantee.
+        assert_eq!(
+            crate::constants::RESERVE_TERMINAL_CYCLE_STATES,
+            &["completed", "failed", "refunded"]
+        );
+        for s in crate::constants::RESERVE_TERMINAL_CYCLE_STATES {
+            assert!(crate::constants::VALID_REPLENISH_STATES.contains(s));
+        }
+        // Unknown on-chain state and unverified fiat must keep blocking.
+        for blocking in ["frozen", "in_transit", "sending", "sent"] {
+            assert!(
+                !crate::constants::RESERVE_TERMINAL_CYCLE_STATES.contains(&blocking),
+                "{} must continue to occupy the in-flight slot",
+                blocking
+            );
+        }
+    }
+
+    #[test]
+    fn test_reserve_refund_vocabularies_match_ddl() {
+        // Mirrors chk_crr_refund_status / chk_crr_refund_reason in 032.
+        assert_eq!(
+            crate::constants::VALID_RESERVE_REFUND_STATUSES,
+            &[
+                "needs_review",
+                "queued",
+                "inflight",
+                "sent",
+                "failed",
+                "frozen",
+                "cancelled"
+            ]
+        );
+        assert_eq!(
+            crate::constants::VALID_RESERVE_REFUND_REASONS,
+            &["late", "underpaid", "order_failed", "manual"]
+        );
+    }
+
+    #[test]
+    fn test_auto_refund_reasons_are_a_strict_subset() {
+        for r in crate::constants::RESERVE_AUTO_REFUND_REASONS {
+            assert!(crate::constants::VALID_RESERVE_REFUND_REASONS.contains(r));
+        }
+        // A human must name the destination for these.
+        assert!(!crate::constants::RESERVE_AUTO_REFUND_REASONS.contains(&"manual"));
+        // Stray-inflow reasons that are NOT auto-refundable: an unmemoed
+        // deposit is how ops tops the pool up.
+        for manual_only in ["no_match", "wrong_asset"] {
+            assert!(!crate::constants::RESERVE_AUTO_REFUND_REASONS.contains(&manual_only));
         }
     }
 

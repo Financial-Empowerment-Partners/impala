@@ -211,6 +211,16 @@ fn require_field<'a>(
 /// Validate a quote request: vocabulary, provider/direction pairing, currency
 /// and amount formats, and the optional provider-specific fields.
 pub(crate) fn validate_quote_request(p: &ExchangeQuoteRequest) -> Result<(), AppError> {
+    // Lock coordinates are validated when supplied; their ABSENCE simply
+    // means no lock is issued, keeping `reserve_lock` best-effort.
+    if p.reserve_lock.unwrap_or(false) {
+        if let Some(a) = p.payout_address.as_deref() {
+            crate::validate::validate_exchange_address(a)?;
+        }
+        if let Some(x) = p.payout_extra_id.as_deref() {
+            crate::validate::validate_exchange_extra_id(x)?;
+        }
+    }
     validate_provider(&p.provider)?;
     validate_direction(&p.direction)?;
     validate_provider_direction(&p.provider, &p.direction)?;
@@ -272,6 +282,17 @@ pub(crate) fn validate_order_request(p: &CreateExchangeOrderRequest) -> Result<(
     validate_rate_type(p.rate_type.as_deref())?;
     if let Some(ref v) = p.rate_id {
         validate_token_field("rate_id", v, 256)?;
+    }
+    if let Some(v) = p.reserve_quote_id.as_deref() {
+        uuid::Uuid::parse_str(v)
+            .map_err(|_| AppError::BadRequest("reserve_quote_id must be a UUID".to_string()))?;
+        // The reserve cannot honor a bridge lock and a provider fixed-rate
+        // contract at once — divert_shape refuses the latter outright.
+        if p.rate_id.is_some() || is_fixed_rate(p.rate_type.as_deref()) {
+            return Err(AppError::BadRequest(
+                "reserve_quote_id cannot be combined with rate_id or rate_type=fixed".to_string(),
+            ));
+        }
     }
     if let Some(ref v) = p.quote_id {
         validate_token_field("quote_id", v, 128)?;
@@ -716,12 +737,18 @@ pub async fn list_providers(
 }
 
 /// Get exchange quotes/offers from a provider (`POST /exchange/quote`).
+#[allow(clippy::too_many_arguments)]
 pub async fn create_quote(
     user: AuthenticatedUser,
+    Extension(pool): Extension<PgPool>,
     Extension(redis_pool): Extension<Arc<deadpool_redis::Pool>>,
+    Extension(metrics): Extension<Arc<AppMetrics>>,
+    Extension(stellar_config): Extension<Arc<crate::config::StellarConfig>>,
+    Extension(http): Extension<Arc<reqwest::Client>>,
     owlpay: Option<Extension<Arc<OwlPayProvider>>>,
     changelly_crypto: Option<Extension<Arc<ChangellyCrypto>>>,
     changelly_fiat: Option<Extension<Arc<ChangellyFiat>>>,
+    reserve: Option<Extension<Arc<crate::exchange::reserve::ConversionReserve>>>,
     headers: HeaderMap,
     Json(payload): Json<ExchangeQuoteRequest>,
 ) -> Result<Json<ExchangeQuoteResponse>, AppError> {
@@ -801,10 +828,59 @@ pub async fn create_quote(
         }
     };
 
+    // Price lock, best effort. Any reason a lock cannot be issued leaves the
+    // response byte-identical to what it has always been — and carries NO
+    // reason, because "the pool cannot cover this" is pool state.
+    let reserve_quote = match (payload.reserve_lock.unwrap_or(false), &reserve) {
+        (true, Some(Extension(reserve))) => {
+            // A lock moves pool capacity, unlike a passthrough quote, so it
+            // gets the tighter custodial budget rather than the quote budget.
+            crate::redis_helpers::check_rate_limit(
+                &redis_pool,
+                "exchange_quote_lock",
+                &user.account_id,
+                crate::constants::SIGN_RATE_LIMIT_MAX_REQUESTS,
+                crate::constants::SIGN_RATE_LIMIT_WINDOW_SECS,
+            )
+            .await?;
+            let ctx = crate::exchange::reserve::DivertContext {
+                pool: &pool,
+                metrics: &metrics,
+                reserve,
+                changelly_crypto: changelly_crypto.as_ref().map(|ext| &ext.0),
+                http: &http,
+                horizon_url: &stellar_config.horizon_url,
+            };
+            // Best-effort by contract: a lock that cannot be minted — for
+            // any reason, including a database hiccup — must not turn an
+            // otherwise good quote response into an error.
+            let issued = match crate::exchange::reserve::try_lock_quote(
+                &ctx,
+                &user.account_id,
+                &payload,
+                &quotes,
+            )
+            .await
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    warn!("create_quote: price lock unavailable: {:?}", e);
+                    None
+                }
+            };
+            if issued.is_some() {
+                metrics.reserve_quotes_issued.add(1, &[]);
+            }
+            issued
+        }
+        _ => None,
+    };
+
     Ok(Json(ExchangeQuoteResponse {
         success: true,
         message: "Quotes retrieved successfully".to_string(),
         quotes: Some(quotes),
+        reserve_quote,
     }))
 }
 
@@ -1013,7 +1089,11 @@ fn order_db_fail(
     AppError::InternalError("Database error".to_string())
 }
 
-async fn changelly_crypto_order(
+/// Create a Changelly swap and normalize the result.
+///
+/// `pub(crate)` because the replenishment job creates provider orders
+/// server-side, off the HTTP path — see `exchange::replenish`.
+pub(crate) async fn changelly_crypto_order(
     provider: &Arc<ChangellyCrypto>,
     p: &CreateExchangeOrderRequest,
     create_tx: &ChangellyCreateTx,
@@ -1140,6 +1220,12 @@ pub async fn create_order(
     // own reserve instead of the provider. Every miss (shape, policy,
     // threshold, funds, quote, trustline) falls through to the normal
     // provider path below — the reserve must never break it.
+    if payload.reserve_quote_id.is_some() && reserve.is_none() {
+        return Err(AppError::BadRequest(
+            "reserve_quote_id was supplied but the conversion reserve is not configured"
+                .to_string(),
+        ));
+    }
     if let Some(Extension(ref reserve)) = reserve {
         let ctx = crate::exchange::reserve::DivertContext {
             pool: &pool,

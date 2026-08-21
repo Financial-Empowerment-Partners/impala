@@ -32,8 +32,8 @@ use crate::constants::{
 use crate::error::AppError;
 use crate::events::AccountEvent;
 use crate::exchange::reserve::{
-    memo_matches_ref, minor_to_decimal_string, parse_decimal_to_minor, ConversionReserve,
-    RESERVE_BUCKET_APPLY_SQL, RESERVE_ENTRY_INSERT_SQL,
+    journal_insert, memo_matches_ref, minor_to_decimal_string, parse_decimal_to_minor,
+    ConversionReserve, JournalEntry, ORDER_HOLD_SQL, RESERVE_BUCKET_APPLY_SQL,
 };
 use crate::models::{
     PaginationParams, ReserveBucketUpdateRequest, ReserveBucketView, ReserveCurrencyForecast,
@@ -80,7 +80,7 @@ pub async fn get_status(
 ) -> Result<Json<ReserveStatusResponse>, AppError> {
     let mut buckets: Vec<ReserveBucketView> = sqlx::query_as(
         "SELECT currency, minor_scale, available AS available_minor, held AS held_minor, \
-                low_water AS low_water_minor \
+                low_water AS low_water_minor, refund_max_minor, refund_daily_max_minor \
          FROM conversion_reserve ORDER BY currency",
     )
     .fetch_all(&pool)
@@ -126,6 +126,28 @@ pub async fn get_status(
     .await
     .map_err(db_err("disbursement count"))?;
 
+    let refund_counts: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT status, COUNT(*) FROM conversion_reserve_refund \
+         WHERE status IN ('queued', 'needs_review', 'frozen') GROUP BY status",
+    )
+    .fetch_all(&pool)
+    .await
+    .map_err(db_err("refund counts"))?;
+    for (status, n) in refund_counts {
+        match status.as_str() {
+            "queued" => pending.refunds_queued = n,
+            "needs_review" => pending.refunds_needs_review = n,
+            "frozen" => pending.refunds_frozen = n,
+            _ => {}
+        }
+    }
+
+    let refunds_enabled: bool =
+        sqlx::query_scalar("SELECT refunds_enabled FROM conversion_reserve_state WHERE id")
+            .fetch_one(&pool)
+            .await
+            .map_err(db_err("refund settings"))?;
+
     let (configured, stellar_address, ttl) = match &reserve {
         Some(Extension(r)) => (
             true,
@@ -167,6 +189,7 @@ pub async fn get_status(
 
     Ok(Json(ReserveStatusResponse {
         configured,
+        refunds_enabled,
         stellar_address,
         deposit_ttl_secs: ttl,
         buckets,
@@ -247,12 +270,28 @@ pub async fn update_bucket(
             "low_water_minor must be >= 0".to_string(),
         ));
     }
-    let updated = sqlx::query("UPDATE conversion_reserve SET low_water = $2 WHERE currency = $1")
-        .bind(&currency)
-        .bind(payload.low_water_minor)
-        .execute(&pool)
-        .await
-        .map_err(db_err("bucket update"))?;
+    for (name, v) in [
+        ("refund_max_minor", payload.refund_max_minor),
+        ("refund_daily_max_minor", payload.refund_daily_max_minor),
+    ] {
+        if v.is_some_and(|v| v < 0) {
+            return Err(AppError::BadRequest(format!("{} must be >= 0", name)));
+        }
+    }
+    let updated = sqlx::query(
+        "UPDATE conversion_reserve \
+         SET low_water = $2, \
+             refund_max_minor = COALESCE($3, refund_max_minor), \
+             refund_daily_max_minor = COALESCE($4, refund_daily_max_minor) \
+         WHERE currency = $1",
+    )
+    .bind(&currency)
+    .bind(payload.low_water_minor)
+    .bind(payload.refund_max_minor)
+    .bind(payload.refund_daily_max_minor)
+    .execute(&pool)
+    .await
+    .map_err(db_err("bucket update"))?;
     if updated.rows_affected() == 0 {
         return Err(AppError::NotFound("No such reserve bucket".to_string()));
     }
@@ -330,22 +369,20 @@ pub async fn create_entry(
         AppError::Conflict("No such bucket, or the operation would overdraw it".to_string())
     })?;
 
-    sqlx::query(RESERVE_ENTRY_INSERT_SQL)
-        .bind(&payload.currency)
-        .bind(&payload.kind)
-        .bind(delta)
-        .bind(held_delta)
-        .bind(bal_after)
-        .bind(held_after)
-        .bind(Option::<Uuid>::None)
-        .bind(Option::<String>::None)
-        .bind(Option::<String>::None)
-        .bind(Option::<String>::None)
-        .bind(Some(user.account_id.clone()))
-        .bind(&payload.note)
-        .execute(&mut *tx)
-        .await
-        .map_err(db_err("entry insert"))?;
+    journal_insert(JournalEntry {
+        currency: payload.currency.clone(),
+        kind: payload.kind.clone(),
+        delta,
+        held_delta,
+        balance_after: bal_after,
+        held_after,
+        admin_account_id: Some(user.account_id.clone()),
+        note: payload.note.clone(),
+        ..Default::default()
+    })
+    .execute(&mut *tx)
+    .await
+    .map_err(db_err("entry insert"))?;
     crate::events::emit_event(
         &mut tx,
         &AccountEvent::ReserveEntryRecorded {
@@ -472,7 +509,8 @@ pub async fn list_unmatched(
         .map_err(db_err("unmatched count"))?;
     let data = sqlx::query_as::<_, ReserveUnmatchedView>(&format!(
         "SELECT paging_token, tx_hash, op_type, asset_code, asset_issuer, amount, \
-                amount_minor, memo, matched_order_id, reason, \
+                amount_minor, memo, matched_order_id, reason, sender_address, \
+                sender_muxed, refund_id, refund_skip_reason, \
                 to_char(seen_at AT TIME ZONE 'UTC', '{ts}') AS seen_at \
          FROM conversion_reserve_unmatched \
          ORDER BY seen_at DESC, paging_token DESC LIMIT $1 OFFSET $2",
@@ -490,6 +528,527 @@ pub async fn list_unmatched(
         per_page: per_page as u64,
         total: total.max(0) as u64,
     }))
+}
+
+// ── Refunds ────────────────────────────────────────────────────────────
+
+/// `GET /admin/exchange-reserve/refunds` — the refund queue.
+pub async fn list_refunds(
+    _user: AdminUser,
+    Extension(pool): Extension<PgPool>,
+    Query(q): Query<crate::models::ReserveRefundListQuery>,
+) -> Result<Json<crate::models::PaginatedResponse<crate::models::ReserveRefundView>>, AppError> {
+    if let Some(st) = &q.status {
+        if !crate::constants::VALID_RESERVE_REFUND_STATUSES.contains(&st.as_str()) {
+            return Err(AppError::BadRequest(format!(
+                "Invalid status '{}'. Must be one of: {}",
+                st,
+                crate::constants::VALID_RESERVE_REFUND_STATUSES.join(", ")
+            )));
+        }
+    }
+    let (per_page, offset) = q.page.clamped();
+    let where_sql = if q.status.is_some() {
+        "WHERE status = $3"
+    } else {
+        ""
+    };
+
+    let count_sql = format!(
+        "SELECT COUNT(*) FROM conversion_reserve_refund {}",
+        where_sql.replace("$3", "$1")
+    );
+    let mut count_q = sqlx::query_scalar::<_, i64>(&count_sql);
+    if let Some(st) = &q.status {
+        count_q = count_q.bind(st);
+    }
+    let total: i64 = count_q
+        .fetch_one(&pool)
+        .await
+        .map_err(db_err("refund count"))?;
+
+    let list_sql = format!(
+        "SELECT refund_id, source_tx_hash, order_id, currency, amount_minor, refund_minor, \
+                destination, reason, status, attempts, stellar_tx_hash, last_error, \
+                skip_reason, resolved_by, \
+                to_char(created_at AT TIME ZONE 'UTC', '{ts}') AS created_at \
+         FROM conversion_reserve_refund {w} \
+         ORDER BY created_at DESC, refund_id DESC LIMIT $1 OFFSET $2",
+        ts = TS_FMT,
+        w = where_sql
+    );
+    let mut list_q = sqlx::query_as::<_, crate::models::ReserveRefundView>(&list_sql)
+        .bind(per_page)
+        .bind(offset);
+    if let Some(st) = &q.status {
+        list_q = list_q.bind(st);
+    }
+    let data = list_q
+        .fetch_all(&pool)
+        .await
+        .map_err(db_err("refund list"))?;
+
+    Ok(Json(crate::models::PaginatedResponse {
+        data,
+        page: ((offset / per_page) + 1) as u64,
+        per_page: per_page as u64,
+        total: total.max(0) as u64,
+    }))
+}
+
+/// `PUT /admin/exchange-reserve/settings` — the refund master switch.
+pub async fn update_settings(
+    user: AdminUser,
+    Extension(pool): Extension<PgPool>,
+    Json(payload): Json<crate::models::ReserveSettingsUpdateRequest>,
+) -> Result<Json<ReserveActionResponse>, AppError> {
+    sqlx::query("UPDATE conversion_reserve_state SET refunds_enabled = $1 WHERE id")
+        .bind(payload.refunds_enabled)
+        .execute(&pool)
+        .await
+        .map_err(db_err("settings update"))?;
+    info!(
+        "update_settings: refunds_enabled={} by={}",
+        payload.refunds_enabled, user.account_id
+    );
+    Ok(ok("Reserve settings updated"))
+}
+
+/// `POST /admin/exchange-reserve/refunds` — mint an obligation by hand.
+///
+/// For the cases the driver deliberately refuses: unknown memo, wrong asset,
+/// a muxed or missing sender, or a row that predates sender capture. The
+/// admin supplies the destination precisely because the bridge could not
+/// infer a safe one.
+pub async fn create_refund(
+    user: AdminUser,
+    Extension(pool): Extension<PgPool>,
+    Extension(redis_pool): Extension<Arc<deadpool_redis::Pool>>,
+    reserve: Option<Extension<Arc<ConversionReserve>>>,
+    Json(payload): Json<crate::models::ReserveRefundCreateRequest>,
+) -> Result<Json<ReserveActionResponse>, AppError> {
+    crate::redis_helpers::check_rate_limit(
+        &redis_pool,
+        "reserve_admin",
+        &user.account_id,
+        SIGN_RATE_LIMIT_MAX_REQUESTS,
+        SIGN_RATE_LIMIT_WINDOW_SECS,
+    )
+    .await?;
+    crate::validate::validate_stellar_account_id(&payload.destination)?;
+    let Extension(reserve) = reserve
+        .ok_or_else(|| AppError::BadRequest("conversion reserve is not configured".to_string()))?;
+    // The same destination guards the automatic path applies.
+    if payload.destination == reserve.stellar_address {
+        return Err(AppError::BadRequest(
+            "destination is the reserve account itself".to_string(),
+        ));
+    }
+    if payload.destination == reserve.usdc_issuer {
+        return Err(AppError::BadRequest(
+            "destination is the asset issuer; sending there would burn the asset".to_string(),
+        ));
+    }
+
+    // Resolve the bucket from the ACTUAL asset. Mapping every non-native
+    // inflow to USDC would refund real USDC for a foreign-token deposit.
+    let row: Option<UnmatchedSourceRow> = sqlx::query_as(
+        "SELECT tx_hash, amount_minor, \
+                CASE \
+                    WHEN asset_code IS NULL THEN 'XLM' \
+                    WHEN asset_code = $2 AND asset_issuer = $3 THEN 'USDC' \
+                    ELSE NULL \
+                END AS currency, \
+                matched_order_id \
+         FROM conversion_reserve_unmatched WHERE paging_token = $1",
+    )
+    .bind(&payload.paging_token)
+    .bind(&reserve.usdc_code)
+    .bind(&reserve.usdc_issuer)
+    .fetch_optional(&pool)
+    .await
+    .map_err(db_err("unmatched lookup"))?;
+    let UnmatchedSourceRow {
+        tx_hash,
+        amount_minor,
+        currency,
+        matched_order_id: order_id,
+    } = row.ok_or_else(|| AppError::NotFound("No such unmatched deposit".to_string()))?;
+    let amount_minor = amount_minor.ok_or_else(|| {
+        AppError::BadRequest(
+            "This inflow's asset is not tracked by the reserve; refund it out of band".to_string(),
+        )
+    })?;
+    let currency = currency.ok_or_else(|| {
+        AppError::BadRequest(
+            "This inflow's asset is not one the reserve can send; return it out of band"
+                .to_string(),
+        )
+    })?;
+
+    let inserted: Option<Uuid> = sqlx::query_scalar(
+        "INSERT INTO conversion_reserve_refund \
+             (source_paging_token, source_tx_hash, order_id, currency, amount_minor, \
+              refund_minor, destination, reason, status, resolved_by, last_error) \
+         VALUES ($1, $2, $3, $4, $5, $5, $6, 'manual', 'queued', $7, $8) \
+         ON CONFLICT (source_paging_token) DO NOTHING \
+         RETURNING refund_id",
+    )
+    .bind(&payload.paging_token)
+    .bind(&tx_hash)
+    .bind(order_id)
+    .bind(&currency)
+    .bind(amount_minor)
+    .bind(&payload.destination)
+    .bind(&user.account_id)
+    .bind(&payload.note)
+    .fetch_optional(&pool)
+    .await
+    .map_err(db_err("manual refund insert"))?;
+
+    let refund_id = inserted.ok_or_else(|| {
+        AppError::Conflict("A refund already exists for this deposit".to_string())
+    })?;
+    sqlx::query("UPDATE conversion_reserve_unmatched SET refund_id = $2 WHERE paging_token = $1")
+        .bind(&payload.paging_token)
+        .bind(refund_id)
+        .execute(&pool)
+        .await
+        .map_err(db_err("manual refund link"))?;
+
+    info!(
+        "create_refund: refund={} {} {} -> {} by={}",
+        refund_id, amount_minor, currency, payload.destination, user.account_id
+    );
+    Ok(ok("Refund queued"))
+}
+
+/// `POST /admin/exchange-reserve/refunds/{refund_id}/resolve`.
+///
+/// `approve` releases a reviewed refund to the driver; `cancel` drops one
+/// that never moved value; `sent` records a refund that did land; `reverse`
+/// restores the ledger for one that provably did not.
+#[allow(clippy::too_many_arguments)]
+pub async fn resolve_refund(
+    user: AdminUser,
+    Extension(pool): Extension<PgPool>,
+    Extension(redis_pool): Extension<Arc<deadpool_redis::Pool>>,
+    Extension(metrics): Extension<Arc<AppMetrics>>,
+    Extension(stellar_config): Extension<Arc<crate::config::StellarConfig>>,
+    Extension(http): Extension<Arc<reqwest::Client>>,
+    reserve: Option<Extension<Arc<ConversionReserve>>>,
+    Path(refund_id): Path<Uuid>,
+    Json(payload): Json<crate::models::ReserveRefundResolveRequest>,
+) -> Result<Json<ReserveActionResponse>, AppError> {
+    crate::redis_helpers::check_rate_limit(
+        &redis_pool,
+        "reserve_admin",
+        &user.account_id,
+        SIGN_RATE_LIMIT_MAX_REQUESTS,
+        SIGN_RATE_LIMIT_WINDOW_SECS,
+    )
+    .await?;
+    if !matches!(
+        payload.action.as_str(),
+        "approve" | "cancel" | "sent" | "reverse"
+    ) {
+        return Err(AppError::BadRequest(
+            "action must be approve, cancel, sent or reverse".to_string(),
+        ));
+    }
+
+    let row: Option<RefundActionRow> = sqlx::query_as(
+        "SELECT status, currency, refund_minor, destination, memo, \
+                EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - claimed_at))::bigint AS claim_age \
+         FROM conversion_reserve_refund WHERE refund_id = $1",
+    )
+    .bind(refund_id)
+    .fetch_optional(&pool)
+    .await
+    .map_err(db_err("refund lookup"))?;
+    let RefundActionRow {
+        status,
+        currency,
+        refund_minor,
+        destination,
+        memo,
+        claim_age,
+    } = row.ok_or_else(|| AppError::NotFound("No such refund".to_string()))?;
+
+    match payload.action.as_str() {
+        "approve" => {
+            let updated = sqlx::query(
+                "UPDATE conversion_reserve_refund \
+                 SET status = 'queued', resolved_by = $2, \
+                     next_attempt_at = CURRENT_TIMESTAMP \
+                 WHERE refund_id = $1 AND status = 'needs_review'",
+            )
+            .bind(refund_id)
+            .bind(&user.account_id)
+            .execute(&pool)
+            .await
+            .map_err(db_err("refund approve"))?;
+            if updated.rows_affected() == 0 {
+                return Err(AppError::Conflict(
+                    "Only a refund awaiting review can be approved".to_string(),
+                ));
+            }
+            info!(
+                "resolve_refund: refund={} action=approve by={}",
+                refund_id, user.account_id
+            );
+            Ok(ok("Refund approved and queued"))
+        }
+        "cancel" => {
+            // Only states where nothing has been debited.
+            let updated = sqlx::query(
+                "UPDATE conversion_reserve_refund \
+                 SET status = 'cancelled', resolved_by = $2, \
+                     resolved_at = CURRENT_TIMESTAMP, last_error = $3 \
+                 WHERE refund_id = $1 AND status IN ('needs_review', 'queued')",
+            )
+            .bind(refund_id)
+            .bind(&user.account_id)
+            .bind(&payload.note)
+            .execute(&pool)
+            .await
+            .map_err(db_err("refund cancel"))?;
+            if updated.rows_affected() == 0 {
+                return Err(AppError::Conflict(
+                    "Only a queued or awaiting-review refund can be cancelled".to_string(),
+                ));
+            }
+            info!(
+                "resolve_refund: refund={} action=cancel by={}",
+                refund_id, user.account_id
+            );
+            Ok(ok("Refund cancelled"))
+        }
+        "sent" => {
+            let hash = payload.stellar_tx_hash.clone().ok_or_else(|| {
+                AppError::BadRequest("stellar_tx_hash is required to record a refund".to_string())
+            })?;
+            if status != "frozen" && status != "inflight" {
+                return Err(AppError::Conflict(
+                    "Only a frozen or in-flight refund can be recorded as sent".to_string(),
+                ));
+            }
+            record_admin_refund_sent(&pool, &metrics, &user, refund_id, &currency, &hash).await
+        }
+        _ => {
+            // REVERSE — the dangerous one. Reversing a refund that actually
+            // landed would credit `available` for money that left the chain.
+            if status != "frozen" {
+                return Err(AppError::Conflict(
+                    "Only a frozen refund can be reversed".to_string(),
+                ));
+            }
+            let age = claim_age.unwrap_or(0);
+            if age < RESERVE_RESOLVE_FAIL_MIN_INTENT_AGE_SECS {
+                return Err(AppError::Conflict(format!(
+                    "The refund was claimed {}s ago and a submitted transaction may still land. \
+                     Retry after {}s",
+                    age, RESERVE_RESOLVE_FAIL_MIN_INTENT_AGE_SECS
+                )));
+            }
+            // Fail closed: refuse when the chain cannot be checked.
+            let Extension(reserve) = reserve.ok_or_else(|| {
+                AppError::Conflict(
+                    "The reserve is not configured, so the chain cannot be checked".to_string(),
+                )
+            })?;
+            if let Some(hash) = find_onchain_refund(
+                &http,
+                &stellar_config.horizon_url,
+                &reserve.stellar_address,
+                &destination,
+                refund_minor,
+                memo.as_deref(),
+            )
+            .await?
+            {
+                return Err(AppError::Conflict(format!(
+                    "A matching refund exists on-chain (tx {}); resolve with action=sent instead",
+                    hash
+                )));
+            }
+            reverse_admin_refund(
+                &pool,
+                &metrics,
+                &user,
+                refund_id,
+                &currency,
+                refund_minor,
+                &payload.note,
+            )
+            .await
+        }
+    }
+}
+
+/// Search the reserve's recent outgoing payments for this refund.
+///
+/// Unambiguous because the refund memo is deliberately distinct from an
+/// order ref, so this can never confuse a refund with a payout.
+async fn find_onchain_refund(
+    http: &reqwest::Client,
+    horizon_url: &str,
+    reserve_address: &str,
+    destination: &str,
+    refund_minor: i64,
+    memo: Option<&str>,
+) -> Result<Option<String>, AppError> {
+    let url = format!(
+        "{}/accounts/{}/payments?order=desc&limit={}&join=transactions",
+        horizon_url.trim_end_matches('/'),
+        reserve_address,
+        RESERVE_WATCH_PAGE_LIMIT
+    );
+    let resp = http.get(&url).send().await.map_err(|e| {
+        error!("find_onchain_refund: horizon error: {}", e);
+        AppError::InternalError("Cannot verify on-chain state; retry later".to_string())
+    })?;
+    if !resp.status().is_success() {
+        error!("find_onchain_refund: horizon HTTP {}", resp.status());
+        return Err(AppError::InternalError(
+            "Cannot verify on-chain state; retry later".to_string(),
+        ));
+    }
+    let body: serde_json::Value = resp.json().await.map_err(|e| {
+        error!("find_onchain_refund: parse error: {}", e);
+        AppError::InternalError("Cannot verify on-chain state; retry later".to_string())
+    })?;
+    for p in crate::stellar::horizon::parse_payments_page(&body).records {
+        // Outgoing only.
+        if p.to == reserve_address {
+            continue;
+        }
+        let amount_hit =
+            parse_decimal_to_minor(&p.amount, RESERVE_SCALE_STELLAR) == Some(refund_minor);
+        let memo_hit = match memo {
+            Some(m) => p.memo_text.as_deref() == Some(m),
+            None => true,
+        };
+        if p.to == destination && amount_hit && memo_hit {
+            return Ok(Some(p.tx_hash));
+        }
+    }
+    Ok(None)
+}
+
+async fn record_admin_refund_sent(
+    pool: &PgPool,
+    metrics: &AppMetrics,
+    user: &AdminUser,
+    refund_id: Uuid,
+    currency: &str,
+    stellar_hash: &str,
+) -> Result<Json<ReserveActionResponse>, AppError> {
+    let mut tx = pool.begin().await.map_err(db_err("refund sent begin"))?;
+    let updated = sqlx::query(
+        "UPDATE conversion_reserve_refund \
+         SET status = 'sent', stellar_tx_hash = $2, resolved_by = $3, \
+             resolved_at = CURRENT_TIMESTAMP \
+         WHERE refund_id = $1 AND status IN ('frozen', 'inflight')",
+    )
+    .bind(refund_id)
+    .bind(stellar_hash)
+    .bind(&user.account_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(db_err("refund sent"))?;
+    if updated.rows_affected() == 0 {
+        return Err(AppError::Conflict(
+            "Refund is no longer resolvable".to_string(),
+        ));
+    }
+    // The debit already happened at intent time; this records the landing.
+    let (bal, held): (i64, i64) = sqlx::query_as(
+        "SELECT available, held FROM conversion_reserve WHERE currency = $1 FOR UPDATE",
+    )
+    .bind(currency)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(db_err("refund sent bucket"))?;
+    journal_insert(JournalEntry {
+        currency: currency.to_string(),
+        kind: "refund_sent".to_string(),
+        balance_after: bal,
+        held_after: held,
+        refund_id: Some(refund_id),
+        stellar_tx_hash: Some(stellar_hash.to_string()),
+        admin_account_id: Some(user.account_id.clone()),
+        ..Default::default()
+    })
+    .execute(&mut *tx)
+    .await
+    .map_err(db_err("refund sent entry"))?;
+    tx.commit().await.map_err(db_err("refund sent commit"))?;
+
+    metrics.reserve_refunds_sent.add(1, &[]);
+    info!(
+        "resolve_refund: refund={} action=sent hash={} by={}",
+        refund_id, stellar_hash, user.account_id
+    );
+    Ok(ok("Refund recorded as sent"))
+}
+
+async fn reverse_admin_refund(
+    pool: &PgPool,
+    metrics: &AppMetrics,
+    user: &AdminUser,
+    refund_id: Uuid,
+    currency: &str,
+    refund_minor: i64,
+    note: &Option<String>,
+) -> Result<Json<ReserveActionResponse>, AppError> {
+    let mut tx = pool.begin().await.map_err(db_err("reverse begin"))?;
+    let updated = sqlx::query(
+        "UPDATE conversion_reserve_refund \
+         SET status = 'failed', resolved_by = $2, resolved_at = CURRENT_TIMESTAMP, \
+             last_error = COALESCE($3, last_error) \
+         WHERE refund_id = $1 AND status = 'frozen'",
+    )
+    .bind(refund_id)
+    .bind(&user.account_id)
+    .bind(note)
+    .execute(&mut *tx)
+    .await
+    .map_err(db_err("reverse update"))?;
+    if updated.rows_affected() == 0 {
+        return Err(AppError::Conflict("Refund is no longer frozen".to_string()));
+    }
+    let bucket: Option<(i64, i64, i64)> = sqlx::query_as(RESERVE_BUCKET_APPLY_SQL)
+        .bind(currency)
+        .bind(refund_minor)
+        .bind(0i64)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(db_err("reverse credit"))?;
+    let (bal_after, held_after, _) =
+        bucket.ok_or_else(|| AppError::InternalError("Reversal underflow (drift)".to_string()))?;
+    journal_insert(JournalEntry {
+        currency: currency.to_string(),
+        kind: "refund_reversal".to_string(),
+        delta: refund_minor,
+        balance_after: bal_after,
+        held_after,
+        refund_id: Some(refund_id),
+        admin_account_id: Some(user.account_id.clone()),
+        note: note.clone(),
+        ..Default::default()
+    })
+    .execute(&mut *tx)
+    .await
+    .map_err(db_err("reverse entry"))?;
+    tx.commit().await.map_err(db_err("reverse commit"))?;
+
+    metrics.record_reserve_refund_failure("admin_reversed");
+    info!(
+        "resolve_refund: refund={} action=reverse by={}",
+        refund_id, user.account_id
+    );
+    Ok(ok("Refund reversed; the ledger is restored"))
 }
 
 // ── Forecast ───────────────────────────────────────────────────────────
@@ -596,6 +1155,68 @@ pub(crate) fn forecast_currency(
     }
 }
 
+/// Daily customer flow for one bucket, EXCLUDING treasury kinds.
+///
+/// Counting the bridge's own inventory moves here would be a runaway loop:
+/// `offramp_sent` (USDC spent to buy fiat) would read as USDC outflow,
+/// inflating the EWMA that sizes the next cycle, which would buy USDC to
+/// replace the USDC it deliberately spent.
+pub(crate) const RESERVE_CUSTOMER_FLOW_SQL: &str = "SELECT \
+        (created_at AT TIME ZONE 'UTC')::date AS day, \
+        COALESCE(SUM(GREATEST(-(delta + held_delta), 0)), 0)::bigint AS outflow, \
+        COALESCE(SUM(GREATEST(delta + held_delta, 0)), 0)::bigint AS inflow \
+     FROM conversion_reserve_entry \
+     WHERE currency = $1 AND kind <> ALL($2) \
+       AND created_at >= CURRENT_TIMESTAMP - make_interval(days => $3::int) \
+     GROUP BY day";
+
+/// How much the receiving bucket is short of its target coverage, using the
+/// same forecast math the admin UI shows.
+pub(crate) async fn customer_shortfall(
+    pool: &PgPool,
+    currency: &str,
+    policy: &crate::exchange::replenish::ReplenishPolicy,
+) -> Result<i64, AppError> {
+    let internal: Vec<String> = crate::constants::RESERVE_INTERNAL_ENTRY_KINDS
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let rows: Vec<(NaiveDate, i64, i64)> = sqlx::query_as(RESERVE_CUSTOMER_FLOW_SQL)
+        .bind(currency)
+        .bind(&internal)
+        .bind(policy.window_days)
+        .fetch_all(pool)
+        .await
+        .map_err(db_err("customer flow"))?;
+
+    let bucket: Option<(i16, i64, i64, i64)> = sqlx::query_as(
+        "SELECT minor_scale, available, held, low_water FROM conversion_reserve \
+         WHERE currency = $1",
+    )
+    .bind(currency)
+    .fetch_optional(pool)
+    .await
+    .map_err(db_err("shortfall bucket"))?;
+    let (scale, available, held, low_water) = match bucket {
+        Some(b) => b,
+        None => return Ok(0),
+    };
+
+    let as_of = Utc::now().date_naive();
+    let daily = fill_daily_series(&rows, as_of, policy.window_days as i64);
+    let f = forecast_currency(
+        currency,
+        scale,
+        available,
+        held,
+        low_water,
+        daily,
+        as_of,
+        policy.target_days as i64,
+    );
+    Ok(f.suggested_topup_minor)
+}
+
 /// `GET /admin/exchange-reserve/forecast` — utilization prediction.
 pub async fn get_forecast(
     _user: AdminUser,
@@ -609,15 +1230,23 @@ pub async fn get_forecast(
     // Net flow per entry is delta + held_delta: holds and releases cancel to
     // zero, deposits/topups are positive, fulfillments/disbursements/
     // withdrawals negative — exactly the pool's real in/out.
+    let internal: Vec<String> = crate::constants::RESERVE_INTERNAL_ENTRY_KINDS
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    // Treasury kinds are excluded here for the same reason the trigger
+    // excludes them: the chart and the sizing must never disagree.
     let rows: Vec<(String, NaiveDate, i64, i64)> = sqlx::query_as(
         "SELECT currency, (created_at AT TIME ZONE 'UTC')::date AS day, \
                 COALESCE(SUM(GREATEST(-(delta + held_delta), 0)), 0)::bigint AS outflow, \
                 COALESCE(SUM(GREATEST(delta + held_delta, 0)), 0)::bigint AS inflow \
          FROM conversion_reserve_entry \
-         WHERE created_at >= CURRENT_TIMESTAMP - make_interval(days => $1::int) \
+         WHERE kind <> ALL($2) \
+           AND created_at >= CURRENT_TIMESTAMP - make_interval(days => $1::int) \
          GROUP BY currency, day",
     )
     .bind(window_days as i32)
+    .bind(&internal)
     .fetch_all(&pool)
     .await
     .map_err(db_err("forecast flows"))?;
@@ -676,6 +1305,39 @@ pub async fn get_forecast(
 
 // ── Order actions: disburse / resolve ──────────────────────────────────
 
+/// A stray inflow, as the manual-refund endpoint needs it.
+#[derive(sqlx::FromRow)]
+struct UnmatchedSourceRow {
+    tx_hash: String,
+    amount_minor: Option<i64>,
+    currency: Option<String>,
+    matched_order_id: Option<Uuid>,
+}
+
+/// A refund obligation, as the resolve endpoint needs it.
+#[derive(sqlx::FromRow)]
+struct RefundActionRow {
+    status: String,
+    currency: String,
+    refund_minor: i64,
+    destination: String,
+    memo: Option<String>,
+    /// Seconds since the claim; `None` when never claimed.
+    claim_age: Option<i64>,
+}
+
+/// The `deposit` journal entry an order received, if any — the source of a
+/// refund obligation when that order is failed.
+#[derive(sqlx::FromRow)]
+struct DepositRow {
+    paging_token: Option<String>,
+    sender_address: Option<String>,
+    sender_muxed: Option<String>,
+    currency: String,
+    delta: i64,
+    stellar_tx_hash: Option<String>,
+}
+
 #[derive(sqlx::FromRow)]
 struct ReserveOrderActionRow {
     payala_account_id: String,
@@ -683,6 +1345,10 @@ struct ReserveOrderActionRow {
     amount_to: Option<String>,
     payout_address: Option<String>,
     payout_extra_id: Option<String>,
+    /// The refund address the caller declared at order time, when any.
+    /// Preferred over an inferred sender: a user-stated destination beats an
+    /// inference from a possibly-omnibus address.
+    refund_address: Option<String>,
     /// The reserve Stellar address the pay-in targeted (source of the payout).
     payin_address: Option<String>,
     provider_order_id: String,
@@ -697,6 +1363,7 @@ async fn load_reserve_order(
 ) -> Result<ReserveOrderActionRow, AppError> {
     sqlx::query_as(
         "SELECT payala_account_id, status, amount_to, payout_address, payout_extra_id, \
+                provider_payload->>'refund_address' AS refund_address, \
                 payin_address, provider_order_id, \
                 provider_payload->>'shape' AS shape, \
                 (provider_payload->>'hold_minor')::bigint AS hold_minor, \
@@ -788,22 +1455,21 @@ pub async fn disburse_order(
         (Some(r), None) => Some(format!("ref={}", r)),
         (None, n) => n.clone(),
     };
-    sqlx::query(RESERVE_ENTRY_INSERT_SQL)
-        .bind(&currency)
-        .bind("disbursement")
-        .bind(hold - actual)
-        .bind(-hold)
-        .bind(bal_after)
-        .bind(held_after)
-        .bind(order_id)
-        .bind(Option::<String>::None)
-        .bind(Option::<String>::None)
-        .bind(Option::<String>::None)
-        .bind(Some(user.account_id.clone()))
-        .bind(&note)
-        .execute(&mut *tx)
-        .await
-        .map_err(db_err("disburse entry"))?;
+    journal_insert(JournalEntry {
+        currency: currency.clone(),
+        kind: "disbursement".to_string(),
+        delta: hold - actual,
+        held_delta: -hold,
+        balance_after: bal_after,
+        held_after,
+        order_id: Some(order_id),
+        admin_account_id: Some(user.account_id.clone()),
+        note: note.clone(),
+        ..Default::default()
+    })
+    .execute(&mut *tx)
+    .await
+    .map_err(db_err("disburse entry"))?;
 
     crate::events::emit_event(
         &mut tx,
@@ -869,11 +1535,18 @@ async fn find_onchain_payout(
             continue;
         }
         let hit = match payout_extra_id {
-            None => p
-                .memo_text
-                .as_deref()
-                .map(|m| memo_matches_ref(m, order_ref))
-                .unwrap_or(false),
+            // Memo-primary, but the destination must ALSO match: refunds are
+            // outgoing too, and a refund carrying an order-derived memo would
+            // otherwise read as "the payout landed" — making resolve-fail
+            // refuse and resolve-complete record the refund's hash as the
+            // fulfillment. A refund never goes to payout_address.
+            None => {
+                payout_address == Some(p.to.as_str())
+                    && p.memo_text
+                        .as_deref()
+                        .map(|m| memo_matches_ref(m, order_ref))
+                        .unwrap_or(false)
+            }
             Some(extra) => {
                 p.memo_text.as_deref() == Some(extra)
                     && payout_address == Some(p.to.as_str())
@@ -990,7 +1663,16 @@ pub async fn resolve_order(
                     )));
                 }
             }
-            resolve_fail(&pool, &metrics, &user, order_id, &order, &payload.note).await
+            resolve_fail(
+                &pool,
+                &metrics,
+                &user,
+                order_id,
+                &order,
+                &payload.note,
+                reserve.as_ref().map(|Extension(r)| r.as_ref()),
+            )
+            .await
         }
         _ => {
             if disburse_pending {
@@ -1028,6 +1710,7 @@ pub async fn resolve_order(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn resolve_fail(
     pool: &PgPool,
     metrics: &AppMetrics,
@@ -1035,6 +1718,7 @@ async fn resolve_fail(
     order_id: Uuid,
     order: &ReserveOrderActionRow,
     note: &Option<String>,
+    reserve: Option<&ConversionReserve>,
 ) -> Result<Json<ReserveActionResponse>, AppError> {
     let mut tx = pool.begin().await.map_err(db_err("fail begin"))?;
     // Two resolvable shapes share this exit: frozen auto-swap payouts
@@ -1058,14 +1742,11 @@ async fn resolve_fail(
         ));
     }
 
-    let hold: Option<(String, i64)> = sqlx::query_as(
-        "SELECT currency, -delta FROM conversion_reserve_entry \
-         WHERE order_id = $1 AND kind = 'hold'",
-    )
-    .bind(order_id)
-    .fetch_optional(&mut *tx)
-    .await
-    .map_err(db_err("fail hold lookup"))?;
+    let hold: Option<(String, i64)> = sqlx::query_as(ORDER_HOLD_SQL)
+        .bind(order_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(db_err("fail hold lookup"))?;
     let (currency, hold_minor) =
         hold.ok_or_else(|| AppError::InternalError("Hold entry missing".to_string()))?;
 
@@ -1079,22 +1760,97 @@ async fn resolve_fail(
     let (bal_after, held_after, _) =
         bucket.ok_or_else(|| AppError::InternalError("Held underflow (drift)".to_string()))?;
 
-    sqlx::query(RESERVE_ENTRY_INSERT_SQL)
-        .bind(&currency)
-        .bind("hold_release")
-        .bind(hold_minor)
-        .bind(-hold_minor)
-        .bind(bal_after)
-        .bind(held_after)
-        .bind(order_id)
-        .bind(Option::<String>::None)
-        .bind(Option::<String>::None)
-        .bind(Option::<String>::None)
-        .bind(Some(user.account_id.clone()))
-        .bind(note)
-        .execute(&mut *tx)
-        .await
-        .map_err(db_err("fail entry"))?;
+    journal_insert(JournalEntry {
+        currency: currency.clone(),
+        kind: "hold_release".to_string(),
+        delta: hold_minor,
+        held_delta: -hold_minor,
+        balance_after: bal_after,
+        held_after,
+        order_id: Some(order_id),
+        admin_account_id: Some(user.account_id.clone()),
+        note: note.clone(),
+        ..Default::default()
+    })
+    .execute(&mut *tx)
+    .await
+    .map_err(db_err("fail entry"))?;
+    // The deposit this order received (if any) is now owed back. Queue it in
+    // the SAME transaction as the failure, so the obligation exists exactly
+    // when the order failed. Exactly zero or one row —
+    // uq_conversion_reserve_entry_order_kind guarantees it.
+    let deposit: Option<DepositRow> = sqlx::query_as(
+        "SELECT paging_token, sender_address, sender_muxed, currency, delta, stellar_tx_hash \
+             FROM conversion_reserve_entry \
+             WHERE order_id = $1 AND kind = 'deposit'",
+    )
+    .bind(order_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(db_err("fail deposit lookup"))?;
+
+    let refund_note = match (&deposit, reserve) {
+        (
+            Some(DepositRow {
+                paging_token: Some(paging_token),
+                sender_address,
+                sender_muxed,
+                currency: dep_currency,
+                delta,
+                stellar_tx_hash: tx_hash,
+            }),
+            Some(reserve),
+        ) => {
+            let decision = crate::exchange::reserve_watch::queue_refund(
+                reserve,
+                metrics,
+                &mut tx,
+                crate::exchange::reserve_watch::QueueRefundInput {
+                    source_paging_token: paging_token,
+                    source_tx_hash: tx_hash.as_deref().unwrap_or(paging_token),
+                    order_id: Some(order_id),
+                    currency: dep_currency,
+                    amount_minor: *delta,
+                    reason: "order_failed",
+                    op_type: "payment",
+                    declared_refund_address: order.refund_address.as_deref(),
+                    sender_address: sender_address.as_deref(),
+                    sender_muxed: sender_muxed.as_deref(),
+                    order_ref: Some(&order.provider_order_id),
+                    account_id: Some(&order.payala_account_id),
+                },
+            )
+            .await?;
+            match decision {
+                crate::exchange::reserve_watch::RefundDecision::Queue { destination, .. } => {
+                    format!(
+                        " The deposit is queued for automatic refund to {}.",
+                        destination
+                    )
+                }
+                crate::exchange::reserve_watch::RefundDecision::Review { why, .. } => {
+                    format!(
+                        " The deposit is queued for refund pending review ({}).",
+                        why
+                    )
+                }
+                crate::exchange::reserve_watch::RefundDecision::Skip(why) => format!(
+                    " The deposit could not be auto-refunded ({}); refund it from the queue.",
+                    why
+                ),
+            }
+        }
+        (Some(_), None) => {
+            " The deposit could not be queued: the reserve is not configured.".to_string()
+        }
+        // A deposit entry with no paging token predates sender capture, so
+        // there is no replay-safe anchor and no known payer: manual only.
+        (Some(_), Some(_)) => {
+            " The deposit predates refund tracking; refund it manually.".to_string()
+        }
+        (None, _) => " No deposit was received.".to_string(),
+    };
+
     crate::events::emit_event(
         &mut tx,
         &AccountEvent::ExchangeOrderUpdated {
@@ -1113,10 +1869,7 @@ async fn resolve_fail(
         "resolve_order: order={} action=fail by={}",
         order_id, user.account_id
     );
-    Ok(ok(
-        "Order failed; hold released. The user's deposit (if any) remains in reserve \
-         inventory — refund it via ops runbook",
-    ))
+    Ok(ok(format!("Order failed; hold released.{}", refund_note)))
 }
 
 async fn resolve_complete(
@@ -1157,22 +1910,20 @@ async fn resolve_complete(
     let (bal_after, held_after, _) =
         bucket.ok_or_else(|| AppError::InternalError("Held underflow (drift)".to_string()))?;
 
-    sqlx::query(RESERVE_ENTRY_INSERT_SQL)
-        .bind(RESERVE_CURRENCY_USDC)
-        .bind("fulfillment")
-        .bind(0i64)
-        .bind(-amount_to_minor)
-        .bind(bal_after)
-        .bind(held_after)
-        .bind(order_id)
-        .bind(Option::<String>::None)
-        .bind(Some(stellar_hash.to_string()))
-        .bind(Option::<String>::None)
-        .bind(Some(user.account_id.clone()))
-        .bind(Option::<String>::None)
-        .execute(&mut *tx)
-        .await
-        .map_err(db_err("complete entry"))?;
+    journal_insert(JournalEntry {
+        currency: RESERVE_CURRENCY_USDC.to_string(),
+        kind: "fulfillment".to_string(),
+        held_delta: -amount_to_minor,
+        balance_after: bal_after,
+        held_after,
+        order_id: Some(order_id),
+        stellar_tx_hash: Some(stellar_hash.to_string()),
+        admin_account_id: Some(user.account_id.clone()),
+        ..Default::default()
+    })
+    .execute(&mut *tx)
+    .await
+    .map_err(db_err("complete entry"))?;
 
     let btxid: Uuid = sqlx::query_scalar(
         "INSERT INTO transaction \

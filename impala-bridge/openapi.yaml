@@ -944,6 +944,242 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
 
+  /admin/exchange-reserve/refunds:
+    get:
+      tags: [reserve]
+      summary: Refund queue (admin only).
+      parameters:
+        - in: query
+          name: page
+          schema: { type: integer, default: 1 }
+        - in: query
+          name: per_page
+          schema: { type: integer, default: 20 }
+        - in: query
+          name: status
+          schema:
+            type: string
+            enum: [needs_review, queued, inflight, sent, failed, frozen, cancelled]
+      responses:
+        '200': { description: Refund obligations, newest first. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [reserve]
+      summary: Queue a refund by hand (admin only; rate limited 5/60s).
+      description: |
+        For inflows the driver deliberately refuses — unknown memo, wrong
+        asset, a muxed or missing sender, or a row predating sender capture.
+        The destination is explicit precisely because the bridge could not
+        infer a safe one. Refused when it is the reserve account itself or
+        the asset issuer (which would burn an issued asset).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                paging_token: { type: string }
+                destination: { type: string, description: Stellar G-address. }
+                note: { type: string }
+              required: [paging_token, destination]
+      responses:
+        '200': { description: Refund queued. }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { description: A refund already exists for this deposit. }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /admin/exchange-reserve/refunds/{refund_id}/resolve:
+    post:
+      tags: [reserve]
+      summary: Resolve a refund (admin only; rate limited 5/60s).
+      description: |
+        `approve` releases a reviewed refund to the driver; `cancel` drops
+        one that never moved value; `sent` records one that did land (needs
+        `stellar_tx_hash`); `reverse` restores the ledger for one that
+        provably did not — refused until 600s after the claim AND only after
+        the bridge verifies on-chain that no matching refund exists, because
+        reversing a refund that landed would credit funds that left the chain.
+      parameters:
+        - in: path
+          name: refund_id
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                action: { type: string, enum: [approve, cancel, sent, reverse] }
+                stellar_tx_hash: { type: string }
+                note: { type: string }
+              required: [action]
+      responses:
+        '200': { description: Refund resolved. }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { description: Not resolvable yet, or the state changed. }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /admin/exchange-reserve/settings:
+    put:
+      tags: [reserve]
+      summary: Reserve master switches (admin only).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                refunds_enabled:
+                  type: boolean
+                  description: >
+                    Master switch for automatic refunds. Default false; a
+                    per-currency cap must ALSO be non-zero before anything is
+                    sent.
+              required: [refunds_enabled]
+      responses:
+        '200': { description: Settings updated. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /admin/exchange-reserve/replenishment:
+    get:
+      tags: [reserve]
+      summary: Replenishment policies and recent cycles (admin only).
+      responses:
+        '200': { description: Policies plus cycle history. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /admin/exchange-reserve/replenishment/policies/{kind}:
+    put:
+      tags: [reserve]
+      summary: Set a replenishment policy (admin only).
+      description: |
+        `max_spend_minor` and `daily_spend_cap_minor` of 0 mean
+        *unconfigured, refuse to run* — never "unlimited" — so enabling a
+        kind whose caps are still 0 is rejected rather than producing a
+        policy that looks armed and silently never runs. `min_float_minor`
+        must cover the Stellar base reserve plus fees, or customer payouts
+        begin failing. `min_price_minor` and `max_slippage_bps` are the
+        guards that stop a mispriced quote dumping the float.
+      parameters:
+        - in: path
+          name: kind
+          required: true
+          schema: { type: string, enum: [xlm_to_usdc, usdc_to_usd] }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ReplenishPolicyUpdateRequest' }
+      responses:
+        '200': { description: Policy updated. }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /admin/exchange-reserve/replenishment/run:
+    post:
+      tags: [reserve]
+      summary: Start one replenishment cycle now (admin only; rate limited 5/60s).
+      description: |
+        Takes the reserve watcher's advisory lock and returns 409 if the
+        watcher is mid-tick — the reserve account signs from a single
+        sequence number, so two concurrent submissions would collide. A 200
+        with no cycle id means a guard declined it.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                kind: { type: string, enum: [xlm_to_usdc, usdc_to_usd] }
+              required: [kind]
+      responses:
+        '200': { description: Cycle started, or a guard declined it. }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { description: The watcher is mid-tick; retry shortly. }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /admin/exchange-reserve/replenishment/{cycle_id}/confirm-fiat:
+    post:
+      tags: [reserve]
+      summary: Confirm a bank credit landed (admin only; rate limited 5/60s).
+      description: |
+        The bridge can see USDC leave and the provider's transfer status, but
+        never a bank credit — so a completed off-ramp books the fiat into
+        `held` as *in transit* and stays there until this call moves it into
+        `available`. The one step that cannot be automated honestly.
+      parameters:
+        - in: path
+          name: cycle_id
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                amount_usd_cents:
+                  type: integer
+                  format: int64
+                  description: Actual cents received, if it differs from the provider's figure.
+                external_ref: { type: string }
+                note: { type: string }
+      responses:
+        '200': { description: Confirmed; the float is spendable. }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { description: Not awaiting confirmation. }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /admin/exchange-reserve/replenishment/{cycle_id}/write-off:
+    post:
+      tags: [reserve]
+      summary: Write off in-transit fiat that never arrived (admin only).
+      description: |
+        Writes off real money and is loudly audited; a note is required.
+        Without it the USD `held` column stays poisoned and the kind stays
+        permanently blocked.
+      parameters:
+        - in: path
+          name: cycle_id
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                note: { type: string }
+              required: [note]
+      responses:
+        '200': { description: Written off. }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { description: Not awaiting confirmation. }
+
   /admin/exchange-reserve/forecast:
     get:
       tags: [reserve]
@@ -2710,6 +2946,21 @@ components:
           type: string
           enum: [float, fixed]
           description: changelly_crypto only (default float).
+        reserve_lock:
+          type: boolean
+          description: >
+            Ask the bridge to lock this price AND reserve the pool capacity
+            behind it, so an order created from the returned quote cannot
+            fail for lack of funds. Best effort: when no lock is available
+            the response is unchanged. Rate limited 5/60s on its own scope.
+        payout_address:
+          type: string
+          description: >
+            Required with reserve_lock for crypto->crypto shapes — the
+            trustline check and the lock are bound to THIS address, and an
+            order consuming the quote must present it byte-for-byte.
+        payout_extra_id:
+          type: string
         country: { type: string, description: "changelly_fiat: ISO 3166-1 alpha-2." }
         state: { type: string, description: "changelly_fiat: required when country=US." }
         user_ip: { type: string, description: "changelly_fiat: end-user IP (falls back to X-Forwarded-For)." }
@@ -2731,6 +2982,13 @@ components:
         quotes:
           description: Provider-specific quote payload, passed through verbatim.
           nullable: true
+        reserve_quote:
+          allOf: [{ $ref: '#/components/schemas/ReserveQuoteView' }]
+          nullable: true
+          description: >
+            A bridge-issued price lock, present only when one was issued.
+            Absence means "no lock available" and nothing more — a reason
+            would leak pool state. Deliberately carries no pool internals.
       required: [success, message]
 
     CreateExchangeOrderRequest:
@@ -2752,6 +3010,15 @@ components:
         refund_extra_id: { type: string }
         rate_type: { type: string, enum: [float, fixed], description: changelly_crypto. }
         rate_id: { type: string, description: "changelly_crypto: fixed-rate quote id (required for fixed)." }
+        reserve_quote_id:
+          type: string
+          format: uuid
+          description: >
+            A bridge-issued conversion-reserve quote id. Honors exactly the
+            locked price. Cannot be combined with rate_id or
+            rate_type=fixed (those are opaque PROVIDER contracts), and is
+            rejected outright when the reserve is unconfigured rather than
+            quietly becoming a provider order at a different price.
         quote_id: { type: string, description: "owlpay: Harbor v2 quote id (required)." }
         provider_code: { type: string, description: "changelly_fiat: aggregated provider (e.g. moonpay); required." }
         payment_method: { type: string, description: changelly_fiat payment method code. }
@@ -2929,6 +3196,52 @@ components:
             on_hold: { type: integer, format: int64 }
             awaiting_disbursement: { type: integer, format: int64 }
       required: [configured, buckets, policies, pending]
+
+    ReserveQuoteView:
+      type: object
+      properties:
+        quote_id: { type: string, format: uuid }
+        from_currency: { type: string }
+        to_currency: { type: string }
+        amount_from: { type: string }
+        amount_to:
+          type: string
+          description: The locked payout, honored for expires_in_secs.
+        expires_in_secs: { type: integer, format: int64 }
+      required: [quote_id, from_currency, to_currency, amount_from, amount_to, expires_in_secs]
+
+    ReplenishPolicyUpdateRequest:
+      type: object
+      properties:
+        enabled: { type: boolean }
+        target_days: { type: integer, minimum: 1, maximum: 365 }
+        window_days: { type: integer, minimum: 1, maximum: 365 }
+        min_need_minor: { type: integer, format: int64, minimum: 0 }
+        max_spend_minor:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Per-cycle ceiling. 0 means unconfigured — the cycle refuses to run.
+        daily_spend_cap_minor:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Rolling-24h ceiling. 0 means unconfigured.
+        cooldown_secs: { type: integer, minimum: 60, maximum: 604800 }
+        min_float_minor:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Never spent — must cover the Stellar base reserve plus fees.
+        min_price_minor:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Recv minor units per whole spend unit. 0 disables the floor.
+        max_slippage_bps: { type: integer, minimum: 0, maximum: 5000 }
+      required: [enabled, target_days, window_days, min_need_minor, max_spend_minor,
+                 daily_spend_cap_minor, cooldown_secs, min_float_minor, min_price_minor,
+                 max_slippage_bps]
 
     ReserveEntryView:
       type: object

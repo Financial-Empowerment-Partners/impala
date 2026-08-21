@@ -34,8 +34,9 @@ use crate::constants::{
     EXCHANGE_PROVIDER_CHANGELLY_CRYPTO, EXCHANGE_PROVIDER_OWLPAY, EXCHANGE_PROVIDER_RESERVE,
     EXCHANGE_STATUS_AWAITING_DEPOSIT, RESERVE_CURRENCY_USD, RESERVE_CURRENCY_USDC,
     RESERVE_DEPOSIT_TTL_MAX_SECS, RESERVE_DEPOSIT_TTL_MIN_SECS,
-    RESERVE_MAX_OPEN_ORDERS_PER_ACCOUNT, RESERVE_SCALE_STELLAR, RESERVE_SCALE_USD,
-    RESERVE_STELLAR_USDC_TICKERS, RESERVE_TICKER_XLM, RESERVE_USD_TICKERS,
+    RESERVE_MAX_OPEN_ORDERS_PER_ACCOUNT, RESERVE_QUOTE_TTL_MAX_SECS, RESERVE_QUOTE_TTL_MIN_SECS,
+    RESERVE_SCALE_STELLAR, RESERVE_SCALE_USD, RESERVE_STELLAR_USDC_TICKERS, RESERVE_TICKER_XLM,
+    RESERVE_TOTAL_PRICE_WINDOW_MAX_SECS, RESERVE_USD_TICKERS,
 };
 use crate::error::AppError;
 use crate::exchange::changelly::ChangellyCrypto;
@@ -64,13 +65,116 @@ pub(crate) const RESERVE_BUCKET_APPLY_SQL: &str = "UPDATE conversion_reserve \
      WHERE currency = $1 AND available + $2 >= 0 AND held + $3 >= 0 \
      RETURNING available, held, low_water";
 
-/// Journal INSERT shared by every writer. `UNIQUE(order_id, kind)` turns a
-/// replayed order-linked write into a constraint error the caller treats as
-/// "already done".
+/// Journal INSERT shared by EVERY writer — one shape for one append-only
+/// money table. `UNIQUE(order_id, kind)` turns a replayed order-linked write
+/// into a constraint error the caller treats as "already done".
+///
+/// The five linkage columns ($13-$17) are appended rather than interleaved so
+/// the twelve original bind positions are untouched, and they are bound
+/// through [`EntryLinks`] rather than positionally: three consecutive
+/// `Option<Uuid>` parameters would otherwise transpose silently.
 pub(crate) const RESERVE_ENTRY_INSERT_SQL: &str = "INSERT INTO conversion_reserve_entry \
      (currency, kind, delta, held_delta, balance_after, held_after, order_id, \
-      diverted_provider, stellar_tx_hash, paging_token, admin_account_id, note) \
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)";
+      diverted_provider, stellar_tx_hash, paging_token, admin_account_id, note, \
+      quote_id, cycle_id, refund_id, sender_address, sender_muxed) \
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)";
+
+/// One journal row, by name.
+///
+/// Every writer goes through [`journal_insert`] rather than binding
+/// [`RESERVE_ENTRY_INSERT_SQL`] positionally. sqlx's dynamic query API does
+/// NOT check bind count at compile time — a writer that missed a column
+/// would fail at runtime, mid-transaction, on a money path — and three
+/// consecutive `Option<Uuid>` linkage columns would transpose silently. With
+/// named fields plus `..Default::default()`, adding a column later is one
+/// edit here and the call sites keep compiling.
+#[derive(Default)]
+pub(crate) struct JournalEntry {
+    pub currency: String,
+    pub kind: String,
+    /// Signed effect on `available`.
+    pub delta: i64,
+    /// Signed effect on `held`.
+    pub held_delta: i64,
+    /// Bucket snapshot AFTER this entry, read under the bucket's row lock.
+    pub balance_after: i64,
+    pub held_after: i64,
+    pub order_id: Option<Uuid>,
+    /// Which provider the order would have used (utilization attribution).
+    pub diverted_provider: Option<String>,
+    pub stellar_tx_hash: Option<String>,
+    /// Horizon operation cursor — the per-payment idempotency anchor.
+    pub paging_token: Option<String>,
+    pub admin_account_id: Option<String>,
+    pub note: Option<String>,
+    /// Pre-order capacity lock (reserved price quotes).
+    pub quote_id: Option<Uuid>,
+    /// Treasury replenishment cycle.
+    pub cycle_id: Option<Uuid>,
+    /// Refund obligation.
+    pub refund_id: Option<Uuid>,
+    /// Counterparty of an inbound payment — where a refund would go back to.
+    pub sender_address: Option<String>,
+    /// Horizon `from_muxed`, when the sender used a muxed account. Its
+    /// presence means `sender_address` is a SHARED base address, so the funds
+    /// cannot be safely returned to it automatically.
+    pub sender_muxed: Option<String>,
+}
+
+/// Build the fully-bound journal INSERT. The only way this table is written.
+pub(crate) fn journal_insert(
+    e: JournalEntry,
+) -> sqlx::query::Query<'static, sqlx::Postgres, sqlx::postgres::PgArguments> {
+    sqlx::query(RESERVE_ENTRY_INSERT_SQL)
+        .bind(e.currency)
+        .bind(e.kind)
+        .bind(e.delta)
+        .bind(e.held_delta)
+        .bind(e.balance_after)
+        .bind(e.held_after)
+        .bind(e.order_id)
+        .bind(e.diverted_provider)
+        .bind(e.stellar_tx_hash)
+        .bind(e.paging_token)
+        .bind(e.admin_account_id)
+        .bind(e.note)
+        .bind(e.quote_id)
+        .bind(e.cycle_id)
+        .bind(e.refund_id)
+        .bind(e.sender_address)
+        .bind(e.sender_muxed)
+}
+
+/// The hold an order owns, whichever anchor took it: its own `hold` entry
+/// (a directly-diverted order) or a consumed quote's `quote_hold` (a
+/// quote-backed order). Exactly one exists.
+///
+/// Before 032 both release paths read `WHERE order_id = $1 AND kind = 'hold'`
+/// and hard-errored when absent — which every quote-backed order would have
+/// hit on expiry or resolve-fail, aborting the transaction and locking its
+/// hold forever. The `IS NOT NULL` guard keeps "no hold at all" a ZERO-ROW
+/// result so those callers' existing drift branches still fire.
+pub(crate) const ORDER_HOLD_SQL: &str =
+    "SELECT COALESCE(e.currency, q.hold_currency) AS currency, \
+        COALESCE(-e.delta, q.hold_minor) AS hold_minor \
+     FROM exchange_order o \
+     LEFT JOIN conversion_reserve_entry e \
+       ON e.order_id = o.order_id AND e.kind = 'hold' \
+     LEFT JOIN conversion_reserve_quote q \
+       ON q.order_id = o.order_id AND q.status = 'consumed' \
+     WHERE o.order_id = $1 \
+       AND (e.entry_id IS NOT NULL OR q.quote_id IS NOT NULL)";
+
+/// Guarded hold for TREASURY movements (replenishment).
+///
+/// Deliberately without [`RESERVE_HOLD_SQL`]'s `(held + x) * 2 <= ...`
+/// fraction guard: that clause exists to stop one CUSTOMER locking the pool
+/// with free-to-abandon orders, and applied here it would cap a treasury sell
+/// at roughly half the bucket — the opposite of "sell the accumulated float".
+pub(crate) const RESERVE_TREASURY_HOLD_SQL: &str = "UPDATE conversion_reserve \
+     SET available = available - $2, held = held + $2 \
+     WHERE currency = $1 AND available >= $2 \
+     RETURNING available, held, low_water";
 
 /// Open (non-terminal) reserve orders for one account — the per-account cap.
 const OPEN_RESERVE_ORDERS_SQL: &str = "SELECT COUNT(*) FROM exchange_order \
@@ -92,6 +196,8 @@ pub struct ConversionReserve {
     pub deposit_ttl_secs: u64,
     /// Watcher cadence (seconds).
     pub watch_secs: u64,
+    /// Price-lock window for reserved quotes (seconds).
+    pub quote_ttl_secs: u64,
 }
 
 /// Build the reserve handle from config. `Ok(None)` = feature off
@@ -177,6 +283,31 @@ pub async fn init_conversion_reserve(
         // then equivalent.
     }
 
+    // Total price-option exposure is the lock window PLUS the deposit window:
+    // a client holds a fixed amount_to across both and may walk away for
+    // free. Cap it at the ceiling 031 sanctioned for the deposit window
+    // alone, so adding locks cannot widen the option beyond what was
+    // reviewed. This depends on configured values, so it cannot be a const
+    // assert — and it fails startup closed, like every other misconfigured
+    // money path here.
+    let quote_ttl = config
+        .reserve_quote_ttl_secs
+        .clamp(RESERVE_QUOTE_TTL_MIN_SECS, RESERVE_QUOTE_TTL_MAX_SECS);
+    let deposit_ttl = config
+        .reserve_deposit_ttl_secs
+        .clamp(RESERVE_DEPOSIT_TTL_MIN_SECS, RESERVE_DEPOSIT_TTL_MAX_SECS);
+    if quote_ttl + deposit_ttl > RESERVE_TOTAL_PRICE_WINDOW_MAX_SECS {
+        return Err(format!(
+            "RESERVE_QUOTE_TTL_SECS ({}) + RESERVE_DEPOSIT_TTL_SECS ({}) = {} exceeds the {}s \
+             ceiling on total price-option exposure; lower one of them",
+            quote_ttl,
+            deposit_ttl,
+            quote_ttl + deposit_ttl,
+            RESERVE_TOTAL_PRICE_WINDOW_MAX_SECS
+        ));
+    }
+    let quote_ttl_secs = quote_ttl;
+
     Ok(Some(Arc::new(ConversionReserve {
         reserve_account_id: account_id,
         stellar_address,
@@ -186,6 +317,7 @@ pub async fn init_conversion_reserve(
             .reserve_deposit_ttl_secs
             .clamp(RESERVE_DEPOSIT_TTL_MIN_SECS, RESERVE_DEPOSIT_TTL_MAX_SECS),
         watch_secs: config.reserve_watch_secs.max(5),
+        quote_ttl_secs,
     })))
 }
 
@@ -384,7 +516,7 @@ pub(crate) fn extract_estimate_amount_to(v: &serde_json::Value) -> Option<String
 /// Price an AutoSwap in USDC minor units via the diverted provider's own
 /// float estimate; below the provider's estimate minimum, scale linearly
 /// from a reference-notional estimate. Returns `(amount_to_minor, pricing)`.
-async fn price_auto_swap(
+pub(crate) async fn price_auto_swap(
     changelly: &ChangellyCrypto,
     payload: &CreateExchangeOrderRequest,
     amount_from_minor: i64,
@@ -427,7 +559,7 @@ async fn price_auto_swap(
 /// trustline for the reserve's USDC asset, or the payment is guaranteed to
 /// fail op_no_trust AFTER the user has deposited. Indeterminate (Horizon
 /// error) reads as "not verified" — pass through, the provider validates.
-async fn payout_has_usdc_trustline(
+pub(crate) async fn payout_has_usdc_trustline(
     http: &reqwest::Client,
     horizon_url: &str,
     address: &str,
@@ -444,6 +576,131 @@ async fn payout_has_usdc_trustline(
         }
         Err(_) => false,
     }
+}
+
+// ── Price locks (called from create_quote) ─────────────────────────────
+
+/// Decide whether a quote request can be price-locked, and mint the lock.
+///
+/// Eligibility runs through the SAME [`divert_shape`] gate order creation
+/// uses, by way of a synthetic order request: one gate, zero drift. A quote
+/// the gate would accept but order creation would refuse could otherwise
+/// mint a lock that can never be consumed, burning capacity until it expires.
+pub(crate) async fn try_lock_quote(
+    ctx: &DivertContext<'_>,
+    account_id: &str,
+    q: &crate::models::ExchangeQuoteRequest,
+    provider_quotes: &serde_json::Value,
+) -> Result<Option<crate::models::ReserveQuoteView>, AppError> {
+    let synthetic: CreateExchangeOrderRequest = match serde_json::from_value(json!({
+        "account_id": account_id,
+        "provider": q.provider,
+        "direction": q.direction,
+        "from_currency": q.from_currency,
+        "to_currency": q.to_currency,
+        "amount_from": q.amount_from,
+        "payout_address": q.payout_address,
+        "payout_extra_id": q.payout_extra_id,
+        "rate_type": q.rate_type,
+        // A quote request carries no beneficiary; disburse shapes supply it
+        // at order time, so stand in with a placeholder purely so the shared
+        // shape gate sees the same request the order will present.
+        "beneficiary": if q.direction == EXCHANGE_DIRECTION_CRYPTO_TO_FIAT {
+            Some(json!({}))
+        } else {
+            None
+        },
+    })) {
+        Ok(v) => v,
+        Err(_) => return Ok(None),
+    };
+
+    let shape = match divert_shape(&synthetic) {
+        Some(s) => s,
+        None => return Ok(None),
+    };
+
+    let policy: Option<(bool, i64)> = sqlx::query_as(
+        "SELECT enabled, threshold_usd_cents FROM conversion_reserve_policy WHERE provider = $1",
+    )
+    .bind(&q.provider)
+    .fetch_optional(ctx.pool)
+    .await
+    .map_err(|e| {
+        error!("try_lock_quote: policy lookup error: {}", e);
+        AppError::InternalError("Database error".to_string())
+    })?;
+    let threshold_usd_cents = match policy {
+        Some((true, t)) => t,
+        _ => return Ok(None),
+    };
+
+    let amount_from_minor = match parse_decimal_to_minor(&q.amount_from, RESERVE_SCALE_STELLAR) {
+        Some(v) if v > 0 => v,
+        _ => return Ok(None),
+    };
+
+    let (hold_currency, hold_minor, pricing) = match shape {
+        DivertShape::AutoSwap => {
+            let payout_address = match synthetic.payout_address.as_deref() {
+                Some(a) if crate::validate::validate_stellar_account_id(a).is_ok() => a,
+                _ => return Ok(None),
+            };
+            // Reuse the estimate the handler already fetched — quoting twice
+            // would spend the provider's request budget for nothing.
+            let amount_to_minor = match extract_estimate_amount_to(provider_quotes)
+                .and_then(|s| parse_decimal_to_minor(&s, RESERVE_SCALE_STELLAR))
+                .filter(|v| *v > 0)
+            {
+                Some(v) => (v, "provider_estimate"),
+                None => {
+                    let changelly = match ctx.changelly_crypto {
+                        Some(c) => c,
+                        None => return Ok(None),
+                    };
+                    match price_auto_swap(changelly, &synthetic, amount_from_minor).await {
+                        Some(p) => p,
+                        None => return Ok(None),
+                    }
+                }
+            };
+            let (amount_to_minor, pricing) = amount_to_minor;
+            if stellar_minor_to_usd_cents_ceil(amount_to_minor) > threshold_usd_cents {
+                return Ok(None);
+            }
+            if !payout_has_usdc_trustline(
+                ctx.http,
+                ctx.horizon_url,
+                payout_address,
+                &ctx.reserve.usdc_code,
+                &ctx.reserve.usdc_issuer,
+            )
+            .await
+            {
+                return Ok(None);
+            }
+            (RESERVE_CURRENCY_USDC, amount_to_minor, pricing)
+        }
+        DivertShape::Disburse => {
+            let usd_cents = stellar_minor_to_usd_cents_ceil(amount_from_minor);
+            if usd_cents > threshold_usd_cents {
+                return Ok(None);
+            }
+            (RESERVE_CURRENCY_USD, usd_cents, "usd_par")
+        }
+    };
+
+    crate::exchange::reserve_quote::mint_quote(
+        ctx.pool,
+        ctx.reserve,
+        account_id,
+        &synthetic,
+        shape,
+        hold_currency,
+        hold_minor,
+        pricing,
+    )
+    .await
 }
 
 // ── Diversion (called from create_order before provider dispatch) ──────
@@ -466,6 +723,30 @@ pub async fn try_divert_order(
     ctx: &DivertContext<'_>,
     payload: &CreateExchangeOrderRequest,
 ) -> Result<Option<ExchangeOrderResponse>, AppError> {
+    // Defence in depth against self-dealing. The replenishment job creates
+    // xlm->usdcxlm orders OWNED BY the reserve account and paid TO the
+    // reserve address — a shape divert_shape otherwise accepts. It bypasses
+    // this function entirely, but if any future caller does not, diverting
+    // would mean the reserve buying from itself while no XLM ever leaves.
+    // These run BEFORE the quoted branch so no path can skip them.
+    if payload.account_id == ctx.reserve.reserve_account_id {
+        return Ok(None);
+    }
+    if payload.payout_address.as_deref() == Some(ctx.reserve.stellar_address.as_str()) {
+        return Ok(None);
+    }
+
+    // A named quote is a commitment: honor it or refuse. Never fall through
+    // to the provider at a different price, and never after a consume that
+    // may already have committed.
+    if let Some(raw) = payload.reserve_quote_id.as_deref() {
+        let quote_id = uuid::Uuid::parse_str(raw)
+            .map_err(|_| AppError::BadRequest("reserve_quote_id must be a UUID".to_string()))?;
+        return crate::exchange::reserve_quote::divert_quoted_order(ctx, payload, quote_id)
+            .await
+            .map(Some);
+    }
+
     let shape = match divert_shape(payload) {
         Some(s) => s,
         None => return Ok(None),
@@ -693,6 +974,9 @@ async fn run_creation_tx(
         },
         "beneficiary": payload.beneficiary,
         "payout_instrument": payload.payout_instrument,
+        // Persisted so a refund honors the destination the customer stated,
+        // rather than inferring one from a possibly-omnibus sender address.
+        "refund_address": payload.refund_address,
     });
 
     let next_poll_at =
@@ -721,22 +1005,20 @@ async fn run_creation_tx(
         .await
         .map_err(db_err("order insert"))?;
 
-    sqlx::query(RESERVE_ENTRY_INSERT_SQL)
-        .bind(hold_currency)
-        .bind("hold")
-        .bind(-hold_minor)
-        .bind(hold_minor)
-        .bind(available_after)
-        .bind(held_after)
-        .bind(order_id)
-        .bind(&payload.provider)
-        .bind(Option::<String>::None)
-        .bind(Option::<String>::None)
-        .bind(Option::<String>::None)
-        .bind(Option::<String>::None)
-        .execute(&mut *tx)
-        .await
-        .map_err(db_err("hold entry"))?;
+    journal_insert(JournalEntry {
+        currency: hold_currency.to_string(),
+        kind: "hold".to_string(),
+        delta: -hold_minor,
+        held_delta: hold_minor,
+        balance_after: available_after,
+        held_after,
+        order_id: Some(order_id),
+        diverted_provider: Some(payload.provider.clone()),
+        ..Default::default()
+    })
+    .execute(&mut *tx)
+    .await
+    .map_err(db_err("hold entry"))?;
 
     crate::events::emit_event(
         &mut tx,

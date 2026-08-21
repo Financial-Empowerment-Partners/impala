@@ -72,6 +72,16 @@ pub struct AppMetrics {
     pub reserve_expiries: Counter<u64>,
     pub reserve_unmatched_deposits: Counter<u64>,
     pub reserve_manual_entries: Counter<u64>,
+    pub reserve_refunds_queued: Counter<u64>,
+    pub reserve_refunds_sent: Counter<u64>,
+    /// Refunds that failed or froze. Sustained non-zero means customer money
+    /// is waiting on ops — alert on it.
+    pub reserve_refund_failures: Counter<u64>,
+    pub reserve_quotes_issued: Counter<u64>,
+    pub reserve_quotes_consumed: Counter<u64>,
+    pub reserve_quote_expiries: Counter<u64>,
+    pub reserve_replenish_cycles: Counter<u64>,
+    pub reserve_replenish_skips: Counter<u64>,
 }
 
 impl AppMetrics {
@@ -221,6 +231,38 @@ impl AppMetrics {
                 .u64_counter("reserve.manual_entries")
                 .with_description("Admin-recorded reserve ledger entries, by kind")
                 .build(),
+            reserve_refunds_queued: meter
+                .u64_counter("reserve.refunds_queued")
+                .with_description("Stranded deposits queued for return, by reason")
+                .build(),
+            reserve_refunds_sent: meter
+                .u64_counter("reserve.refunds_sent")
+                .with_description("Refunds settled on-chain")
+                .build(),
+            reserve_refund_failures: meter
+                .u64_counter("reserve.refund_failures")
+                .with_description("Refunds failed or frozen for admin, by reason")
+                .build(),
+            reserve_quotes_issued: meter
+                .u64_counter("reserve.quotes_issued")
+                .with_description("Price locks issued against the pool")
+                .build(),
+            reserve_quotes_consumed: meter
+                .u64_counter("reserve.quotes_consumed")
+                .with_description("Price locks turned into orders")
+                .build(),
+            reserve_quote_expiries: meter
+                .u64_counter("reserve.quote_expiries")
+                .with_description("Price locks that expired unused")
+                .build(),
+            reserve_replenish_cycles: meter
+                .u64_counter("reserve.replenish_cycles")
+                .with_description("Replenishment cycles by outcome")
+                .build(),
+            reserve_replenish_skips: meter
+                .u64_counter("reserve.replenish_skips")
+                .with_description("Replenishment cycles not started, by reason")
+                .build(),
         }
     }
 }
@@ -289,6 +331,33 @@ impl AppMetrics {
     /// Record a frozen/failed reserve payout on `reserve.payout_failures`.
     pub fn record_reserve_payout_failure(&self, reason: &'static str) {
         self.reserve_payout_failures
+            .add(1, &[KeyValue::new("reason", reason)]);
+    }
+
+    /// Record a replenishment cycle outcome on `reserve.replenish_cycles`
+    /// (`outcome` = started|settled|refunded|frozen|failed).
+    pub fn record_replenish_outcome(&self, outcome: &'static str) {
+        self.reserve_replenish_cycles
+            .add(1, &[KeyValue::new("outcome", outcome)]);
+    }
+
+    /// Record a cycle that did not start on `reserve.replenish_skips`.
+    pub fn record_replenish_skip(&self, reason: &'static str) {
+        self.reserve_replenish_skips
+            .add(1, &[KeyValue::new("reason", reason)]);
+    }
+
+    /// Record a queued refund on `reserve.refunds_queued`.
+    pub fn record_reserve_refund_queued(&self, reason: &str) {
+        self.reserve_refunds_queued
+            .add(1, &[KeyValue::new("reason", reason.to_string())]);
+    }
+
+    /// Record a failed/frozen refund on `reserve.refund_failures` (`reason` =
+    /// rejected|submit_unknown|stale_claim|cap_daily|insufficient|
+    /// unsupported_asset|unrecordable).
+    pub fn record_reserve_refund_failure(&self, reason: &'static str) {
+        self.reserve_refund_failures
             .add(1, &[KeyValue::new("reason", reason)]);
     }
 

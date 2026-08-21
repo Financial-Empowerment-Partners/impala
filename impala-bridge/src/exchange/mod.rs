@@ -20,5 +20,7 @@
 pub mod changelly;
 pub mod owlpay;
 pub mod reconcile;
+pub mod replenish;
 pub mod reserve;
+pub mod reserve_quote;
 pub mod reserve_watch;

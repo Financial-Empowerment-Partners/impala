@@ -119,6 +119,28 @@ pub enum AccountEvent {
         enabled: bool,
         threshold_usd_cents: i64,
     },
+    /// A stranded deposit was queued for return to its payer.
+    ReserveRefundQueued {
+        account_id: String,
+        refund_id: String,
+        currency: String,
+        amount_minor: i64,
+        reason: String,
+    },
+    /// A refund settled on-chain.
+    ReserveRefundSent {
+        account_id: String,
+        refund_id: String,
+        currency: String,
+        amount_minor: i64,
+    },
+    /// A refund could not be completed automatically and is waiting on an
+    /// admin (`reason` = rejected|submit_unknown|stale_claim).
+    ReserveRefundFailed {
+        account_id: String,
+        refund_id: String,
+        reason: String,
+    },
     /// Admin-recorded manual ledger entry. account_id is the acting admin.
     ReserveEntryRecorded {
         account_id: String,
@@ -150,6 +172,9 @@ impl AccountEvent {
             AccountEvent::ReserveUnmatchedDeposit { .. } => "reserve.unmatched_deposit",
             AccountEvent::ReserveLowWater { .. } => "reserve.low_water",
             AccountEvent::ReservePolicyUpdated { .. } => "reserve.policy_updated",
+            AccountEvent::ReserveRefundQueued { .. } => "reserve.refund_queued",
+            AccountEvent::ReserveRefundSent { .. } => "reserve.refund_sent",
+            AccountEvent::ReserveRefundFailed { .. } => "reserve.refund_failed",
             AccountEvent::ReserveEntryRecorded { .. } => "reserve.entry_recorded",
         }
     }
@@ -174,6 +199,9 @@ impl AccountEvent {
             | AccountEvent::ReserveUnmatchedDeposit { account_id, .. }
             | AccountEvent::ReserveLowWater { account_id, .. }
             | AccountEvent::ReservePolicyUpdated { account_id, .. }
+            | AccountEvent::ReserveRefundQueued { account_id, .. }
+            | AccountEvent::ReserveRefundSent { account_id, .. }
+            | AccountEvent::ReserveRefundFailed { account_id, .. }
             | AccountEvent::ReserveEntryRecorded { account_id, .. } => account_id,
         }
     }
@@ -290,6 +318,31 @@ impl AccountEvent {
                 "enabled": enabled,
                 "threshold_usd_cents": threshold_usd_cents,
             }),
+            AccountEvent::ReserveRefundQueued {
+                refund_id,
+                currency,
+                amount_minor,
+                reason,
+                ..
+            } => json!({
+                "refund_id": refund_id,
+                "currency": currency,
+                "amount_minor": amount_minor,
+                "reason": reason,
+            }),
+            AccountEvent::ReserveRefundSent {
+                refund_id,
+                currency,
+                amount_minor,
+                ..
+            } => json!({
+                "refund_id": refund_id,
+                "currency": currency,
+                "amount_minor": amount_minor,
+            }),
+            AccountEvent::ReserveRefundFailed {
+                refund_id, reason, ..
+            } => json!({ "refund_id": refund_id, "reason": reason }),
             AccountEvent::ReserveEntryRecorded {
                 currency,
                 kind,

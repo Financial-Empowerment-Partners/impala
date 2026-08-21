@@ -22,6 +22,20 @@ pub struct HorizonPayment {
     pub op_type: String,
     /// Receiving account (`to`, or `account` for create_account).
     pub to: String,
+    /// Sending account: `from` for payments, `funder` for create_account.
+    ///
+    /// This is where a refund goes back to, so it is the only reason the
+    /// bridge can return money it cannot use. Optional because the parser's
+    /// contract is never to drop a record on feed noise — a missing sender
+    /// must not stall the CREDIT path, only make the payment unrefundable.
+    pub from: Option<String>,
+    /// Horizon `from_muxed` (M-strkey) when the sender used a muxed account.
+    ///
+    /// Its presence means `from` is a SHARED base address and the real payer
+    /// identity is the muxed id, so refunding `from` would strand the money
+    /// again. The signer takes only G-addresses, so this is a hard stop for
+    /// automatic refunds.
+    pub from_muxed: Option<String>,
     /// `native` or `credit_alphanum4/12`.
     pub asset_type: String,
     pub asset_code: Option<String>,
@@ -67,9 +81,10 @@ pub fn parse_payments_page(body: &Value) -> PaymentsPage {
 
 fn parse_payment_record(r: &Value) -> Option<HorizonPayment> {
     let op_type = r["type"].as_str()?;
-    let (to, asset_type, asset_code, asset_issuer, amount) = match op_type {
+    let (to, from, asset_type, asset_code, asset_issuer, amount) = match op_type {
         "payment" | "path_payment_strict_send" | "path_payment_strict_receive" => (
             r["to"].as_str()?.to_string(),
+            r["from"].as_str().map(|s| s.to_string()),
             r["asset_type"].as_str().unwrap_or("").to_string(),
             r["asset_code"].as_str().map(|s| s.to_string()),
             r["asset_issuer"].as_str().map(|s| s.to_string()),
@@ -77,6 +92,10 @@ fn parse_payment_record(r: &Value) -> Option<HorizonPayment> {
         ),
         "create_account" => (
             r["account"].as_str()?.to_string(),
+            // The funder is captured for the audit trail only: a
+            // create_account inflow IS the account's base reserve and is
+            // never refundable.
+            r["funder"].as_str().map(|s| s.to_string()),
             "native".to_string(),
             None,
             None,
@@ -95,6 +114,8 @@ fn parse_payment_record(r: &Value) -> Option<HorizonPayment> {
         tx_hash: r["transaction_hash"].as_str()?.to_string(),
         op_type: op_type.to_string(),
         to,
+        from,
+        from_muxed: r["from_muxed"].as_str().map(|s| s.to_string()),
         asset_type,
         asset_code,
         asset_issuer,
@@ -203,6 +224,49 @@ mod tests {
         assert_eq!(p[0].amount, "25.0000000");
         assert_eq!(p[0].memo_text.as_deref(), Some("05Z8W1K9T2"));
         assert_eq!(p[0].tx_hash, "abc123");
+        assert_eq!(p[0].from.as_deref(), Some("GUSER"));
+        assert!(p[0].from_muxed.is_none());
+    }
+
+    #[test]
+    fn captures_muxed_sender() {
+        // `from` is the SHARED base address when the payer used a muxed
+        // account — refunding it would strand the money again, so the muxed
+        // marker has to survive parsing.
+        let body = page(json!([{
+            "type": "payment",
+            "paging_token": "7",
+            "transaction_hash": "h7",
+            "to": "GRESERVE",
+            "from": "GBASE",
+            "from_muxed": "MBASEXXXXXXXX",
+            "from_muxed_id": "1234",
+            "asset_type": "native",
+            "amount": "5.0000000",
+            "transaction": { "memo_type": "none" }
+        }]));
+        let p = parse_payments_page(&body).records;
+        assert_eq!(p[0].from.as_deref(), Some("GBASE"));
+        assert_eq!(p[0].from_muxed.as_deref(), Some("MBASEXXXXXXXX"));
+    }
+
+    #[test]
+    fn payment_without_sender_still_parses() {
+        // Dropping the record would stall the credit path, not just the
+        // refund path — the money still has to reach the ledger.
+        let body = page(json!([{
+            "type": "payment",
+            "paging_token": "8",
+            "transaction_hash": "h8",
+            "to": "GRESERVE",
+            "asset_type": "native",
+            "amount": "3.0000000",
+            "transaction": { "memo_type": "none" }
+        }]));
+        let p = parse_payments_page(&body).records;
+        assert_eq!(p.len(), 1);
+        assert!(p[0].from.is_none());
+        assert_eq!(p[0].amount, "3.0000000");
     }
 
     #[test]
@@ -241,6 +305,8 @@ mod tests {
         assert_eq!(p.len(), 1);
         assert_eq!(p[0].op_type, "create_account");
         assert_eq!(p[0].to, "GRESERVE");
+        // Funder captured for audit; create_account is never refundable.
+        assert_eq!(p[0].from.as_deref(), Some("GOPS"));
         assert_eq!(p[0].asset_type, "native");
         assert_eq!(p[0].amount, "100.0000000");
     }
