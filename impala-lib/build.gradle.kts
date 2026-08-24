@@ -1,7 +1,7 @@
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
-    id("com.android.library") version "9.2.1"
+    id("com.android.library") version "9.3.2"
     // AGP 9 has built-in Kotlin: the kotlin-android plugin must NOT be applied.
     // It stays on the classpath (apply false) so built-in Kotlin resolves KGP
     // 2.4.0 instead of the 2.2.x AGP bundles as its floor.
