@@ -12,7 +12,7 @@
   "//": "vitest pinned: ^4 requires Node >=20 (rolldown uses util.styleText); pin revisit noted 2026-06-09",
   "devDependencies": {
     "@eslint/js": "^9.13.0",
-    "eslint": "^9.13.0",
+    "eslint": "^10.9.0",
     "vitest": "^3"
   }
 }
