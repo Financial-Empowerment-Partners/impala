@@ -43,6 +43,12 @@ pub enum AccountEvent {
         account_id: String,
         mfa_type: String,
     },
+    /// An SMS notification destination was confirmed by its recipient. Carries
+    /// the row id only — never the number.
+    NotifyMobileVerified {
+        account_id: String,
+        notify_id: i32,
+    },
     DeviceTokenRegistered {
         account_id: String,
         platform: String,
@@ -193,6 +199,7 @@ impl AccountEvent {
             AccountEvent::CardRegistered { .. } => "card.registered",
             AccountEvent::CardDeleted { .. } => "card.deleted",
             AccountEvent::MfaEnrolled { .. } => "mfa.enrolled",
+            AccountEvent::NotifyMobileVerified { .. } => "notify.mobile_verified",
             AccountEvent::DeviceTokenRegistered { .. } => "device_token.registered",
             AccountEvent::DeviceTokenDeleted { .. } => "device_token.deleted",
             AccountEvent::ExchangeOrderCreated { .. } => "exchange.order_created",
@@ -223,6 +230,7 @@ impl AccountEvent {
             | AccountEvent::CardRegistered { account_id, .. }
             | AccountEvent::CardDeleted { account_id, .. }
             | AccountEvent::MfaEnrolled { account_id, .. }
+            | AccountEvent::NotifyMobileVerified { account_id, .. }
             | AccountEvent::DeviceTokenRegistered { account_id, .. }
             | AccountEvent::DeviceTokenDeleted { account_id }
             | AccountEvent::ExchangeOrderCreated { account_id, .. }
@@ -268,6 +276,9 @@ impl AccountEvent {
             AccountEvent::CardRegistered { card_id, .. } => json!({ "card_id": card_id }),
             AccountEvent::CardDeleted { card_id, .. } => json!({ "card_id": card_id }),
             AccountEvent::MfaEnrolled { mfa_type, .. } => json!({ "mfa_type": mfa_type }),
+            AccountEvent::NotifyMobileVerified { notify_id, .. } => {
+                json!({ "notify_id": notify_id })
+            }
             AccountEvent::DeviceTokenRegistered { platform, .. } => {
                 json!({ "platform": platform })
             }
@@ -480,6 +491,21 @@ mod tests {
         assert_eq!(e.event_type(), "account.updated");
         assert_eq!(e.account_id(), "acct-1");
         assert_eq!(e.data(), json!({ "fields": ["nickname"] }));
+    }
+
+    #[test]
+    fn notify_mobile_verified_payload_never_carries_the_number() {
+        // The phone number is subscriber PII and this payload fans out to
+        // every registered admin webhook. The row id is enough to correlate.
+        let e = AccountEvent::NotifyMobileVerified {
+            account_id: "acct-1".into(),
+            notify_id: 42,
+        };
+        assert_eq!(e.event_type(), "notify.mobile_verified");
+        assert_eq!(e.account_id(), "acct-1");
+        let data = e.data();
+        assert_eq!(data, json!({ "notify_id": 42 }));
+        assert!(data.get("mobile").is_none());
     }
 
     #[test]

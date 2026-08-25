@@ -41,6 +41,10 @@ pub struct AppMetrics {
     pub notifications_dispatched: Counter<u64>,
     pub notifications_delivered: Counter<u64>,
     pub notification_delivery_duration: Histogram<f64>,
+    /// SMS enrollment codes issued, labelled by whether an SMS actually went out.
+    pub notification_verifications_sent: Counter<u64>,
+    /// Enrollment code submissions, labelled by outcome.
+    pub notification_verification_results: Counter<u64>,
 
     // Worker / Jobs
     pub jobs_processed: Counter<u64>,
@@ -150,6 +154,14 @@ impl AppMetrics {
             notification_delivery_duration: meter
                 .f64_histogram("notification.delivery.duration")
                 .with_description("Notification delivery duration in seconds")
+                .build(),
+            notification_verifications_sent: meter
+                .u64_counter("notification.verification_sent")
+                .with_description("SMS enrollment verification codes issued, by send outcome")
+                .build(),
+            notification_verification_results: meter
+                .u64_counter("notification.verification_result")
+                .with_description("SMS enrollment verification submissions, by outcome")
                 .build(),
 
             jobs_processed: meter

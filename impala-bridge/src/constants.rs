@@ -187,6 +187,46 @@ pub const CARD_CHALLENGE_TTL_SECS: usize = 60;
 /// Maximum DER-encoded ECDSA P-256 signature length in bytes (144 hex chars).
 pub const CARD_SIGNATURE_MAX_BYTES: usize = 72;
 
+/// Digits in an SMS notification-enrollment verification code.
+///
+/// Six digits is ~20 bits, which is only safe because
+/// `NOTIFY_VERIFY_MAX_ATTEMPTS` destroys the code long before the space can be
+/// walked. Raising the attempt ceiling without widening this is a downgrade.
+pub const NOTIFY_VERIFY_CODE_DIGITS: u32 = 6;
+
+/// Upper bound (exclusive) of the verification code space: 10^6.
+pub const NOTIFY_VERIFY_CODE_SPACE: u32 = 1_000_000;
+
+/// How long an issued SMS notification-enrollment code stays valid.
+pub const NOTIFY_VERIFY_CODE_TTL_SECS: usize = 10 * 60;
+
+/// Wrong codes tolerated for one pending verification before the code is
+/// discarded and the recipient has to request a new one.
+pub const NOTIFY_VERIFY_MAX_ATTEMPTS: u64 = 5;
+
+/// Verification sends allowed per notify row per `NOTIFY_VERIFY_SEND_WINDOW_SECS`.
+///
+/// Deliberately tighter than `RATE_LIMIT_MAX_REQUESTS`: every send is a billed
+/// Twilio message to a number the caller chose, so this endpoint is an SMS
+/// pump if it is not held down.
+pub const NOTIFY_VERIFY_SEND_MAX: u64 = 3;
+
+/// Window for `NOTIFY_VERIFY_SEND_MAX`.
+pub const NOTIFY_VERIFY_SEND_WINDOW_SECS: usize = 10 * 60;
+
+/// Verification sends allowed per *account* per `NOTIFY_VERIFY_SEND_WINDOW_SECS`,
+/// across every notify row it owns. The per-row limit alone would let one
+/// account cycle rows to keep sending.
+pub const NOTIFY_VERIFY_SEND_ACCOUNT_MAX: u64 = 10;
+
+/// Rate-limit scope for verification-code sends.
+pub const NOTIFY_VERIFY_SEND_SCOPE: &str = "notifyverify";
+
+/// Rate-limit scope for verification-code submissions. Separate from the send
+/// scope so a burst of guesses cannot exhaust the (much tighter) send budget
+/// and lock the recipient out of requesting a fresh code.
+pub const NOTIFY_VERIFY_SUBMIT_SCOPE: &str = "notifyverifysubmit";
+
 /// Account role: read-only access. Default for any account without an explicit role.
 pub const ROLE_VIEW_ONLY: &str = "view-only";
 

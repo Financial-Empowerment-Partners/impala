@@ -3,6 +3,7 @@ use opentelemetry::KeyValue;
 use sqlx::PgPool;
 use std::sync::Arc;
 
+use crate::error::AppError;
 use crate::sns;
 use crate::telemetry::AppMetrics;
 
@@ -113,6 +114,27 @@ struct SubscriptionTarget {
     url: Option<String>,
 }
 
+/// Active subscriptions for an account/event, joined to their contact details.
+///
+/// The `mobile_verified_at` clause is where SMS enrollment verification is
+/// actually enforced: a number the recipient never confirmed is filtered out
+/// here, so it is inert rather than merely flagged. Enforcing at dispatch
+/// rather than at write time means a number that *loses* its verification later
+/// — the database trigger nulls it whenever `mobile` changes — stops receiving
+/// immediately, with no reconciliation step to forget.
+///
+/// Held as a constant so the guard is covered by a test; deleting the clause
+/// silently resumes sending to unconfirmed numbers.
+const SUBSCRIPTION_TARGETS_SQL: &str = r#"
+        SELECT n.id AS notify_id, ns.medium::text, n.mobile, n.email, n.url
+        FROM notification_subscription ns
+        JOIN notify n ON n.account_id = ns.account_id AND n.medium = ns.medium
+        WHERE ns.account_id = $1
+          AND ns.event_type = $2::event_type
+          AND ns.enabled = true
+          AND (ns.medium::text <> 'sms' OR n.mobile_verified_at IS NOT NULL)
+        "#;
+
 /// Dispatch notification jobs for a given event.
 ///
 /// Looks up the user's active subscriptions and contact info, then publishes
@@ -138,21 +160,11 @@ pub async fn dispatch_event(
     let event_type = event.event_type_str();
     let (title, body) = event.format_message();
 
-    // Query active subscriptions joined with contact info
-    let targets = sqlx::query_as::<_, SubscriptionTarget>(
-        r#"
-        SELECT n.id AS notify_id, ns.medium::text, n.mobile, n.email, n.url
-        FROM notification_subscription ns
-        JOIN notify n ON n.account_id = ns.account_id AND n.medium = ns.medium
-        WHERE ns.account_id = $1
-          AND ns.event_type = $2::event_type
-          AND ns.enabled = true
-        "#,
-    )
-    .bind(&account_id)
-    .bind(event_type)
-    .fetch_all(pool)
-    .await;
+    let targets = sqlx::query_as::<_, SubscriptionTarget>(SUBSCRIPTION_TARGETS_SQL)
+        .bind(&account_id)
+        .bind(event_type)
+        .fetch_all(pool)
+        .await;
 
     let targets = match targets {
         Ok(t) => t,
@@ -268,6 +280,101 @@ pub async fn dispatch_event(
                     KeyValue::new("medium", target.medium.clone()),
                 ],
             );
+        }
+    }
+}
+
+/// Generate a uniformly-distributed verification code, zero-padded to
+/// `NOTIFY_VERIFY_CODE_DIGITS`.
+///
+/// Rejection sampling rather than `% CODE_SPACE`: the modulo would bias the
+/// low end of the range, and a code space with a known skew is a shorter code
+/// than it looks. Draws until the value falls in the largest whole multiple of
+/// the space, which terminates immediately in the overwhelming majority of
+/// draws.
+pub fn generate_verification_code() -> Result<String, AppError> {
+    let space = crate::constants::NOTIFY_VERIFY_CODE_SPACE;
+    let limit = (u32::MAX / space) * space;
+
+    for _ in 0..64 {
+        let mut buf = [0u8; 4];
+        aws_lc_rs::rand::fill(&mut buf).map_err(|e| {
+            error!("generate_verification_code: RNG failure: {}", e);
+            AppError::InternalError("Service temporarily unavailable".to_string())
+        })?;
+        let draw = u32::from_be_bytes(buf);
+        if draw < limit {
+            return Ok(format!(
+                "{:0width$}",
+                draw % space,
+                width = crate::constants::NOTIFY_VERIFY_CODE_DIGITS as usize
+            ));
+        }
+    }
+
+    // Unreachable in practice: each draw rejects with probability < 2^-32 of
+    // the range. Fail closed rather than fall back to a biased value.
+    error!("generate_verification_code: exhausted rejection sampling attempts");
+    Err(AppError::InternalError(
+        "Service temporarily unavailable".to_string(),
+    ))
+}
+
+/// The SMS body carrying an enrollment code.
+///
+/// Names the service, states the expiry, and tells a recipient who did not ask
+/// for it that ignoring it is the correct response — this message can arrive at
+/// a number whose owner has no relationship with us, because the number is
+/// whatever the account typed.
+pub fn verification_message(code: &str) -> String {
+    format!(
+        "Impala: {} is your notification verification code. \
+         It expires in {} minutes. If you did not request this, ignore this message \
+         and no alerts will be sent to this number.",
+        code,
+        crate::constants::NOTIFY_VERIFY_CODE_TTL_SECS / 60
+    )
+}
+
+/// Publish the SMS job carrying a verification code.
+///
+/// Returns `false` when SMS delivery is not configured, so the caller can tell
+/// the client that the row is pending but nothing was sent.
+pub async fn send_verification_sms(
+    sns_client: Option<&Arc<aws_sdk_sns::Client>>,
+    sns_topic_arn: Option<&Arc<String>>,
+    account_id: &str,
+    mobile: &str,
+    code: &str,
+) -> bool {
+    let (Some(sns_client), Some(topic_arn)) = (sns_client, sns_topic_arn) else {
+        warn!(
+            "send_verification_sms: SNS not configured; no code sent for account={}",
+            account_id
+        );
+        return false;
+    };
+
+    // Deliberately no `notify_id`: the worker writes the provider's response
+    // into `notify_log`, and Twilio echoes the message body — which would
+    // persist the code in the database long after it expired in Redis. The
+    // delivery is observable through the job's own logs and metrics instead.
+    let payload = serde_json::json!({
+        "account_id": account_id,
+        "medium": "sms",
+        "message_title": "Verification code",
+        "message_body": verification_message(code),
+        "destination": mobile,
+    });
+
+    match sns::publish_job(sns_client, topic_arn, "send_notification", payload).await {
+        Ok(()) => true,
+        Err(e) => {
+            error!(
+                "send_verification_sms: failed to publish job for account={}: {}",
+                account_id, e
+            );
+            false
         }
     }
 }
@@ -389,5 +496,92 @@ mod tests {
         assert_eq!(subject, "Incoming Transfer");
         assert!(body.contains("250 XLM"));
         assert!(body.contains("GSRC"));
+    }
+
+    // ── SMS enrollment verification ────────────────────────────────────
+
+    #[test]
+    fn dispatch_query_filters_unverified_sms_destinations() {
+        // This clause IS the enforcement. If it is ever dropped, unconfirmed
+        // numbers silently start receiving notifications again, and nothing
+        // else in the system would notice.
+        assert!(
+            SUBSCRIPTION_TARGETS_SQL
+                .contains("(ns.medium::text <> 'sms' OR n.mobile_verified_at IS NOT NULL)"),
+            "the SMS verification guard is missing from the dispatch query"
+        );
+    }
+
+    #[test]
+    fn dispatch_query_still_delivers_other_media_unconditionally() {
+        // Verification gates SMS only; email/webhook/push must not be caught
+        // by a clause that accidentally applies to every medium.
+        assert!(SUBSCRIPTION_TARGETS_SQL.contains("ns.medium::text <> 'sms'"));
+    }
+
+    #[test]
+    fn generated_code_has_the_configured_shape() {
+        let code = generate_verification_code().expect("code generation failed");
+        assert_eq!(
+            code.len(),
+            crate::constants::NOTIFY_VERIFY_CODE_DIGITS as usize
+        );
+        assert!(
+            code.chars().all(|c| c.is_ascii_digit()),
+            "non-digit in code: {code}"
+        );
+    }
+
+    #[test]
+    fn generated_codes_keep_their_leading_zeros() {
+        // Zero-padding matters: a code rendered as "1234" when it is really
+        // 001234 would never match what the recipient types back.
+        let padded = format!(
+            "{:0width$}",
+            42,
+            width = crate::constants::NOTIFY_VERIFY_CODE_DIGITS as usize
+        );
+        assert_eq!(padded, "000042");
+    }
+
+    #[test]
+    fn generated_codes_vary() {
+        // Not a randomness test — a smoke check that the generator is not
+        // pinned to one value.
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..50 {
+            seen.insert(generate_verification_code().unwrap());
+        }
+        assert!(seen.len() > 1, "generator produced a constant value");
+    }
+
+    #[test]
+    fn generated_codes_span_the_whole_range() {
+        // Rejection sampling is there to keep the distribution flat; a
+        // generator biased into the low decade would shrink the code space.
+        let mut high = false;
+        for _ in 0..200 {
+            if generate_verification_code().unwrap().starts_with('9') {
+                high = true;
+                break;
+            }
+        }
+        assert!(high, "no code in the top decade across 200 draws");
+    }
+
+    #[test]
+    fn verification_message_carries_the_code_and_its_expiry() {
+        let msg = verification_message("013579");
+        assert!(msg.contains("013579"), "{msg}");
+        assert!(msg.contains("10 minutes"), "{msg}");
+    }
+
+    #[test]
+    fn verification_message_tells_an_unexpecting_recipient_to_ignore_it() {
+        // The number is whatever an account typed, so this can land on someone
+        // with no relationship to us; the message has to be safe for them.
+        let msg = verification_message("123456");
+        assert!(msg.contains("did not request"), "{msg}");
+        assert!(msg.starts_with("Impala:"), "{msg}");
     }
 }

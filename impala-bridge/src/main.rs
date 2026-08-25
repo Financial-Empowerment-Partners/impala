@@ -554,6 +554,11 @@ async fn run_server(
                 .put(notify::update_notify),
         )
         .route(
+            "/notify/verify/send",
+            post(notify::send_notify_verification),
+        )
+        .route("/notify/verify", post(notify::verify_notify))
+        .route(
             "/notification/subscriptions",
             get(notification_subscription::list_subscriptions)
                 .post(notification_subscription::create_subscription),

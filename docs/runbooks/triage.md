@@ -157,6 +157,9 @@ prefixes worth knowing:
 | `health_check:` | health | Which dependency failed the probe |
 | `worker:` | `worker.rs` | SQS poll loop and job outcomes |
 | `enroll_mfa:` / `verify_mfa:` | MFA | Enrollment/verification failures |
+| `issue_verification:` | SMS enrollment | A code was minted; `sent=false` means nothing went out |
+| `try_issue_verification:` | SMS enrollment | Code could not be issued on a create/update — the row saved unverified |
+| `verify_notify:` | SMS enrollment | Wrong/expired code, spent attempt budget, or a number changed mid-flight |
 
 ### Ledger-integrity alarms — page on these
 
@@ -299,6 +302,23 @@ that does not qualify. The `reserve.fallbacks` metric is labelled by reason.
 `invalid JSON`, `failed to delete message`. See `incident-response.md` for the
 DLQ procedure.
 
+**A user says they get no SMS notifications.** Most likely the number is not
+confirmed. `GET /notify` shows `mobile_verified_at` — null means
+`dispatch_event` skips it by design. Have them request a fresh code with
+`POST /notify/verify/send` and submit it to `POST /notify/verify`. Note that
+**changing the number clears the confirmation** (a database trigger does it), so
+an edit silently returns the row to unverified until re-confirmed.
+
+**Codes are never delivered.** Verification uses the same Twilio path as every
+other SMS, so it needs `TWILIO_SID`/`TWILIO_TOKEN`/`TWILIO_NUMBER` **and** a
+worker consuming SQS. Where SNS is unconfigured the write still succeeds but
+answers `verification_sent: false` — check for `try_issue_verification:` in the
+logs, and `notification.verification_sent` with `outcome=not_sent`.
+
+**Verification 429s.** Sends are capped per row and per account (each one is a
+billed message). Submissions are capped separately, so a burst of guesses
+cannot lock someone out of requesting a new code.
+
 **`GET /exchange/*` returns 400.** The provider is unconfigured. Empty
 credential env vars mean "not configured"; the routes answer 400 rather than
 failing at boot.
@@ -322,6 +342,7 @@ Names (from `src/telemetry.rs`):
 `transaction.created`, `payment.settled_unrecorded`,
 `mfa.enrollment`, `mfa.verification`,
 `notification.dispatched`, `notification.delivered`, `notification.delivery.duration`,
+`notification.verification_sent`, `notification.verification_result`,
 `worker.job.processed`, `worker.job.duration`, `worker.job.active`,
 `stellar.reconcile.transactions`, `batch_sync.accounts`,
 `payala_sync.batches`, `payala_sync.items`,

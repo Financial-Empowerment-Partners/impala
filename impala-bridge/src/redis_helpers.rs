@@ -276,6 +276,163 @@ pub async fn consume_card_challenge(
     Ok(challenge)
 }
 
+/// A pending SMS notification-enrollment verification.
+///
+/// The destination is stored alongside the code so a code issued for one
+/// number can never confirm another: if the row's `mobile` changed between
+/// send and submit, the numbers disagree and the attempt is rejected. The
+/// database trigger clears `mobile_verified_at` on such a change; this closes
+/// the same gap for a code that was already in flight.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct PendingNotifyVerification {
+    pub code: String,
+    pub mobile: String,
+}
+
+fn notify_verify_key(notify_id: i32) -> String {
+    format!("impala:notify_verify:{notify_id}")
+}
+
+fn notify_verify_attempts_key(notify_id: i32) -> String {
+    format!("impala:notify_verify_attempts:{notify_id}")
+}
+
+/// Store a freshly-issued SMS enrollment code for `notify_id`.
+///
+/// Fails closed: if Redis is unavailable no code is stored, and the caller
+/// must not send an SMS it could never verify. Storing replaces any code
+/// already outstanding and resets the attempt counter, so a resend gives the
+/// recipient a clean slate rather than inheriting a nearly-exhausted one.
+pub async fn store_notify_verification(
+    pool: &RedisPool,
+    notify_id: i32,
+    code: &str,
+    mobile: &str,
+    ttl_secs: usize,
+) -> Result<(), AppError> {
+    let mut conn = pool.get().await.map_err(|e| {
+        error!(
+            "store_notify_verification: failed to get Redis connection: {}",
+            e
+        );
+        AppError::InternalError("Service temporarily unavailable".to_string())
+    })?;
+
+    let pending = PendingNotifyVerification {
+        code: code.to_string(),
+        mobile: mobile.to_string(),
+    };
+    let encoded = serde_json::to_string(&pending).map_err(|e| {
+        error!("store_notify_verification: failed to serialize: {}", e);
+        AppError::InternalError("Service temporarily unavailable".to_string())
+    })?;
+
+    let key = notify_verify_key(notify_id);
+    conn.set_ex::<_, &str, ()>(&key, &encoded, ttl_secs as u64)
+        .await
+        .map_err(|e| {
+            warn!(
+                "store_notify_verification: Redis SET_EX failed for {}: {}",
+                key, e
+            );
+            AppError::InternalError("Service temporarily unavailable".to_string())
+        })?;
+
+    // Best-effort: a stale attempt counter only costs the recipient retries,
+    // and failing the send over it would be worse.
+    let _: Result<(), _> = conn.del(notify_verify_attempts_key(notify_id)).await;
+
+    Ok(())
+}
+
+/// Read the pending verification for `notify_id` without consuming it.
+///
+/// Left in place on a wrong code so the recipient can retype it; the attempt
+/// counter, not deletion, is what bounds guessing. Fails closed.
+pub async fn peek_notify_verification(
+    pool: &RedisPool,
+    notify_id: i32,
+) -> Result<Option<PendingNotifyVerification>, AppError> {
+    let mut conn = pool.get().await.map_err(|e| {
+        error!(
+            "peek_notify_verification: failed to get Redis connection: {}",
+            e
+        );
+        AppError::InternalError("Service temporarily unavailable".to_string())
+    })?;
+
+    let key = notify_verify_key(notify_id);
+    let raw: Option<String> = conn.get(&key).await.map_err(|e| {
+        warn!(
+            "peek_notify_verification: Redis GET failed for {}: {}",
+            key, e
+        );
+        AppError::InternalError("Service temporarily unavailable".to_string())
+    })?;
+
+    match raw {
+        None => Ok(None),
+        Some(s) => match serde_json::from_str::<PendingNotifyVerification>(&s) {
+            Ok(p) => Ok(Some(p)),
+            Err(e) => {
+                // Unreadable record: treat as absent and clear it rather than
+                // wedging the row until the TTL runs out.
+                warn!(
+                    "peek_notify_verification: unreadable record for {}: {}",
+                    key, e
+                );
+                let _: Result<(), _> = conn.del(&key).await;
+                Ok(None)
+            }
+        },
+    }
+}
+
+/// Discard the pending verification for `notify_id` (consumed or burned).
+pub async fn clear_notify_verification(pool: &RedisPool, notify_id: i32) {
+    let Ok(mut conn) = pool.get().await else {
+        warn!("clear_notify_verification: failed to get Redis connection");
+        return;
+    };
+    let _: Result<(), _> = conn.del(notify_verify_key(notify_id)).await;
+    let _: Result<(), _> = conn.del(notify_verify_attempts_key(notify_id)).await;
+}
+
+/// Count a wrong code against `notify_id` and report whether the budget is now
+/// spent. The counter carries the code's own TTL, so it cannot outlive it.
+///
+/// Fails closed: an unreadable counter is treated as exhausted, because the
+/// alternative is unbounded guessing while Redis is degraded.
+pub async fn increment_notify_verification_attempts(
+    pool: &RedisPool,
+    notify_id: i32,
+    max_attempts: u64,
+    ttl_secs: usize,
+) -> bool {
+    let Ok(mut conn) = pool.get().await else {
+        warn!("increment_notify_verification_attempts: failed to get Redis connection");
+        return true;
+    };
+
+    let key = notify_verify_attempts_key(notify_id);
+    let attempts: Result<u64, _> = conn.incr(&key, 1u64).await;
+    match attempts {
+        Ok(n) => {
+            if n == 1 {
+                let _: Result<(), _> = conn.expire(&key, ttl_secs as i64).await;
+            }
+            n >= max_attempts
+        }
+        Err(e) => {
+            warn!(
+                "increment_notify_verification_attempts: Redis INCR failed for {}: {}",
+                key, e
+            );
+            true
+        }
+    }
+}
+
 /// Mark a JWT as revoked, strictly: a Redis failure is returned to the
 /// caller. Used where an unrecorded revocation is itself a security bug
 /// (logout must not silently fail).
@@ -715,5 +872,35 @@ mod tests {
         assert!(lockout_key("x").starts_with("impala:lockout:"));
         assert!(revoked_key("x").starts_with("impala:revoked:"));
         assert!(mfa_attempts_key("x", "y").starts_with("impala:mfa_attempts:"));
+    }
+
+    /// The pending record must survive a round trip intact: the stored number
+    /// is what binds a code to a destination, so losing it would let a code
+    /// issued for one number confirm another.
+    #[test]
+    fn pending_notify_verification_round_trips() {
+        let pending = PendingNotifyVerification {
+            code: "000123".to_string(),
+            mobile: "+15551234567".to_string(),
+        };
+        let encoded = serde_json::to_string(&pending).unwrap();
+        let decoded: PendingNotifyVerification = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded.code, "000123");
+        assert_eq!(decoded.mobile, "+15551234567");
+    }
+
+    #[test]
+    fn notify_verification_keys_are_namespaced_and_distinct() {
+        // The code and its attempt counter must never collide: one key doing
+        // both jobs would let a failed attempt overwrite the code.
+        assert!(notify_verify_key(7).starts_with("impala:notify_verify:"));
+        assert!(notify_verify_attempts_key(7).starts_with("impala:notify_verify_attempts:"));
+        assert_ne!(notify_verify_key(7), notify_verify_attempts_key(7));
+    }
+
+    #[test]
+    fn notify_verification_keys_are_per_row() {
+        assert_ne!(notify_verify_key(7), notify_verify_key(8));
+        assert_ne!(notify_verify_attempts_key(7), notify_verify_attempts_key(8));
     }
 }

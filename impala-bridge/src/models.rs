@@ -591,6 +591,30 @@ pub struct NotifyResponse {
     pub message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<i32>,
+    /// Present when the write left an SMS number awaiting confirmation. The
+    /// client should collect the code and submit it to `POST /notify/verify`;
+    /// until then no SMS is delivered to this row.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verification_required: Option<bool>,
+    /// Whether a code was actually sent. `false` means the row is pending but
+    /// nothing went out (SMS delivery unconfigured, or the send failed) — the
+    /// client should offer `POST /notify/verify/send`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verification_sent: Option<bool>,
+}
+
+impl NotifyResponse {
+    /// A response that says nothing about verification (non-SMS writes, and
+    /// every rejection path).
+    pub fn plain(success: bool, message: impl Into<String>, id: Option<i32>) -> Self {
+        NotifyResponse {
+            success,
+            message: message.into(),
+            id,
+            verification_required: None,
+            verification_sent: None,
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -604,6 +628,40 @@ pub struct UpdateNotifyRequest {
     pub email: Option<String>,
     pub url: Option<String>,
     pub app: Option<String>,
+}
+
+/// `POST /notify/verify/send` — (re)issue a code to a row's `mobile`.
+#[derive(Deserialize)]
+pub struct SendNotifyVerificationRequest {
+    pub notify_id: i32,
+}
+
+/// `POST /notify/verify` — confirm a code the recipient received.
+#[derive(Deserialize)]
+pub struct VerifyNotifyRequest {
+    pub notify_id: i32,
+    pub code: String,
+}
+
+#[derive(Serialize)]
+pub struct NotifyVerificationResponse {
+    pub success: bool,
+    pub message: String,
+    /// The row's verification state after this call. Lets a client refresh its
+    /// view without a follow-up `GET /notify`.
+    pub verified: bool,
+}
+
+/// The row fields the verification flow needs, and nothing else.
+///
+/// `mobile_verified` is computed as `mobile_verified_at IS NOT NULL`: the flow
+/// only ever asks whether the number is confirmed, never when.
+#[derive(sqlx::FromRow)]
+pub struct NotifyVerificationTarget {
+    pub account_id: String,
+    pub medium: String,
+    pub mobile: Option<String>,
+    pub mobile_verified: bool,
 }
 
 // ── Notification Subscription ──────────────────────────────────────────
@@ -673,6 +731,9 @@ pub struct NotifyListItem {
     pub email: Option<String>,
     pub url: Option<String>,
     pub app: Option<String>,
+    /// When the recipient confirmed `mobile`, RFC3339. Absent means SMS for
+    /// this row is inert — `dispatch_event` skips it.
+    pub mobile_verified_at: Option<String>,
 }
 
 // ── Version ────────────────────────────────────────────────────────────

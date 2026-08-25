@@ -1938,6 +1938,67 @@ paths:
         '200':
           description: Destination updated.
 
+  /notify/verify/send:
+    post:
+      tags: [notify]
+      summary: Send (or resend) an SMS enrollment verification code.
+      description: >
+        Issues a code to the row's `mobile` and sends it by SMS. Adding or
+        changing an SMS number already triggers this automatically; use it to
+        retry a message that did not arrive, or when SMS delivery was
+        unconfigured at the time the row was written.
+
+
+        Rate limited per row and per account — each call is a billed message to
+        a number the caller chose. Idempotent once verified: an already-verified
+        row answers `200` without sending anything.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SendNotifyVerificationRequest' }
+      responses:
+        '200':
+          description: Code sent, or the number was already verified.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/NotifyVerificationResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /notify/verify:
+    post:
+      tags: [notify]
+      summary: Confirm an SMS enrollment verification code.
+      description: >
+        Marks the row's `mobile` as verified, after which `dispatch_event`
+        will deliver SMS to it. The code is bound to the number it was sent
+        to: if the row's number changed in the meantime the code is discarded.
+
+
+        A wrong code is counted; once the attempt budget is spent the code is
+        destroyed and a fresh one must be requested. Every failure returns the
+        same message and a `200` with `success: false`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/VerifyNotifyRequest' }
+      responses:
+        '200':
+          description: >
+            Verification result. `success: false` with `verified: false` is a
+            rejected code, not a transport failure.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/NotifyVerificationResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
   /notification/subscriptions:
     get:
       tags: [subscription]
@@ -2826,6 +2887,20 @@ components:
         success: { type: boolean }
         message: { type: string }
         id: { type: integer, nullable: true }
+        verification_required:
+          type: boolean
+          nullable: true
+          description: >
+            Present when the write left an SMS number awaiting confirmation.
+            No SMS is delivered to the row until `POST /notify/verify`
+            succeeds.
+        verification_sent:
+          type: boolean
+          nullable: true
+          description: >
+            Whether a code was actually sent. `false` means the row is pending
+            but nothing went out (SMS delivery unconfigured, or the send
+            failed) — retry with `POST /notify/verify/send`.
 
     NotifyListItem:
       type: object
@@ -2840,6 +2915,12 @@ components:
         email: { type: string, nullable: true }
         url: { type: string, nullable: true }
         app: { type: string, nullable: true }
+        mobile_verified_at:
+          type: string
+          nullable: true
+          description: >
+            When the recipient confirmed `mobile`, RFC3339. Null means SMS for
+            this row is inert — dispatch skips it.
 
     PaginatedNotifyList:
       type: object
@@ -2850,6 +2931,33 @@ components:
         page: { type: integer }
         per_page: { type: integer }
         total: { type: integer }
+
+    SendNotifyVerificationRequest:
+      type: object
+      properties:
+        notify_id: { type: integer }
+      required: [notify_id]
+
+    VerifyNotifyRequest:
+      type: object
+      properties:
+        notify_id: { type: integer }
+        code: { type: string, description: The code the recipient received by SMS. }
+      required: [notify_id, code]
+
+    NotifyVerificationResponse:
+      type: object
+      properties:
+        success: { type: boolean }
+        message:
+          type: string
+          description: >
+            Every rejection reason returns one indistinguishable message, so a
+            caller cannot learn whether a code is currently in flight.
+        verified:
+          type: boolean
+          description: The row's verification state after this call.
+      required: [success, message, verified]
 
     CreateSubscriptionRequest:
       type: object
