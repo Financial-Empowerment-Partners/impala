@@ -9,6 +9,7 @@ mod google;
 mod handlers;
 mod jobs;
 mod jwt;
+mod keys;
 mod ldap;
 mod middleware;
 mod models;
@@ -48,9 +49,9 @@ use tower_http::trace::TraceLayer;
 
 use config::load_config;
 use handlers::{
-    account, admin, admin_replenish, admin_reserve, admin_webhook, authenticate, card, card_auth,
-    device_token, exchange as exchange_handler, exchange_webhook, github as github_handler,
-    google as google_handler, health, logout, managed_seed, mfa, network,
+    account, admin, admin_keys, admin_replenish, admin_reserve, admin_webhook, authenticate, card,
+    card_auth, device_token, exchange as exchange_handler, exchange_webhook,
+    github as github_handler, google as google_handler, health, logout, managed_seed, mfa, network,
     notification_subscription, notify, okta as okta_handler, session as session_handler,
     sso as sso_handler, subscribe, sync, token, transaction,
 };
@@ -272,23 +273,6 @@ async fn run_server(
         None
     };
 
-    // Initialize exchange providers (OwlPay Harbor + Changelly crypto/fiat).
-    // Misconfigured credentials on a money-moving path are a hard startup
-    // error — fail closed rather than run with a half-working provider.
-    let owlpay_provider = exchange::owlpay::init_owlpay_provider(&config).unwrap_or_else(|e| {
-        error!("Failed to initialize OwlPay provider: {}", e);
-        std::process::exit(1);
-    });
-    let changelly_crypto =
-        exchange::changelly::init_changelly_crypto(&config).unwrap_or_else(|e| {
-            error!("Failed to initialize Changelly exchange provider: {}", e);
-            std::process::exit(1);
-        });
-    let changelly_fiat = exchange::changelly::init_changelly_fiat(&config).unwrap_or_else(|e| {
-        error!("Failed to initialize Changelly fiat provider: {}", e);
-        std::process::exit(1);
-    });
-
     // Initialize SNS client for job dispatch (if configured)
     let sns_client = if config.sns_topic_arn.is_some() {
         let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
@@ -323,6 +307,100 @@ async fn run_server(
         config.seed_protection_backend
     );
     let stellar_signer = stellar::build_signer(&stellar_config);
+
+    // Resolve exchange provider credentials, then build the clients from what
+    // resolved. Ordering matters: the protector must exist first, because a
+    // stored credential can only be opened through it.
+    //
+    // ACTIVATION MODEL: resolution happens exactly once, here. An admin import
+    // is stored, not pushed into running processes — the fleet is autoscaled
+    // and multi-instance, so a push would update one task and leave the others
+    // on the previous key. Every task picks up an imported credential at the
+    // same moment: its next restart. See src/keys/store.rs.
+    if config.key_import_enabled {
+        // Bound how long a superseded credential stays recoverable from a
+        // database snapshot. Done here (and after every mutation) so no
+        // background task is needed to enforce the retention window.
+        keys::store::scrub_expired(&pool).await;
+    }
+    let resolutions = keys::store::resolve_all(&config, &pool, &seed_protector).await;
+
+    let mut owlpay_provider = None;
+    let mut changelly_crypto = None;
+    let mut changelly_fiat = None;
+    let mut effective_keys = Vec::with_capacity(resolutions.len());
+
+    for resolution in &resolutions {
+        // A credential the admin imported that cannot be built disables just
+        // that provider; one supplied by the deployment is a hard startup
+        // error, because that is a config mistake a human is watching for.
+        let built = match resolution.parts.as_ref() {
+            None => Ok(false),
+            Some(parts) => match resolution.kind {
+                constants::EXCHANGE_PROVIDER_OWLPAY => exchange::owlpay::build_owlpay_provider(
+                    &config,
+                    parts,
+                    resolution.previous_parts.as_ref(),
+                )
+                .map(|p| {
+                    owlpay_provider = Some(p);
+                    true
+                }),
+                constants::EXCHANGE_PROVIDER_CHANGELLY_CRYPTO => {
+                    exchange::changelly::build_changelly_crypto(&config, parts).map(|p| {
+                        changelly_crypto = Some(p);
+                        true
+                    })
+                }
+                constants::EXCHANGE_PROVIDER_CHANGELLY_FIAT => {
+                    exchange::changelly::build_changelly_fiat(&config, parts).map(|p| {
+                        changelly_fiat = Some(p);
+                        true
+                    })
+                }
+                other => Err(format!("no builder for credential kind '{}'", other)),
+            },
+        };
+
+        let mut resolution_error = resolution.error.clone();
+        let active = match built {
+            Ok(active) => active,
+            Err(msg) => {
+                if resolution.source == constants::CREDENTIAL_SOURCE_ENV {
+                    error!(
+                        "Failed to initialize the '{}' provider from the environment: {}",
+                        resolution.kind, msg
+                    );
+                    std::process::exit(1);
+                }
+                error!(
+                    "Failed to build the '{}' provider from its stored credential: {}. \
+                     The provider is DISABLED for this process.",
+                    resolution.kind, msg
+                );
+                resolution_error = Some("stored credential could not build a client".to_string());
+                false
+            }
+        };
+        let mut effective = keys::store::EffectiveKey::from_resolution(resolution, active);
+        effective.error = resolution_error;
+        effective_keys.push(effective);
+    }
+
+    let key_runtime = Arc::new(keys::store::KeyRuntime {
+        enabled: config.key_import_enabled,
+        protection_backend: config.seed_protection_backend.clone(),
+        effective: effective_keys,
+    });
+    for e in &key_runtime.effective {
+        info!(
+            "Exchange credential '{}': source={} active={} fingerprint={}",
+            e.kind,
+            e.source,
+            e.active,
+            e.fingerprint.as_deref().unwrap_or("-")
+        );
+    }
 
     // Conversion reserve (bridge service reserve for small exchange orders).
     // Fail closed: a designated reserve account whose seed the bridge cannot
@@ -524,6 +602,23 @@ async fn run_server(
             post(admin_webhook::test_webhook),
         )
         .route("/admin/events", get(admin_webhook::list_events))
+        // Bridge key management (all AdminUser-gated). These install the
+        // credentials that move money — see the DANGER block in
+        // handlers/admin_keys.rs and docs/runbooks/import-keys.md. Imports ADD
+        // by default; replacing anything already in effect requires an
+        // explicit compare-and-swap plus a typed confirmation phrase.
+        .route("/admin/keys", get(admin_keys::list_keys))
+        .route("/admin/keys/{kind}", post(admin_keys::import_key))
+        .route("/admin/keys/{kind}/merge", post(admin_keys::merge_key))
+        .route("/admin/keys/{kind}/revoke", post(admin_keys::revoke_key))
+        // Custodial Stellar seeds. `generate` is the only way to provision the
+        // conversion-reserve account: an admin-supplied reserve seed would put
+        // the pool's signing key in a human's hands permanently.
+        .route(
+            "/admin/stellar-seeds/generate",
+            post(admin_keys::generate_seed),
+        )
+        .route("/admin/stellar-seeds/import", post(admin_keys::import_seed))
         // Conversion-reserve management (all AdminUser-gated): pool status,
         // per-provider routing policies ($20-$200 thresholds), the manual
         // ledger, stray-inflow queue, utilization forecast, and resolution of
@@ -667,8 +762,21 @@ async fn run_server(
         .layer(Extension(Arc::new(subscribe::ActiveStreams::default())))
         .layer(Extension(stellar_config.clone()))
         .layer(Extension(admin_ids.clone()))
-        .layer(Extension(seed_protector))
+        .layer(Extension(seed_protector.clone()))
         .layer(Extension(stellar_signer))
+        // Always present, unlike the ConversionReserve handle: the quarantine
+        // on /managed-account/* must stay armed even when the reserve failed
+        // to initialize, which is exactly when its account is unclaimed.
+        .layer(Extension(Arc::new(
+            exchange::reserve::ReserveAccountGuard::from_config(&config),
+        )))
+        .layer(Extension(key_runtime.clone()))
+        // Non-secret provider URLs + timeouts, so the import endpoint can
+        // build a throwaway client and prove a submitted credential against
+        // the provider before storing it.
+        .layer(Extension(Arc::new(handlers::admin_keys::ProbeConfig(
+            config.clone(),
+        ))))
         .layer(Extension(http_client))
         .layer(Extension(ldap_config))
         .layer(Extension(metrics))

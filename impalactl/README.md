@@ -201,6 +201,41 @@ while :; do
 done
 ```
 
+### Bridge keys (admin)
+
+Installs the credentials the bridge uses to move money. **Read
+`docs/runbooks/import-keys.md` first** — importing a provider credential is
+spend authority over the replenishment leg's outgoing treasury XLM.
+
+```bash
+impalactl keys list                                      # running, stored, and the gap
+impalactl keys import changelly_crypto \
+    --part-file private_key=/run/secrets/changelly.hex   # api_key is prompted for
+impalactl keys import changelly_crypto --replace \
+    --part-file private_key=/run/secrets/new.hex         # prompts for the confirm phrase
+impalactl keys revoke owlpay                             # scrubs the stored ciphertext
+impalactl stellar-seed generate --account bridge-reserve # the only way to seed the reserve
+impalactl stellar-seed import --account svc-payouts      # seed via prompt/stdin/env
+```
+
+Three behaviours are worth knowing before you use these:
+
+- **Imports only add.** If anything is already in effect — including a
+  credential the deployment supplies through environment variables — the
+  command refuses until you pass `--replace` *and* type the exact phrase the
+  bridge names. The phrase includes the network, which is what catches the
+  right key in the wrong environment.
+- **Nothing takes effect until the bridge restarts.** Credentials are resolved
+  once per process so every instance in the fleet switches together. `keys
+  list` shows the gap.
+- **Part values never touch argv.** `--part-file name=path` is the only way to
+  pass a multi-line PEM; otherwise a part comes from
+  `$IMPALA_KEY_<KIND>_<PART>` (e.g. `IMPALA_KEY_OWLPAY_API_KEY`) or a no-echo
+  prompt. The kind is in the variable name deliberately: a shared
+  `IMPALA_KEY_API_KEY` would let a value exported for one provider be submitted
+  to another without anyone being asked, and both sides would accept it because
+  both are well-formed opaque strings.
+
 ## Output and exit codes
 
 Human-readable summaries by default; `--json` prints the server's response body
@@ -227,9 +262,14 @@ message: `error: [403 forbidden] Access denied`. Rate limits report the
   endpoint that issued them.
 - **`login --json` prints the token pair** (that is the raw response body). Use
   it deliberately — piping it into a log or CI transcript exposes a credential.
-- **A custodial seed never reaches this CLI.** `account generate` returns only
-  the public address, and `transfer send` signs server-side; `account import` is
-  the one command that sends a seed, and it sends it once.
+- **A custodial seed never reaches this CLI.** `account generate` and
+  `stellar-seed generate` return only the public address, and `transfer send`
+  signs server-side; `account import` and `stellar-seed import` are the commands
+  that send a seed, and they send it once.
+- **`keys import` is the safe surface for provider credentials.** The admin UI
+  can do the same thing, but a key pasted into a browser is exposed to
+  extensions, autofill and session restore. Here a secret comes from a file,
+  stdin, or a no-echo prompt.
 - **Client-side validation is convenience, not a boundary.** Address, seed and
   amount checks here mirror the bridge's own so mistakes fail before a round
   trip; the bridge re-validates everything, and it is the only authority on

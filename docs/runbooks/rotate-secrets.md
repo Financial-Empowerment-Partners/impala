@@ -19,6 +19,14 @@ once unless that's the intent.
 | `Vault/OpenBao wrapping token` | Unwraps DB URL from Vault/OpenBao on startup | Bridge fails to start on next restart |
 | `Vault/OpenBao Transit token` | Seed encrypt/decrypt (`SEED_PROTECTION_BACKEND=vault\|openbao`) | Custodial sign/import fails until rotated |
 
+> **Exchange provider credentials and custodial Stellar seeds are not in this
+> table.** When `KEY_IMPORT_ENABLED=true` they are rotated through
+> `/admin/keys/*` and `/admin/stellar-seeds/*` rather than through the secret
+> manager, and the rules are different enough to warrant their own runbook —
+> including the one that catches people out: **a rotation is not finished until
+> the old environment variable is removed**, because turning `KEY_IMPORT_ENABLED`
+> off reverts the whole fleet to it. See `import-keys.md`.
+
 ## General rotation workflow
 
 Rotations happen in two phases: **prepare** (update the secret manager
@@ -106,8 +114,11 @@ to letting an attacker with stolen credentials continue.
 Order suggested:
 1. `JWT_SECRET` (kills all tokens).
 2. `DATABASE_URL` password.
-3. Twilio, SES, FCM, Vault/OpenBao, `DUO_2FA_CLIENT_SECRET` (if Duo 2FA is enabled).
-4. Rotate IAM keys (if any) for the bridge's task role — AWS console →
+3. Exchange provider credentials — **revoke at the provider first**, then
+   `impalactl keys revoke <kind>`, then scrub the environment variables (see
+   `import-keys.md`). Bridge-side revocation does not invalidate a key upstream.
+4. Twilio, SES, FCM, Vault/OpenBao, `DUO_2FA_CLIENT_SECRET` (if Duo 2FA is enabled).
+5. Rotate IAM keys (if any) for the bridge's task role — AWS console →
    IAM → Roles → impala-bridge-task-role → Security credentials.
 
 After rotation: see `incident-response.md` for forensic capture and

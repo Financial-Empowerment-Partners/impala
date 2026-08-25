@@ -27,29 +27,9 @@ use crate::constants::{
     EXCHANGE_STATUS_PROCESSING, EXCHANGE_STATUS_REFUNDED,
 };
 use crate::error::AppError;
+use crate::keys::CredentialParts;
 
 // ── Shared RSA / DER helpers ──────────────────────────────────────────────────
-
-/// Read a secret env var, treating empty values as unset. Secrets deliberately
-/// bypass `Config` so they never land in the Debug-logged struct.
-fn env_secret(name: &str) -> Option<String> {
-    std::env::var(name).ok().filter(|v| !v.is_empty())
-}
-
-/// Read a secret from `var`, falling back to the file named by `file_var`
-/// (mounted-secret pattern, cf. FCM_SERVICE_ACCOUNT_KEY). `Ok(None)` when
-/// neither is set; `Err` when the file is named but unreadable.
-fn env_secret_or_file(var: &str, file_var: &str) -> Result<Option<String>, String> {
-    if let Some(v) = env_secret(var) {
-        return Ok(Some(v));
-    }
-    match env_secret(file_var) {
-        Some(path) => std::fs::read_to_string(&path)
-            .map(|s| Some(s.trim().to_string()))
-            .map_err(|e| format!("failed to read {} ({}): {}", file_var, path, e)),
-        None => Ok(None),
-    }
-}
 
 /// Parse a hex-encoded PKCS#8 DER RSA private key (Changelly Exchange API v2
 /// key format: PKCS#8 DER, hex-encoded). Error strings never echo key bytes.
@@ -219,22 +199,26 @@ pub struct ChangellyCrypto {
     rng: SystemRandom,
 }
 
-/// Initialize the Changelly crypto client from the environment.
+/// Build the Changelly crypto client from an already-resolved credential set.
 ///
-/// `Ok(None)` = unconfigured (CHANGELLY_API_KEY unset/empty). `Err(msg)` =
-/// configured but invalid — the orchestrator exits so the money path fails
-/// closed rather than running half-configured.
-pub fn init_changelly_crypto(config: &Config) -> Result<Option<Arc<ChangellyCrypto>>, String> {
-    let api_key = match env_secret("CHANGELLY_API_KEY") {
-        Some(k) => k,
-        None => return Ok(None),
-    };
-    let key_hex = env_secret_or_file("CHANGELLY_PRIVATE_KEY", "CHANGELLY_PRIVATE_KEY_FILE")?
-        .ok_or_else(|| {
-            "CHANGELLY_API_KEY is set but CHANGELLY_PRIVATE_KEY / CHANGELLY_PRIVATE_KEY_FILE is not"
-                .to_string()
-        })?;
-    let key_pair = parse_private_key_hex_pkcs8(&key_hex)
+/// The set comes from [`crate::keys::store::resolve_all`], which reads it from
+/// the environment (the default) or from an admin-imported `bridge_credential`
+/// row. Parsing lives here rather than at the resolver so a stored credential
+/// and an environment one fail in exactly the same way; `Err(msg)` is a hard
+/// startup error for an environment-sourced set, and disables just this
+/// provider for a stored one.
+pub fn build_changelly_crypto(
+    config: &Config,
+    parts: &CredentialParts,
+) -> Result<Arc<ChangellyCrypto>, String> {
+    let api_key = parts
+        .get("api_key")
+        .ok_or_else(|| "changelly: credential set has no api_key".to_string())?
+        .to_string();
+    let key_hex = parts
+        .get("private_key")
+        .ok_or_else(|| "changelly: credential set has no private_key".to_string())?;
+    let key_pair = parse_private_key_hex_pkcs8(key_hex)
         .map_err(|e| format!("CHANGELLY_PRIVATE_KEY: {}", e))?;
 
     let http = reqwest::Client::builder()
@@ -245,13 +229,13 @@ pub fn init_changelly_crypto(config: &Config) -> Result<Option<Arc<ChangellyCryp
         .map_err(|e| format!("failed to build Changelly HTTP client: {}", e))?;
 
     info!("changelly: crypto exchange provider initialized");
-    Ok(Some(Arc::new(ChangellyCrypto {
+    Ok(Arc::new(ChangellyCrypto {
         http,
         base_url: config.changelly_api_url.trim_end_matches('/').to_string(),
         api_key,
         key_pair,
         rng: SystemRandom::new(),
-    })))
+    }))
 }
 
 /// Serialize the JSON-RPC 2.0 envelope once; the returned string is both
@@ -622,34 +606,30 @@ pub struct ChangellyFiat {
     callback_public_key: Option<Vec<u8>>,
 }
 
-/// Initialize the Changelly Fiat client from the environment.
-///
-/// `Ok(None)` = unconfigured (CHANGELLY_FIAT_API_KEY unset/empty). `Err(msg)` =
-/// configured but invalid (the orchestrator exits — money path fails closed).
-pub fn init_changelly_fiat(config: &Config) -> Result<Option<Arc<ChangellyFiat>>, String> {
-    let api_key = match env_secret("CHANGELLY_FIAT_API_KEY") {
-        Some(k) => k,
-        None => return Ok(None),
-    };
-    let key_pem = env_secret_or_file(
-        "CHANGELLY_FIAT_PRIVATE_KEY",
-        "CHANGELLY_FIAT_PRIVATE_KEY_FILE",
-    )?
-    .ok_or_else(|| {
-        "CHANGELLY_FIAT_API_KEY is set but CHANGELLY_FIAT_PRIVATE_KEY / CHANGELLY_FIAT_PRIVATE_KEY_FILE is not"
-            .to_string()
-    })?;
-    let key_pair = parse_private_key_pem(&key_pem)
-        .map_err(|e| format!("CHANGELLY_FIAT_PRIVATE_KEY: {}", e))?;
+/// Build the Changelly Fiat client from an already-resolved credential set.
+/// See [`build_changelly_crypto`] for the resolution contract.
+pub fn build_changelly_fiat(
+    config: &Config,
+    parts: &CredentialParts,
+) -> Result<Arc<ChangellyFiat>, String> {
+    let api_key = parts
+        .get("api_key")
+        .ok_or_else(|| "changelly_fiat: credential set has no api_key".to_string())?
+        .to_string();
+    let key_pem = parts
+        .get("private_key")
+        .ok_or_else(|| "changelly_fiat: credential set has no private_key".to_string())?;
+    let key_pair =
+        parse_private_key_pem(key_pem).map_err(|e| format!("CHANGELLY_FIAT_PRIVATE_KEY: {}", e))?;
 
-    let callback_public_key = match env_secret("CHANGELLY_FIAT_CALLBACK_PUBLIC_KEY") {
+    let callback_public_key = match parts.get("callback_public_key") {
         Some(k) => Some(
-            parse_public_key(&k)
+            parse_public_key(k)
                 .map_err(|e| format!("CHANGELLY_FIAT_CALLBACK_PUBLIC_KEY: {}", e))?,
         ),
         None => {
             warn!(
-                "changelly_fiat: CHANGELLY_FIAT_CALLBACK_PUBLIC_KEY not set; \
+                "changelly_fiat: no callback public key configured; \
                  webhook signature verification will fail closed"
             );
             None
@@ -664,7 +644,7 @@ pub fn init_changelly_fiat(config: &Config) -> Result<Option<Arc<ChangellyFiat>>
         .map_err(|e| format!("failed to build Changelly Fiat HTTP client: {}", e))?;
 
     info!("changelly_fiat: fiat exchange provider initialized");
-    Ok(Some(Arc::new(ChangellyFiat {
+    Ok(Arc::new(ChangellyFiat {
         http,
         base_url: config
             .changelly_fiat_api_url
@@ -674,7 +654,7 @@ pub fn init_changelly_fiat(config: &Config) -> Result<Option<Arc<ChangellyFiat>>
         key_pair,
         rng: SystemRandom::new(),
         callback_public_key,
-    })))
+    }))
 }
 
 /// Offer-query inputs shared by `GET /v1/offers` and `GET /v1/sell/offers`.

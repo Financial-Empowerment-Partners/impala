@@ -743,3 +743,67 @@ pub const RESERVE_REFUND_MIN_MINOR: i64 = 1_000_000;
 /// `resolve complete` record the refund's hash as the fulfillment.
 pub const RESERVE_REFUND_MEMO_PREFIX: &str = "RF";
 const _: () = assert!(RESERVE_REFUND_MEMO_PREFIX.len() + 8 <= 28);
+
+// ── Admin key import ──────────────────────────────────────────────────
+
+/// Credential sets an admin can import. Deliberately the same vocabulary as
+/// [`VALID_EXCHANGE_PROVIDERS`] — a credential set exists to build exactly one
+/// provider client — and pinned to it by a test so the two cannot drift.
+pub const VALID_CREDENTIAL_KINDS: &[&str] = &[
+    EXCHANGE_PROVIDER_OWLPAY,
+    EXCHANGE_PROVIDER_CHANGELLY_CRYPTO,
+    EXCHANGE_PROVIDER_CHANGELLY_FIAT,
+];
+
+/// States of a `bridge_credential` row (mirrors `chk_bridge_credential_state`).
+/// Vocabulary-only: the states are written as literals by the statements that
+/// own them and pinned against the DDL by a models.rs drift-guard test.
+#[allow(dead_code)]
+pub const VALID_CREDENTIAL_STATES: &[&str] = &["active", "superseded", "revoked"];
+
+/// Where an effective credential came from, as reported by `GET /admin/keys`.
+pub const CREDENTIAL_SOURCE_DB: &str = "db";
+pub const CREDENTIAL_SOURCE_ENV: &str = "env";
+pub const CREDENTIAL_SOURCE_UNCONFIGURED: &str = "unconfigured";
+
+/// Domain separator for credential fingerprints. Changing it invalidates every
+/// stored fingerprint, so it is versioned rather than edited.
+pub const CREDENTIAL_FP_DOMAIN: &str = "impala-key-fp-v1";
+
+/// Displayed/compared fingerprint length in hex characters (80 bits). Long
+/// enough that two live credentials never collide, short enough to read aloud.
+pub const CREDENTIAL_FP_HEX_LEN: usize = 20;
+
+/// Bound-header magic sealed inside a credential ciphertext. Verified on
+/// decrypt so a blob cannot be replayed into a different row.
+pub const CREDENTIAL_HEADER_MAGIC: &str = "impala-cred-v1";
+
+/// Bound-header magic sealed inside a custodial seed ciphertext
+/// (`managed_seed.format_version = 1`).
+pub const SEED_HEADER_MAGIC: &str = "impala-seed-v1";
+
+/// `managed_seed.format_version` for a ciphertext carrying the bound header.
+pub const SEED_FORMAT_BOUND: i16 = 1;
+
+/// How long a superseded credential stays decryptable before it is scrubbed.
+/// The window exists so inbound webhooks signed with the previous secret still
+/// verify and in-flight orders can still be reconciled; past it, keeping the
+/// old key recoverable only grows the blast radius of a database compromise.
+pub const CREDENTIAL_SUPERSEDE_GRACE_SECS: i64 = 604_800;
+// Long enough for provider webhook retries and in-flight reconciliation, short
+// enough that a database snapshot does not hand over every key the bridge has
+// ever held. Never unbounded.
+const _: () = assert!(CREDENTIAL_SUPERSEDE_GRACE_SECS > 0);
+const _: () = assert!(CREDENTIAL_SUPERSEDE_GRACE_SECS <= 30 * 86_400);
+
+/// Max length of an operator note on a credential row.
+pub const CREDENTIAL_NOTE_MAX_LEN: usize = 256;
+
+/// Max accepted length of a single imported secret part. Comfortably fits a
+/// 4096-bit RSA PEM; anything larger is a paste error, not a key.
+pub const CREDENTIAL_PART_MAX_LEN: usize = 16_384;
+
+/// Rate-limit scope for the mutating key-management endpoints. They reuse the
+/// tighter custodial-sign budget (`SIGN_RATE_LIMIT_*`) because each one can
+/// re-point a money path.
+pub const KEY_IMPORT_RATE_LIMIT_SCOPE: &str = "keyimport";

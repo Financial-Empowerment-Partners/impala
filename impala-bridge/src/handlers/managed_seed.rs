@@ -20,8 +20,8 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::auth::AuthenticatedUser;
 use crate::constants::{
-    MAX_NAME_LENGTH, RATE_LIMIT_MAX_REQUESTS, RATE_LIMIT_WINDOW_SECS, SIGN_RATE_LIMIT_MAX_REQUESTS,
-    SIGN_RATE_LIMIT_WINDOW_SECS,
+    MAX_NAME_LENGTH, RATE_LIMIT_MAX_REQUESTS, RATE_LIMIT_WINDOW_SECS, SEED_FORMAT_BOUND,
+    SIGN_RATE_LIMIT_MAX_REQUESTS, SIGN_RATE_LIMIT_WINDOW_SECS,
 };
 use crate::error::AppError;
 use crate::models::{
@@ -33,7 +33,6 @@ use crate::seed_protect::{ProtectedSeed, ProtectorBackend, SeedProtector};
 use crate::stellar::{Asset, PaymentParams, StellarSigner};
 use crate::telemetry::AppMetrics;
 
-/// Validate the profile name fields shared by generate/import.
 /// The configured conversion-reserve account is quarantined from user-facing
 /// custodial endpoints: its seed signs payouts from the bridge's own pool, so
 /// whoever holds that one account's *user* credential must not be able to
@@ -41,22 +40,27 @@ use crate::telemetry::AppMetrics;
 /// the pool would silently overstate available), nor rebind/overwrite its
 /// seed via generate/import. Ops movements go through the audited
 /// /admin/exchange-reserve flows instead. Fail closed on a match.
+///
+/// The guard reads the CONFIGURED account id, not the live `ConversionReserve`
+/// handle. The handle is absent whenever the reserve failed to initialize —
+/// including the bootstrap window in which `RESERVE_ACCOUNT_ID` is set but its
+/// seed has not been provisioned yet — and keying off it would disarm this
+/// check at exactly the moment the reserve account is claimable.
 fn require_not_reserve_account(
-    reserve: &Option<Extension<Arc<crate::exchange::reserve::ConversionReserve>>>,
+    guard: &crate::exchange::reserve::ReserveAccountGuard,
     payala_account_id: &str,
 ) -> Result<(), AppError> {
-    if let Some(Extension(r)) = reserve {
-        if r.reserve_account_id == payala_account_id {
-            error!(
-                "managed-account endpoint refused for the conversion-reserve account '{}'",
-                payala_account_id
-            );
-            return Err(AppError::Forbidden);
-        }
+    if guard.matches(payala_account_id) {
+        error!(
+            "managed-account endpoint refused for the conversion-reserve account '{}'",
+            payala_account_id
+        );
+        return Err(AppError::Forbidden);
     }
     Ok(())
 }
 
+/// Validate the profile name fields shared by generate/import.
 fn validate_names(first_name: &str, last_name: &str) -> Result<(), AppError> {
     if first_name.trim().is_empty() || last_name.trim().is_empty() {
         return Err(AppError::BadRequest(
@@ -95,8 +99,8 @@ async fn store_managed_account(
         r#"
         INSERT INTO managed_seed
             (payala_account_id, stellar_account_id, backend, ciphertext,
-             wrapped_data_key, nonce, key_id, key_version, origin)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+             wrapped_data_key, nonce, key_id, key_version, origin, format_version)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
         "#,
     )
     .bind(payala_account_id)
@@ -108,6 +112,10 @@ async fn store_managed_account(
     .bind(&protected.key_id)
     .bind(&protected.key_version)
     .bind(origin)
+    // Every new row is written bound. `seal_seed` is the only producer of the
+    // ciphertext handed in here, so this constant and that call must move
+    // together; `bound_writes_are_marked_bound` pins them.
+    .bind(SEED_FORMAT_BOUND)
     .execute(&mut *tx)
     .await;
 
@@ -168,11 +176,11 @@ pub async fn generate_managed_account(
     Extension(redis_pool): Extension<Arc<deadpool_redis::Pool>>,
     Extension(protector): Extension<Arc<dyn SeedProtector>>,
     Extension(signer): Extension<Arc<dyn StellarSigner>>,
-    reserve: Option<Extension<Arc<crate::exchange::reserve::ConversionReserve>>>,
+    Extension(reserve_guard): Extension<Arc<crate::exchange::reserve::ReserveAccountGuard>>,
     Json(payload): Json<GenerateManagedAccountRequest>,
 ) -> Result<Json<ManagedAccountResponse>, AppError> {
     crate::auth::require_owner(&user, &payload.payala_account_id)?;
-    require_not_reserve_account(&reserve, &payload.payala_account_id)?;
+    require_not_reserve_account(&reserve_guard, &payload.payala_account_id)?;
     crate::redis_helpers::check_rate_limit(
         &redis_pool,
         "seedgen",
@@ -189,7 +197,9 @@ pub async fn generate_managed_account(
     );
 
     let (stellar_account_id, seed) = signer.generate_keypair()?;
-    let protected = protector.encrypt_seed(seed.as_slice()).await?;
+    let protected = protector
+        .encrypt_seed(&seal_seed(&payload.payala_account_id, seed.as_slice()))
+        .await?;
     // `seed` (SecretBytes) zeroizes on drop at the end of this function.
 
     store_managed_account(
@@ -225,11 +235,11 @@ pub async fn import_managed_account(
     Extension(redis_pool): Extension<Arc<deadpool_redis::Pool>>,
     Extension(protector): Extension<Arc<dyn SeedProtector>>,
     Extension(signer): Extension<Arc<dyn StellarSigner>>,
-    reserve: Option<Extension<Arc<crate::exchange::reserve::ConversionReserve>>>,
+    Extension(reserve_guard): Extension<Arc<crate::exchange::reserve::ReserveAccountGuard>>,
     Json(mut payload): Json<ImportManagedAccountRequest>,
 ) -> Result<Json<ManagedAccountResponse>, AppError> {
     crate::auth::require_owner(&user, &payload.payala_account_id)?;
-    require_not_reserve_account(&reserve, &payload.payala_account_id)?;
+    require_not_reserve_account(&reserve_guard, &payload.payala_account_id)?;
     crate::redis_helpers::check_rate_limit(
         &redis_pool,
         "seedimport",
@@ -258,7 +268,9 @@ pub async fn import_managed_account(
     crate::validate::validate_stellar_secret_seed(&secret_seed)?;
     let seed = signer.seed_from_strkey(&secret_seed)?;
     let stellar_account_id = signer.public_address(seed.as_slice())?;
-    let protected = protector.encrypt_seed(seed.as_slice()).await?;
+    let protected = protector
+        .encrypt_seed(&seal_seed(&payload.payala_account_id, seed.as_slice()))
+        .await?;
 
     store_managed_account(
         &pool,
@@ -293,8 +305,10 @@ pub async fn import_managed_account(
 pub(crate) async fn load_protected_seed(
     pool: &PgPool,
     protector: &Arc<dyn SeedProtector>,
+    signer: &Arc<dyn StellarSigner>,
     payala_account_id: &str,
 ) -> Result<crate::seed_protect::SecretBytes, AppError> {
+    #[allow(clippy::type_complexity)]
     let row = sqlx::query_as::<
         _,
         (
@@ -304,10 +318,13 @@ pub(crate) async fn load_protected_seed(
             Option<Vec<u8>>,
             String,
             Option<String>,
+            String,
+            i16,
         ),
     >(
         r#"
-        SELECT backend, ciphertext, wrapped_data_key, nonce, key_id, key_version
+        SELECT backend, ciphertext, wrapped_data_key, nonce, key_id, key_version,
+               stellar_account_id, format_version
         FROM managed_seed
         WHERE payala_account_id = $1
         "#,
@@ -320,8 +337,16 @@ pub(crate) async fn load_protected_seed(
         AppError::InternalError("Database error".to_string())
     })?;
 
-    let (backend_tag, ciphertext, wrapped_data_key, nonce, key_id, key_version) =
-        row.ok_or_else(|| AppError::NotFound("No managed seed for this account".to_string()))?;
+    let (
+        backend_tag,
+        ciphertext,
+        wrapped_data_key,
+        nonce,
+        key_id,
+        key_version,
+        stellar_account_id,
+        format_version,
+    ) = row.ok_or_else(|| AppError::NotFound("No managed seed for this account".to_string()))?;
 
     let backend = ProtectorBackend::from_tag(&backend_tag)
         .ok_or_else(|| AppError::InternalError("Corrupt seed record".to_string()))?;
@@ -346,7 +371,134 @@ pub(crate) async fn load_protected_seed(
         key_version,
     };
 
-    protector.decrypt_seed(&protected).await
+    let raw = protector.decrypt_seed(&protected).await?;
+    let seed = unseal_seed(payala_account_id, format_version, raw)?;
+
+    // The identity check. Neither protector backend binds an encryption
+    // context, so a ciphertext is byte-portable between rows: an adversary
+    // with database write access (but no KMS/Vault access) could copy the
+    // conversion reserve's ciphertext into an ordinary account's row and sign
+    // payments FROM the reserve through /managed-account/sign, because the
+    // quarantine there keys off the account id the transplanted row no longer
+    // matches, and `sign_and_submit_payment` derives the source account from
+    // the SEED rather than from the row.
+    //
+    // Asserting the decrypted seed derives the address the row claims closes
+    // that for every row, including legacy ones written before the bound
+    // header existed. Failing closed here costs one public-key derivation.
+    let derived = signer.public_address(seed.as_slice())?;
+    if derived != stellar_account_id {
+        error!(
+            "load_protected_seed: seed for account '{}' derives a different Stellar address \
+             than its row claims — REFUSING to sign. This means the row was tampered with or \
+             the seed was replaced out of band.",
+            payala_account_id
+        );
+        return Err(AppError::InternalError(
+            "seed does not match its account record".to_string(),
+        ));
+    }
+
+    // Opportunistic upgrade: a legacy row that just proved it decrypts and
+    // derives the right address is re-sealed with the bound header. Guarded on
+    // `format_version = 0`, so it is idempotent and cannot race a replacement.
+    // Best-effort by design — a read-only replica or a revoked KMS encrypt
+    // grant must never break signing.
+    if format_version < SEED_FORMAT_BOUND {
+        upgrade_seed_binding(pool, protector, payala_account_id, seed.as_slice()).await;
+    }
+
+    Ok(seed)
+}
+
+/// Strip and verify the bound header on a decrypted seed blob.
+///
+/// `format_version = 0` rows predate the header and carry the bare strkey;
+/// they are accepted (the derived-address assertion in the caller is what
+/// protects them) and upgraded on the way past.
+fn unseal_seed(
+    payala_account_id: &str,
+    format_version: i16,
+    raw: crate::seed_protect::SecretBytes,
+) -> Result<crate::seed_protect::SecretBytes, AppError> {
+    if format_version < SEED_FORMAT_BOUND {
+        return Ok(raw);
+    }
+    let header = crate::keys::seed_header(payala_account_id);
+    if !raw.as_slice().starts_with(header.as_bytes()) {
+        // Fixed string: on a transplanted blob the leading plaintext bytes are
+        // another account's secret seed, and `AppError` messages are returned
+        // to the caller verbatim.
+        error!(
+            "load_protected_seed: seed blob for account '{}' failed its binding check",
+            payala_account_id
+        );
+        return Err(AppError::InternalError(
+            "seed blob failed the binding check".to_string(),
+        ));
+    }
+    Ok(crate::seed_protect::SecretBytes::new(
+        raw.as_slice()[header.len()..].to_vec(),
+    ))
+}
+
+/// Seal a seed under its account-bound header, ready for the protector.
+pub(crate) fn seal_seed(payala_account_id: &str, seed: &[u8]) -> Zeroizing<Vec<u8>> {
+    let header = crate::keys::seed_header(payala_account_id);
+    let mut buf = Zeroizing::new(Vec::with_capacity(header.len() + seed.len()));
+    buf.extend_from_slice(header.as_bytes());
+    buf.extend_from_slice(seed);
+    buf
+}
+
+/// Re-seal a legacy (unbound) row in place. Never fatal.
+async fn upgrade_seed_binding(
+    pool: &PgPool,
+    protector: &Arc<dyn SeedProtector>,
+    payala_account_id: &str,
+    seed: &[u8],
+) {
+    let sealed = seal_seed(payala_account_id, seed);
+    let protected = match protector.encrypt_seed(&sealed).await {
+        Ok(p) => p,
+        Err(_) => {
+            info!(
+                "load_protected_seed: could not re-seal legacy seed for '{}'; leaving it unbound",
+                payala_account_id
+            );
+            return;
+        }
+    };
+    let result = sqlx::query(
+        r#"
+        UPDATE managed_seed
+        SET ciphertext = $2, wrapped_data_key = $3, nonce = $4, key_id = $5,
+            key_version = $6, backend = $7, format_version = $8,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE payala_account_id = $1 AND format_version = 0
+        "#,
+    )
+    .bind(payala_account_id)
+    .bind(&protected.ciphertext)
+    .bind(&protected.wrapped_data_key)
+    .bind(&protected.nonce)
+    .bind(&protected.key_id)
+    .bind(&protected.key_version)
+    .bind(protected.backend.as_str())
+    .bind(SEED_FORMAT_BOUND)
+    .execute(pool)
+    .await;
+    match result {
+        Ok(r) if r.rows_affected() > 0 => info!(
+            "load_protected_seed: upgraded '{}' to a bound seed ciphertext",
+            payala_account_id
+        ),
+        Ok(_) => {}
+        Err(e) => info!(
+            "load_protected_seed: bound-seed upgrade for '{}' did not apply: {}",
+            payala_account_id, e
+        ),
+    }
 }
 
 /// Sign and submit a payment from a custodial account (`POST /managed-account/sign`).
@@ -361,11 +513,11 @@ pub async fn sign_and_submit(
     Extension(signer): Extension<Arc<dyn StellarSigner>>,
     sns_client: Option<Extension<Arc<aws_sdk_sns::Client>>>,
     sns_topic_arn: Option<Extension<Arc<String>>>,
-    reserve: Option<Extension<Arc<crate::exchange::reserve::ConversionReserve>>>,
+    Extension(reserve_guard): Extension<Arc<crate::exchange::reserve::ReserveAccountGuard>>,
     Json(payload): Json<SignSubmitRequest>,
 ) -> Result<Json<SignSubmitResponse>, AppError> {
     crate::auth::require_owner(&user, &payload.payala_account_id)?;
-    require_not_reserve_account(&reserve, &payload.payala_account_id)?;
+    require_not_reserve_account(&reserve_guard, &payload.payala_account_id)?;
     crate::redis_helpers::check_rate_limit(
         &redis_pool,
         "sign",
@@ -383,7 +535,7 @@ pub async fn sign_and_submit(
     info!("POST /managed-account/sign: account={}", user.account_id);
 
     // Load and decrypt the protected seed for this owner's account.
-    let seed = load_protected_seed(&pool, &protector, &payload.payala_account_id).await?;
+    let seed = load_protected_seed(&pool, &protector, &signer, &payload.payala_account_id).await?;
     let params = PaymentParams {
         destination: payload.destination.clone(),
         amount: payload.amount.clone(),
@@ -486,5 +638,107 @@ mod tests {
         assert!(super::validate_names("John", "  ").is_err());
         let long = "a".repeat(100);
         assert!(super::validate_names(&long, "Doe").is_err());
+    }
+
+    // ── Seed binding ──────────────────────────────────────────────────
+    //
+    // Neither protector backend binds an encryption context, so a ciphertext
+    // is byte-portable between rows. Without the bound header, an adversary
+    // with database write access (but no KMS/Vault access) could copy the
+    // conversion reserve's ciphertext into an ordinary account's row and sign
+    // payments FROM the reserve: `sign_and_submit_payment` derives the source
+    // account from the SEED, and the reserve quarantine keys off the account
+    // id the transplanted row no longer matches.
+
+    #[test]
+    fn a_sealed_seed_round_trips_under_its_own_account() {
+        let seed = b"SABCDEFGHIJKLMNOPQRSTUVWXYZ234567ABCDEFGHIJKLMNOPQRSTUVW";
+        let sealed = super::seal_seed("acct-1", seed);
+        let opened = super::unseal_seed(
+            "acct-1",
+            crate::constants::SEED_FORMAT_BOUND,
+            crate::seed_protect::SecretBytes::new(sealed.to_vec()),
+        )
+        .expect("bound seed should open under its own account");
+        assert_eq!(opened.as_slice(), seed);
+    }
+
+    #[test]
+    fn a_sealed_seed_does_not_open_under_another_account() {
+        let seed = b"SABCDEFGHIJKLMNOPQRSTUVWXYZ234567ABCDEFGHIJKLMNOPQRSTUVW";
+        let sealed = super::seal_seed("reserve-acct", seed);
+        let err = super::unseal_seed(
+            "victim-acct",
+            crate::constants::SEED_FORMAT_BOUND,
+            crate::seed_protect::SecretBytes::new(sealed.to_vec()),
+        );
+        assert!(err.is_err(), "a transplanted seed blob must not open");
+    }
+
+    // `AppError` messages are serialized into the response body verbatim, and
+    // a transplanted blob's leading plaintext bytes are another account's
+    // secret seed.
+    #[test]
+    fn a_binding_failure_never_echoes_seed_material() {
+        let seed = "SABCDEFGHIJKLMNOPQRSTUVWXYZ234567ABCDEFGHIJKLMNOPQRSTUVW";
+        let sealed = super::seal_seed("reserve-acct", seed.as_bytes());
+        let err = super::unseal_seed(
+            "victim-acct",
+            crate::constants::SEED_FORMAT_BOUND,
+            crate::seed_protect::SecretBytes::new(sealed.to_vec()),
+        )
+        .unwrap_err();
+        let rendered = format!("{:?}", err);
+        assert!(!rendered.contains(seed));
+        assert!(!rendered.contains("SABCDE"));
+        // The account being READ is safe to name; the one sealed in is not.
+        assert!(!rendered.contains("reserve-acct"));
+    }
+
+    // Rows written before the header existed carry the bare strkey. They must
+    // keep opening — the derived-address assertion in `load_protected_seed` is
+    // what protects them until the opportunistic upgrade rewrites them.
+    #[test]
+    fn legacy_unbound_seeds_still_open() {
+        let seed = b"SABCDEFGHIJKLMNOPQRSTUVWXYZ234567ABCDEFGHIJKLMNOPQRSTUVW";
+        let opened = super::unseal_seed(
+            "acct-1",
+            0,
+            crate::seed_protect::SecretBytes::new(seed.to_vec()),
+        )
+        .expect("legacy seeds must keep opening");
+        assert_eq!(opened.as_slice(), seed);
+    }
+
+    // A bound seed blob must not be mistakable for a bound credential blob.
+    #[test]
+    fn seed_and_credential_headers_are_distinct() {
+        let sealed = super::seal_seed("acct-1", b"seed");
+        assert!(sealed.starts_with(crate::constants::SEED_HEADER_MAGIC.as_bytes()));
+        assert!(!sealed.starts_with(crate::constants::CREDENTIAL_HEADER_MAGIC.as_bytes()));
+    }
+
+    // The quarantine must read configuration, not the live reserve handle:
+    // the handle is absent exactly during the bootstrap window in which the
+    // reserve account has no seed and is therefore claimable.
+    #[test]
+    fn the_reserve_quarantine_is_armed_without_a_live_reserve() {
+        let mut config = crate::config::test_config();
+        config.reserve_account_id = Some("reserve-acct".to_string());
+        let guard = crate::exchange::reserve::ReserveAccountGuard::from_config(&config);
+        assert!(super::require_not_reserve_account(&guard, "reserve-acct").is_err());
+        assert!(super::require_not_reserve_account(&guard, "someone-else").is_ok());
+    }
+
+    #[test]
+    fn no_reserve_configured_quarantines_nothing() {
+        let config = crate::config::test_config();
+        let guard = crate::exchange::reserve::ReserveAccountGuard::from_config(&config);
+        assert!(super::require_not_reserve_account(&guard, "anyone").is_ok());
+        // An empty string is "unset", not "an account called empty".
+        let mut empty = crate::config::test_config();
+        empty.reserve_account_id = Some(String::new());
+        let guard = crate::exchange::reserve::ReserveAccountGuard::from_config(&empty);
+        assert!(super::require_not_reserve_account(&guard, "").is_ok());
     }
 }

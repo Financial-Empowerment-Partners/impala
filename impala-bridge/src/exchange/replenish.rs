@@ -963,6 +963,7 @@ async fn submit_spend(deps: &ReserveWatchDeps, c: &DueCycleRow) -> Result<(), Ap
     let seed = crate::handlers::managed_seed::load_protected_seed(
         &deps.pool,
         &deps.protector,
+        &deps.signer,
         &deps.reserve.reserve_account_id,
     )
     .await?;

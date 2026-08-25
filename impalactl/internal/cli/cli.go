@@ -56,6 +56,13 @@ Activity:
   activity review <btxid>    Set review status / flag / note (admin)
   activity events            Read the admin event feed (admin)
 
+Bridge keys (admin) — installs the credentials that move money:
+  keys list                  Show provider credentials: running, stored, gap
+  keys import <kind>         Import or replace a provider credential set
+  keys revoke <kind>         Revoke a stored credential (not at the provider)
+  stellar-seed generate      Provision a custodial seed the bridge generates
+  stellar-seed import        Place an existing Stellar seed under custody
+
 Other:
   health                     Show bridge health, version and network
   version                    Print the impalactl version
@@ -80,7 +87,15 @@ different bridge.
 Secrets are never read from argv, which is visible to other processes and to
 shell history. The login password comes from $%s, an
 interactive no-echo prompt, or stdin; a Stellar seed from $%s
-the same way.
+the same way. Credential parts for "keys import" come from
+--part-file name=path (the only way to pass a multi-line PEM),
+$IMPALA_KEY_<PART>, or a no-echo prompt.
+
+Importing a credential installs spend authority: replenishment sends real
+reserve XLM to the pay-in address the active provider account names. Imports
+ADD by default; replacing anything in effect needs --replace plus the exact
+confirmation phrase the bridge names, and takes effect only at the next
+rolling restart. See docs/runbooks/import-keys.md.
 `
 
 // App holds the I/O streams and environment the CLI runs against. Keeping
@@ -156,6 +171,10 @@ func (a *App) run(args []string) int {
 		return a.runTransfer(opts, cmdArgs)
 	case "activity":
 		return a.runActivity(opts, cmdArgs)
+	case "keys":
+		return a.runKeys(opts, cmdArgs)
+	case "stellar-seed":
+		return a.runStellarSeed(opts, cmdArgs)
 	case "health":
 		return a.runHealth(opts, cmdArgs)
 	default:

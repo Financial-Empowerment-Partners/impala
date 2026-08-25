@@ -36,6 +36,7 @@ pub async fn health_check(
     Extension(pool): Extension<PgPool>,
     Extension(redis_pool): Extension<Arc<deadpool_redis::Pool>>,
     Extension(stellar_config): Extension<Arc<crate::config::StellarConfig>>,
+    Extension(key_runtime): Extension<Arc<crate::keys::store::KeyRuntime>>,
 ) -> Result<Json<HealthResponse>, AppError> {
     // Check database
     let db_status = match sqlx::query_scalar::<_, i32>("SELECT 1")
@@ -67,6 +68,15 @@ pub async fn health_check(
         }
     };
 
+    // A credential that failed to resolve disables one provider; it does not
+    // make the bridge unhealthy, so it is reported beside the overall status
+    // rather than folded into it.
+    let key_resolution = if key_runtime.degraded() {
+        "degraded"
+    } else {
+        "ok"
+    };
+
     let overall = if db_status == "ok" && redis_status == "ok" {
         "healthy"
     } else {
@@ -78,6 +88,7 @@ pub async fn health_check(
         database: db_status,
         redis: redis_status,
         stellar_network: stellar_config.network.as_str().to_string(),
+        key_resolution: key_resolution.to_string(),
     }))
 }
 

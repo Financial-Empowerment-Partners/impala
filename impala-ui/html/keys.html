@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Impala - Bridge Keys</title>
+    <link rel="stylesheet" href="vendor/foundation.min.css" integrity="sha384-2ZAo6d0r9zxtxn7DvMBmpd3hscGP+LkxQ/kMShaUz/TqqsBPtbtZ1K3+3/CgndDu">
+    <link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+    <div class="top-bar" id="main-nav"></div>
+    <div id="toast-container" class="toast-container"></div>
+
+    <div class="grid-container">
+        <div class="page-header">
+            <h3>Bridge Keys</h3>
+            <p class="text-muted">Provider credentials and custodial Stellar seeds. Imports <strong>add</strong> by default; replacing anything already in effect needs an explicit confirmation.</p>
+        </div>
+
+        <div class="card callout alert">
+            <div class="card-section">
+                <h5>Before you use this page</h5>
+                <ul>
+                    <li><strong>A provider credential is spend authority.</strong> Replenishment sends real reserve XLM to the pay-in address the active Changelly account names, so whoever controls these credentials chooses a counterparty the bridge pays.</li>
+                    <li><strong>Confirmation stops mistakes, not attackers.</strong> Every check here is defeated by one admin token. It exists so you do not replace the wrong thing, and so two operators do not clobber each other.</li>
+                    <li><strong>Nothing takes effect until a rolling restart.</strong> Credentials are resolved once per process, so all instances switch together rather than drifting apart.</li>
+                    <li><strong>Pasting a key into a browser exposes it to the browser</strong> — extensions, autofill, session restore, and anything reading this page's memory. <code>impalactl keys import</code> reads secrets from a file, stdin, or a no-echo prompt and is the safer surface.</li>
+                    <li><strong>Revoking here does not revoke at the provider.</strong> If a key is compromised, revoke it at the provider first.</li>
+                </ul>
+                <p class="text-muted">Full detail: <code>docs/runbooks/import-keys.md</code>.</p>
+            </div>
+        </div>
+
+        <div id="keys-disabled" class="card" hidden>
+            <div class="card-section">
+                <h5>Key import is off</h5>
+                <p class="text-muted">This bridge runs with <code>KEY_IMPORT_ENABLED=false</code>, so provider credentials come from the deployment configuration and these endpoints refuse. Anything already stored is shown below but is <strong>not in use</strong>.</p>
+            </div>
+        </div>
+
+        <div id="keys-degraded" class="card callout alert" hidden>
+            <div class="card-section">
+                <h5>A stored credential could not be used</h5>
+                <p>At least one provider is <strong>disabled on this instance</strong> because its stored credential failed to open. It deliberately did not fall back to the environment — that would silently re-activate the credential someone replaced. Details are on the affected card.</p>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-section">
+                <h5>Provider credentials</h5>
+                <div id="keys-list"><p class="text-muted">Loading&hellip;</p></div>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-section">
+                <h5>Custodial Stellar seeds</h5>
+                <p class="text-muted">Provision a seed the bridge generates itself, or bring an existing one under custody. The conversion-reserve account is <strong>generate-only</strong>: an imported reserve seed would leave the pool&rsquo;s signing key in a person&rsquo;s hands.</p>
+                <div class="button-group">
+                    <button class="button" id="seed-generate">Generate a seed</button>
+                    <button class="button secondary" id="seed-import">Import a seed</button>
+                </div>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-section">
+                <h5>History</h5>
+                <p class="text-muted">Every stored version, newest first. Superseded versions stay decryptable for a bounded overlap so in-flight webhooks still verify, then are scrubbed; revoked ones are scrubbed at once.</p>
+                <div id="keys-history"></div>
+            </div>
+        </div>
+    </div>
+
+    <script src="config.js"></script>
+    <script src="js/escape-html.js"></script>
+    <script src="js/api.js"></script>
+    <script src="js/theme.js"></script>
+    <script src="js/roles.js"></script>
+    <script src="js/auth.js"></script>
+    <script src="js/net-config.js"></script>
+    <script src="js/net.js"></script>
+    <script src="js/session-timer.js"></script>
+    <script src="js/modal.js"></script>
+    <script src="js/router.js"></script>
+    <script src="js/keys-view.js"></script>
+    <script src="js/keys.js"></script>
+</body>
+</html>

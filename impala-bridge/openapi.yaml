@@ -60,6 +60,16 @@ tags:
       forecasting.
   - name: managed-account
     description: Custodial Stellar accounts — server-side seed generation/import and sign+submit.
+  - name: keys
+    description: >
+      Admin import of the credentials the bridge uses to move money — provider
+      API/signing keys and custodial Stellar seeds. DANGER: a provider
+      credential is spend authority over the replenishment leg's outgoing
+      treasury XLM, and a seed is signing authority. Imports ADD by default;
+      replacing anything already in effect needs an explicit compare-and-swap
+      plus a typed confirmation phrase, and takes effect only at the next
+      rolling restart. Off unless KEY_IMPORT_ENABLED=true. See
+      docs/runbooks/import-keys.md.
   - name: mfa
     description: TOTP and SMS enrollment + verification.
   - name: card
@@ -797,6 +807,256 @@ paths:
               schema: { $ref: '#/components/schemas/EventFeedResponse' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+
+  /admin/keys:
+    get:
+      tags: [keys]
+      summary: List provider credentials — running, stored, and the gap (admin only).
+      description: |
+        For each credential kind: what THIS instance resolved at startup
+        (`effective_source`, `effective_fingerprint`), what is stored in the
+        database, and `pending_restart` when they differ — the normal state
+        between an import and the deploy that activates it.
+
+        Never returns key material. Fingerprints are one-way digests over
+        canonical parsed material; RSA keys are fingerprinted through their
+        PUBLIC half, so no digest of private material exists. `env_vars_set`
+        names environment variables still present, which a stored credential is
+        shadowing: until they are removed, turning `KEY_IMPORT_ENABLED` off
+        reverts to them.
+
+        Readable even when the feature is disabled, so stored-but-inert rows
+        are visible rather than hidden.
+      responses:
+        '200':
+          description: Credential inventory.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/KeyListResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /admin/keys/{kind}:
+    post:
+      tags: [keys]
+      summary: Import (or, with confirmation, replace) a provider credential set (admin only).
+      description: |
+        **This installs a credential that moves money.** The replenishment
+        driver sends real reserve XLM to the pay-in address the active
+        Changelly account names, so whoever controls this credential chooses a
+        counterparty the bridge pays.
+
+        **Adds only, by default.** If any credential is already in effect for
+        this kind — including one supplied by the environment — the request is
+        refused with `409` and a descriptor of what is there. To replace it,
+        resend with `replace: true`, `expected_fingerprint` equal to the
+        fingerprint currently in effect, and `confirm_phrase` equal to
+        `replace {kind} {network}`.
+
+        The fingerprint is a compare-and-swap token: it stops two admins
+        clobbering each other and stops a blind replace of something never
+        looked at. It is NOT access control — an admin can read it from
+        `GET /admin/keys`.
+
+        The set is validated, then proven against the provider with one
+        authenticated read-only call (`skip_verify` opts out, and is audited).
+        OwlPay exposes no such endpoint, so its credentials are validated but
+        not proven; the response says so.
+
+        **Nothing changes until a rolling restart.** Credentials are resolved
+        once per process so every instance switches together instead of
+        drifting apart.
+      parameters:
+        - in: path
+          name: kind
+          required: true
+          schema: { type: string, enum: [owlpay, changelly_crypto, changelly_fiat] }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ImportKeyRequest' }
+      responses:
+        '200':
+          description: Credential stored (replacing the previous version).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/KeyActionResponse' }
+        '400':
+          description: >
+            Unknown kind or part, a key that does not parse, a note that looks
+            like key material, or a credential the provider rejected.
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403':
+          description: Not an admin, or KEY_IMPORT_ENABLED is false.
+        '409':
+          description: >
+            A credential is already in effect and `replace` was not set; or
+            `expected_fingerprint` / `confirm_phrase` did not match; or
+            non-terminal orders would be stranded by the change.
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /admin/keys/{kind}/merge:
+    post:
+      tags: [keys]
+      summary: Rotate part of a stored credential set (admin only).
+      description: |
+        Overlays `set_parts` onto the stored set and removes `drop_parts`,
+        writing a new version. Exists because a stored secret cannot be read
+        back, so rotating one part (Changelly rotates its callback public key
+        on its own schedule) would otherwise mean re-entering the others.
+
+        Only works against a STORED set — there is nothing to merge into an
+        environment-sourced credential, and synthesising one would silently
+        promote the deployment's secrets into the database. Always a
+        replacement, so it always requires the confirmation fields.
+      parameters:
+        - in: path
+          name: kind
+          required: true
+          schema: { type: string, enum: [owlpay, changelly_crypto, changelly_fiat] }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/MergeKeyRequest' }
+      responses:
+        '200':
+          description: Merged credential stored as a new version.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/KeyActionResponse' }
+        '400': { description: Nothing to change, or an unknown/undroppable part. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { description: Not an admin, or KEY_IMPORT_ENABLED is false. }
+        '404': { description: No stored credential for this kind to merge into. }
+        '409': { description: Confirmation missing or stale. }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /admin/keys/{kind}/revoke:
+    post:
+      tags: [keys]
+      summary: Revoke a stored credential and scrub its ciphertext (admin only).
+      description: |
+        Marks the stored credential revoked and clears its ciphertext
+        immediately — unlike supersession, which keeps the previous version
+        decryptable for a bounded overlap so in-flight webhooks still verify.
+
+        Revoking here does NOT invalidate the key at the provider. If it is
+        believed compromised, revoke it there first.
+
+        Because revocation changes what the provider falls back to after the
+        next restart — the environment credential, or nothing at all — the
+        request must acknowledge that outcome with `confirm_next_source`. The
+        409 body names it.
+      parameters:
+        - in: path
+          name: kind
+          required: true
+          schema: { type: string, enum: [owlpay, changelly_crypto, changelly_fiat] }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RevokeKeyRequest' }
+      responses:
+        '200':
+          description: Credential revoked and scrubbed.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/KeyActionResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { description: Not an admin, or KEY_IMPORT_ENABLED is false. }
+        '409':
+          description: >
+            Confirmation missing, fingerprint stale, or the resulting fallback
+            source not acknowledged.
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /admin/stellar-seeds/generate:
+    post:
+      tags: [keys]
+      summary: Provision a bridge-generated custodial Stellar seed (admin only).
+      description: |
+        Creates the seed inside the bridge, seals it with the configured
+        protection backend, and returns only the public `G...` address. The
+        secret never exists outside the process in plaintext and there is no
+        way to export it.
+
+        **This is the only way to provision the conversion-reserve account's
+        seed.** Import is refused for that account: an admin-supplied reserve
+        seed means a human holds the pool's signing key indefinitely, and
+        during bootstrap it would let whoever calls first install a key they
+        control and capture every deposit the bridge later directs at the
+        reserve address.
+
+        Add-only: an account that already has a seed is refused rather than
+        having its existing one orphaned. Fund the returned address before it
+        can transact; if it is `RESERVE_ACCOUNT_ID`, restart to activate the
+        conversion reserve.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AdminSeedRequest' }
+      responses:
+        '200':
+          description: Seed generated.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AdminSeedResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { description: Not an admin, or KEY_IMPORT_ENABLED is false. }
+        '409': { description: The account already has a custodial seed. }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /admin/stellar-seeds/import:
+    post:
+      tags: [keys]
+      summary: Bring an existing Stellar secret seed under custody (admin only).
+      description: |
+        Binds an existing `S...` seed to an existing account. Refused for the
+        configured reserve account (see `/admin/stellar-seeds/generate`).
+
+        **A replacement may not change the account's Stellar address.** On this
+        bridge an account's address IS its seed's public key — the signer
+        derives the source account from the seed — so a different seed is a
+        different account: the bridge would advertise one address for deposits
+        while signing as another, and anything held at the old address would be
+        stranded. Rotating a Stellar key without changing the address is an
+        on-chain `set_options` operation this custodial signer does not
+        support; create a new account and migrate instead.
+
+        The account is looked up on Horizon first. A master key with weight 0
+        is refused (`skip_verify` opts out): it can authorize nothing, however
+        valid the strkey looks. An account that does not exist yet is fine —
+        it simply has not been funded.
+
+        The imported key also exists wherever it was copied from. Treat that
+        copy as part of the bridge's key material.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AdminImportSeedRequest' }
+      responses:
+        '200':
+          description: Seed stored. Signing uses it immediately.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AdminSeedResponse' }
+        '400': { description: Malformed seed, or a key that cannot authorize on chain. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403':
+          description: >
+            Not an admin, KEY_IMPORT_ENABLED is false, or the target is the
+            conversion-reserve account (generate-only).
+        '404': { description: No such account. }
+        '409':
+          description: >
+            A seed already exists and `replace` was not set, confirmation was
+            missing or stale, or the new seed derives a different address.
+        '429': { $ref: '#/components/responses/RateLimited' }
 
   /admin/exchange-reserve:
     get:
@@ -2668,6 +2928,15 @@ components:
         database: { type: string, enum: [ok, error] }
         redis: { type: string, enum: [ok, error] }
         stellar_network: { type: string }
+        key_resolution:
+          type: string
+          enum: [ok, degraded]
+          description: >
+            `degraded` means an imported provider credential could not be used
+            at startup, so that provider is disabled for this process. Reported
+            here rather than in /readyz: the orchestrator acts on readiness, and
+            one unreadable credential row must degrade a provider rather than
+            cycle every task in the fleet.
 
     VersionResponse:
       type: object
@@ -3168,6 +3437,295 @@ components:
         low_water_minor: { type: integer, format: int64 }
         onchain_balance: { type: string, nullable: true, description: Live Horizon balance (best-effort). }
       required: [currency, minor_scale, available_minor, held_minor, low_water_minor]
+
+    KeyListResponse:
+      type: object
+      properties:
+        enabled:
+          type: boolean
+          description: Whether KEY_IMPORT_ENABLED is on for this instance.
+        protection_backend:
+          type: string
+          description: At-rest protection backend (kms | vault | none).
+        degraded:
+          type: boolean
+          description: >
+            True when some kind has a stored credential that failed to resolve
+            at startup, leaving that provider disabled for this process. Also
+            reported as `key_resolution` by GET /health. Deliberately NOT
+            reflected in /readyz, which the orchestrator acts on.
+        keys:
+          type: array
+          items: { $ref: '#/components/schemas/KeyView' }
+
+    KeyView:
+      type: object
+      description: One credential kind — what is running, what is stored, and the gap.
+      properties:
+        kind: { type: string, enum: [owlpay, changelly_crypto, changelly_fiat] }
+        parts:
+          type: array
+          items: { type: string }
+          description: Part names this kind accepts (e.g. api_key, private_key).
+        required_parts:
+          type: array
+          items: { type: string }
+        effective_source:
+          type: string
+          enum: [env, db, unconfigured]
+          description: Where THIS instance resolved its credential at startup.
+        effective_fingerprint: { type: string, nullable: true }
+        effective_version: { type: integer, nullable: true }
+        active:
+          type: boolean
+          description: Whether the provider client was built and is serving.
+        resolution_error:
+          type: string
+          nullable: true
+          description: >
+            Fixed-string reason a stored credential could not be used. Never
+            derived from decrypted bytes.
+        shadowed_env_fingerprint:
+          type: string
+          nullable: true
+          description: >
+            An environment credential a stored one is shadowing. The rotation
+            is not finished until it is removed from the deployment.
+        env_vars_set:
+          type: array
+          items: { type: string }
+          description: Environment variables for this kind still set in this process.
+        stored_state: { type: string, nullable: true, enum: [active, superseded, revoked] }
+        stored_version: { type: integer, nullable: true }
+        stored_fingerprint: { type: string, nullable: true }
+        per_part_fingerprints:
+          type: object
+          additionalProperties: { type: string }
+          description: >
+            One-way digests over canonical parsed material. RSA keys are
+            fingerprinted through their PUBLIC half.
+        imported_by: { type: string, nullable: true }
+        imported_at: { type: string, nullable: true, format: date-time }
+        note: { type: string, nullable: true }
+        replace_target_fingerprint:
+          type: string
+          nullable: true
+          description: >
+            The fingerprint a replacement would supersede — the stored
+            credential if there is one, otherwise whatever this instance is
+            running. This is the value `expected_fingerprint` must equal;
+            clients read it from here rather than choosing between the other
+            fingerprints themselves.
+        confirm_phrase:
+          type: string
+          nullable: true
+          description: >
+            The exact phrase a replacement or revoke must echo, present
+            whenever either is possible — including for a stored credential
+            this instance failed to resolve, which is the row most likely to
+            need recovering. Served rather than reconstructed by clients, so a
+            client cannot drift from the server and hand operators a phrase
+            that is always rejected.
+        pending_restart:
+          type: boolean
+          description: >
+            True when the stored credential differs from the one this instance
+            is running — the normal state between an import and the deploy.
+        in_flight_count:
+          type: integer
+          format: int64
+          description: >
+            Non-terminal orders and replenishment cycles riding this credential.
+            Replacing while this is non-zero can strand provider references.
+        history:
+          type: array
+          items: { $ref: '#/components/schemas/CredentialRow' }
+
+    CredentialRow:
+      type: object
+      description: A stored credential version, without any secret material.
+      properties:
+        id: { type: string, format: uuid }
+        kind: { type: string }
+        version: { type: integer }
+        state: { type: string, enum: [active, superseded, revoked] }
+        set_fingerprint: { type: string }
+        fingerprints:
+          type: object
+          additionalProperties: { type: string }
+        imported_by: { type: string }
+        imported_at: { type: string, nullable: true, format: date-time }
+        superseded_at: { type: string, nullable: true, format: date-time }
+        scrubbed_at:
+          type: string
+          nullable: true
+          format: date-time
+          description: >
+            When the ciphertext was cleared. Superseded versions are scrubbed
+            after the overlap grace; revoked ones immediately.
+        note: { type: string, nullable: true }
+
+    ImportKeyRequest:
+      type: object
+      required: [parts]
+      properties:
+        parts:
+          type: object
+          additionalProperties: { type: string }
+          description: >
+            Secret parts keyed by part name. GET /admin/keys lists the names
+            each kind expects. RSA private keys are accepted in the encoding
+            the provider issues (hex PKCS#8 for Changelly crypto, PEM for
+            Changelly fiat).
+        replace:
+          type: boolean
+          default: false
+          description: Must be true to overwrite a credential already in effect.
+        expected_fingerprint:
+          type: string
+          description: >
+            The fingerprint currently in effect, echoed back. Anti-race and
+            anti-mistake, NOT access control.
+        confirm_phrase:
+          type: string
+          description: >
+            Typed confirmation, exactly `replace {kind} {network}`. Deliberately
+            not the fingerprint, which is on screen and copyable — naming the
+            network is what catches the right key in the wrong environment.
+        strand_in_flight:
+          type: boolean
+          default: false
+          description: >
+            Accept that in-flight orders/cycles may be stranded if the new
+            credential belongs to a different provider account.
+        skip_verify:
+          type: boolean
+          default: false
+          description: Store without proving the credential against the provider.
+        note:
+          type: string
+          description: >
+            Operator note, stored in plaintext and shown in listings. Rejected
+            if it looks like key material.
+
+    MergeKeyRequest:
+      type: object
+      properties:
+        set_parts:
+          type: object
+          additionalProperties: { type: string }
+        drop_parts:
+          type: array
+          items: { type: string }
+          description: >
+            Parts to remove. Explicit because removing one is a capability
+            change — dropping a webhook secret stops verifying deliveries.
+        expected_fingerprint: { type: string }
+        confirm_phrase: { type: string }
+        strand_in_flight: { type: boolean, default: false }
+        skip_verify: { type: boolean, default: false }
+        note: { type: string }
+
+    RevokeKeyRequest:
+      type: object
+      required: [expected_fingerprint]
+      properties:
+        expected_fingerprint: { type: string }
+        confirm_phrase:
+          type: string
+          description: Exactly `replace {kind} {network}`.
+        confirm_next_source:
+          type: boolean
+          default: false
+          description: >
+            Acknowledge what the provider falls back to after the next restart
+            — an environment credential, or nothing at all.
+        strand_in_flight:
+          type: boolean
+          default: false
+          description: >
+            Accept that in-flight orders and cycles will have nothing able to
+            reconcile them once this credential stops being used.
+
+    KeyActionResponse:
+      type: object
+      properties:
+        success: { type: boolean }
+        message: { type: string }
+        kind: { type: string }
+        version: { type: integer, nullable: true }
+        set_fingerprint: { type: string, nullable: true }
+        effective_after:
+          type: string
+          description: >
+            Always `rolling_restart` for credential changes: stored credentials
+            are resolved once per process, so nothing changes until every task
+            restarts.
+        verify_note:
+          type: string
+          nullable: true
+          description: Present when the provider probe was skipped or impossible.
+        env_shadow_note:
+          type: string
+          nullable: true
+          description: Names environment variables that must still be removed.
+
+    AdminSeedRequest:
+      type: object
+      required: [payala_account_id]
+      properties:
+        payala_account_id: { type: string, maxLength: 64 }
+        label:
+          type: string
+          maxLength: 32
+          description: Display name for the account record created alongside the seed.
+
+    AdminImportSeedRequest:
+      type: object
+      required: [payala_account_id, secret_seed]
+      properties:
+        payala_account_id: { type: string, maxLength: 64 }
+        secret_seed:
+          type: string
+          description: Stellar secret seed (`S...`, 56 chars).
+        replace: { type: boolean, default: false }
+        expected_stellar_account_id:
+          type: string
+          description: >
+            The address the stored seed currently derives, echoed back. The
+            replacement must derive this SAME address.
+        confirm_phrase:
+          type: string
+          description: Exactly `replace seed {last 6 chars of the current address}`.
+        skip_verify:
+          type: boolean
+          default: false
+          description: Store even when the on-chain probe says the key cannot authorize.
+
+    SeedProbe:
+      type: object
+      description: What Horizon says about the account a submitted seed derives.
+      properties:
+        exists: { type: boolean }
+        master_key_weight:
+          type: integer
+          nullable: true
+          description: >
+            Weight of the account's own master key. 0 means the key was
+            disabled on chain and can authorize nothing.
+        native_balance: { type: string, nullable: true }
+        non_native_balances: { type: integer, format: int64 }
+
+    AdminSeedResponse:
+      type: object
+      properties:
+        success: { type: boolean }
+        message: { type: string }
+        stellar_account_id: { type: string, nullable: true }
+        on_chain:
+          allOf: [{ $ref: '#/components/schemas/SeedProbe' }]
+          nullable: true
+        effective_after: { type: string }
 
     ReserveStatusResponse:
       type: object

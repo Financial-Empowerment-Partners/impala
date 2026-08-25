@@ -67,6 +67,7 @@ var Router = (function () {
 
         if (Roles.isAdmin()) {
             links.push({ href: 'reserve.html', label: 'Reserve' });
+            links.push({ href: 'keys.html', label: 'Keys' });
             links.push({ href: 'admin.html', label: 'Admin' });
         }
 

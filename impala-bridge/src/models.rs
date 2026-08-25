@@ -694,6 +694,12 @@ pub struct HealthResponse {
     pub database: String,
     pub redis: String,
     pub stellar_network: String,
+    /// `ok` | `degraded` — `degraded` means at least one imported provider
+    /// credential could not be used at startup, so that provider is disabled
+    /// for this process. Deliberately NOT reflected in `/readyz`: the
+    /// orchestrator acts on readiness, and one unreadable credential row must
+    /// degrade a provider rather than cycle every task in the fleet.
+    pub key_resolution: String,
 }
 
 // ── Network Info ──────────────────────────────────────────────────────
@@ -1504,6 +1510,210 @@ pub struct ReserveForecastResponse {
     pub provider_utilization: Vec<ReserveProviderUtilization>,
 }
 
+// ── Admin key import ──────────────────────────────────────────────────
+//
+// None of these types carry secret material in the OUTBOUND direction. The
+// request types do (that is the point) and are scrubbed by the handler; none
+// of them derive `Debug`, so a request cannot be logged by accident.
+
+/// Import or replace a provider credential set.
+#[derive(Deserialize)]
+pub struct ImportKeyRequest {
+    /// Secret parts keyed by part name (`api_key`, `private_key`, …).
+    /// `GET /admin/keys` lists the names each kind expects.
+    #[serde(default)]
+    pub parts: std::collections::BTreeMap<String, String>,
+    /// Must be `true` to overwrite a credential already in effect. Default
+    /// false: imports ADD by default.
+    #[serde(default)]
+    pub replace: bool,
+    /// The fingerprint currently in effect, echoed back. A compare-and-swap
+    /// token: it stops two admins clobbering each other and stops a blind
+    /// replace of something never looked at. It is NOT access control — an
+    /// admin can read it from `GET /admin/keys`.
+    pub expected_fingerprint: Option<String>,
+    /// Typed confirmation: `replace {kind} {network}`. Deliberately not the
+    /// fingerprint, which is on screen and copyable — naming the network is
+    /// what catches the right key in the wrong environment.
+    pub confirm_phrase: Option<String>,
+    /// Accept that in-flight orders/cycles may be stranded if the replacement
+    /// belongs to a different provider account.
+    #[serde(default)]
+    pub strand_in_flight: bool,
+    /// Store without proving the credential against the provider first.
+    #[serde(default)]
+    pub skip_verify: bool,
+    /// Operator note. Stored in plaintext and shown in listings; rejected if
+    /// it looks like key material.
+    pub note: Option<String>,
+}
+
+/// Rotate part of a stored set without re-supplying the rest.
+#[derive(Deserialize)]
+pub struct MergeKeyRequest {
+    #[serde(default)]
+    pub set_parts: std::collections::BTreeMap<String, String>,
+    /// Parts to remove. Explicit because removing one is a capability change.
+    #[serde(default)]
+    pub drop_parts: Vec<String>,
+    pub expected_fingerprint: Option<String>,
+    pub confirm_phrase: Option<String>,
+    #[serde(default)]
+    pub strand_in_flight: bool,
+    #[serde(default)]
+    pub skip_verify: bool,
+    pub note: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct RevokeKeyRequest {
+    /// The stored credential's fingerprint, echoed back.
+    pub expected_fingerprint: String,
+    pub confirm_phrase: Option<String>,
+    /// Acknowledge what the provider falls back to after the next restart —
+    /// the environment credential, or nothing at all.
+    #[serde(default)]
+    pub confirm_next_source: bool,
+    /// Accept that in-flight orders and cycles will have nothing able to
+    /// reconcile them once this credential stops being used.
+    #[serde(default)]
+    pub strand_in_flight: bool,
+}
+
+#[derive(Serialize)]
+pub struct KeyActionResponse {
+    pub success: bool,
+    pub message: String,
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub set_fingerprint: Option<String>,
+    /// Always `rolling_restart` for credential changes: stored credentials are
+    /// resolved once per process, so nothing changes until every task restarts.
+    pub effective_after: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verify_note: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub env_shadow_note: Option<String>,
+}
+
+/// One credential kind as seen by `GET /admin/keys`: what this instance is
+/// running, what is stored, and whether they differ.
+#[derive(Serialize)]
+pub struct KeyView {
+    pub kind: &'static str,
+    pub parts: Vec<&'static str>,
+    pub required_parts: Vec<&'static str>,
+    /// `env` | `db` | `unconfigured` — for THIS instance, fixed at startup.
+    pub effective_source: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effective_fingerprint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effective_version: Option<i32>,
+    /// Whether the provider client was actually built and is serving requests.
+    pub active: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolution_error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shadowed_env_fingerprint: Option<String>,
+    pub env_vars_set: Vec<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stored_state: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stored_version: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stored_fingerprint: Option<String>,
+    pub per_part_fingerprints: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub imported_by: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub imported_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    /// The fingerprint a replacement would supersede: the stored credential if
+    /// there is one, otherwise whatever this instance is running. This is the
+    /// value `expected_fingerprint` must equal — clients read it from here
+    /// rather than choosing between the other two fingerprints themselves.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replace_target_fingerprint: Option<String>,
+    /// The exact phrase a replacement must echo, present whenever a
+    /// replacement or revoke is possible — including for a stored credential
+    /// this instance failed to resolve, which is the row most likely to need
+    /// recovering.
+    ///
+    /// Served rather than reconstructed by clients: the admin UI and
+    /// `impalactl` both need to show it, and a client that built the string
+    /// itself could drift from the server and hand operators a phrase that is
+    /// always rejected.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub confirm_phrase: Option<String>,
+    /// True when a stored credential differs from the one this instance is
+    /// running — the normal state between an import and the deploy that
+    /// activates it.
+    pub pending_restart: bool,
+    /// Non-terminal orders and replenishment cycles riding this credential.
+    pub in_flight_count: i64,
+    pub history: Vec<crate::keys::store::CredentialRow>,
+}
+
+#[derive(Serialize)]
+pub struct KeyListResponse {
+    /// Whether `KEY_IMPORT_ENABLED` is on for this instance.
+    pub enabled: bool,
+    pub protection_backend: String,
+    /// True when some kind has a stored credential that failed to resolve.
+    pub degraded: bool,
+    pub keys: Vec<KeyView>,
+}
+
+/// Provision a bridge-generated custodial seed.
+#[derive(Deserialize)]
+pub struct AdminSeedRequest {
+    pub payala_account_id: String,
+    /// Display name for the account record created alongside the seed.
+    pub label: Option<String>,
+}
+
+/// Bring an existing secret seed under custody (non-reserve accounts only).
+#[derive(Deserialize)]
+pub struct AdminImportSeedRequest {
+    pub payala_account_id: String,
+    pub secret_seed: String,
+    #[serde(default)]
+    pub replace: bool,
+    /// The address the stored seed currently derives, echoed back.
+    pub expected_stellar_account_id: Option<String>,
+    pub confirm_phrase: Option<String>,
+    /// Store even when the on-chain probe says the key cannot authorize.
+    #[serde(default)]
+    pub skip_verify: bool,
+}
+
+/// What Horizon says about the account a submitted seed derives.
+#[derive(Serialize, Clone)]
+pub struct SeedProbe {
+    pub exists: bool,
+    /// Weight of the account's own master key. `Some(0)` means the key was
+    /// disabled on chain and can authorize nothing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub master_key_weight: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub native_balance: Option<String>,
+    pub non_native_balances: i64,
+}
+
+#[derive(Serialize)]
+pub struct AdminSeedResponse {
+    pub success: bool,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stellar_account_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub on_chain: Option<SeedProbe>,
+    pub effective_after: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2190,6 +2400,35 @@ mod tests {
                 blocking
             );
         }
+    }
+
+    #[test]
+    fn test_bridge_credential_vocabularies_match_ddl() {
+        // Mirrors chk_bridge_credential_state in
+        // 033_bridge_credential_import.sql.
+        assert_eq!(
+            crate::constants::VALID_CREDENTIAL_STATES,
+            &["active", "superseded", "revoked"]
+        );
+        // The partial unique index uq_bridge_credential_active keys on
+        // state = 'active'; if that literal ever leaves this vocabulary the
+        // one-active-row-per-kind guarantee silently disappears.
+        assert!(crate::constants::VALID_CREDENTIAL_STATES.contains(&"active"));
+        // Every importable kind must be a provider the resolver can build a
+        // client for, or an admin could store a credential nothing reads.
+        assert_eq!(
+            crate::constants::VALID_CREDENTIAL_KINDS,
+            crate::constants::VALID_EXCHANGE_PROVIDERS
+        );
+        // Both header magics are versioned, not edited: changing one in place
+        // would make every existing ciphertext fail its binding check.
+        assert!(crate::constants::CREDENTIAL_HEADER_MAGIC.ends_with("-v1"));
+        assert!(crate::constants::SEED_HEADER_MAGIC.ends_with("-v1"));
+        assert_ne!(
+            crate::constants::CREDENTIAL_HEADER_MAGIC,
+            crate::constants::SEED_HEADER_MAGIC,
+            "a seed blob must not open as a credential blob, or vice versa"
+        );
     }
 
     #[test]

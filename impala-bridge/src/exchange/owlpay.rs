@@ -12,7 +12,6 @@ use hmac::{Hmac, KeyInit, Mac};
 use log::{error, warn};
 use serde_json::Value;
 use sha2::Sha256;
-use std::env;
 use std::sync::Arc;
 use std::time::Duration;
 use subtle::ConstantTimeEq;
@@ -48,25 +47,53 @@ pub struct OwlPayProvider {
     /// Webhook signing secret `whs_...` (OWLPAY_WEBHOOK_SECRET). When absent,
     /// webhook deliveries are rejected and order state advances by poll only.
     webhook_secret: Option<String>,
+    /// The secret from the previous credential version, accepted alongside the
+    /// current one for the duration of the rotation overlap. Never used to
+    /// SIGN anything — only to verify a delivery already in flight.
+    previous_webhook_secret: Option<String>,
 }
 
-/// Build the shared OwlPay provider from config + environment.
+/// Build the shared OwlPay provider from an already-resolved credential set.
 ///
-/// `Ok(None)` = unconfigured (`OWLPAY_API_KEY` unset/empty): exchange routes
-/// report the provider as disabled. `Err` is reserved for configured-but-
-/// nonsensical state so startup fails closed on the money path. Secrets are
-/// read directly from the environment (config.rs rule) — they must never land
-/// in the `Debug`-logged `Config` struct.
-pub fn init_owlpay_provider(config: &Config) -> Result<Option<Arc<OwlPayProvider>>, String> {
-    let api_key = match env::var("OWLPAY_API_KEY").ok().filter(|v| !v.is_empty()) {
-        Some(key) => key,
-        None => return Ok(None),
-    };
-    let webhook_secret = env::var("OWLPAY_WEBHOOK_SECRET")
-        .ok()
-        .filter(|v| !v.is_empty());
+/// The set comes from [`crate::keys::store::resolve_all`] — the environment by
+/// default, or an admin-imported `bridge_credential` row. `Err` is reserved for
+/// configured-but-nonsensical state so startup fails closed on the money path.
+///
+/// `previous_webhook_secret` is the secret from the most recently superseded
+/// credential version, still inside the overlap grace. Without it, rotating the
+/// webhook secret would reject every delivery OwlPay signed before the cutover
+/// and is still retrying — the same reason `JWT_SECRET_PREVIOUS` exists.
+///
+/// It is resolved once, at startup, like every other credential: this process
+/// accepts it until this process restarts. Scrubbing the superseded credential
+/// bounds how long a FUTURE process can load it; it does not shorten the
+/// overlap for one already running.
+pub fn build_owlpay_provider(
+    config: &Config,
+    parts: &crate::keys::CredentialParts,
+    previous: Option<&crate::keys::CredentialParts>,
+) -> Result<Arc<OwlPayProvider>, String> {
+    let api_key = parts
+        .get("api_key")
+        .ok_or_else(|| "owlpay: credential set has no api_key".to_string())?
+        .to_string();
+    let webhook_secret = parts.get("webhook_secret").map(str::to_string);
     if webhook_secret.is_none() {
-        warn!("owlpay: OWLPAY_WEBHOOK_SECRET not set; webhook deliveries will be rejected (poll-only order updates)");
+        warn!("owlpay: no webhook secret configured; webhook deliveries will be rejected (poll-only order updates)");
+    }
+    // Only carried forward when the CURRENT secret differs, so a rotation that
+    // did not touch this part cannot leave a stale duplicate accepted.
+    let previous_webhook_secret = previous
+        .and_then(|p| p.get("webhook_secret"))
+        .filter(|prev| Some(*prev) != webhook_secret.as_deref())
+        .map(str::to_string);
+    if previous_webhook_secret.is_some() {
+        warn!(
+            "owlpay: honouring the previous webhook secret during the rotation overlap. \
+             It was loaded at startup and this process keeps accepting it until IT \
+             restarts — scrubbing the superseded credential stops a FUTURE process \
+             loading it, not this one. Restart the fleet to end the overlap early."
+        );
     }
 
     let http_client = reqwest::Client::builder()
@@ -74,12 +101,30 @@ pub fn init_owlpay_provider(config: &Config) -> Result<Option<Arc<OwlPayProvider
         .build()
         .map_err(|e| format!("owlpay: failed to build HTTP client: {}", e))?;
 
-    Ok(Some(Arc::new(OwlPayProvider {
+    Ok(Arc::new(OwlPayProvider {
         http_client,
         base_url: config.owlpay_api_url.trim_end_matches('/').to_string(),
         api_key,
         webhook_secret,
-    })))
+        previous_webhook_secret,
+    }))
+}
+
+/// Recompute the Harbor signature under one secret and compare in constant time.
+///
+/// Both sides are 64-char lowercase hex (the header parser normalizes case),
+/// so `ct_eq` compares equal-length buffers.
+fn signature_matches(secret: &str, t: i64, body: &[u8], presented_hex: &str) -> bool {
+    let mut mac =
+        HmacSha256::new_from_slice(secret.as_bytes()).expect("HMAC accepts any key length");
+    mac.update(t.to_string().as_bytes());
+    mac.update(b".");
+    mac.update(body);
+    let expected_hex = hex::encode(mac.finalize().into_bytes());
+    expected_hex
+        .as_bytes()
+        .ct_eq(presented_hex.as_bytes())
+        .into()
 }
 
 impl OwlPayProvider {
@@ -199,20 +244,19 @@ impl OwlPayProvider {
             return Err(AppError::Unauthorized);
         }
 
-        let mut mac =
-            HmacSha256::new_from_slice(secret.as_bytes()).expect("HMAC accepts any key length");
-        mac.update(t.to_string().as_bytes());
-        mac.update(b".");
-        mac.update(body);
-        let expected_hex = hex::encode(mac.finalize().into_bytes());
+        // Try the active secret, then — only if it does not match — the
+        // previous one from an in-progress rotation. Both comparisons are
+        // constant-time and unconditional (no early return between them), so
+        // the overlap does not turn signature checking into a timing oracle
+        // for which secret matched.
+        let matched = signature_matches(secret, t, body, &presented_hex)
+            | self
+                .previous_webhook_secret
+                .as_deref()
+                .map(|prev| signature_matches(prev, t, body, &presented_hex))
+                .unwrap_or(false);
 
-        // Both sides are 64-char lowercase hex (the parser normalizes case),
-        // so ct_eq compares equal-length buffers in constant time.
-        if expected_hex
-            .as_bytes()
-            .ct_eq(presented_hex.as_bytes())
-            .into()
-        {
+        if matched {
             Ok(())
         } else {
             warn!("owlpay: verify_webhook: signature mismatch");
@@ -450,11 +494,19 @@ mod tests {
     const VECTOR_HEX: &str = "ce81da9200c6cd964a79c4f8ae604098bd50f9021442d5ddd936561898fb832f";
 
     fn test_provider(webhook_secret: Option<&str>) -> OwlPayProvider {
+        test_provider_with_previous(webhook_secret, None)
+    }
+
+    fn test_provider_with_previous(
+        webhook_secret: Option<&str>,
+        previous: Option<&str>,
+    ) -> OwlPayProvider {
         OwlPayProvider {
             http_client: reqwest::Client::new(),
             base_url: "https://harbor-sandbox.owlpay.com".to_string(),
             api_key: "test_api_key".to_string(),
             webhook_secret: webhook_secret.map(str::to_string),
+            previous_webhook_secret: previous.map(str::to_string),
         }
     }
 

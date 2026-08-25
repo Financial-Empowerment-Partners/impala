@@ -66,7 +66,8 @@ export default [
                 Modal: 'writable',
                 Drawer: 'writable',
                 TxFilter: 'writable',
-                ReserveMath: 'writable'
+                ReserveMath: 'writable',
+                KeysView: 'writable'
             }
         },
         rules: {

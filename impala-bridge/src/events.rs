@@ -148,6 +148,39 @@ pub enum AccountEvent {
         kind: String,
         amount_minor: i64,
     },
+    // Bridge credential/key management. account_id is the acting admin.
+    // Payloads carry FINGERPRINTS and identities only — never key material,
+    // and never anything derived from a decrypted blob.
+    /// A provider credential set was stored (`action` = import | merge).
+    BridgeKeyImported {
+        account_id: String,
+        kind: String,
+        version: i32,
+        set_fingerprint: String,
+        /// Whether this superseded a credential that was already in effect.
+        replaced: bool,
+        action: String,
+    },
+    /// A stored provider credential was revoked and its ciphertext scrubbed.
+    BridgeKeyRevoked {
+        account_id: String,
+        kind: String,
+        version: i32,
+        set_fingerprint: String,
+        /// What the provider falls back to after the next restart.
+        next_source: String,
+    },
+    /// A custodial Stellar seed was provisioned by an admin
+    /// (`origin` = generated | imported). The public address is not a secret.
+    BridgeSeedProvisioned {
+        account_id: String,
+        target_account_id: String,
+        stellar_account_id: String,
+        origin: String,
+        /// Whether the target is the configured conversion-reserve account —
+        /// the single highest-value key in the deployment.
+        is_reserve: bool,
+    },
 }
 
 impl AccountEvent {
@@ -176,6 +209,9 @@ impl AccountEvent {
             AccountEvent::ReserveRefundSent { .. } => "reserve.refund_sent",
             AccountEvent::ReserveRefundFailed { .. } => "reserve.refund_failed",
             AccountEvent::ReserveEntryRecorded { .. } => "reserve.entry_recorded",
+            AccountEvent::BridgeKeyImported { .. } => "bridge.key_imported",
+            AccountEvent::BridgeKeyRevoked { .. } => "bridge.key_revoked",
+            AccountEvent::BridgeSeedProvisioned { .. } => "bridge.seed_provisioned",
         }
     }
 
@@ -202,7 +238,10 @@ impl AccountEvent {
             | AccountEvent::ReserveRefundQueued { account_id, .. }
             | AccountEvent::ReserveRefundSent { account_id, .. }
             | AccountEvent::ReserveRefundFailed { account_id, .. }
-            | AccountEvent::ReserveEntryRecorded { account_id, .. } => account_id,
+            | AccountEvent::ReserveEntryRecorded { account_id, .. }
+            | AccountEvent::BridgeKeyImported { account_id, .. }
+            | AccountEvent::BridgeKeyRevoked { account_id, .. }
+            | AccountEvent::BridgeSeedProvisioned { account_id, .. } => account_id,
         }
     }
 
@@ -352,6 +391,45 @@ impl AccountEvent {
                 "currency": currency,
                 "kind": kind,
                 "amount_minor": amount_minor,
+            }),
+            AccountEvent::BridgeKeyImported {
+                kind,
+                version,
+                set_fingerprint,
+                replaced,
+                action,
+                ..
+            } => json!({
+                "kind": kind,
+                "version": version,
+                "set_fingerprint": set_fingerprint,
+                "replaced": replaced,
+                "action": action,
+                "effective_after": "rolling_restart",
+            }),
+            AccountEvent::BridgeKeyRevoked {
+                kind,
+                version,
+                set_fingerprint,
+                next_source,
+                ..
+            } => json!({
+                "kind": kind,
+                "version": version,
+                "set_fingerprint": set_fingerprint,
+                "next_source": next_source,
+            }),
+            AccountEvent::BridgeSeedProvisioned {
+                target_account_id,
+                stellar_account_id,
+                origin,
+                is_reserve,
+                ..
+            } => json!({
+                "target_account_id": target_account_id,
+                "stellar_account_id": stellar_account_id,
+                "origin": origin,
+                "is_reserve": is_reserve,
             }),
         }
     }

@@ -26,6 +26,20 @@
 4. **Announce in the incident channel** what you see, with timestamp.
 5. **Do not change prod configuration yet.** Observe first.
 
+## Suspected credential compromise
+
+If an exchange provider key or a custodial Stellar seed may be exposed, follow
+`import-keys.md` — the order matters, and two steps are easy to miss:
+
+1. **Revoke at the provider first.** `impalactl keys revoke` stops the bridge
+   using a key; it does not invalidate it upstream.
+2. **Scrub the environment variables too.** A stored credential shadows them,
+   but `KEY_IMPORT_ENABLED=false` — including the break-glass path — reverts
+   the fleet to whatever they still hold.
+
+Then check `GET /admin/events` for `bridge.key_imported`, `bridge.key_revoked`
+and `bridge.seed_provisioned` entries nobody can account for.
+
 ## Common failure modes
 
 ### `/readyz` is 503

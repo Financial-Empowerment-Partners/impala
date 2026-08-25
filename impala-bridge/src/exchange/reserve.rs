@@ -200,6 +200,36 @@ pub struct ConversionReserve {
     pub quote_ttl_secs: u64,
 }
 
+/// The configured reserve account id, independent of whether the reserve
+/// actually initialized.
+///
+/// [`ConversionReserve`] is absent whenever initialization failed or was
+/// deferred — including the bootstrap window in which `RESERVE_ACCOUNT_ID` is
+/// set but its custodial seed has not been provisioned yet. Any guard that
+/// keys off the handle therefore disarms exactly when the reserve account is
+/// unclaimed and most worth protecting. This one is always present and keyed
+/// off configuration, so it stays armed through that window.
+pub struct ReserveAccountGuard {
+    account_id: Option<String>,
+}
+
+impl ReserveAccountGuard {
+    pub fn from_config(config: &Config) -> Self {
+        ReserveAccountGuard {
+            account_id: config
+                .reserve_account_id
+                .as_deref()
+                .filter(|id| !id.is_empty())
+                .map(str::to_string),
+        }
+    }
+
+    /// True when `payala_account_id` is the designated reserve account.
+    pub fn matches(&self, payala_account_id: &str) -> bool {
+        self.account_id.as_deref() == Some(payala_account_id)
+    }
+}
+
 /// Build the reserve handle from config. `Ok(None)` = feature off
 /// (RESERVE_ACCOUNT_ID unset); `Err` = configured but unusable — a hard
 /// startup error, because a half-configured pool on a money path must fail
@@ -233,12 +263,37 @@ pub async fn init_conversion_reserve(
     .fetch_optional(pool)
     .await
     .map_err(|e| format!("reserve init: managed seed lookup failed: {}", e))?;
-    let stellar_address = stellar_address.ok_or_else(|| {
-        format!(
-            "RESERVE_ACCOUNT_ID '{}' has no managed seed — generate one via /managed-account/generate first",
-            account_id
-        )
-    })?;
+    let stellar_address = match stellar_address {
+        Some(addr) => addr,
+        // Armed but inactive. The endpoint that provisions this seed
+        // (`POST /admin/stellar-seeds/generate`) lives inside this process, so
+        // exiting here would make the reserve unrecoverable without a
+        // configuration change: the bridge would crash-loop on the very
+        // condition the endpoint exists to repair. Diversion stays off — every
+        // order passes through to its provider, which is the reserve's
+        // existing behaviour on any miss — and `ReserveAccountGuard` keeps the
+        // account quarantined from the user-facing custodial endpoints
+        // throughout, because that guard reads configuration rather than this
+        // handle.
+        None if config.key_import_enabled => {
+            error!(
+                "RESERVE_ACCOUNT_ID '{}' has no managed seed. The conversion reserve is \
+                 ARMED BUT INACTIVE: no order will divert to it and no payout can be \
+                 signed. Provision the seed with POST /admin/stellar-seeds/generate and \
+                 restart. (The account stays quarantined from /managed-account/* meanwhile.)",
+                account_id
+            );
+            return Ok(None);
+        }
+        None => {
+            return Err(format!(
+                "RESERVE_ACCOUNT_ID '{}' has no managed seed — provision one with \
+                 POST /admin/stellar-seeds/generate (requires KEY_IMPORT_ENABLED=true) \
+                 and restart",
+                account_id
+            ));
+        }
+    };
 
     // Initialize the deposit-scan cursor BEFORE any order can be created:
     // the watcher's first tick runs up to watch_secs after startup, and a

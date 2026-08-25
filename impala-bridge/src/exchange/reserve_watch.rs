@@ -1106,6 +1106,7 @@ async fn drive_one_payout(deps: &ReserveWatchDeps, order: &PayoutOrderRow) -> Re
     let seed = crate::handlers::managed_seed::load_protected_seed(
         &deps.pool,
         &deps.protector,
+        &deps.signer,
         &deps.reserve.reserve_account_id,
     )
     .await?;
@@ -1704,6 +1705,7 @@ async fn drive_one_refund(deps: &ReserveWatchDeps, r: &DueRefundRow) -> Result<(
     let seed = crate::handlers::managed_seed::load_protected_seed(
         &deps.pool,
         &deps.protector,
+        &deps.signer,
         &deps.reserve.reserve_account_id,
     )
     .await?;

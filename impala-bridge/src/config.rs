@@ -209,6 +209,16 @@ pub struct Config {
     // they never land in this `Debug`-logged struct.
     pub seed_protection_backend: String,
     pub kms_seed_key_id: Option<String>,
+    /// Whether admins may import bridge credentials through `/admin/keys/*`,
+    /// and whether stored credentials are consulted at startup at all.
+    ///
+    /// Default **false**: with it off, provider secrets resolve from the
+    /// environment exactly as they always have and the admin endpoints refuse.
+    /// It doubles as the break-glass switch — flipping it off and restarting
+    /// reverts the whole fleet to environment credentials, which is why
+    /// `GET /admin/keys` reports any environment variable a stored credential
+    /// is shadowing.
+    pub key_import_enabled: bool,
     pub vault_addr: Option<String>,
     pub vault_transit_key: Option<String>,
     // Exchange providers (OwlPay / Changelly). Non-secret config only — API
@@ -290,6 +300,7 @@ impl std::fmt::Debug for Config {
             .field("session_cookie_secure", &self.session_cookie_secure)
             .field("admin_account_ids", &self.admin_account_ids.len())
             .field("seed_protection_backend", &self.seed_protection_backend)
+            .field("key_import_enabled", &self.key_import_enabled)
             .field("sso_providers", &self.sso_providers.len())
             .field("okta_issuer_url", &self.okta_issuer_url)
             .field("github_auth_enabled", &self.github_auth_enabled)
@@ -674,6 +685,14 @@ pub fn load_config() -> Config {
         .ok()
         .or_else(|| from_file("kms_seed_key_id"));
 
+    // Off unless explicitly turned on. See the field doc: this gates both the
+    // admin endpoints and whether stored credentials are read at startup.
+    let key_import_enabled = env::var("KEY_IMPORT_ENABLED")
+        .ok()
+        .or_else(|| from_file("key_import_enabled"))
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(false);
+
     // Vault/OpenBao: accept the OpenBao-native name first, then the Vault name,
     // then the config file. The internal field names stay `vault_*`.
     let vault_addr = env_any(&["BAO_ADDR", "VAULT_ADDR"]).or_else(|| from_file("vault_addr"));
@@ -818,6 +837,7 @@ pub fn load_config() -> Config {
         request_timeout_secs,
         db_acquire_timeout_secs,
         seed_protection_backend,
+        key_import_enabled,
         kms_seed_key_id,
         vault_addr,
         vault_transit_key,
@@ -891,6 +911,7 @@ pub(crate) fn test_config() -> Config {
         request_timeout_secs: REQUEST_TIMEOUT_SECS,
         db_acquire_timeout_secs: DB_ACQUIRE_TIMEOUT_SECS,
         seed_protection_backend: "none".to_string(),
+        key_import_enabled: false,
         kms_seed_key_id: None,
         vault_addr: None,
         vault_transit_key: None,
