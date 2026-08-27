@@ -65,6 +65,10 @@ lumencli --network testnet account create --dest G...new... --amount 50
 # 5. Send a payment with an optional memo
 lumencli --network testnet send --to G...dest... --amount 25 --memo "thanks"
 
+# 5b. Send to an exchange, which identifies the deposit by an id memo
+lumencli --network testnet send --to G...exchange... --amount 25 \
+  --memo-type id --memo 3141592653
+
 # 6. Show your receiving address
 lumencli receive --address G...
 ```
@@ -72,6 +76,73 @@ lumencli receive --address G...
 To run the same commands on mainnet, drop `--network testnet` (or set it to
 `mainnet`). Friendbot is testnet-only; on mainnet a new account must be funded
 by an existing account via `account create`.
+
+## Memos
+
+`send` and `account create` can attach a memo to the transaction. Stellar
+supports four memo types; `--memo` carries the value and `--memo-type` selects
+how it is encoded (default `text`):
+
+| `--memo-type` | Value                                | Typical use                          |
+| ------------- | ------------------------------------ | ------------------------------------ |
+| `text`        | up to **28 bytes** of text           | a note to the recipient              |
+| `id`          | unsigned 64-bit integer              | **exchange / custodial deposits**    |
+| `hash`        | 64 hex digits (32 bytes)             | reference to another transaction     |
+| `return`      | 64 hex digits (32 bytes)             | hash of the transaction being refunded |
+
+```bash
+lumencli send --to G... --amount 25 --memo "thanks"                  # text (default)
+lumencli send --to G... --amount 25 --memo-type id --memo 3141592653  # id
+lumencli send --to G... --amount 25 --memo-type hash --memo 0123...ef # 64 hex digits
+```
+
+### Missing-memo guard
+
+A transfer that carries **no** memo to a destination believed to need one stops
+with a warning and requires an explicit confirmation:
+
+```
+WARNING: this transfer carries no memo, but it declares on-ledger (SEP-0029)
+that payments to it must carry a memo.
+Deposits there are credited by their memo. Without one the funds usually cannot
+be credited to you, and recovering them means contacting the operator's support.
+Add one with --memo (for an exchange, usually --memo-type id).
+Type "no memo" to send anyway:
+```
+
+Confirming is deliberately **separate from `--yes`**. `--yes` means "I know this
+is mainnet", and it already appears in every non-interactive script; letting it
+also wave through a missing memo would disarm this check everywhere it is most
+needed. To send with no memo you must type `no memo` at the prompt, or pass
+`--no-memo` when scripting.
+
+A destination is believed to need a memo when either:
+
+1. **It says so on-ledger.** The account sets the SEP-0029 data entry
+   `config.memo_required`. This is authoritative — it comes from the account
+   holder — and needs no maintenance here. `send` consults it before signing.
+2. **It is on the built-in list** in `internal/stellar/memo_required.go`, for
+   services that have not set the on-ledger flag. This list ships **empty**; see
+   that file's comment for how to verify an address before adding one. It is for
+   recognition only — never copy a destination address out of it.
+
+Neither source is exhaustive, so **the absence of a warning is not a guarantee
+that no memo is needed**. Check the recipient's deposit instructions.
+
+`account create` consults only the list, since its destination cannot exist yet
+and so cannot have declared anything.
+
+Exchanges and other pooled accounts credit a deposit by its memo, so a missing
+or wrong memo can lose the funds as surely as a wrong address. Accordingly:
+
+- Naming a `--memo-type` without a `--memo` value is an error, never a silent
+  no-memo transfer.
+- The memo is named in the mainnet confirmation prompt and in the receipt line,
+  so you see what will be attached before approving it.
+- `text` memos are sent verbatim (their bytes are the message); the other types
+  are trimmed of the whitespace copy-paste tends to pick up.
+- The 28-byte text limit is bytes, not characters — non-ASCII memos run out of
+  room sooner.
 
 ## Security
 

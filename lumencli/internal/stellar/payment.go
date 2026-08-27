@@ -16,25 +16,24 @@ import (
 const txTimeoutSeconds = 300
 
 // SendPayment sends a native XLM payment from source to destination and returns
-// the resulting transaction hash. memoText is optional (max 28 bytes).
-func (c *Client) SendPayment(source *keypair.Full, destination, amount, memoText string) (string, error) {
+// the resulting transaction hash. memo is optional — a nil memo attaches none;
+// build one with ParseMemo.
+func (c *Client) SendPayment(source *keypair.Full, destination, amount string, memo Memo) (string, error) {
 	if err := wallet.ValidateAddress(destination); err != nil {
 		return "", err
-	}
-	if len(memoText) > txnbuild.MemoTextMaxLength {
-		return "", fmt.Errorf("memo too long: %d bytes (max %d)", len(memoText), txnbuild.MemoTextMaxLength)
 	}
 	op := &txnbuild.Payment{
 		Destination: destination,
 		Amount:      amount,
 		Asset:       txnbuild.NativeAsset{},
 	}
-	return c.buildSignSubmit(source, op, memoText)
+	return c.buildSignSubmit(source, op, memo)
 }
 
 // CreateAccount creates and funds a brand-new account on-ledger, paid for by
-// source, seeding it with startingBalance XLM. Returns the transaction hash.
-func (c *Client) CreateAccount(source *keypair.Full, destination, startingBalance string) (string, error) {
+// source, seeding it with startingBalance XLM. memo is optional, as for
+// SendPayment. Returns the transaction hash.
+func (c *Client) CreateAccount(source *keypair.Full, destination, startingBalance string, memo Memo) (string, error) {
 	if err := wallet.ValidateAddress(destination); err != nil {
 		return "", err
 	}
@@ -42,13 +41,13 @@ func (c *Client) CreateAccount(source *keypair.Full, destination, startingBalanc
 		Destination: destination,
 		Amount:      startingBalance,
 	}
-	return c.buildSignSubmit(source, op, "")
+	return c.buildSignSubmit(source, op, memo)
 }
 
 // buildSignSubmit loads the source account (for its sequence number), builds a
 // single-operation transaction, signs it with the source key for this network's
 // passphrase, and submits it to Horizon.
-func (c *Client) buildSignSubmit(source *keypair.Full, op txnbuild.Operation, memoText string) (string, error) {
+func (c *Client) buildSignSubmit(source *keypair.Full, op txnbuild.Operation, memo Memo) (string, error) {
 	srcAccount, err := c.horizon.AccountDetail(horizonclient.AccountRequest{AccountID: source.Address()})
 	if err != nil {
 		if horizonclient.IsNotFoundError(err) {
@@ -64,9 +63,7 @@ func (c *Client) buildSignSubmit(source *keypair.Full, op txnbuild.Operation, me
 		BaseFee:              txnbuild.MinBaseFee,
 		Preconditions:        txnbuild.Preconditions{TimeBounds: txnbuild.NewTimeout(txTimeoutSeconds)},
 		Operations:           []txnbuild.Operation{op},
-	}
-	if memoText != "" {
-		params.Memo = txnbuild.MemoText(memoText)
+		Memo:                 memo,
 	}
 
 	tx, err := txnbuild.NewTransaction(params)

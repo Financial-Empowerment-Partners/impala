@@ -5,6 +5,7 @@
 package cli
 
 import (
+	"bufio"
 	"flag"
 	"fmt"
 	"io"
@@ -42,6 +43,23 @@ Global flags (may appear before or after the command):
 Fund-moving commands (send, account create) require an explicit confirmation on
 mainnet; pass --yes to skip the prompt for non-interactive use.
 
+Memos (send, account create):
+  --memo <value>            Attach a memo to the transaction
+  --memo-type <type>        text | id | hash | return  (default: text)
+  --no-memo                 Send with no memo to a destination that needs one
+
+  text is up to 28 bytes; id is an unsigned 64-bit integer; hash and return are
+  64 hex digits (32 bytes). Exchanges and other pooled accounts identify your
+  deposit by its memo — usually an id — so a missing or wrong memo can lose the
+  funds as surely as a wrong address. The memo is echoed in the mainnet
+  confirmation prompt.
+
+  A memo-less transfer to a destination believed to need one stops and warns.
+  Confirming is separate from --yes: type "no memo" at the prompt, or pass
+  --no-memo when scripting. The check knows a destination needs a memo if it
+  says so on-ledger (SEP-0029) or is on a short built-in list; neither is
+  exhaustive, so no warning is not a guarantee that no memo is needed.
+
 Secrets:
   Commands needing a secret seed read it from $%s, or interactively from the
   terminal (no echo) — never from a command-line argument, since argv is
@@ -56,6 +74,19 @@ type App struct {
 	out    io.Writer
 	err    io.Writer
 	getenv func(string) string
+
+	lines *bufio.Reader // shared by every prompt; see lineReader
+}
+
+// lineReader returns the one buffered reader over a.in that all prompts share.
+// A fresh bufio.Reader per prompt would be a bug: it can buffer well past its
+// own line, swallowing the input meant for the next prompt — and a send does
+// prompt twice (the memo warning, then the mainnet confirmation).
+func (a *App) lineReader() *bufio.Reader {
+	if a.lines == nil {
+		a.lines = bufio.NewReader(a.in)
+	}
+	return a.lines
 }
 
 // Run is the process entry point. It returns the exit code.

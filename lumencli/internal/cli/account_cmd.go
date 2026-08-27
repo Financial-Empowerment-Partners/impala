@@ -89,6 +89,7 @@ func (a *App) accountCreate(opts netcfg.Options, args []string) int {
 	bindNetworkFlags(fs, &opts)
 	dest := fs.String("dest", "", "destination address (G...) of the account to create")
 	amount := fs.String("amount", "", "starting XLM balance to fund the new account with")
+	memo := bindMemoFlags(fs)
 	assumeYes := fs.Bool("yes", false, "skip the mainnet confirmation prompt (for non-interactive use)")
 	if _, err := parseArgs(fs, args); err != nil {
 		return parseCode(err)
@@ -105,13 +106,23 @@ func (a *App) accountCreate(opts netcfg.Options, args []string) int {
 	if err := stellar.ValidateAmount(amt); err != nil {
 		return a.fail("%v", err)
 	}
+	txMemo, err := memo.memo()
+	if err != nil {
+		return a.fail("%v", err)
+	}
 
 	net, err := a.resolveNetwork(opts)
 	if err != nil {
 		return a.fail("%v", err)
 	}
 	a.announce(net)
-	if err := a.confirmSpend(net, fmt.Sprintf("create account %s with %s XLM", destination, amt), *assumeYes); err != nil {
+	// checkLedger is false: the destination must not exist yet, so it cannot
+	// have declared a memo requirement on-ledger. Only the curated list applies.
+	if err := a.confirmMissingMemo(net, destination, txMemo, *memo.noMemo, false); err != nil {
+		return a.fail("%v", err)
+	}
+	summary := fmt.Sprintf("create account %s with %s XLM%s", destination, amt, withMemo(txMemo))
+	if err := a.confirmSpend(net, summary, *assumeYes); err != nil {
 		return a.fail("%v", err)
 	}
 
@@ -125,11 +136,11 @@ func (a *App) accountCreate(opts netcfg.Options, args []string) int {
 	}
 	fmt.Fprintf(a.err, "Signing from: %s\n", source.Address())
 
-	hash, err := stellar.New(net).CreateAccount(source, destination, amt)
+	hash, err := stellar.New(net).CreateAccount(source, destination, amt, txMemo)
 	if err != nil {
 		return a.fail("%v", err)
 	}
-	fmt.Fprintf(a.out, "Created account %s with %s XLM\nTransaction: %s\n", destination, amt, hash)
+	fmt.Fprintf(a.out, "Created account %s with %s XLM%s\nTransaction: %s\n", destination, amt, withMemo(txMemo), hash)
 	return 0
 }
 

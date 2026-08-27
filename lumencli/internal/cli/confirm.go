@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"bufio"
 	"fmt"
 	"os"
 	"strings"
@@ -26,7 +25,7 @@ func (a *App) confirmSpend(net netcfg.Network, summary string, assumeYes bool) e
 
 	if f, ok := a.in.(*os.File); ok && term.IsTerminal(int(f.Fd())) {
 		fmt.Fprintf(a.err, "About to %s on %s — REAL FUNDS.\nType \"yes\" to proceed: ", summary, label)
-		line, err := bufio.NewReader(a.in).ReadString('\n')
+		line, err := a.lineReader().ReadString('\n')
 		if err != nil {
 			return fmt.Errorf("read confirmation: %w", err)
 		}

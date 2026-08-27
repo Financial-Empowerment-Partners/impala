@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"bufio"
 	"fmt"
 	"io"
 	"os"
@@ -41,7 +40,7 @@ func (a *App) readSecret(prompt string) (string, error) {
 	}
 
 	// Non-interactive: read one line from stdin.
-	line, err := bufio.NewReader(a.in).ReadString('\n')
+	line, err := a.lineReader().ReadString('\n')
 	if err != nil && err != io.EOF {
 		return "", fmt.Errorf("read secret: %w", err)
 	}

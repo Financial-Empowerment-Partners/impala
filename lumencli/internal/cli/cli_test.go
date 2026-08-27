@@ -190,8 +190,9 @@ func TestSendRefusesMainnetWithoutConfirmation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
+	srv := fakeHorizon(t, kp.Address(), false)
 	app, _, errb := newTestApp("", nil)
-	code := app.run([]string{"send", "--to", kp.Address(), "--amount", "10"})
+	code := app.run([]string{"send", "--horizon-url", srv.URL, "--to", kp.Address(), "--amount", "10"})
 	if code != 1 {
 		t.Fatalf("exit code = %d, want 1", code)
 	}
@@ -304,5 +305,100 @@ func TestConfirmSpend(t *testing.T) {
 	}
 	if err := app.confirmSpend(mainnet, "send 1 XLM", false); err == nil {
 		t.Error("mainnet non-interactive without --yes must refuse")
+	}
+}
+
+// TestSendMemoValidatedBeforeSpending checks that a bad memo is rejected up
+// front — before the network confirmation and before the secret is read — so a
+// typo never reaches a signed transaction.
+func TestSendMemoValidatedBeforeSpending(t *testing.T) {
+	kp, err := wallet.Generate()
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	tests := []struct {
+		name   string
+		args   []string
+		errHas string
+	}{
+		{"unknown type", []string{"--memo-type", "note", "--memo", "x"}, "unknown memo type"},
+		{"id without value", []string{"--memo-type", "id"}, "needs a memo value"},
+		{"non-numeric id", []string{"--memo-type", "id", "--memo", "abc"}, "invalid id memo"},
+		{"short hash", []string{"--memo-type", "hash", "--memo", "abcd"}, "64 hex digits"},
+		{"over-long text", []string{"--memo", strings.Repeat("x", 29)}, "too long"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			app, _, errb := newTestApp("", nil)
+			args := append([]string{"send", "--to", kp.Address(), "--amount", "10", "--network", "testnet"}, tt.args...)
+			if code := app.run(args); code != 1 {
+				t.Fatalf("exit code = %d, want 1", code)
+			}
+			es := errb.String()
+			if !strings.Contains(es, tt.errHas) {
+				t.Errorf("stderr %q missing %q", es, tt.errHas)
+			}
+			if strings.Contains(es, "secret seed") {
+				t.Errorf("prompted for the secret despite an invalid memo: %q", es)
+			}
+		})
+	}
+}
+
+// TestSendConfirmationNamesMemo locks in that the mainnet confirmation summary
+// spells out the memo being attached: a wrong memo on a deposit loses funds
+// just as a wrong address does, so the user must see it before typing "yes".
+func TestSendConfirmationNamesMemo(t *testing.T) {
+	kp, err := wallet.Generate()
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	app, _, errb := newTestApp("", nil)
+	// Mainnet, non-interactive, no --yes: the refusal quotes the summary.
+	code := app.run([]string{"send", "--to", kp.Address(), "--amount", "10", "--memo-type", "id", "--memo", "778899"})
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1", code)
+	}
+	if es := errb.String(); !strings.Contains(es, "id memo 778899") {
+		t.Errorf("confirmation summary %q does not name the memo", es)
+	}
+}
+
+// TestAccountCreateAcceptsMemo confirms account create takes the same memo
+// flags as send, and names the memo in its confirmation summary.
+func TestAccountCreateAcceptsMemo(t *testing.T) {
+	kp, err := wallet.Generate()
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	app, _, errb := newTestApp("", nil)
+	code := app.run([]string{"account", "create", "--dest", kp.Address(), "--amount", "10", "--memo", "welcome"})
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1", code)
+	}
+	es := errb.String()
+	if !strings.Contains(es, `text memo "welcome"`) {
+		t.Errorf("confirmation summary %q does not name the memo", es)
+	}
+	if !strings.Contains(es, "refusing") {
+		t.Errorf("stderr %q missing mainnet confirmation refusal", es)
+	}
+}
+
+// TestSendWithoutMemoMentionsNoMemo guards the no-memo path: the summary must
+// stay exactly as it was before memos existed.
+func TestSendWithoutMemoMentionsNoMemo(t *testing.T) {
+	kp, err := wallet.Generate()
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	srv := fakeHorizon(t, kp.Address(), false)
+	app, _, errb := newTestApp("", nil)
+	code := app.run([]string{"send", "--horizon-url", srv.URL, "--to", kp.Address(), "--amount", "10"})
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1", code)
+	}
+	if es := errb.String(); !strings.Contains(es, "send 10 XLM to "+kp.Address()+" on MAINNET") {
+		t.Errorf("summary %q is not the plain no-memo form", es)
 	}
 }
