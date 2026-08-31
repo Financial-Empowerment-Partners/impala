@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	hProtocol "github.com/stellar/go-stellar-sdk/protocols/horizon"
+	"github.com/stellar/go-stellar-sdk/protocols/horizon/base"
 
 	"lumencli/internal/netcfg"
 	"lumencli/internal/stellar"
@@ -38,20 +38,20 @@ func (a *App) runBalance(opts netcfg.Options, args []string) int {
 	fmt.Fprintf(a.out, "Account: %s\n", address)
 	fmt.Fprintln(a.out, "Balances:")
 	for _, b := range acct.Balances {
-		fmt.Fprintf(a.out, "  %-12s %s\n", assetLabel(b), b.Balance)
+		fmt.Fprintf(a.out, "  %-12s %s\n", assetLabel(b.Asset), b.Balance)
 	}
 	return 0
 }
 
-// assetLabel renders a human-friendly label for a balance line. The native
-// lumen has asset type "native"; other assets carry a code (e.g. "USDC").
-func assetLabel(b hProtocol.Balance) string {
+// assetLabel renders a human-friendly label for an asset. The native lumen
+// has asset type "native"; other assets carry a code (e.g. "USDC").
+func assetLabel(a base.Asset) string {
 	switch {
-	case b.Type == "native":
+	case a.Type == "native":
 		return "XLM"
-	case b.Code != "":
-		return b.Code
+	case a.Code != "":
+		return a.Code
 	default:
-		return b.Type
+		return a.Type
 	}
 }

@@ -27,6 +27,7 @@ Commands:
   account create     Create & fund a new account on-ledger (spends real XLM)
   account fund       Fund an account via testnet Friendbot (testnet only)
   balance <address>  Show the balances of an account
+  history <address>  Show the transaction history of an account
   send               Send XLM to another account
   receive            Show your address for receiving XLM
   version            Print the version
@@ -42,6 +43,16 @@ Global flags (may appear before or after the command):
 
 Fund-moving commands (send, account create) require an explicit confirmation on
 mainnet; pass --yes to skip the prompt for non-interactive use.
+
+History (history <address>):
+  --limit <n>               Stop after the newest n entries (default: 0, the
+                            full history)
+  --failed                  Also list operations from failed transactions,
+                            which moved no funds
+
+  Lists the operations that moved funds — payments, path payments, account
+  creations and merges — newest first, with counterparty, memo, and
+  transaction hash.
 
 Memos (send, account create):
   --memo <value>            Attach a memo to the transaction
@@ -130,6 +141,8 @@ func (a *App) run(args []string) int {
 		return a.runAccount(opts, cmdArgs)
 	case "balance":
 		return a.runBalance(opts, cmdArgs)
+	case "history":
+		return a.runHistory(opts, cmdArgs)
 	case "send":
 		return a.runSend(opts, cmdArgs)
 	case "receive":

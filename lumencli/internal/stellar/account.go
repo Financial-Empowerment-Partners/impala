@@ -17,12 +17,18 @@ func (c *Client) AccountInfo(accountID string) (hProtocol.Account, error) {
 	acct, err := c.horizon.AccountDetail(horizonclient.AccountRequest{AccountID: accountID})
 	if err != nil {
 		if horizonclient.IsNotFoundError(err) {
-			return hProtocol.Account{}, fmt.Errorf(
-				"account %s does not exist on %s (it has not been created/funded yet)", accountID, c.net.Name)
+			return hProtocol.Account{}, c.accountNotFound(accountID)
 		}
 		return hProtocol.Account{}, wrapHorizonError("fetch account", err)
 	}
 	return acct, nil
+}
+
+// accountNotFound is the message for a Horizon 404 on an account: on Stellar
+// an address whose account was never created/funded simply does not exist yet.
+func (c *Client) accountNotFound(accountID string) error {
+	return fmt.Errorf(
+		"account %s does not exist on %s (it has not been created/funded yet)", accountID, c.net.Name)
 }
 
 // NativeBalance returns the account's XLM (native) balance.

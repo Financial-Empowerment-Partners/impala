@@ -39,6 +39,7 @@ lumencli account address    Derive the public address (G...) from a secret seed
 lumencli account create     Create & fund a new account on-ledger (spends XLM)
 lumencli account fund       Fund an account via testnet Friendbot (testnet only)
 lumencli balance <address>  Show the balances of an account
+lumencli history <address>  Show the transaction history of an account
 lumencli send               Send XLM to another account
 lumencli receive            Show your address for receiving XLM
 lumencli version | help
@@ -71,11 +72,44 @@ lumencli --network testnet send --to G...exchange... --amount 25 \
 
 # 6. Show your receiving address
 lumencli receive --address G...
+
+# 7. View the account's transaction history
+lumencli --network testnet history G...
 ```
 
 To run the same commands on mainnet, drop `--network testnet` (or set it to
 `mainnet`). Friendbot is testnet-only; on mainnet a new account must be funded
 by an existing account via `account create`.
+
+## Transaction history
+
+`history <address>` lists the operations that moved funds into or out of an
+account — payments, path payments, account creations, and merges — newest
+first, with the counterparty, memo, and transaction hash of each:
+
+```
+2026-08-31 20:14:37 UTC  received  25.0000000 XLM  (payment)
+  From: GBOSTEH5XRAMOJWXIWIPJT5P6GOW6GYXQJ7GHORK3X2Z426BWGYFTVLA
+  Memo: id 3141592653
+  Tx:   73b0e6af59879f824e2b735e3081e27360ece25bd186ef95d36c5d27bc0fac70
+```
+
+By default the **entire** history is fetched, following Horizon's paging until
+the account's first transaction. Flags:
+
+- `--limit <n>` — stop after the newest *n* entries (`0`, the default, means
+  the full history). Stopping early is noted on stderr, so a piped listing
+  cannot silently pass for a complete one.
+- `--failed` — also list operations from failed transactions. These moved no
+  funds and are marked `[FAILED — no funds moved]`; Horizon (and therefore the
+  default listing) omits them.
+
+Addresses and transaction hashes are printed in full, never abbreviated:
+history is what you consult when checking whether a deposit arrived or where
+funds went, and a truncated identifier cannot be pasted into an explorer or
+compared against a receipt. Amounts are shown in the asset transferred (`XLM`
+for lumens, the asset code otherwise). An `account merge` shows `entire
+balance` — the ledger does not record the amount a merge moved.
 
 ## Memos
 
