@@ -6,6 +6,7 @@ package cli
 
 import (
 	"bufio"
+	"context"
 	"flag"
 	"fmt"
 	"io"
@@ -14,9 +15,12 @@ import (
 	"lumencli/internal/netcfg"
 )
 
-const version = "0.1.0"
+// version identifies a build. It is a var so release builds can stamp it:
+//
+//	go build -ldflags "-X lumencli/internal/cli.version=..."
+var version = "0.2.0"
 
-const usage = `lumencli ` + version + ` — a command-line wallet for Stellar Lumens (XLM)
+var usage = `lumencli ` + version + ` — a command-line wallet for Stellar Lumens (XLM)
 
 Usage:
   lumencli [global flags] <command> [flags]
@@ -28,6 +32,7 @@ Commands:
   account fund       Fund an account via testnet Friendbot (testnet only)
   balance <address>  Show the balances of an account
   history <address>  Show the transaction history of an account
+  tx <hash>          Show one transaction: status, fee, memo, operations
   send               Send XLM to another account
   receive            Show your address for receiving XLM
   version            Print the version
@@ -45,14 +50,20 @@ Fund-moving commands (send, account create) require an explicit confirmation on
 mainnet; pass --yes to skip the prompt for non-interactive use.
 
 History (history <address>):
-  --limit <n>               Stop after the newest n entries (default: 0, the
-                            full history)
-  --failed                  Also list operations from failed transactions,
-                            which moved no funds
+  --limit <n>       Stop after the newest n entries (0 = full history)
+  --failed          Also list operations from failed transactions
+  --json | --csv    Machine-readable output (JSON Lines / CSV)
+  --sent | --received           Only one direction
+  --counterparty <G...|M...>    Only entries with this counterparty
+  --asset <native|XLM|CODE:ISSUER>  Only entries moving this asset
+  --since <t> | --until <t>     Time range: YYYY-MM-DD (UTC) or RFC3339
+  --summary         Per-asset totals over the range instead of the listing
+  --all-ops         Every operation type, not just the fund-moving kinds
+  --follow          Keep streaming new payments after the listing (Ctrl+C stops)
 
-  Lists the operations that moved funds — payments, path payments, account
-  creations and merges — newest first, with counterparty, memo, and
-  transaction hash.
+  The default listing covers the fund-moving operations (payments, path
+  payments, account creations, merges). See the README for the full flag
+  reference, the JSON/CSV schemas, and what the default listing omits.
 
 Memos (send, account create):
   --memo <value>            Attach a memo to the transaction
@@ -87,6 +98,10 @@ type App struct {
 	getenv func(string) string
 
 	lines *bufio.Reader // shared by every prompt; see lineReader
+
+	// signalCtx overrides the Ctrl+C context used by history --follow; nil
+	// means the real signal handler. Tests set it to drive cancellation.
+	signalCtx func() (context.Context, context.CancelFunc)
 }
 
 // lineReader returns the one buffered reader over a.in that all prompts share.
@@ -143,6 +158,8 @@ func (a *App) run(args []string) int {
 		return a.runBalance(opts, cmdArgs)
 	case "history":
 		return a.runHistory(opts, cmdArgs)
+	case "tx":
+		return a.runTx(opts, cmdArgs)
 	case "send":
 		return a.runSend(opts, cmdArgs)
 	case "receive":

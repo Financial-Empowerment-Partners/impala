@@ -17,8 +17,12 @@ import (
 // httpTimeout bounds every Horizon request so the CLI cannot hang indefinitely.
 const httpTimeout = 30 * time.Second
 
-// appVersion is reported to Horizon via the client headers.
-const appVersion = "0.1.0"
+// appVersion is reported to Horizon via the client headers (X-App-Version),
+// by both the paging and the streaming client. A var so release builds stamp
+// it alongside the CLI's own version:
+//
+//	go build -ldflags "-X lumencli/internal/stellar.appVersion=..."
+var appVersion = "0.2.0"
 
 // Client is a Horizon-backed client bound to a single network.
 type Client struct {

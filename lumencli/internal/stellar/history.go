@@ -12,33 +12,53 @@ import (
 // to fetch the same history.
 const historyPageLimit = 200
 
-// EachPayment walks accountID's payment history newest-first, calling visit
-// for every fund-moving operation — payments, path payments, account
-// creations, and merges — until the history is exhausted or visit returns
-// false. It follows Horizon's paging, so a long history spans several
-// requests.
+// HistoryOpts selects what a history walk covers.
+type HistoryOpts struct {
+	// IncludeFailed additionally reports operations from failed transactions,
+	// which moved no funds; Horizon omits them by default.
+	IncludeFailed bool
+	// AllOps walks the /operations endpoint (every operation type) instead of
+	// /payments (only the fund-moving kinds: payments, path payments, account
+	// creations, and merges).
+	AllOps bool
+}
+
+// EachOperation walks accountID's history newest-first, calling visit for
+// every operation until the history is exhausted or visit returns false. It
+// follows Horizon's paging, so a long history spans several requests.
+//
+// By default it walks the payments endpoint — the operations that move funds.
+// Note that endpoint's limits: claimable-balance operations and Soroban
+// (invoke_host_function) transfers do not appear in it. opts.AllOps walks the
+// full operations endpoint instead.
 //
 // Each operation carries its parent transaction (join=transactions), so
 // callers can show the memo — the part of a payment that identifies an
-// exchange deposit. includeFailed additionally reports operations from failed
-// transactions, which moved no funds; Horizon omits them by default.
-func (c *Client) EachPayment(accountID string, includeFailed bool, visit func(operations.Operation) bool) error {
+// exchange deposit.
+func (c *Client) EachOperation(accountID string, opts HistoryOpts, visit func(operations.Operation) bool) error {
 	if err := wallet.ValidateAddress(accountID); err != nil {
 		return err
 	}
-	page, err := c.horizon.Payments(horizonclient.OperationRequest{
+	req := horizonclient.OperationRequest{
 		ForAccount:    accountID,
 		Order:         horizonclient.OrderDesc,
 		Limit:         historyPageLimit,
-		IncludeFailed: includeFailed,
+		IncludeFailed: opts.IncludeFailed,
 		Join:          "transactions",
-	})
+	}
+	var page operations.OperationsPage
+	var err error
+	if opts.AllOps {
+		page, err = c.horizon.Operations(req)
+	} else {
+		page, err = c.horizon.Payments(req)
+	}
 	for {
 		if err != nil {
 			if horizonclient.IsNotFoundError(err) {
 				return c.accountNotFound(accountID)
 			}
-			return wrapHorizonError("fetch payment history", err)
+			return wrapHorizonError("fetch history", err)
 		}
 		for _, op := range page.Embedded.Records {
 			if !visit(op) {
@@ -50,6 +70,6 @@ func (c *Client) EachPayment(accountID string, includeFailed bool, visit func(op
 		if len(page.Embedded.Records) < historyPageLimit {
 			return nil
 		}
-		page, err = c.horizon.NextPaymentsPage(page)
+		page, err = c.horizon.NextOperationsPage(page)
 	}
 }

@@ -40,10 +40,15 @@ lumencli account create     Create & fund a new account on-ledger (spends XLM)
 lumencli account fund       Fund an account via testnet Friendbot (testnet only)
 lumencli balance <address>  Show the balances of an account
 lumencli history <address>  Show the transaction history of an account
+lumencli tx <hash>          Show one transaction: status, fee, memo, operations
 lumencli send               Send XLM to another account
 lumencli receive            Show your address for receiving XLM
 lumencli version | help
 ```
+
+`history` takes filtering and output flags — `--json`, `--csv`, `--summary`,
+`--follow`, direction/counterparty/asset/time filters, and more. See
+[Transaction history](#transaction-history) for the full reference.
 
 ### Examples (testnet)
 
@@ -95,21 +100,303 @@ first, with the counterparty, memo, and transaction hash of each:
 ```
 
 By default the **entire** history is fetched, following Horizon's paging until
-the account's first transaction. Flags:
+the account's first transaction. Addresses and transaction hashes are printed
+in full, never abbreviated: history is what you consult when checking whether
+a deposit arrived or where funds went, and a truncated identifier cannot be
+pasted into an explorer or compared against a receipt. Amounts are shown in
+the asset transferred (`XLM` for lumens, `CODE` otherwise). An `account merge`
+shows `entire balance` — the ledger does not record the amount a merge moved.
 
-- `--limit <n>` — stop after the newest *n* entries (`0`, the default, means
-  the full history). Stopping early is noted on stderr, so a piped listing
-  cannot silently pass for a complete one.
-- `--failed` — also list operations from failed transactions. These moved no
-  funds and are marked `[FAILED — no funds moved]`; Horizon (and therefore the
-  default listing) omits them.
+A payment from the account **to itself** — the standard Stellar pattern for
+converting one asset to another via a path payment — is shown as a
+`converted` entry with both legs, and carries direction `self` in the
+machine-readable output. Treating it as a plain send would book the outgoing
+leg and silently drop the incoming one, corrupting every net figure computed
+downstream.
 
-Addresses and transaction hashes are printed in full, never abbreviated:
-history is what you consult when checking whether a deposit arrived or where
-funds went, and a truncated identifier cannot be pasted into an explorer or
-compared against a receipt. Amounts are shown in the asset transferred (`XLM`
-for lumens, the asset code otherwise). An `account merge` shows `entire
-balance` — the ledger does not record the amount a merge moved.
+`history` takes the account's `G...` address; an `M...` (muxed) address is
+rejected with guidance, because Horizon indexes accounts, not muxed
+sub-addresses. To isolate one muxed depositor, pass the `M...` address to
+`--counterparty` on the pooled account's history.
+
+### Flags
+
+| Flag | Meaning |
+| ---- | ------- |
+| `--limit <n>` | Stop after the newest *n* entries (`0`, the default, means the full history). Stopping early is noted on stderr — and inside a `--summary` — so a truncated result cannot silently pass for a complete one. |
+| `--failed` | Also list operations from failed transactions. These moved no funds and are marked `[FAILED — no funds moved]`; Horizon (and therefore the default listing) omits them. |
+| `--json` | Write JSON Lines (one object per entry) instead of the human listing. |
+| `--csv` | Write CSV instead of the human listing. Mutually exclusive with `--json`. |
+| `--sent` / `--received` | Only entries in one direction. Mutually exclusive with each other (the default already shows both). `self` entries (conversions) are both a send and a receive, so they match either filter. |
+| `--counterparty <G...\|M...>` | Only entries with this counterparty. See below for G vs. M semantics. |
+| `--asset <native\|XLM\|CODE:ISSUER>` | Only entries moving this asset (either leg of a path payment). The issuer is required for non-native assets — see below. |
+| `--since <t>` / `--until <t>` | Time range, inclusive at both ends. `YYYY-MM-DD` (UTC; a date-only `--until` covers that whole UTC day) or RFC3339. |
+| `--summary` | Per-asset totals over the (filtered) range instead of the listing. No CSV form; combines with `--json`. Incompatible with `--follow` (totals need a finished range) and `--all-ops`. |
+| `--all-ops` | List every operation type, not just the fund-moving kinds. Incompatible with the direction/counterparty/asset filters and `--follow` — see below. |
+| `--follow` | After the listing, keep streaming new payments as they arrive (Ctrl+C to stop). Incompatible with `--until` (which bounds the past) and `--csv` (an export needs a finished range). |
+
+Every meaningless flag combination is rejected up front with a clear error
+rather than producing an accidental, silently-wrong behavior a script could
+come to depend on.
+
+**`--counterparty` — G vs. M matching.** A `G...` value matches the entry's
+counterparty *account*. An `M...` value matches only the **exact muxed
+address** the payment carried on the wire (on either side). This strictness is
+the point: a muxed address identifies *one depositor* among the many sharing a
+pooled account, so if an M input loosely matched the underlying account it
+would match every depositor's payments — exactly the wrong answer when you are
+checking whether *your* deposit arrived.
+
+**`--asset` — the issuer is required.** `native` and `XLM` both mean the
+lumen; anything else must be written `CODE:ISSUER` with the issuer's full
+`G...` address. A bare code is rejected rather than matched loosely: asset
+codes are **not unique** on Stellar — anyone can issue an asset named `USDC` —
+and an issuer-less match could present a counterfeit asset as the real one.
+For the same reason, the machine-readable outputs always render issued assets
+with their full issuer. A native filter (`native`/`XLM`) also keeps account
+merges — a merge moves exclusively the native lumen, and hiding it would
+drop a fund movement exactly when you asked to see everything XLM.
+
+**`--since` / `--until` — UTC semantics.** A bare date is interpreted as UTC:
+`--since 2026-08-01 --until 2026-08-31` covers August, inclusive, in UTC. An
+RFC3339 timestamp carries its own offset, so local-time precision is
+available: `--since 2026-08-30T17:00:00-07:00` means 5 pm Pacific, exactly.
+
+### What the listing covers — and what it omits
+
+The default listing walks Horizon's **payments endpoint**: payments, path
+payments, account creations, and account merges. That endpoint has known
+blind spots, and this tool documents them rather than papering over them:
+
+- **Claimable-balance operations** (`create_claimable_balance` /
+  `claim_claimable_balance`) do not appear in it, even though they move funds.
+- **Soroban contract transfers** (`invoke_host_function`) do not appear in it
+  either — a token sent via a smart contract will not show.
+
+`--all-ops` is the escape hatch: it walks the full operations endpoint
+instead, so *every* operation the account was involved in is listed —
+including the kinds above, trustline changes, offers, and anything newer.
+Generic operations have no amount, direction, or counterparty, which is why
+the direction/counterparty/asset filters refuse to combine with `--all-ops`:
+they would silently drop every non-payment entry — a wrong answer about money
+dressed as an empty result. Operation kinds the vendored Stellar SDK models
+but lumencli gives no bespoke rendering are listed generically (type and
+source account). A kind the SDK does not model at all — one newer than the
+vendored SDK — makes the walk **fail loudly** with a decode error rather than
+listing a silently incomplete page; the remedy is rebuilding against a newer
+SDK. Either way, `--all-ops` completeness tracks the vendored SDK version.
+
+### Machine-readable output
+
+The `--json` and `--csv` schemas are a **compatibility promise**: scripts and
+accounting exports depend on them across releases, so fields are
+**append-only** — never renamed, retyped, or reordered.
+
+`--json` writes JSON Lines: one object per entry, streamed as the walk
+progresses. Fields:
+
+| Field | Type | Present | Meaning |
+| ----- | ---- | ------- | ------- |
+| `id` | string | always | Horizon operation id |
+| `paging_token` | string | always | Horizon cursor for this entry |
+| `created_at` | string | always | Ledger close time, RFC3339, UTC |
+| `type` | string | always | Wire operation type, e.g. `payment`, `path_payment_strict_send` |
+| `direction` | string | always | `sent` \| `received` \| `self` \| `other` |
+| `successful` | bool | always | Whether the parent transaction succeeded |
+| `tx_hash` | string | always | Parent transaction hash |
+| `ledger` | number | when the transaction join was present | Ledger sequence |
+| `amount` | string | only when the exact value is in the record | Destination-leg amount, 7-decimal string |
+| `asset` | object | with `amount` (also with `destination_min`, for the bound's asset) | `{"type":"native"}` or `{"type":...,"code":...,"issuer":...}` |
+| `source_amount` | string | path payments, when the source leg is known | Source-leg amount, 7-decimal string |
+| `source_asset` | object | with `source_amount` or `source_max` | Asset of the source leg |
+| `source_max` | string | failed strict-receive path payments | The *bound* on the source leg — not an amount |
+| `destination_min` | string | failed strict-send path payments | The *bound* on the destination leg — not an amount |
+| `entire_balance` | bool (`true`) | account merges | The whole balance moved; the amount is not in the record |
+| `counterparty` | string | fund-moving entries | The other account (`G...`) |
+| `to_muxed` / `from_muxed` | string | when the wire carried one | Muxed (`M...`) form of the destination / source |
+| `source_account` | string | generic operations (`--all-ops`) | The operation's source account |
+| `memo` | object | when the transaction carried a memo | `{"type":...,"value":...}` — text verbatim, id decimal, hash/return as 64 hex digits |
+| `memo_bytes` | string | when Horizon sanitized a text memo | Base64 of the raw memo bytes, so scripts can recover them exactly |
+
+The amount semantics are strict, because these values flow into accounting:
+
+- **Amounts are 7-decimal-place strings, never JSON numbers.** Parsing money
+  through a float corrupts it; keep amounts as strings (or convert to integer
+  stroops) in consuming code.
+- `amount` and `source_amount` are present **only when they are exact
+  values** — executed, or declared in the envelope of a failed operation
+  whose `successful: false` already says nothing moved. The
+  execution-determined leg of a **failed** path payment has no value: Horizon
+  serializes it as a `"0.0000000"` placeholder, which is dropped, and the leg
+  carries its bound instead — `source_max` for a failed strict-receive,
+  `destination_min` for a failed strict-send. The envelope-fixed leg (the
+  destination amount of a strict-receive, the source amount of a
+  strict-send) stays: it is exact, and the failure is flagged by
+  `successful`. Consumers doing money math must filter on `successful` —
+  true for every operation kind, not just path payments.
+- An account merge sets `entire_balance` and leaves every amount field empty —
+  the ledger does not record what a merge moved.
+- **There is deliberately no per-entry fee field.** Fees are per-*transaction*,
+  and this listing is per-*operation*: a transaction with three payments would
+  repeat its fee on all three entries, so the obvious
+  `jq 'map(.fee) | add'` would double-count. Fees live in `tx <hash>` and in
+  the deduplicated `--summary`.
+
+`--csv` writes these columns, in order:
+
+```
+id, created_at, direction, type, amount, asset, source_amount, source_asset,
+counterparty, to_muxed, from_muxed, memo_type, memo, tx_hash, successful
+```
+
+`asset` and `source_asset` are `native` or `CODE:ISSUER` (full issuer — a
+short code alone would let a counterfeit asset pass for the real one in an
+export). The amount columns hold strict decimals or nothing: the bounds and
+wire placeholders of failed path payments and the unrecorded amount of a
+merge are never written where a spreadsheet `SUM` would swallow them. Failed
+rows (visible only under `--failed`) can still carry their envelope-declared
+exact amounts with `successful` = `false` — exactly like a failed plain
+payment — so a spreadsheet summing amounts must filter on the `successful`
+column.
+
+**Formula-injection guard.** Memo content is written by whoever sent the
+payment — anyone can send dust with a memo of `=HYPERLINK(...)` — and the
+documented use of `--csv` is opening the export in a spreadsheet, where cells
+starting with `=` `+` `-` `@` or a tab execute as formulas. RFC-4180 quoting
+(which the writer applies) does **not** stop that — Excel evaluates the cell
+after unquoting — so such memo cells get a leading apostrophe, the spreadsheet
+convention for "literal text".
+
+**Empty results and errors.** An empty result is success: `--json` writes
+nothing to stdout, `--csv` writes the header row only, and both exit 0 —
+scripts should test for emptiness, not the exit code. A mid-walk error
+(Horizon down, network drop) exits **1** with stdout truncated at the point of
+failure, so a pipeline must check the exit status or a partial history can
+pass for a complete one:
+
+```bash
+set -o pipefail
+lumencli history G... --json | jq -r '.tx_hash' || {
+  echo "history walk failed — do not trust the partial output" >&2
+  exit 1
+}
+```
+
+### Summary
+
+`--summary` aggregates the (filtered) range into per-asset totals instead of
+listing it. All arithmetic is exact — integer stroops, no floating point
+anywhere near money — and each asset is keyed by `CODE:ISSUER` (or `native`),
+so two assets sharing a code can never be summed together:
+
+- **Per-asset lines** show received, sent, and net. A self-conversion books
+  **both legs** — what left under the source asset and what arrived under the
+  destination asset — so conversions net to zero only when the assets match.
+- **The fee line** reads `Fees paid on the N listed transactions where this
+  account was the fee payer` — and every word of that scope is load-bearing.
+  It is deduplicated per transaction (a multi-operation transaction appears
+  once), counts only transactions where the queried account actually paid the
+  fee (a fee-bumped transaction someone else paid is excluded), and includes
+  failed transactions whenever their records are visible (`--failed`) — their
+  fees were charged regardless. It is **not** total fee accounting: the
+  payments view only ever sees transactions containing fund-moving operations
+  that touch this account, so a transaction that only burned a fee (or whose
+  operations fall outside the view or your filters) cannot be counted from
+  here. A complete fee audit needs the transactions endpoint, not this view.
+- **Merges** carry no amount in the operation record, so a summary containing
+  merges reports its totals as **lower bounds** and says so.
+- **The coverage line** — `Summary of N entries from <oldest> to <newest>`,
+  plus a truncation note when `--limit` stopped the walk — is part of stdout,
+  not a stderr notice, because a redirected summary must never pass for a
+  full-history total when it was filtered or truncated. Every summary
+  describes exactly what it covers.
+
+`--summary --json` emits one object with the same append-only discipline:
+`account`, `entries`, `failed`, `truncated`, `oldest`, `newest`, `assets`
+(each `{asset, received, sent, net}` — string decimals), `fees`
+(`{listed_total, transactions}` — "listed" for the scope above), and
+`merges_sent` / `merges_received`.
+
+### Follow
+
+`--follow` prints the backlog listing first, then keeps streaming new
+payments as they arrive, rendering each with the same filters and format
+(human or `--json`) as the listing. The stream resumes from the paging token
+of the newest already-listed entry, so there is **no gap and no duplicate**
+between the listing and the live tail — a payment landing while the listing
+prints is not lost.
+
+If the stream drops (network blip, Horizon restart), it reconnects with
+exponential backoff, resuming from the last delivered entry — again no gap,
+no duplicates — and each reconnect is announced on stderr. After **5
+consecutive failures** the watch ends with an error and exit 1: silently
+pretending to watch a real-money account is worse than stopping loudly. The
+failure counter resets whenever an event arrives, so a long-running watch
+survives any number of isolated drops — only a persistently unreachable
+Horizon ends it.
+
+Ctrl+C stops the watch cleanly and immediately, even on a quiet account (the
+connection is torn down rather than waiting for the next event). A second
+Ctrl+C during a slow shutdown force-kills the process the ordinary way.
+
+## Transaction lookup
+
+`tx <hash>` shows one transaction in full. The use case is pasting a hash
+from a history entry, a receipt, or an explorer and seeing what it did:
+status, ledger and close time, source account, fee, memo, and every operation
+with **both** parties named (a transaction has no "my account" perspective).
+`--json` emits a single object instead.
+
+- A **failed** transaction is marked
+  `FAILED — no funds moved; the fee was still charged` — the fee is the one
+  part of a failed transaction that is real.
+- A **fee-bump** transaction (someone else paid the fee) shows the fee as
+  `paid by G...`; in JSON, `fee_payer` is present only in that case.
+
+The hash is accepted in either case — explorers render hashes both ways.
+
+### Scripting examples
+
+Check the exit status in every pipeline (`set -o pipefail`): a mid-walk error
+truncates stdout, and a partial history must not be mistaken for a complete
+one.
+
+Did the deposit with memo id `3141592653` arrive?
+
+```bash
+set -o pipefail
+lumencli history G... --received --since 2026-08-01 --json \
+  | jq -e 'select(.memo.type == "id" and .memo.value == "3141592653")' \
+  && echo "deposit arrived"
+```
+
+Export a month to CSV for a spreadsheet (a date-only `--until` is inclusive
+through the whole UTC day):
+
+```bash
+lumencli history G... --csv --since 2026-08-01 --until 2026-08-31 > 2026-08.csv
+```
+
+Monthly received total, computed by the exact-arithmetic summary rather than
+by adding floats in `jq`:
+
+```bash
+set -o pipefail
+lumencli history G... --summary --json --since 2026-08-01 --until 2026-08-31 \
+  | jq -r '.assets[] | select(.asset.type == "native") | "received \(.received) XLM"'
+```
+
+Who did this account pay most often?
+
+```bash
+set -o pipefail
+lumencli history G... --sent --json \
+  | jq -r '.counterparty' | sort | uniq -c | sort -rn | head
+```
+
+> **Windows note:** output uses non-ASCII glyphs (`—`, `≤`, `≥`); they render
+> fine in Windows Terminal, but garble on legacy codepages (e.g. `cmd.exe`
+> without UTF-8).
 
 ## Memos
 
@@ -194,10 +481,50 @@ This is a wallet for real money, so key handling matters:
 
 ## Development
 
+The `Makefile` bundles every check; plain `go` commands work too.
+
 ```bash
-go build ./...                       # build
-go test ./...                        # run all tests
-go test -run '^TestResolve' ./internal/netcfg   # run a single test / package
-go vet ./...                         # static checks
-gofmt -l -w .                        # format
+make build          # static, version-stamped ./lumencli for the host
+make test           # go test ./...
+make race           # tests under the race detector
+make vet fmt-check  # static checks / formatting gate
+make cross          # cross-build all six release targets into dist/
+make verify         # fmt-check + vet + test + race + build (offline, host only)
+make verify-linux   # full test suite on linux/arm64 AND linux/amd64 in Docker,
+                    # then smoke-runs any cross-built linux binaries in dist/
+make vulncheck      # govulncheck gate (needs network + jq; not part of verify)
+make verify-all     # verify + verify-linux + vulncheck
 ```
+
+`verify-linux` rides [OrbStack](https://orbstack.dev) on macOS: the arm64 leg
+runs natively (with `-race`), the amd64 leg through Rosetta — which is why
+that leg skips the race detector (TSan is unsupported under emulation; native
+amd64 race coverage comes from CI's ubuntu runner instead). Every `docker run`
+pins `--platform` explicitly, because a bare image tag silently resolves to
+whichever architecture was pulled last.
+
+CI lives in `.github/workflows/lumencli.yml`: format/vet/race-test on Ubuntu,
+plain tests on Windows, the vulnerability gate, and a cross-compile job that
+uploads all six platform binaries. It is path-filtered to `lumencli/**`, so a
+weekly scheduled run re-checks dependencies for new vulnerability advisories
+that would otherwise surface only on the next code change. The gate itself is
+`scripts/vulncheck.sh`: a pinned `govulncheck` whose symbol-level findings
+fail the job unless they are on the script's accept list — each accepted
+finding carries its justification in the script, so a known, assessed,
+unfixable transitive finding cannot turn the job permanently red (which would
+only train everyone to ignore it), while anything new still fails.
+
+`scripts/testnet-smoke.sh` is an opt-in end-to-end exercise against real
+testnet Horizon (Friendbot funding, a create + payment with an id memo, then
+invariant checks over `history`, `--json`, `--summary`, and `tx`). It is
+deliberately not in CI — a public network is a flake source, not a merge gate.
+Its `--record` flag refreshes `internal/cli/testdata/live_payments_page.json`,
+the recorded real-Horizon page that keeps the hand-built test fixtures honest.
+
+The machine-readable history schemas (`--json`, `--csv`, `--summary --json`)
+are an append-only compatibility promise — see
+[Machine-readable output](#machine-readable-output). A change that renames,
+retypes, or reorders a field is a breaking change to every script built on
+them — add fields, never alter existing ones. The golden-file tests under
+`internal/cli/testdata/` enforce this: `go test ./internal/cli -update`
+regenerates them, and a diff in review is a schema change to justify.

@@ -1,0 +1,3 @@
+# Byte-exact fixtures: golden tests compare exact bytes, so CRLF checkout
+# conversion (the default on Windows runners) must never touch these.
+* -text

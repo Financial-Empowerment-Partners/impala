@@ -14,3 +14,6 @@ secrets/
 keystore/
 .env
 .env.*
+
+# Build output
+/dist/
