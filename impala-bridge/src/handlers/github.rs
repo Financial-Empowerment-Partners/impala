@@ -143,7 +143,15 @@ async fn github_token_exchange_inner(
                 RATE_LIMIT_WINDOW_SECS,
             )
             .await?;
-            token
+            // A raw access token carries no audience: GET /user would accept a
+            // token issued to ANY GitHub OAuth app for the victim and log the
+            // caller in as that victim. Verify the token was issued to THIS
+            // app via POST /applications/{client_id}/token (app-authenticated),
+            // which also returns the bound user. Without configured OAuth
+            // credentials the audience cannot be checked at all, so the legacy
+            // shape is refused — use the code exchange.
+            let user = verify_github_app_token(&provider, &token).await?;
+            return finish_github_login(user, &pool, &redis_pool, &jwt_keys, &admin_ids).await;
         }
         (None, None) => {
             return Err(AppError::BadRequest(
@@ -152,8 +160,24 @@ async fn github_token_exchange_inner(
         }
     };
 
-    // Verify the token against the GitHub API
+    // The code-exchange path yields a token freshly minted for this app, so
+    // its audience is already ours; GET /user identifies the caller.
     let user = fetch_github_user(&provider, &token).await?;
+    finish_github_login(user, &pool, &redis_pool, &jwt_keys, &admin_ids).await
+}
+
+/// Shared tail for both GitHub auth shapes: turn an app-verified GitHub user
+/// into a provisioned local account and a JWT pair. Both callers must have
+/// already established that the token was issued to THIS app (code exchange
+/// mints such a token; the legacy path validates it via the app-token check),
+/// so the identity here is trustworthy.
+async fn finish_github_login(
+    user: GitHubUser,
+    pool: &PgPool,
+    redis_pool: &Arc<deadpool_redis::Pool>,
+    jwt_keys: &Arc<crate::jwt::JwtKeys>,
+    admin_ids: &Arc<std::collections::HashSet<String>>,
+) -> Result<Json<GitHubExchangeResponse>, AppError> {
     let account_id = normalize_federated_account_id(&format!("github:{}", user.id), "github")?;
 
     info!(
@@ -163,9 +187,9 @@ async fn github_token_exchange_inner(
     );
 
     // Rate limiting and lockout checks (fail-closed on Redis errors)
-    crate::redis_helpers::check_lockout(&redis_pool, &account_id, LOCKOUT_THRESHOLD).await?;
+    crate::redis_helpers::check_lockout(redis_pool, &account_id, LOCKOUT_THRESHOLD).await?;
     crate::redis_helpers::check_rate_limit(
-        &redis_pool,
+        redis_pool,
         "github",
         &account_id,
         RATE_LIMIT_MAX_REQUESTS,
@@ -174,12 +198,12 @@ async fn github_token_exchange_inner(
     .await?;
 
     // Auto-provision using a database transaction
-    provision_federated_account(&pool, &account_id, AUTH_PROVIDER_GITHUB).await?;
+    provision_federated_account(pool, &account_id, AUTH_PROVIDER_GITHUB).await?;
 
     // Issue local JWT tokens (role derived from DB + allowlist at issuance)
-    let role = crate::auth::issuance_role(&pool, &admin_ids, &account_id).await;
+    let role = crate::auth::issuance_role(pool, admin_ids, &account_id).await;
     let (refresh_token, temporal_token) =
-        crate::jwt::encode_token_pair(&jwt_keys, &account_id, &role)?;
+        crate::jwt::encode_token_pair(jwt_keys, &account_id, &role)?;
 
     info!("github: tokens issued for account_id={}", account_id);
 
@@ -284,6 +308,82 @@ async fn exchange_github_code(
 
     body.access_token.ok_or_else(|| {
         warn!("github: code exchange response missing access_token");
+        AppError::Unauthorized
+    })
+}
+
+/// Validate that a raw access token was issued to THIS OAuth app, and return
+/// the user it is bound to. Uses GitHub's app-authenticated token check
+/// (`POST {api_url}/applications/{client_id}/token`, Basic auth with the
+/// app's client_id:client_secret, body `{"access_token": ...}`), which
+/// returns 200 with the authorization (including its `user`) only when the
+/// token belongs to this app — closing the cross-app confusion where a token
+/// minted for any other GitHub app would otherwise authenticate its bearer.
+///
+/// Requires configured OAuth credentials; without them a raw token's audience
+/// cannot be checked, so the legacy shape is refused (the code exchange, which
+/// also needs the secret, is the supported path).
+async fn verify_github_app_token(
+    provider: &GitHubProvider,
+    token: &str,
+) -> Result<GitHubUser, AppError> {
+    let (client_id, client_secret) = match (
+        provider.oauth_client_id.as_deref(),
+        provider.oauth_client_secret.as_deref(),
+    ) {
+        (Some(id), Some(secret)) if !id.is_empty() && !secret.is_empty() => (id, secret),
+        _ => {
+            warn!("github: legacy access_token shape used without configured OAuth app");
+            return Err(AppError::BadRequest(
+                "Raw GitHub access tokens are not accepted without a configured OAuth app; \
+                     use the authorization-code exchange instead"
+                    .to_string(),
+            ));
+        }
+    };
+
+    let url = format!("{}/applications/{}/token", provider.api_url, client_id);
+    #[derive(serde::Deserialize)]
+    struct AppTokenCheck {
+        user: Option<GitHubUser>,
+    }
+    let res = provider
+        .http_client
+        .post(&url)
+        .basic_auth(client_id, Some(client_secret))
+        .header(reqwest::header::ACCEPT, "application/vnd.github+json")
+        .header(reqwest::header::USER_AGENT, "impala-bridge")
+        .header("X-GitHub-Api-Version", "2022-11-28")
+        .json(&serde_json::json!({ "access_token": token }))
+        .send()
+        .await
+        .map_err(|e| {
+            warn!("github: app-token check request failed: {}", e);
+            AppError::InternalError("Failed to verify GitHub token".to_string())
+        })?;
+
+    let status = res.status();
+    // 404 (token not for this app / invalid) and 422 (bad token) both mean
+    // "not a token this app issued" — reject without leaking which.
+    if status == reqwest::StatusCode::NOT_FOUND
+        || status == reqwest::StatusCode::UNPROCESSABLE_ENTITY
+        || status == reqwest::StatusCode::UNAUTHORIZED
+    {
+        warn!("github: access token not issued to this app ({})", status);
+        return Err(AppError::Unauthorized);
+    }
+    if !status.is_success() {
+        warn!("github: app-token check returned {}", status);
+        return Err(AppError::InternalError(
+            "Failed to verify GitHub token".to_string(),
+        ));
+    }
+    let check: AppTokenCheck = res.json().await.map_err(|e| {
+        warn!("github: failed to parse app-token check response: {}", e);
+        AppError::InternalError("Failed to verify GitHub token".to_string())
+    })?;
+    check.user.ok_or_else(|| {
+        warn!("github: app-token check returned no user");
         AppError::Unauthorized
     })
 }

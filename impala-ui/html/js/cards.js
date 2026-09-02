@@ -102,17 +102,24 @@
     });
 
     confirmYes.addEventListener('click', function () {
-        var accountId = document.getElementById('deact-account-id').value.trim();
+        // DELETE /card scopes to the authenticated account server-side, so the
+        // card id alone identifies the target.
         var cardId = document.getElementById('deact-card-id').value.trim();
 
         API.setButtonLoading(confirmYes, true);
 
-        API.put('/account', {
-            account_id: accountId,
-            card_id: cardId,
-            card_active: false
-        })
-            .then(function () {
+        // Deactivation is DELETE /card {card_id}: the bridge soft-deletes the
+        // card, scoped to the authenticated account (account_id is taken from
+        // the token, not the body). The previous PUT /account with
+        // card_active silently no-op'd — that field is not part of the
+        // account update contract, so it returned 200 success:false and the
+        // card stayed active. Honor the success envelope.
+        API.del('/card', { card_id: cardId })
+            .then(function (res) {
+                if (res && res.success === false) {
+                    Router.showToast(res.message || 'Card not found or already inactive', 'warning');
+                    return;
+                }
                 Router.showToast('Card deactivated', 'success');
                 document.getElementById('deactivate-form').reset();
                 closeModal();

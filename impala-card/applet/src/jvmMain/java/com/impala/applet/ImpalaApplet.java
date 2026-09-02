@@ -68,6 +68,7 @@ public class ImpalaApplet extends Applet {
     public static final short SW_ERROR_EC_CARD_KEY_MISSING = 0x6230;
     public static final short SW_ERROR_WRONG_SENDER = 0x6231;
     public static final short SW_ERROR_WRONG_RECIPIENT = 0x6232;
+    public static final short SW_ERROR_TRANSFER_COUNTER_INVALID = 0x6233;
     public static final short SW_WRONG_PIN_CARD_BLOCKED = 0x6201;
     public static final short SW_WRONG_PIN_TWO_RETRIES_LEFT = 0x6302;
     public static final short SW_WRONG_PIN_ONE_RETRY_LEFT = 0x6301;
@@ -148,6 +149,7 @@ public class ImpalaApplet extends Applet {
     private byte[] cardId;             // 16-byte UUID unique to this card, randomly generated
     private byte[] currency;           // 4-byte currency code
     private byte[] myBalance;          // 8-byte (int64) on-card balance in lowest denomination
+    private byte[] lastReceiveCounter; // 4-byte last accepted incoming-transfer counter (replay guard)
 
     // --- Cryptographic keys ---
     private ECPrivateKey cardECPrivateKey;   // Card's EC private key (secp256r1) for signing
@@ -172,7 +174,6 @@ public class ImpalaApplet extends Applet {
     private byte[] signableBuffer;     // Holds signable data during two-phase verify
     private byte[] tempAmount;         // Temporary buffer for parsed transaction amount
     private byte[] tempCounter;        // Temporary buffer for parsed transaction counter
-    private byte[] tempPlusOne;        // Temporary buffer for counter+1 comparison
     private ECPublicKey tempPubKey;    // Reusable EC public key for transfer verification
 
     // --- SCP03 secure channel ---
@@ -204,6 +205,7 @@ public class ImpalaApplet extends Applet {
 
         currency = new byte[4];
         myBalance = new byte[INT64_LENGTH];
+        lastReceiveCounter = new byte[INT32_LENGTH];
 
         cardECPrivateKey = null;
         cardECPublicKey = null;
@@ -225,7 +227,6 @@ public class ImpalaApplet extends Applet {
         signableBuffer = JCSystem.makeTransientByteArray(SIGNABLE_LENGTH, JCSystem.CLEAR_ON_RESET);
         tempAmount = JCSystem.makeTransientByteArray(INT64_LENGTH, JCSystem.CLEAR_ON_RESET);
         tempCounter = JCSystem.makeTransientByteArray(INT32_LENGTH, JCSystem.CLEAR_ON_RESET);
-        tempPlusOne = JCSystem.makeTransientByteArray(INT32_LENGTH, JCSystem.CLEAR_ON_RESET);
         tempPubKey = SecP256r1.newPubKey();
 
         hashBuffer = JCSystem.makeTransientByteArray(HASH_LENGTH, JCSystem.CLEAR_ON_RESET);
@@ -879,7 +880,9 @@ public class ImpalaApplet extends Applet {
      * Verifies and accepts an incoming transfer in two phases:
      * - P1=0x00: Receives the signable transaction data (60 bytes)
      * - P1=0x01: Receives signature + pubKey + pubKeySig, verifies all cryptographic
-     *   proofs, checks the recipient is this card, and credits the amount to the on-card balance.
+     *   proofs, checks the recipient is this card, enforces the strictly-increasing
+     *   receive counter (replay protection), and credits the amount to the on-card
+     *   balance atomically with the counter advance.
      *
      * NOTE (tracking): verification trusts the public key embedded in the message
      * tail — the trust chain on that key (pubKeySig) is established off-card, not
@@ -924,12 +927,38 @@ public class ImpalaApplet extends Applet {
                 ISOException.throwIt(SW_ERROR_WRONG_RECIPIENT);
             }
 
-            // Credit the transfer amount to on-card balance
+            // Replay protection: the signable's counter must be strictly greater
+            // than the last counter this card accepted a credit for.
+            //
+            // Counter scope: ONE stream per receiving card, not per sender. The
+            // sending side persists no counter of its own — signTransfer signs
+            // whatever non-negative counter the coordinating host puts in the
+            // signable — so incoming counters are allocated per recipient by the
+            // transfer coordinator (as in the original seenOfflineCounter
+            // design). Strictly-greater rather than exactly stored+1 so that a
+            // signed-but-never-presented transfer cannot jam the stream: gaps
+            // are acceptable, repeats are not. Zero is never accepted because
+            // the stored counter starts at zero.
+            TransactionParser.getCounter(signableBuffer, ZERO, tempCounter);
+            if (isNegative(tempCounter) ||
+                    ArrayUtil.unsignedByteArrayCompare(tempCounter, ZERO,
+                            lastReceiveCounter, ZERO, INT32_LENGTH) <= 0) {
+                ISOException.throwIt(SW_ERROR_TRANSFER_COUNTER_INVALID);
+            }
+
+            // Credit the transfer amount to on-card balance. The counter
+            // advances in the same transaction as the credit, so a tear can
+            // never credit without consuming the counter (or vice versa).
             TransactionParser.getAmount(signableBuffer, ZERO, tempAmount);
 
             JCSystem.beginTransaction();
             addToBalance(tempAmount);
+            Util.arrayCopy(tempCounter, ZERO, lastReceiveCounter, ZERO, INT32_LENGTH);
             JCSystem.commitTransaction();
+
+            // Consume the buffered signable: a repeated P1=0x01 tail must not
+            // be able to re-verify against it within the same session.
+            Util.arrayFillNonAtomic(signableBuffer, ZERO, SIGNABLE_LENGTH, (byte) 0);
         }
     }
 
@@ -962,6 +991,13 @@ public class ImpalaApplet extends Applet {
         byte pinLength = buffer[ISO7816.OFFSET_LC];
         short count = apdu.setIncomingAndReceive();
         if (count < pinLength) {
+            ISOException.throwIt(ISO7816.SW_WRONG_LENGTH);
+        }
+        // SIGN_TRANSFER always checks exactly USER_PIN_LENGTH digits, so a PIN
+        // stored with any other length could never verify again — every attempt
+        // would burn a retry until the user PIN blocks. Enforce the same fixed
+        // length the SCP03 provisioning path does.
+        if (pinLength != USER_PIN_LENGTH) {
             ISOException.throwIt(ISO7816.SW_WRONG_LENGTH);
         }
         if (Util.arrayCompare(buffer, ISO7816.OFFSET_CDATA, FOUR_ZERO_PIN, ZERO, pinLength) == 0) {

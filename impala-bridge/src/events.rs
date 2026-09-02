@@ -154,6 +154,16 @@ pub enum AccountEvent {
         kind: String,
         amount_minor: i64,
     },
+    /// An account's role was changed by an admin. Role grants are governance
+    /// over spend-adjacent authority (treasurer, key-custodian), so they get
+    /// the same feed visibility as key operations. `account_id` is the TARGET
+    /// account; the acting admin rides in `actor`.
+    RoleChanged {
+        account_id: String,
+        actor: String,
+        old_role: String,
+        new_role: String,
+    },
     // Bridge credential/key management. account_id is the acting admin.
     // Payloads carry FINGERPRINTS and identities only — never key material,
     // and never anything derived from a decrypted blob.
@@ -216,6 +226,7 @@ impl AccountEvent {
             AccountEvent::ReserveRefundSent { .. } => "reserve.refund_sent",
             AccountEvent::ReserveRefundFailed { .. } => "reserve.refund_failed",
             AccountEvent::ReserveEntryRecorded { .. } => "reserve.entry_recorded",
+            AccountEvent::RoleChanged { .. } => "account.role_changed",
             AccountEvent::BridgeKeyImported { .. } => "bridge.key_imported",
             AccountEvent::BridgeKeyRevoked { .. } => "bridge.key_revoked",
             AccountEvent::BridgeSeedProvisioned { .. } => "bridge.seed_provisioned",
@@ -247,6 +258,7 @@ impl AccountEvent {
             | AccountEvent::ReserveRefundSent { account_id, .. }
             | AccountEvent::ReserveRefundFailed { account_id, .. }
             | AccountEvent::ReserveEntryRecorded { account_id, .. }
+            | AccountEvent::RoleChanged { account_id, .. }
             | AccountEvent::BridgeKeyImported { account_id, .. }
             | AccountEvent::BridgeKeyRevoked { account_id, .. }
             | AccountEvent::BridgeSeedProvisioned { account_id, .. } => account_id,
@@ -272,6 +284,16 @@ impl AccountEvent {
                 "btxid": btxid,
                 "stellar_tx_id": stellar_tx_id,
                 "payala_tx_id": payala_tx_id,
+            }),
+            AccountEvent::RoleChanged {
+                actor,
+                old_role,
+                new_role,
+                ..
+            } => json!({
+                "actor": actor,
+                "old_role": old_role,
+                "new_role": new_role,
             }),
             AccountEvent::CardRegistered { card_id, .. } => json!({ "card_id": card_id }),
             AccountEvent::CardDeleted { card_id, .. } => json!({ "card_id": card_id }),

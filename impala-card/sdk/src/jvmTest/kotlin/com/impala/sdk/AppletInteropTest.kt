@@ -114,6 +114,79 @@ class AppletInteropTest {
         assertTrue(verifyP256(cardPublicKey, spend, trimDer(signature.toByteArray())))
     }
 
+    // --- verifyTransfer replay protection (receive counter) ---
+
+    @Test
+    fun `verifyTransfer rejects replays and stale counters but allows counter gaps`() {
+        val sdk = newSdk()
+        sdk.setSeed()
+        val externalKeys = genP256()
+        val externalId = ByteArray(16) { (it + 1).toByte() }
+        val cardAccountId = ByteArray(16)
+        val pubKey = uncompressedPoint(externalKeys.public as ECPublicKey)
+
+        val funding = buildSignable(externalId, cardAccountId, amount = 1000, counter = 1)
+        val sig = pad72(signP256(externalKeys.private, funding))
+        sdk.verifyTransfer(funding, sig, pubKey, ByteArray(72))
+        assertEquals(1000L, sdk.getBalance())
+
+        // Replaying the full two-phase exchange must not credit again (0x6233)
+        val fullReplay = assertFailsWith<ImpalaException> {
+            sdk.verifyTransfer(funding, sig, pubKey, ByteArray(72))
+        }
+        assertTrue(fullReplay.message!!.contains("6233"))
+        assertEquals(1000L, sdk.getBalance())
+
+        // Replaying only the P1=0x01 tail cannot re-verify either: the applet
+        // consumed the buffered signable after the successful credit
+        assertFailsWith<ImpalaException> {
+            sdk.tx(
+                CommandAPDU(
+                    0x00, Constants.INS_VERIFY_TRANSFER.toInt(), 0x01, 0x00,
+                    sig + pubKey + ByteArray(72)
+                )
+            )
+        }
+        assertEquals(1000L, sdk.getBalance())
+
+        // A fresh, differently-signed transfer whose counter is not strictly
+        // greater than the last accepted one is rejected too
+        val stale = buildSignable(externalId, cardAccountId, amount = 500, counter = 1)
+        assertFailsWith<ImpalaException> {
+            sdk.verifyTransfer(stale, pad72(signP256(externalKeys.private, stale)), pubKey, ByteArray(72))
+        }
+        assertEquals(1000L, sdk.getBalance())
+
+        // ...while a gap in the counter stream is fine (5 > 1): a transfer that
+        // was signed but never presented must not jam later ones
+        val next = buildSignable(externalId, cardAccountId, amount = 500, counter = 5)
+        sdk.verifyTransfer(next, pad72(signP256(externalKeys.private, next)), pubKey, ByteArray(72))
+        assertEquals(1500L, sdk.getBalance())
+    }
+
+    @Test
+    fun `verifyTransfer never accepts a zero or negative counter`() {
+        val sdk = newSdk()
+        sdk.setSeed()
+        val externalKeys = genP256()
+        val externalId = ByteArray(16) { (it + 1).toByte() }
+        val cardAccountId = ByteArray(16)
+        val pubKey = uncompressedPoint(externalKeys.public as ECPublicKey)
+
+        for (counter in intArrayOf(0, -1)) {
+            val transfer = buildSignable(externalId, cardAccountId, amount = 100, counter = counter)
+            assertFailsWith<ImpalaException> {
+                sdk.verifyTransfer(
+                    transfer,
+                    pad72(signP256(externalKeys.private, transfer)),
+                    pubKey,
+                    ByteArray(72)
+                )
+            }
+            assertEquals(0L, sdk.getBalance())
+        }
+    }
+
     // --- SIGN_AUTH domain tag (pinned card-auth contract) ---
 
     /**
@@ -205,6 +278,36 @@ class AppletInteropTest {
         // A PIN-verified transfer resets the counter, re-enabling PIN-less
         sdk.signTransfer("1111", buildSignable(cardAccountId, externalId, amount = 1))
         sdk.signTransfer("0000", buildSignable(cardAccountId, externalId, amount = 1))
+    }
+
+    // --- Master-PIN-authorized user PIN update ---
+
+    @Test
+    fun `update user PIN rejects lengths other than 4 digits`() {
+        val sdk = newSdk()
+        sdk.tx(verifyMasterPinCmd(byteArrayOf(1, 4, 1, 1, 7, 2, 9, 8)))
+
+        // A stored PIN of any other length could never satisfy SIGN_TRANSFER's
+        // fixed 4-digit check and would lock the user out attempt by attempt
+        for (pin in listOf(byteArrayOf(1, 2, 3), byteArrayOf(1, 2, 3, 4, 5))) {
+            assertFailsWith<ImpalaWrongLengthException> {
+                sdk.tx(
+                    CommandAPDU(
+                        0x00, Constants.INS_UPDATE_USER_PIN.toInt(),
+                        0x00, Constants.P2_USER_PIN.toInt(), pin
+                    )
+                )
+            }
+        }
+        // The stored PIN is unchanged, and a 4-digit update still works
+        sdk.verifyUserPin("1111")
+        sdk.tx(
+            CommandAPDU(
+                0x00, Constants.INS_UPDATE_USER_PIN.toInt(),
+                0x00, Constants.P2_USER_PIN.toInt(), byteArrayOf(9, 9, 9, 9)
+            )
+        )
+        sdk.verifyUserPin("9999")
     }
 
     // --- Install-parameter provisioning ---
@@ -303,6 +406,19 @@ class AppletInteropTest {
     }
 
     @Test
+    fun `external authenticate without C-MAC in the security level is refused`() {
+        val sdk = newSdk()
+        // C-MAC is the mandatory minimum: any level without bit 0x01 must be
+        // rejected, or PROVISION_PIN / APPLET_UPDATE would run un-MACed
+        for (level in byteArrayOf(0x00, 0x02, 0x30)) {
+            assertFailsWith<ImpalaException> { sdk.openSecureChannel(level) }
+        }
+        // The rejection happens before any cryptogram work: a compliant retry
+        // on the same card still opens
+        assertTrue(sdk.openSecureChannel())
+    }
+
+    @Test
     fun `secured CLA without an open session is rejected`() {
         val bibo = SimulatorBibo()
         val resp = bibo.transceive(byteArrayOf(0x84.toByte(), 0x04, 0x00, 0x00, 0x08) + ByteArray(8))
@@ -355,6 +471,21 @@ class AppletInteropTest {
         sdk.tx(verifyMasterPinCmd(byteArrayOf(8, 7, 6, 5, 4, 3, 2, 1)))
         assertFailsWith<ImpalaPinException> {
             sdk.tx(verifyMasterPinCmd(byteArrayOf(1, 4, 1, 1, 7, 2, 9, 8)))
+        }
+    }
+
+    @Test
+    fun `verifyMasterPin string API maps digits, not ASCII`() {
+        // Exercise the PUBLIC ImpalaSDK.verifyMasterPin(String) — the other
+        // tests build the APDU from raw bytes and so never covered the string
+        // mapping, which sent ASCII char codes ([0x31,...]) against a card
+        // storing raw digits ([1,...]): verification could never succeed and
+        // 10 attempts would brick the master PIN. The install default is
+        // 14117298; a correct mapping must verify, a wrong PIN must not.
+        val sdk = newSdk()
+        sdk.verifyMasterPin("14117298") // throws on any non-9000 SW
+        assertFailsWith<ImpalaPinException> {
+            sdk.verifyMasterPin("00000000")
         }
     }
 

@@ -4,7 +4,14 @@
 from a terminal or a script.
 
 **Prerequisites:** Go 1.26+ to build; network reach to the bridge; an account on
-the target bridge. Admin operations need the `admin` role.
+the target bridge. Privileged operations need the matching role: reserve and
+replenishment money operations take `treasurer` or `admin`; key and seed
+operations take `key-custodian` or `admin`; the cross-account read surfaces
+(accounts list, cross-account activity, the event feed, key metadata, reserve
+state) are also open to `auditor`. Governance — role grants, deletion, sync,
+webhooks, review — is `admin` only. For a read-only investigation, mint an
+**auditor** token rather than an admin one: it sees everything and can change
+nothing.
 
 **See also:** [`impalactl/README.md`](../../impalactl/README.md) is the command
 reference. This runbook is the *task* view: the sequences worth following
@@ -123,7 +130,7 @@ Inspect:
 impalactl account show G...              # the bridge's record
 impalactl account onchain G...           # live Horizon balances, sequence, signers
 impalactl account reserves alice         # Payala reserve balances
-impalactl account list --search ada      # admin; paginated
+impalactl account list --search ada      # admin, auditor or key-custodian; paginated
 impalactl account list --page 2 --per-page 50
 ```
 
@@ -137,24 +144,32 @@ impalactl account list --page 2 --per-page 50
 
 ## 4. Roles
 
-Roles are server-side and land in the JWT's `role` claim. The four values,
-least to most privileged:
+Roles are server-side and land in the JWT's `role` claim. Seven values: the
+ladder (ascending privilege), plus three lateral privileged roles that split
+the old admin surface — none includes another, and `admin` stays the superset:
 
-| Role | Adds |
+| Role | Holds |
 |---|---|
 | `view-only` | view accounts, MFA, transactions, cards |
 | `device` | + create transactions, manage cards |
-| `token` | + manage accounts, manage MFA, review transactions |
-| `admin` | + manage roles, delete accounts, sync profiles — everything |
+| `token` | + manage accounts, manage MFA |
+| `treasurer` | reserve & replenishment money operations |
+| `key-custodian` | bridge credentials & custodial seeds (+ account reads) |
+| `auditor` | read-only oversight of every privileged surface |
+| `admin` | everything, including governance — the only role that can grant roles, delete accounts, sync, manage webhooks, or review transactions |
+
+The full matrix lives in [`accounts-and-roles.md`](./accounts-and-roles.md).
 
 Granting is an admin operation on the bridge (`PUT
 /admin/accounts/{account_id}/role`, driven from the admin UI's Accounts page).
 
-**A grant takes effect at the target's next token refresh, not immediately.**
-Someone promoted to `admin` keeps hitting 403 until their token turns over.
-Have them run `impalactl logout` and log in again, or wait out the temporal
-token. `impalactl whoami` shows the role actually present in the stored token,
-which is the fastest way to tell "not granted" from "granted but not refreshed".
+**A grant revokes the target's existing sessions and tokens immediately**;
+the new role applies when they next sign in. There is no waiting out a token
+refresh any more — the target is signed out by the grant itself and simply
+logs back in. `impalactl whoami` shows the role actually present in the
+stored token, which is the fastest way to tell "not granted" from "granted
+but not signed in again" — though note that after a grant the stored token it
+describes is already revoked.
 
 > **Unknown or missing role fails closed to `view-only`.** Tokens minted before
 > the role claim existed have no role and are treated as least-privileged. After
@@ -167,7 +182,8 @@ which is the fastest way to tell "not granted" from "granted but not refreshed".
 
 **Read [`import-keys.md`](./import-keys.md) first.** A provider credential is
 spend authority: the replenishment driver sends real reserve XLM to the pay-in
-address the active provider account names.
+address the active provider account names. Key and seed mutations require the
+`admin` or `key-custodian` role; `keys list` is also readable by auditors.
 
 The three credential kinds and their parts:
 
@@ -286,9 +302,11 @@ impalactl activity events --since 42
 
 > **`activity review` is a full replacement of the review record.** Anything you
 > do not pass is reset. Read the current state with `activity show` first.
+> Review is governance and stays admin-only; cross-account `activity list` /
+> `show` and the event feed need only admin **or auditor**.
 
-`activity events` is the admin audit feed and prints the cursor to use next, so
-a poller is just:
+`activity events` is the audit feed (admin or auditor) and prints the cursor to
+use next, so a poller is just:
 
 ```
 cursor=0
@@ -300,7 +318,8 @@ done
 
 After any key operation, confirm it landed in the audit trail: look for
 `bridge.key_imported`, `bridge.key_revoked` and `bridge.seed_provisioned`
-events, and investigate any nobody can account for.
+events, and investigate any nobody can account for. Role grants land as
+`account.role_changed` (actor, old role, new role).
 
 ## 8. Offline Payala batches
 

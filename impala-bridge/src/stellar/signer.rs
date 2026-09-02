@@ -78,6 +78,16 @@ fn signer_error(context: &str, cause: impl std::fmt::Display) -> AppError {
     AppError::InternalError("transaction signing failed".to_string())
 }
 
+/// Error for a failure that provably occurred BEFORE the transaction was
+/// submitted (reading the source sequence, building or signing) — nothing
+/// reached Horizon, so the caller may safely retry without any double-spend
+/// risk. Distinct from `signer_error` (ambiguous) so the reserve payout
+/// driver does not freeze a payout on a transient pre-submit Horizon blip.
+fn presubmit_error(context: &str, cause: impl std::fmt::Display) -> AppError {
+    error!("stellar signer (pre-submit): {}: {}", context, cause);
+    AppError::Retryable("transaction preparation failed before submission".to_string())
+}
+
 fn hex_encode(bytes: &[u8]) -> String {
     let mut s = String::with_capacity(bytes.len() * 2);
     for b in bytes {
@@ -117,14 +127,14 @@ impl StellarBaseSigner {
             .get(&url)
             .send()
             .await
-            .map_err(|e| signer_error("horizon accounts request", e))?;
+            .map_err(|e| presubmit_error("horizon accounts request", e))?;
         if resp.status() == reqwest::StatusCode::NOT_FOUND {
             return Err(AppError::BadRequest(
                 "source account does not exist on the network (not funded yet)".to_string(),
             ));
         }
         if !resp.status().is_success() {
-            return Err(signer_error(
+            return Err(presubmit_error(
                 "horizon accounts",
                 format!("HTTP {}", resp.status()),
             ));
@@ -132,14 +142,14 @@ impl StellarBaseSigner {
         let body: serde_json::Value = resp
             .json()
             .await
-            .map_err(|e| signer_error("horizon accounts response", e))?;
+            .map_err(|e| presubmit_error("horizon accounts response", e))?;
         // Horizon returns the sequence as a string.
         let seq_str = body["sequence"]
             .as_str()
-            .ok_or_else(|| signer_error("horizon accounts", "missing sequence"))?;
+            .ok_or_else(|| presubmit_error("horizon accounts", "missing sequence"))?;
         seq_str
             .parse::<i64>()
-            .map_err(|e| signer_error("horizon accounts sequence parse", e))
+            .map_err(|e| presubmit_error("horizon accounts sequence parse", e))
     }
 
     /// Submit a base64 XDR transaction envelope to Horizon (`POST /transactions`,
@@ -220,7 +230,7 @@ impl StellarSigner for StellarBaseSigner {
         let current_seq = self.fetch_sequence(&source).await?;
         let next_seq = current_seq
             .checked_add(1)
-            .ok_or_else(|| signer_error("sequence", "overflow"))?;
+            .ok_or_else(|| presubmit_error("sequence", "overflow"))?;
 
         let destination = PublicKey::from_account_id(&params.destination)
             .map_err(|_| AppError::BadRequest("invalid destination address".to_string()))?;
@@ -242,7 +252,7 @@ impl StellarSigner for StellarBaseSigner {
             .map_err(|_| AppError::BadRequest("invalid amount".to_string()))?
             .with_asset(asset)
             .build()
-            .map_err(|e| signer_error("build payment", e))?;
+            .map_err(|e| presubmit_error("build payment", e))?;
 
         let memo = match &params.memo {
             Some(text) => Memo::new_text(text.clone())
@@ -265,18 +275,18 @@ impl StellarSigner for StellarBaseSigner {
             )))
             .add_operation(payment)
             .into_transaction()
-            .map_err(|e| signer_error("build transaction", e))?;
+            .map_err(|e| presubmit_error("build transaction", e))?;
 
         tx.sign(kp.as_ref(), &network)
-            .map_err(|e| signer_error("sign", e))?;
+            .map_err(|e| presubmit_error("sign", e))?;
 
-        let hash = tx.hash(&network).map_err(|e| signer_error("hash", e))?;
+        let hash = tx.hash(&network).map_err(|e| presubmit_error("hash", e))?;
         let stellar_hash = hex_encode(&hash);
 
         let xdr = tx
             .into_envelope()
             .xdr_base64()
-            .map_err(|e| signer_error("xdr encode", e))?;
+            .map_err(|e| presubmit_error("xdr encode", e))?;
 
         let submitted_hash = self.submit(&xdr).await?;
 

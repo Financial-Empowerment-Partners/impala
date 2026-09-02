@@ -5,7 +5,8 @@ use sqlx::PgPool;
 use std::sync::Arc;
 
 use crate::constants::{
-    RATE_LIMIT_MAX_REQUESTS, RATE_LIMIT_WINDOW_SECS, REFRESH_TOKEN_TTL_SECS, TOKEN_TYPE_REFRESH,
+    LOCKOUT_DURATION_SECS, LOCKOUT_THRESHOLD, RATE_LIMIT_MAX_REQUESTS, RATE_LIMIT_WINDOW_SECS,
+    REFRESH_TOKEN_TTL_SECS, TOKEN_TYPE_REFRESH,
 };
 use crate::error::AppError;
 use crate::jwt::JwtKeys;
@@ -139,23 +140,14 @@ pub async fn token(
 
         // 4. Mint the replacement pair inside the same token family.
         // The role is re-derived at every rotation (never trusted from the
-        // presented token): current DB role, with the ADMIN_ACCOUNT_IDS
-        // allowlist overriding to admin — so grants/revocations take effect
-        // within one temporal-token lifetime regardless of refresh-token age.
-        // Falls back to the presented token's role if the account row is gone.
-        let role = if admin_ids.contains(&claims.sub) {
-            crate::constants::ROLE_ADMIN.to_string()
-        } else {
-            sqlx::query_scalar::<_, String>(
-                "SELECT role FROM impala_account WHERE payala_account_id = $1",
-            )
-            .bind(&claims.sub)
-            .fetch_optional(&pool)
-            .await
-            .ok()
-            .flatten()
-            .unwrap_or_else(|| claims.role.clone())
-        };
+        // presented token) via the shared issuance path: current DB role,
+        // ADMIN_ACCOUNT_IDS overriding to admin — so grants/revocations take
+        // effect within one temporal-token lifetime regardless of
+        // refresh-token age. Fail-closed like every issuance: a missing row
+        // or a DB error mints least privilege, never the presented token's
+        // role — a deleted treasurer must not keep re-minting treasury power
+        // off a 14-day refresh family.
+        let role = crate::auth::issuance_role(&pool, &admin_ids, &claims.sub).await;
         let (new_refresh_token, temporal_token) =
             crate::jwt::encode_token_pair_with_family(&jwt_keys, &claims.sub, &role, &claims.fid)?;
 
@@ -195,12 +187,22 @@ pub async fn token(
     )
     .await?;
 
+    // Account lockout — the SAME gate `POST /authenticate` and
+    // `POST /session/login` enforce. Without it this password flow was an
+    // unthrottled password-guessing oracle against the identical credential
+    // store (the per-minute rate limit alone allows sustained guessing).
+    crate::redis_helpers::check_lockout(&redis_pool, username, LOCKOUT_THRESHOLD).await?;
+
     match verify_local_credentials(&pool, username, password).await {
-        Ok(()) => {}
+        Ok(()) => {
+            crate::redis_helpers::clear_lockout(&redis_pool, username).await;
+        }
         // Preserve the wire contract: invalid credentials are a 200 with
         // success=false (matching the historical behavior of this endpoint),
         // while the federated-account rejection stays a 400.
         Err(AppError::Unauthorized) => {
+            crate::redis_helpers::increment_lockout(&redis_pool, username, LOCKOUT_DURATION_SECS)
+                .await;
             return Ok(Json(TokenResponse {
                 success: false,
                 message: "Invalid credentials".to_string(),

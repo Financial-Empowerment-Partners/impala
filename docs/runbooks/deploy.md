@@ -30,13 +30,16 @@ existing bridge stack):
     Review the diff. The only expected changes for a code-only deploy are the ECS task definitions and services (new image reference).
 4. **Apply.** `terraform apply plan.tfplan`. ECS rolls the server + worker services one task at a time with the health check as the gate.
 5. **Run database migrations (if any).** See [Database migrations](#database-migrations) below.
-   - **Server-side roles (migrations 019–021):** these add the account `role`
-     column, a first-account-admin bootstrap trigger + backfill, `profile_source`,
-     and the `transaction_review` table. **After this deploy, every existing
+   - **Server-side roles (migrations 023–025; extended to seven roles by
+     035):** these add the account `role` column, a first-account-admin
+     bootstrap trigger + backfill, `profile_source`, and the
+     `transaction_review` table; 035 widens the role CHECK for treasurer /
+     key-custodian / auditor and must run **before** rolling a binary that
+     grants them. **After this deploy, every existing
      session must refresh its token** (or re-login) to obtain the new server-side
      `role` claim — tokens minted before the deploy lack it and are treated as
      `view-only`, so admins will lose admin access in the web UI until they
-     refresh. On an existing database the 019 backfill promotes the earliest
+     refresh. On an existing database the 023 backfill promotes the earliest
      account to `admin`; confirm at least one admin exists
      (`SELECT count(*) FROM impala_account WHERE role='admin'`) before relying on
      the admin console.

@@ -249,6 +249,15 @@ public class SCP03 {
             ISOException.throwIt((short) 0x6700); // SW_WRONG_LENGTH
         }
 
+        // C-MAC is the mandatory minimum SCP03 security level (GP 2.3 Amd D):
+        // without it, unwrapCommand would skip MAC verification entirely and
+        // PROVISION_PIN / APPLET_UPDATE would execute payloads that carried no
+        // per-command authentication. Rejected before any cryptogram work, so
+        // the session stays retryable with a compliant P1.
+        if ((secLevel & SEC_CMAC) == 0) {
+            ISOException.throwIt((short) 0x6985); // SW_CONDITIONS_NOT_SATISFIED
+        }
+
         // Verify host cryptogram
         computeCryptogram(sessionMAC, DERIV_HOST_CRYPTO, (short) 0x0040,
                 tempBuffer, (short) 0);

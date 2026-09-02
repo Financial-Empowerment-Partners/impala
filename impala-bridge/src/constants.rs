@@ -74,6 +74,11 @@ pub const LOCKOUT_THRESHOLD: u64 = 5;
 /// Account lockout: duration in seconds (15 minutes).
 pub const LOCKOUT_DURATION_SECS: usize = 15 * 60;
 
+/// How long a consumed MFA code stays marked used, blocking replay. Covers a
+/// TOTP code's full acceptance window: the 30s step plus one step of skew on
+/// each side (90s), rounded up.
+pub const MFA_CODE_REPLAY_WINDOW_SECS: usize = 120;
+
 /// Maximum Stellar account ID length.
 pub const STELLAR_ACCOUNT_ID_LENGTH: usize = 56;
 
@@ -236,12 +241,40 @@ pub const ROLE_DEVICE: &str = "device";
 /// Account role: token — can manage accounts and MFA.
 pub const ROLE_TOKEN: &str = "token";
 
+/// Account role: treasurer — reserve and replenishment money operations
+/// (disbursement, refunds, write-offs, policy). Lateral: no key custody, no
+/// governance.
+pub const ROLE_TREASURER: &str = "treasurer";
+
+/// Account role: key custodian — bridge provider credentials and custodial
+/// Stellar seeds. Lateral: no treasury operations, no governance.
+pub const ROLE_KEY_CUSTODIAN: &str = "key-custodian";
+
+/// Account role: auditor — read-only access to the privileged surfaces
+/// (accounts list, reserve ledgers, key inventory, event feed) for
+/// compliance/reconciliation. Holds no privileged mutation capability; on its
+/// own account it remains an ordinary self-scoped user, like `view-only`.
+pub const ROLE_AUDITOR: &str = "auditor";
+
 /// Account role: admin — full access including role management and the admin console.
 pub const ROLE_ADMIN: &str = "admin";
 
-/// All valid account roles. The hyphenated `view-only` mirrors the UI's role keys
-/// (`impala-ui/html/js/roles.js`) so the UI can read the role straight from the JWT.
-pub const ALL_ROLES: &[&str] = &[ROLE_VIEW_ONLY, ROLE_DEVICE, ROLE_TOKEN, ROLE_ADMIN];
+/// All valid account roles. The hyphenated names mirror the UI's role keys
+/// (`impala-ui/html/js/roles.js`) so the UI can read the role straight from
+/// the JWT. The first four are the original ladder; treasurer, key-custodian
+/// and auditor are LATERAL specializations of the admin surface (none
+/// includes another; admin remains the superset). Must stay in sync with the
+/// CHECK constraint in migrations/035_add_privileged_roles.sql — a tripwire
+/// test in auth.rs pins that.
+pub const ALL_ROLES: &[&str] = &[
+    ROLE_VIEW_ONLY,
+    ROLE_DEVICE,
+    ROLE_TOKEN,
+    ROLE_TREASURER,
+    ROLE_KEY_CUSTODIAN,
+    ROLE_AUDITOR,
+    ROLE_ADMIN,
+];
 
 /// Valid transaction review statuses (mirrors the `chk_review_status` DB CHECK).
 pub const VALID_REVIEW_STATUSES: &[&str] = &["unreviewed", "cleared", "flagged", "escalated"];
@@ -623,6 +656,19 @@ pub const DEFAULT_RESERVE_WATCH_SECS: u64 = 30;
 
 /// Max Horizon payment records per watcher page.
 pub const RESERVE_WATCH_PAGE_LIMIT: u32 = 200;
+
+/// Max pages an admin-resolve on-chain search walks backward before declaring
+/// the result inconclusive (and the caller fails closed). 200 records/page x
+/// 50 pages = 10,000 records — comfortably deeper than any plausible feed
+/// backlog since an order was created, while bounding a resolve request's
+/// Horizon fan-out. The time floor (the order/refund creation time) normally
+/// stops the walk far sooner.
+pub const RESERVE_ONCHAIN_SEARCH_MAX_PAGES: usize = 50;
+
+/// Safety margin subtracted from an order/refund's own timestamp to form the
+/// backward-search floor, absorbing bridge/ledger clock skew so the walk can
+/// never stop just short of the settling payment.
+pub const RESERVE_ONCHAIN_SEARCH_SKEW_SECS: i64 = 600;
 
 /// Max concurrently open (non-terminal) reserve orders per account — with
 /// the hold-fraction guard, bounds how much of the pool one actor can lock.

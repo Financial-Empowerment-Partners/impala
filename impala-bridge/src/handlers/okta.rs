@@ -166,12 +166,10 @@ async fn okta_token_exchange_inner(
     // Validate the Okta access token
     let claims = okta::validate_okta_token(&provider, &payload.okta_token).await?;
 
-    // Determine account ID from claims (email > preferred_username > okta:{sub})
-    let account_id = claims
-        .email
-        .clone()
-        .or_else(|| claims.preferred_username.clone())
-        .unwrap_or_else(|| format!("okta:{}", claims.sub));
+    // Key the account by email ONLY when the IdP asserts it verified (see
+    // `derive_okta_account_id`).
+    let account_id =
+        derive_okta_account_id(claims.email.as_deref(), claims.email_verified, &claims.sub);
 
     // Validate and normalize the account ID
     let account_id = normalize_federated_account_id(&account_id, "okta")?;
@@ -274,6 +272,20 @@ pub async fn okta_config(
     }
 }
 
+/// Derive the local account id from Okta claims. The bridge shares one
+/// account namespace across every configured IdP, so an email keys an account
+/// ONLY when the IdP asserts it verified — an unverified or absent email (or a
+/// self-asserted preferred_username) must never let a token claim
+/// victim@corp.com's account, ADMIN_ACCOUNT_IDS matching included. The bar is
+/// `Some(true)`, not "not explicitly false": an absent claim is untrusted.
+/// Mirrors `derive_sso_account_id` / `derive_google_account_id`.
+fn derive_okta_account_id(email: Option<&str>, email_verified: Option<bool>, sub: &str) -> String {
+    match email {
+        Some(e) if !e.trim().is_empty() && email_verified == Some(true) => e.trim().to_string(),
+        _ => format!("okta:{}", sub),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -300,5 +312,33 @@ mod tests {
     #[test]
     fn normalize_rejects_control_characters() {
         assert!(normalize_federated_account_id("user\n@example.com", "okta").is_err());
+    }
+
+    #[test]
+    fn account_id_uses_email_only_when_verified() {
+        // Verified email keys the shared namespace...
+        assert_eq!(
+            derive_okta_account_id(Some("victim@corp.com"), Some(true), "sub123"),
+            "victim@corp.com"
+        );
+        // ...but an unverified or absent verification claim must NOT — the
+        // account-takeover primitive this fix closes.
+        assert_eq!(
+            derive_okta_account_id(Some("victim@corp.com"), Some(false), "sub123"),
+            "okta:sub123"
+        );
+        assert_eq!(
+            derive_okta_account_id(Some("victim@corp.com"), None, "sub123"),
+            "okta:sub123"
+        );
+        // No email at all falls back to the namespaced subject.
+        assert_eq!(
+            derive_okta_account_id(None, Some(true), "sub123"),
+            "okta:sub123"
+        );
+        assert_eq!(
+            derive_okta_account_id(Some("  "), Some(true), "sub123"),
+            "okta:sub123"
+        );
     }
 }

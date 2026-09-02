@@ -23,11 +23,15 @@
     'use strict';
 
     Router.init();
-    if (!Router.requireAdmin()) return;
-    if (!Roles.currentUserHasPermission('manage_keys')) {
-        Router.showToast('Key management requires the admin role', 'alert');
-        return;
-    }
+    if (!Router.requirePermission('view_keys', 'Bridge Keys')) return;
+
+    // One flag, applied at every action-injection point: viewers without it
+    // (the auditor) get the same inventory, read-only. The bridge enforces
+    // the same boundary server-side regardless — which is also why the
+    // injection points carry no unit tests (DOM rendering, outside the
+    // DOM-free test style): a missed gate shows a button that 403s, never an
+    // unauthorized mutation.
+    var canManage = Roles.currentUserHasPermission('manage_keys');
 
     var escapeHtml = EscapeHtml.escape;
 
@@ -128,7 +132,7 @@
             }
 
             var actions = '';
-            if (enabled) {
+            if (enabled && canManage) {
                 actions =
                     '<button class="button small" data-import="' + escapeHtml(v.kind) + '">' +
                     (KeysView.isReplacement(v) ? 'Replace&hellip;' : 'Import&hellip;') +
@@ -533,10 +537,17 @@
         });
     }
 
-    document.getElementById('seed-generate')
-        .addEventListener('click', openGenerateSeedModal);
-    document.getElementById('seed-import')
-        .addEventListener('click', openImportSeedModal);
+    // Static action buttons carry data-permission="manage_keys" in the HTML
+    // (hidden for read-only viewers by Router.enforcePermissions), so wire
+    // them null-safely and only when the role can act.
+    var seedGen = document.getElementById('seed-generate');
+    var seedImp = document.getElementById('seed-import');
+    if (canManage && seedGen) seedGen.addEventListener('click', openGenerateSeedModal);
+    if (canManage && seedImp) seedImp.addEventListener('click', openImportSeedModal);
+
+    if (!canManage) {
+        Router.showReadOnlyBanner('Key operations', 'the admin or key-custodian role');
+    }
 
     load();
 })();

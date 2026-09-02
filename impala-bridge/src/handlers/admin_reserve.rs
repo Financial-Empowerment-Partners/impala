@@ -1,6 +1,8 @@
 //! Admin management of the conversion reserve (`/admin/exchange-reserve/*`).
 //!
-//! All endpoints are `AdminUser`-gated. Value-moving ones (manual entries,
+//! All endpoints are capability-gated: reads take `Privileged<ReadReserve>`
+//! (admin, treasurer, auditor), mutations `Privileged<ManageReserve>` (admin,
+//! treasurer). Value-moving ones (manual entries,
 //! disburse, resolve) additionally carry the custodial-sign rate limit
 //! (5/min) and write audit `info!` lines plus outbox events. Every ledger
 //! mutation follows the module rules from `exchange/reserve.rs`: guarded
@@ -21,9 +23,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::auth::AdminUser;
+use crate::auth::{ManageReserve, Privileged, ReadReserve};
 use crate::constants::{
     RESERVE_ADMIN_ENTRY_KINDS, RESERVE_CURRENCY_USDC, RESERVE_DISBURSE_MAX_MULTIPLE,
+    RESERVE_ONCHAIN_SEARCH_MAX_PAGES, RESERVE_ONCHAIN_SEARCH_SKEW_SECS,
     RESERVE_RESOLVE_FAIL_MIN_INTENT_AGE_SECS, RESERVE_SCALE_STELLAR, RESERVE_SCALE_USD,
     RESERVE_SUPPORTED_POLICY_PROVIDERS, RESERVE_THRESHOLD_MAX_USD_CENTS,
     RESERVE_THRESHOLD_MIN_USD_CENTS, RESERVE_WATCH_PAGE_LIMIT, SIGN_RATE_LIMIT_MAX_REQUESTS,
@@ -72,7 +75,7 @@ fn ok(message: impl Into<String>) -> Json<ReserveActionResponse> {
 /// `GET /admin/exchange-reserve` — buckets, policies, pending queues, and a
 /// best-effort on-chain snapshot for drift visibility.
 pub async fn get_status(
-    _user: AdminUser,
+    _user: Privileged<ReadReserve>,
     Extension(pool): Extension<PgPool>,
     Extension(stellar_config): Extension<Arc<crate::config::StellarConfig>>,
     Extension(http): Extension<Arc<reqwest::Client>>,
@@ -202,7 +205,7 @@ pub async fn get_status(
 
 /// `PUT /admin/exchange-reserve/policies/{provider}` — enable/threshold.
 pub async fn update_policy(
-    user: AdminUser,
+    user: Privileged<ManageReserve>,
     Extension(pool): Extension<PgPool>,
     Path(provider): Path<String>,
     Json(payload): Json<ReservePolicyUpdateRequest>,
@@ -260,7 +263,7 @@ pub async fn update_policy(
 
 /// `PUT /admin/exchange-reserve/buckets/{currency}` — low-water mark.
 pub async fn update_bucket(
-    user: AdminUser,
+    user: Privileged<ManageReserve>,
     Extension(pool): Extension<PgPool>,
     Path(currency): Path<String>,
     Json(payload): Json<ReserveBucketUpdateRequest>,
@@ -308,7 +311,7 @@ pub async fn update_bucket(
 /// held_adjustment. The ledger tracks the chain: record a topup only after
 /// the matching on-chain/bank funding actually happened (runbook).
 pub async fn create_entry(
-    user: AdminUser,
+    user: Privileged<ManageReserve>,
     Extension(pool): Extension<PgPool>,
     Extension(redis_pool): Extension<Arc<deadpool_redis::Pool>>,
     Extension(metrics): Extension<Arc<AppMetrics>>,
@@ -420,7 +423,7 @@ pub struct ReserveEntryListQuery {
 }
 
 pub async fn list_entries(
-    _user: AdminUser,
+    _user: Privileged<ReadReserve>,
     Extension(pool): Extension<PgPool>,
     Query(q): Query<ReserveEntryListQuery>,
 ) -> Result<Json<crate::models::PaginatedResponse<ReserveEntryView>>, AppError> {
@@ -498,7 +501,7 @@ pub async fn list_entries(
 
 /// `GET /admin/exchange-reserve/unmatched` — stray-inflow work queue.
 pub async fn list_unmatched(
-    _user: AdminUser,
+    _user: Privileged<ReadReserve>,
     Extension(pool): Extension<PgPool>,
     Query(q): Query<PaginationParams>,
 ) -> Result<Json<crate::models::PaginatedResponse<ReserveUnmatchedView>>, AppError> {
@@ -534,7 +537,7 @@ pub async fn list_unmatched(
 
 /// `GET /admin/exchange-reserve/refunds` — the refund queue.
 pub async fn list_refunds(
-    _user: AdminUser,
+    _user: Privileged<ReadReserve>,
     Extension(pool): Extension<PgPool>,
     Query(q): Query<crate::models::ReserveRefundListQuery>,
 ) -> Result<Json<crate::models::PaginatedResponse<crate::models::ReserveRefundView>>, AppError> {
@@ -598,7 +601,7 @@ pub async fn list_refunds(
 
 /// `PUT /admin/exchange-reserve/settings` — the refund master switch.
 pub async fn update_settings(
-    user: AdminUser,
+    user: Privileged<ManageReserve>,
     Extension(pool): Extension<PgPool>,
     Json(payload): Json<crate::models::ReserveSettingsUpdateRequest>,
 ) -> Result<Json<ReserveActionResponse>, AppError> {
@@ -621,7 +624,7 @@ pub async fn update_settings(
 /// admin supplies the destination precisely because the bridge could not
 /// infer a safe one.
 pub async fn create_refund(
-    user: AdminUser,
+    user: Privileged<ManageReserve>,
     Extension(pool): Extension<PgPool>,
     Extension(redis_pool): Extension<Arc<deadpool_redis::Pool>>,
     reserve: Option<Extension<Arc<ConversionReserve>>>,
@@ -730,7 +733,7 @@ pub async fn create_refund(
 /// restores the ledger for one that provably did not.
 #[allow(clippy::too_many_arguments)]
 pub async fn resolve_refund(
-    user: AdminUser,
+    user: Privileged<ManageReserve>,
     Extension(pool): Extension<PgPool>,
     Extension(redis_pool): Extension<Arc<deadpool_redis::Pool>>,
     Extension(metrics): Extension<Arc<AppMetrics>>,
@@ -759,7 +762,8 @@ pub async fn resolve_refund(
 
     let row: Option<RefundActionRow> = sqlx::query_as(
         "SELECT status, currency, refund_minor, destination, memo, \
-                EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - claimed_at))::bigint AS claim_age \
+                EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - claimed_at))::bigint AS claim_age, \
+                created_at \
          FROM conversion_reserve_refund WHERE refund_id = $1",
     )
     .bind(refund_id)
@@ -773,6 +777,7 @@ pub async fn resolve_refund(
         destination,
         memo,
         claim_age,
+        created_at: refund_created_at,
     } = row.ok_or_else(|| AppError::NotFound("No such refund".to_string()))?;
 
     match payload.action.as_str() {
@@ -833,7 +838,15 @@ pub async fn resolve_refund(
                     "Only a frozen or in-flight refund can be recorded as sent".to_string(),
                 ));
             }
-            record_admin_refund_sent(&pool, &metrics, &user, refund_id, &currency, &hash).await
+            record_admin_refund_sent(
+                &pool,
+                &metrics,
+                &user.account_id,
+                refund_id,
+                &currency,
+                &hash,
+            )
+            .await
         }
         _ => {
             // REVERSE — the dangerous one. Reversing a refund that actually
@@ -857,6 +870,8 @@ pub async fn resolve_refund(
                     "The reserve is not configured, so the chain cannot be checked".to_string(),
                 )
             })?;
+            let not_before =
+                refund_created_at - ChronoDuration::seconds(RESERVE_ONCHAIN_SEARCH_SKEW_SECS);
             if let Some(hash) = find_onchain_refund(
                 &http,
                 &stellar_config.horizon_url,
@@ -864,6 +879,7 @@ pub async fn resolve_refund(
                 &destination,
                 refund_minor,
                 memo.as_deref(),
+                not_before,
             )
             .await?
             {
@@ -875,7 +891,7 @@ pub async fn resolve_refund(
             reverse_admin_refund(
                 &pool,
                 &metrics,
-                &user,
+                &user.account_id,
                 refund_id,
                 &currency,
                 refund_minor,
@@ -886,10 +902,15 @@ pub async fn resolve_refund(
     }
 }
 
-/// Search the reserve's recent outgoing payments for this refund.
+/// Search the reserve's outgoing payments for this refund, exhaustively over
+/// the window since the refund could first have been sent.
 ///
-/// Unambiguous because the refund memo is deliberately distinct from an
-/// order ref, so this can never confuse a refund with a payout.
+/// Unambiguous because the refund memo is deliberately distinct from an order
+/// ref, so this can never confuse a refund with a payout. `not_before` bounds
+/// the backward walk (the payment cannot predate the refund row); an
+/// `Inconclusive` walk fails closed, because a settled refund that has merely
+/// scrolled past the newest records must never be read as "never sent" — that
+/// would re-credit money that already left the chain.
 async fn find_onchain_refund(
     http: &reqwest::Client,
     horizon_url: &str,
@@ -897,49 +918,66 @@ async fn find_onchain_refund(
     destination: &str,
     refund_minor: i64,
     memo: Option<&str>,
+    not_before: chrono::DateTime<Utc>,
 ) -> Result<Option<String>, AppError> {
-    let url = format!(
-        "{}/accounts/{}/payments?order=desc&limit={}&join=transactions",
-        horizon_url.trim_end_matches('/'),
-        reserve_address,
-        RESERVE_WATCH_PAGE_LIMIT
-    );
-    let resp = http.get(&url).send().await.map_err(|e| {
-        error!("find_onchain_refund: horizon error: {}", e);
+    let reserve_address = reserve_address.to_string();
+    let destination = destination.to_string();
+    let memo = memo.map(str::to_string);
+    let result = crate::stellar::horizon::search_payments_desc(
+        http,
+        horizon_url,
+        &reserve_address,
+        not_before,
+        RESERVE_ONCHAIN_SEARCH_MAX_PAGES,
+        RESERVE_WATCH_PAGE_LIMIT,
+        |p| {
+            if p.to == reserve_address {
+                return false; // outgoing only
+            }
+            let amount_hit =
+                parse_decimal_to_minor(&p.amount, RESERVE_SCALE_STELLAR) == Some(refund_minor);
+            let memo_hit = match &memo {
+                Some(m) => p.memo_text.as_deref() == Some(m.as_str()),
+                None => true,
+            };
+            p.to == destination && amount_hit && memo_hit
+        },
+    )
+    .await
+    .map_err(|_| {
         AppError::InternalError("Cannot verify on-chain state; retry later".to_string())
     })?;
-    if !resp.status().is_success() {
-        error!("find_onchain_refund: horizon HTTP {}", resp.status());
-        return Err(AppError::InternalError(
-            "Cannot verify on-chain state; retry later".to_string(),
-        ));
-    }
-    let body: serde_json::Value = resp.json().await.map_err(|e| {
-        error!("find_onchain_refund: parse error: {}", e);
-        AppError::InternalError("Cannot verify on-chain state; retry later".to_string())
-    })?;
-    for p in crate::stellar::horizon::parse_payments_page(&body).records {
-        // Outgoing only.
-        if p.to == reserve_address {
-            continue;
+    onchain_search_result("find_onchain_refund", result)
+}
+
+/// Collapse a bounded feed search into the caller's Option, failing closed on
+/// an inconclusive walk (absence was not proven — refuse rather than assume).
+fn onchain_search_result(
+    context: &str,
+    result: crate::stellar::horizon::FeedSearch,
+) -> Result<Option<String>, AppError> {
+    use crate::stellar::horizon::FeedSearch;
+    match result {
+        FeedSearch::Found(hash) => Ok(Some(hash)),
+        FeedSearch::VerifiedAbsent => Ok(None),
+        FeedSearch::Inconclusive => {
+            error!(
+                "{}: on-chain search inconclusive over the bounded window",
+                context
+            );
+            Err(AppError::Conflict(
+                "Could not verify on-chain state exhaustively; retry later or supply the settling \
+                 transaction hash"
+                    .to_string(),
+            ))
         }
-        let amount_hit =
-            parse_decimal_to_minor(&p.amount, RESERVE_SCALE_STELLAR) == Some(refund_minor);
-        let memo_hit = match memo {
-            Some(m) => p.memo_text.as_deref() == Some(m),
-            None => true,
-        };
-        if p.to == destination && amount_hit && memo_hit {
-            return Ok(Some(p.tx_hash));
-        }
     }
-    Ok(None)
 }
 
 async fn record_admin_refund_sent(
     pool: &PgPool,
     metrics: &AppMetrics,
-    user: &AdminUser,
+    actor: &str,
     refund_id: Uuid,
     currency: &str,
     stellar_hash: &str,
@@ -953,7 +991,7 @@ async fn record_admin_refund_sent(
     )
     .bind(refund_id)
     .bind(stellar_hash)
-    .bind(&user.account_id)
+    .bind(actor)
     .execute(&mut *tx)
     .await
     .map_err(db_err("refund sent"))?;
@@ -977,7 +1015,7 @@ async fn record_admin_refund_sent(
         held_after: held,
         refund_id: Some(refund_id),
         stellar_tx_hash: Some(stellar_hash.to_string()),
-        admin_account_id: Some(user.account_id.clone()),
+        admin_account_id: Some(actor.to_string()),
         ..Default::default()
     })
     .execute(&mut *tx)
@@ -988,7 +1026,7 @@ async fn record_admin_refund_sent(
     metrics.reserve_refunds_sent.add(1, &[]);
     info!(
         "resolve_refund: refund={} action=sent hash={} by={}",
-        refund_id, stellar_hash, user.account_id
+        refund_id, stellar_hash, actor
     );
     Ok(ok("Refund recorded as sent"))
 }
@@ -996,7 +1034,7 @@ async fn record_admin_refund_sent(
 async fn reverse_admin_refund(
     pool: &PgPool,
     metrics: &AppMetrics,
-    user: &AdminUser,
+    actor: &str,
     refund_id: Uuid,
     currency: &str,
     refund_minor: i64,
@@ -1010,7 +1048,7 @@ async fn reverse_admin_refund(
          WHERE refund_id = $1 AND status = 'frozen'",
     )
     .bind(refund_id)
-    .bind(&user.account_id)
+    .bind(actor)
     .bind(note)
     .execute(&mut *tx)
     .await
@@ -1034,7 +1072,7 @@ async fn reverse_admin_refund(
         balance_after: bal_after,
         held_after,
         refund_id: Some(refund_id),
-        admin_account_id: Some(user.account_id.clone()),
+        admin_account_id: Some(actor.to_string()),
         note: note.clone(),
         ..Default::default()
     })
@@ -1046,7 +1084,7 @@ async fn reverse_admin_refund(
     metrics.record_reserve_refund_failure("admin_reversed");
     info!(
         "resolve_refund: refund={} action=reverse by={}",
-        refund_id, user.account_id
+        refund_id, actor
     );
     Ok(ok("Refund reversed; the ledger is restored"))
 }
@@ -1219,7 +1257,7 @@ pub(crate) async fn customer_shortfall(
 
 /// `GET /admin/exchange-reserve/forecast` — utilization prediction.
 pub async fn get_forecast(
-    _user: AdminUser,
+    _user: Privileged<ReadReserve>,
     Extension(pool): Extension<PgPool>,
     Query(q): Query<ReserveForecastQuery>,
 ) -> Result<Json<ReserveForecastResponse>, AppError> {
@@ -1324,6 +1362,9 @@ struct RefundActionRow {
     memo: Option<String>,
     /// Seconds since the claim; `None` when never claimed.
     claim_age: Option<i64>,
+    /// When the refund row was created — the earliest a settling payment for
+    /// it could exist, used to floor the on-chain search.
+    created_at: chrono::DateTime<Utc>,
 }
 
 /// The `deposit` journal entry an order received, if any — the source of a
@@ -1381,7 +1422,7 @@ async fn load_reserve_order(
 /// fiat off-ramp order: the admin paid `amount_usd_cents` out of the USD
 /// float (bank/OwlPay balance) and records it here.
 pub async fn disburse_order(
-    user: AdminUser,
+    user: Privileged<ManageReserve>,
     Extension(pool): Extension<PgPool>,
     Extension(redis_pool): Extension<Arc<deadpool_redis::Pool>>,
     Extension(metrics): Extension<Arc<AppMetrics>>,
@@ -1499,6 +1540,7 @@ pub async fn disburse_order(
 /// amount must all agree — destination+amount alone could confuse two
 /// payouts to the same address. All candidates are reserve-signed (the feed
 /// only carries the reserve's own operations), so none are forgeable.
+#[allow(clippy::too_many_arguments)]
 async fn find_onchain_payout(
     http: &reqwest::Client,
     horizon_url: &str,
@@ -1507,58 +1549,53 @@ async fn find_onchain_payout(
     payout_extra_id: Option<&str>,
     payout_address: Option<&str>,
     amount_to: Option<&str>,
+    not_before: chrono::DateTime<Utc>,
 ) -> Result<Option<String>, AppError> {
-    let url = format!(
-        "{}/accounts/{}/payments?order=desc&limit={}&join=transactions",
-        horizon_url.trim_end_matches('/'),
-        reserve_address,
-        RESERVE_WATCH_PAGE_LIMIT
-    );
-    let resp = http.get(&url).send().await.map_err(|e| {
-        error!("find_onchain_payout: horizon error: {}", e);
-        AppError::InternalError("Cannot verify on-chain state; retry later".to_string())
-    })?;
-    if !resp.status().is_success() {
-        error!("find_onchain_payout: horizon HTTP {}", resp.status());
-        return Err(AppError::InternalError(
-            "Cannot verify on-chain state; retry later".to_string(),
-        ));
-    }
-    let body: serde_json::Value = resp.json().await.map_err(|e| {
-        error!("find_onchain_payout: parse error: {}", e);
-        AppError::InternalError("Cannot verify on-chain state; retry later".to_string())
-    })?;
+    let reserve_address = reserve_address.to_string();
+    let order_ref = order_ref.to_string();
+    let payout_extra_id = payout_extra_id.map(str::to_string);
+    let payout_address = payout_address.map(str::to_string);
     let amount_minor = amount_to.and_then(|a| parse_decimal_to_minor(a, RESERVE_SCALE_STELLAR));
-    for p in crate::stellar::horizon::parse_payments_page(&body).records {
-        // Outgoing only — the pay-in deposit carries the same memo.
-        if p.to == reserve_address {
-            continue;
-        }
-        let hit = match payout_extra_id {
-            // Memo-primary, but the destination must ALSO match: refunds are
-            // outgoing too, and a refund carrying an order-derived memo would
-            // otherwise read as "the payout landed" — making resolve-fail
-            // refuse and resolve-complete record the refund's hash as the
-            // fulfillment. A refund never goes to payout_address.
-            None => {
-                payout_address == Some(p.to.as_str())
-                    && p.memo_text
-                        .as_deref()
-                        .map(|m| memo_matches_ref(m, order_ref))
-                        .unwrap_or(false)
+    let result = crate::stellar::horizon::search_payments_desc(
+        http,
+        horizon_url,
+        &reserve_address,
+        not_before,
+        RESERVE_ONCHAIN_SEARCH_MAX_PAGES,
+        RESERVE_WATCH_PAGE_LIMIT,
+        |p| {
+            // Outgoing only — the pay-in deposit carries the same memo.
+            if p.to == reserve_address {
+                return false;
             }
-            Some(extra) => {
-                p.memo_text.as_deref() == Some(extra)
-                    && payout_address == Some(p.to.as_str())
-                    && amount_minor.is_some()
-                    && parse_decimal_to_minor(&p.amount, RESERVE_SCALE_STELLAR) == amount_minor
+            match &payout_extra_id {
+                // Memo-primary, but the destination must ALSO match: refunds
+                // are outgoing too, and a refund carrying an order-derived
+                // memo would otherwise read as "the payout landed" — making
+                // resolve-fail refuse and resolve-complete record the refund's
+                // hash as the fulfillment. A refund never goes to
+                // payout_address.
+                None => {
+                    payout_address.as_deref() == Some(p.to.as_str())
+                        && p.memo_text
+                            .as_deref()
+                            .map(|m| memo_matches_ref(m, &order_ref))
+                            .unwrap_or(false)
+                }
+                Some(extra) => {
+                    p.memo_text.as_deref() == Some(extra.as_str())
+                        && payout_address.as_deref() == Some(p.to.as_str())
+                        && amount_minor.is_some()
+                        && parse_decimal_to_minor(&p.amount, RESERVE_SCALE_STELLAR) == amount_minor
+                }
             }
-        };
-        if hit {
-            return Ok(Some(p.tx_hash));
-        }
-    }
-    Ok(None)
+        },
+    )
+    .await
+    .map_err(|_| {
+        AppError::InternalError("Cannot verify on-chain state; retry later".to_string())
+    })?;
+    onchain_search_result("find_onchain_payout", result)
 }
 
 /// `POST /admin/exchange-reserve/orders/{order_id}/resolve` — resolve a
@@ -1569,7 +1606,7 @@ async fn find_onchain_payout(
 /// other exit is a real disbursement).
 #[allow(clippy::too_many_arguments)]
 pub async fn resolve_order(
-    user: AdminUser,
+    user: Privileged<ManageReserve>,
     Extension(pool): Extension<PgPool>,
     Extension(redis_pool): Extension<Arc<deadpool_redis::Pool>>,
     Extension(metrics): Extension<Arc<AppMetrics>>,
@@ -1608,14 +1645,18 @@ pub async fn resolve_order(
     // change (the freeze), not the first intent: retries re-sign with fresh
     // 300s validity windows, so only "frozen for >= 600s" proves no
     // submission can still land.
-    let intent_exists: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM conversion_reserve_entry \
-             WHERE order_id = $1 AND kind = 'payout_attempt')",
+    // The earliest payout_attempt intent for the order: a payout can never
+    // predate its write-ahead intent, so this floors the on-chain search.
+    // NULL when no intent was ever written (no payout could have been sent).
+    let first_intent_at: Option<chrono::DateTime<Utc>> = sqlx::query_scalar(
+        "SELECT MIN(created_at) FROM conversion_reserve_entry \
+             WHERE order_id = $1 AND kind = 'payout_attempt'",
     )
     .bind(order_id)
     .fetch_one(&pool)
     .await
     .map_err(db_err("intent lookup"))?;
+    let intent_exists = first_intent_at.is_some();
     let state_age_secs: i64 = sqlx::query_scalar(
         "SELECT EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - updated_at))::bigint \
          FROM exchange_order WHERE order_id = $1",
@@ -1645,6 +1686,8 @@ pub async fn resolve_order(
                             .to_string(),
                     ));
                 };
+                let not_before = first_intent_at.unwrap_or_else(Utc::now)
+                    - ChronoDuration::seconds(RESERVE_ONCHAIN_SEARCH_SKEW_SECS);
                 if let Some(hash) = find_onchain_payout(
                     &http,
                     &stellar_config.horizon_url,
@@ -1653,6 +1696,7 @@ pub async fn resolve_order(
                     order.payout_extra_id.as_deref(),
                     order.payout_address.as_deref(),
                     order.amount_to.as_deref(),
+                    not_before,
                 )
                 .await?
                 {
@@ -1666,7 +1710,7 @@ pub async fn resolve_order(
             resolve_fail(
                 &pool,
                 &metrics,
-                &user,
+                &user.account_id,
                 order_id,
                 &order,
                 &payload.note,
@@ -1688,6 +1732,8 @@ pub async fn resolve_order(
                             "Reserve not configured; supply stellar_tx_hash explicitly".to_string(),
                         ));
                     };
+                    let not_before = first_intent_at.unwrap_or_else(Utc::now)
+                        - ChronoDuration::seconds(RESERVE_ONCHAIN_SEARCH_SKEW_SECS);
                     find_onchain_payout(
                         &http,
                         &stellar_config.horizon_url,
@@ -1696,6 +1742,7 @@ pub async fn resolve_order(
                         order.payout_extra_id.as_deref(),
                         order.payout_address.as_deref(),
                         order.amount_to.as_deref(),
+                        not_before,
                     )
                     .await?
                     .ok_or_else(|| {
@@ -1705,7 +1752,7 @@ pub async fn resolve_order(
                     })?
                 }
             };
-            resolve_complete(&pool, &metrics, &user, order_id, &order, &hash).await
+            resolve_complete(&pool, &metrics, &user.account_id, order_id, &order, &hash).await
         }
     }
 }
@@ -1714,7 +1761,7 @@ pub async fn resolve_order(
 async fn resolve_fail(
     pool: &PgPool,
     metrics: &AppMetrics,
-    user: &AdminUser,
+    actor: &str,
     order_id: Uuid,
     order: &ReserveOrderActionRow,
     note: &Option<String>,
@@ -1768,7 +1815,7 @@ async fn resolve_fail(
         balance_after: bal_after,
         held_after,
         order_id: Some(order_id),
-        admin_account_id: Some(user.account_id.clone()),
+        admin_account_id: Some(actor.to_string()),
         note: note.clone(),
         ..Default::default()
     })
@@ -1865,17 +1912,14 @@ async fn resolve_fail(
     tx.commit().await.map_err(db_err("fail commit"))?;
 
     metrics.record_exchange_order_update("reserve", "failed", "admin");
-    info!(
-        "resolve_order: order={} action=fail by={}",
-        order_id, user.account_id
-    );
+    info!("resolve_order: order={} action=fail by={}", order_id, actor);
     Ok(ok(format!("Order failed; hold released.{}", refund_note)))
 }
 
 async fn resolve_complete(
     pool: &PgPool,
     metrics: &AppMetrics,
-    user: &AdminUser,
+    actor: &str,
     order_id: Uuid,
     order: &ReserveOrderActionRow,
     stellar_hash: &str,
@@ -1918,7 +1962,7 @@ async fn resolve_complete(
         held_after,
         order_id: Some(order_id),
         stellar_tx_hash: Some(stellar_hash.to_string()),
-        admin_account_id: Some(user.account_id.clone()),
+        admin_account_id: Some(actor.to_string()),
         ..Default::default()
     })
     .execute(&mut *tx)
@@ -1964,7 +2008,7 @@ async fn resolve_complete(
     metrics.record_exchange_order_update("reserve", "completed", "admin");
     info!(
         "resolve_order: order={} action=complete hash={} by={}",
-        order_id, stellar_hash, user.account_id
+        order_id, stellar_hash, actor
     );
     Ok(ok("Payout recorded; order completed"))
 }

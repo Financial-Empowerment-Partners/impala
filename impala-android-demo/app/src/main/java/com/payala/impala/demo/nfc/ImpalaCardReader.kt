@@ -145,11 +145,19 @@ class ImpalaCardReader(apduChannel: BIBO) {
     /**
      * Verifies the master PIN against the card.
      *
+     * Wire contract: the applet stores master PIN digits as raw byte VALUES,
+     * not ASCII — the install default is {1,4,1,1,7,2,9,8} and SCP03
+     * provisioning writes mapDigitsToByteArray output ('1' -> 0x01; see
+     * impala-card/sdk ImpalaSDK.provisionMasterPIN). Sending UTF-8 bytes here
+     * can never verify and each attempt burns one of the 10 master-PIN tries,
+     * which have no unblock path.
+     *
      * @param pin 8-digit master PIN (default "14117298")
      * @throws BIBOException if the PIN is rejected or communication fails
      */
     fun verifyMasterPin(pin: String = "14117298") {
-        val pinBytes = pin.toByteArray(Charsets.UTF_8)
+        require(pin.length == 8 && pin.all { it.isDigit() }) { "Master PIN must be exactly 8 digits" }
+        val pinBytes = ByteArray(pin.length) { (pin[it] - '0').toByte() }
         val cmd = CommandAPDU(0x00, INS_VERIFY_PIN.toInt(), 0x00, P2_MASTER_PIN.toInt(), pinBytes)
         transmit(cmd)
     }

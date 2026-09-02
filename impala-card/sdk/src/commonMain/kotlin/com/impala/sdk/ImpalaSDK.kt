@@ -412,7 +412,11 @@ class ImpalaSDK(
 
     fun verifyMasterPin(mPin: String) {
         require(mPin.length == 8 && mPin.all { it.isDigit() }) { "Master PIN must be exactly 8 digits" }
-        val masterPin = mapStringToByteArray(mPin)
+        // Raw digit values, NOT UTF-8 char codes: provisionMasterPIN stores
+        // the PIN via mapDigitsToByteArray ([1,4,...]), so verifying with
+        // mapStringToByteArray ([0x31,0x34,...]) could never match — every
+        // attempt burned a retry until the master PIN blocked permanently.
+        val masterPin = mapDigitsToByteArray(mPin)
         val cmd = CommandAPDU(0x00, Constants.INS_VERIFY_PIN, 0x00, Constants.P2_MASTER_PIN, masterPin)
         tx(cmd)
     }

@@ -1,5 +1,18 @@
 package com.payala.impala.demo.model
 
+/**
+ * The bridge's pagination envelope, `{data, page, per_page, total}`
+ * (`PaginatedResponse<T>` in impala-bridge/src/models.rs). List endpoints such
+ * as `GET /notify` and `GET /notification/subscriptions` return this wrapper,
+ * not a bare JSON array.
+ */
+data class PaginatedList<T>(
+    val data: List<T>,
+    val page: Int,
+    val per_page: Int,
+    val total: Int
+)
+
 /** Request body for `POST /notify`. Creates a notification preference record. */
 data class CreateNotifyRequest(
     val account_id: String,

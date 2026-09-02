@@ -314,7 +314,7 @@ and its own callback.
 Authorization is server‑driven: `impala_account.role` is embedded in the JWT `role` claim.
 
 - The **first account ever inserted** — through **any** path, including Okta auto‑provision — is
-  promoted to `admin` by a `BEFORE INSERT` trigger (`migrations/019_add_account_role.sql`). Every
+  promoted to `admin` by a `BEFORE INSERT` trigger (`migrations/023_add_account_role.sql`). Every
   **later** Okta user auto‑provisions as **`view-only`**.
 - There is **no Okta‑group → role mapping**. To promote an Okta user, an existing admin calls
   `PUT /admin/accounts/:id/role`; the new role takes effect at the target's next token refresh.

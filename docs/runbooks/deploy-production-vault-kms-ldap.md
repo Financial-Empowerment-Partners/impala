@@ -20,10 +20,10 @@ identical; see §5).
 | RDS deletion protection | ✅ only when `environment="production"` (`rds.tf:139`) | Set `environment="production"` |
 | HashiCorp **Vault server** + `seal "awskms"` auto‑unseal | ❌ Terraform injects only `VAULT_ADDR`/`VAULT_TRANSIT_KEY` *pointers* (`seeds.tf:28‑31`); no server, no seal stanza anywhere | **§4 — you run a Raft HA cluster** |
 | **LDAP** config on the task | ❌ Zero `LDAP_*` in Terraform (grep‑confirmed) | **§6 — add env + bind‑password secret + SG egress** |
-| `profile_source='ldap'` tagging (so force‑sync works) | ❌ Nothing writes `'ldap'`; accounts default `'local'`/`'okta'` (`migrations/020`, `ldap.rs`, `okta.rs`) | **§6 — tag accounts; feature is dormant otherwise** |
+| `profile_source='ldap'` tagging (so force‑sync works) | ❌ Nothing writes `'ldap'`; accounts default `'local'`/`'okta'` (`migrations/024`, `ldap.rs`, `okta.rs`) | **§6 — tag accounts; feature is dormant otherwise** |
 | Admin UI hosting | ❌ Not in Terraform; no UI Dockerfile | **§7 — multi‑AZ ECS nginx *or* S3+CloudFront** |
 | `PUBLIC_ENDPOINT` / `CORS_ALLOWED_ORIGINS` | ❌ Unset → `http://localhost:8080` / `*` | **§5/§7 — set them** |
-| DB **migrate** runner | ❌ No migrate task (README is wrong) | **§8 — one‑off `ecs run-task`** |
+| DB **migrate** runner | ✅ Dedicated `aws_ecs_task_definition.migrate` + `migrate_*` outputs (`terraform/ecs.tf`, `outputs.tf`) | **§8 — one‑off `ecs run-task`** |
 
 ### Target topology (multi‑AZ)
 
@@ -375,16 +375,20 @@ aws s3 sync impala-ui/html/ s3://impala-ui-production-<acct>/ --delete --cache-c
 
 ## 8. Database migrations (one‑off task)
 
-There is **no migrate task in Terraform**. Run migrations (incl. **019–021**: account `role` +
-first‑admin bootstrap + backfill, `profile_source`, `transaction_review`) as a one‑off against the
-server task definition, overriding `RUN_MODE`:
+Terraform ships a dedicated one‑off migration task definition
+(`aws_ecs_task_definition.migrate` in `terraform/ecs.tf`, `RUN_MODE=migrate`) with matching
+`migrate_task_definition` / `migrate_network_config` outputs — use it rather than overriding the
+server task definition. Migrations include **023–025** (account `role` + first‑admin bootstrap +
+backfill, `profile_source`, `transaction_review`) and **035** (widens the role set to the seven
+privileged roles):
 ```bash
 CL=$(cd terraform && terraform output -raw ecs_cluster_name)
-aws ecs run-task --cluster "$CL" --launch-type FARGATE --task-definition impala-bridge-production-server \
-  --network-configuration "awsvpcConfiguration={subnets=[<private-subnets>],securityGroups=[<ecs_tasks-sg>],assignPublicIp=DISABLED}" \
-  --overrides '{"containerOverrides":[{"name":"impala-bridge-server","environment":[{"name":"RUN_MODE","value":"migrate"}]}]}'
+aws ecs run-task --cluster "$CL" --launch-type FARGATE \
+  --task-definition $(cd terraform && terraform output -raw migrate_task_definition) \
+  --network-configuration "$(cd terraform && terraform output -json migrate_network_config)"
 ```
-Watch `/ecs/impala-bridge-production-server` for "Migrations completed successfully". Migration 019
+Watch `/ecs/impala-bridge-production-server` (stream prefix `migrate`) for "Migrations completed
+successfully". Migration 023
 promotes the earliest account to `admin` if none exists; on a fresh DB the **first** registered
 account becomes admin. Confirm `SELECT count(*) FROM impala_account WHERE role='admin'`. **Post‑deploy:
 all existing sessions must refresh** to pick up the new `role` claim (pre‑existing tokens are treated
@@ -437,8 +441,9 @@ console, transaction flag/review, and **on‑chain Refresh**.
   writeback) and runs on every task at boot.
 - **Net‑new Terraform required:** Vault HA cluster (server‑side, not in repo), the `ecs.tf` task‑def
   edits (Vault AppRole + LDAP env/secret + `PUBLIC_ENDPOINT`/`CORS`), the LDAPS SG egress, the UI
-  hosting (Option A service+TG+listener‑rule+Dockerfile, or Option B `ui.tf`+CloudFront), and the
-  migrate run‑task. None ship in `terraform/` today.
+  hosting (Option A service+TG+listener‑rule+Dockerfile, or Option B `ui.tf`+CloudFront). None ship
+  in `terraform/` today. (The **migrate run‑task does** ship — `aws_ecs_task_definition.migrate` +
+  `migrate_*` outputs; see §8.)
 - **`environment="production"` gates only RDS deletion protection** — everything else HA is via
   `az_count`/counts. Don't assume the env string sizes the cluster.
 - **Worker is a SPOF at defaults** (`worker_min_count=1`) — set `≥ 2` (§2).

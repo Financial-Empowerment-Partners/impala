@@ -1487,9 +1487,20 @@ pub async fn list_orders(
         }
     }
 
-    // Owner scoping: admins may filter by any account; everyone else is
-    // pinned to their own (an explicit foreign account_id is a 403).
-    let scope_account: Option<String> = if user.is_admin() {
+    // Owner scoping: admins see across accounts unconditionally. Non-admin
+    // ReadReserve holders (treasurer, auditor) see across accounts ONLY for
+    // reserve-provider listings — that is the documented grant (the
+    // disbursement/frozen work queues are cross-account reserve rows, and
+    // pinning a treasurer to their own account would render the queues
+    // silently empty). It must not widen further: an unrestricted listing
+    // would hand lateral roles every customer's OwlPay/Changelly orders
+    // (payout addresses, transfer instructions) their mandate never covers.
+    // Everyone else is pinned to their own account (an explicit foreign
+    // account_id is a 403).
+    let cross_account = user.is_admin()
+        || (crate::auth::role_has_capability(&user.role, crate::auth::Capability::ReadReserve)
+            && q.provider.as_deref() == Some(crate::constants::EXCHANGE_PROVIDER_RESERVE));
+    let scope_account: Option<String> = if cross_account {
         q.account_id.clone()
     } else {
         if let Some(ref a) = q.account_id {
@@ -1561,15 +1572,33 @@ async fn fetch_order_detail(
     order_id: Uuid,
     user: &AuthenticatedUser,
 ) -> Result<Option<ExchangeOrderDetail>, AppError> {
+    // Same scoping rule as list_orders: admins fetch any order; non-admin
+    // ReadReserve holders may additionally drill into reserve-provider rows
+    // (the work-queue orders belong to other accounts) but nothing else;
+    // everyone else is owner-scoped. Expressed in the WHERE clause so a
+    // non-owned non-reserve row 404s exactly like today (no existence leak).
+    let is_admin = user.is_admin();
+    let reserve_read =
+        crate::auth::role_has_capability(&user.role, crate::auth::Capability::ReadReserve);
     let mut sql = format!(
         "SELECT {} FROM exchange_order WHERE order_id = $1",
         exchange_order_detail_columns()
     );
-    if !user.is_admin() {
-        sql.push_str(" AND payala_account_id = $2");
+    if !is_admin {
+        if reserve_read {
+            // Keep this predicate in lockstep with list_orders' cross_account
+            // rule above — the two express one scoping contract (admin: all;
+            // ReadReserve: own + reserve-provider rows; else: own).
+            sql.push_str(&format!(
+                " AND (payala_account_id = $2 OR provider = '{}')",
+                crate::constants::EXCHANGE_PROVIDER_RESERVE
+            ));
+        } else {
+            sql.push_str(" AND payala_account_id = $2");
+        }
     }
     let mut q = sqlx::query_as::<_, ExchangeOrderDetail>(&sql).bind(order_id);
-    if !user.is_admin() {
+    if !is_admin {
         q = q.bind(&user.account_id);
     }
     q.fetch_optional(pool).await.map_err(|e| {
@@ -1602,6 +1631,10 @@ pub async fn get_order(
     // deposit watcher. A refresh must NOT reach refresh_order_once — its
     // unknown-provider defer path would stamp last_error and push
     // next_poll_at (the very column the watcher schedules on) forward.
+    // This also keeps cross-account reads side-effect free: a non-admin
+    // ReadReserve holder can only fetch foreign RESERVE rows (see
+    // fetch_order_detail), which this predicate always excludes — a read
+    // capability must never trigger a write, even a bookkeeping one.
     let refreshable = q.refresh
         && detail.provider != crate::constants::EXCHANGE_PROVIDER_RESERVE
         && !is_terminal_exchange_status(&detail.status);

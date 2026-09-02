@@ -9,13 +9,20 @@ frozen refunds, frozen replenishment cycles).
 Since migration 032 the reserve also: issues **locked price quotes** that
 reserve capacity, **refunds** deposits it cannot use, and **replenishes**
 itself by selling accumulated float. Each ships behind its own flag,
-defaulting off — applying 032 changes no behavior until an admin opts in.
+defaulting off — applying 032 changes no behavior until an operator opts in.
+
+Reserve and replenishment operations (disburse, resolve, write-off,
+confirm-fiat, refunds, policy and settings changes) require the **treasurer
+or admin** role; every reserve-side read surface — status, ledger, policies,
+the work queues, unmatched deposits, refunds, replenishment cycles, and
+cross-account reserve orders — is also visible to **auditors**, read-only.
 
 Design summary: diverted orders are ordinary `exchange_order` rows with
 `provider = 'reserve'`; the caller pays XLM/USDC into the reserve Stellar
 account with an order-unique text memo; a background watcher matches
 deposits, pays USDC out automatically (crypto swaps), or queues fiat
-disbursements for an admin (OwlPay off-ramps). All pool accounting is the
+disbursements for a treasurer or admin (OwlPay off-ramps). All pool
+accounting is the
 `conversion_reserve*` tables (BIGINT minor units: USDC/XLM 7 dp, USD cents),
 journaled in `conversion_reserve_entry`.
 
@@ -55,7 +62,7 @@ journaled in `conversion_reserve_entry`.
   provider minimum) — automatic end-to-end.
 - `owlpay` `crypto_to_fiat` Stellar-USDC→USD orders that include
   `beneficiary`/`payout_instrument` — pay-in is automatic, the fiat leg
-  lands in the admin disbursement queue.
+  lands in the disbursement queue for a treasurer or admin.
 - Everything else — including fixed-rate swaps, non-Stellar USDC, missing
   trustlines, over-threshold amounts, an exhausted pool, or any internal
   error — passes through to the provider unchanged (`reserve.fallbacks`
@@ -70,7 +77,8 @@ against the pool.
 
 - **Reserve page (admin UI)**: buckets + on-chain drift, policies, forecast
   (EWMA depletion projection, suggested top-up), work queues, ledger,
-  unmatched deposits.
+  unmatched deposits. Treasurers and admins act from it; auditors see the
+  same live page read-only (a banner says which roles the actions require).
 - **Top-ups**: send funds on-chain to the reserve address (no memo, or a
   non-order memo). The watcher credits the inflow automatically (unmatched
   queue, reason `no_match`) — do **not** also record a manual `topup` for
@@ -137,7 +145,8 @@ that distinction now matters.
 `available`/`held` must replay from the journal exactly. If an incident
 leaves `held` wrong (e.g. an order was force-completed outside the flow),
 repair with a `held_adjustment` entry; `adjustment` repairs `available`.
-Both are audited (admin id + note required by convention). The status
+Both are audited (the acting treasurer's or admin's id + note required by
+convention). The status
 endpoint's on-chain column is the ground truth to reconcile against.
 
 ## Disabling / deconfiguring
@@ -190,8 +199,8 @@ someone to read this runbook. Two-step opt-in, both default off:
    currency** — there is deliberately no way to express "unlimited".
 
 **What auto-refunds:** `late` deposits (arrived after expiry), `underpaid`
-deposits, and deposits stranded when an admin resolve-fails an order. Each
-identifies both an order and a payer.
+deposits, and deposits stranded when a treasurer or admin resolve-fails an
+order. Each identifies both an order and a payer.
 
 **What stays manual, and why:** `no_match` (no memo) and `wrong_asset`. An
 unmemoed inflow is exactly how ops tops the pool up — auto-refunding one

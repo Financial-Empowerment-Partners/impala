@@ -1,5 +1,7 @@
 //! Admin-only management of the webhook event feed (all routes gated by the
-//! [`AdminUser`] extractor) plus a pull/replay endpoint over the event log.
+//! [`AdminUser`] extractor for register/delete/test; `Privileged<ReadEvents>`
+//! for the read surfaces, which the auditor role also holds) plus a
+//! pull/replay endpoint over the event log.
 
 use axum::extract::{Extension, Path, Query};
 use axum::Json;
@@ -8,7 +10,7 @@ use sqlx::PgPool;
 use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::auth::AdminUser;
+use crate::auth::{AdminUser, Privileged, ReadEvents};
 use crate::constants::{RATE_LIMIT_MAX_REQUESTS, RATE_LIMIT_WINDOW_SECS};
 use crate::error::AppError;
 use crate::models::{
@@ -70,7 +72,7 @@ pub async fn register_webhook(
 
 /// List admin webhooks (`GET /admin/webhooks`). Never returns the signing secret.
 pub async fn list_webhooks(
-    _user: AdminUser,
+    _user: Privileged<ReadEvents>,
     Extension(pool): Extension<PgPool>,
 ) -> Result<Json<Vec<WebhookInfo>>, AppError> {
     let rows = sqlx::query_as::<_, WebhookInfo>(
@@ -154,7 +156,7 @@ pub async fn test_webhook(
 
 /// Pull/replay the event feed (`GET /admin/events?since=<id>&limit=<n>`).
 pub async fn list_events(
-    _user: AdminUser,
+    _user: Privileged<ReadEvents>,
     Extension(pool): Extension<PgPool>,
     Query(q): Query<EventFeedQuery>,
 ) -> Result<Json<EventFeedResponse>, AppError> {

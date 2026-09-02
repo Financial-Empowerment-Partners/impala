@@ -863,7 +863,11 @@ mod tests {
 
     #[test]
     fn test_validate_role_accepts_all_roles() {
-        for role in ["view-only", "device", "token", "admin"] {
+        // Iterate the shared list so a role added to ALL_ROLES is covered
+        // automatically, and pin the expected size so a dropped role cannot
+        // pass silently.
+        assert_eq!(crate::constants::ALL_ROLES.len(), 7);
+        for role in crate::constants::ALL_ROLES {
             assert!(validate_role(role).is_ok(), "role {} should be valid", role);
         }
     }
@@ -873,6 +877,13 @@ mod tests {
         assert!(validate_role("superuser").is_err());
         assert!(validate_role("").is_err());
         assert!(validate_role("Admin").is_err());
+        // Near-miss variants of the hyphenated names are the likely
+        // operator-facing typo.
+        assert!(validate_role("Treasurer").is_err());
+        assert!(validate_role("key_custodian").is_err());
+        assert!(validate_role("keycustodian").is_err());
+        assert!(validate_role("AUDITOR").is_err());
+        assert!(validate_role("auditor ").is_err());
     }
 
     // ── Payala currency / sync mode ────────────────────────────────────

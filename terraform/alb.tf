@@ -43,7 +43,15 @@ resource "aws_lb_target_group" "server" {
 }
 
 # HTTP listener — forwards to target group when no HTTPS cert is configured,
-# otherwise redirects to HTTPS (301)
+# otherwise redirects to HTTPS (301).
+#
+# WARNING: the certificate-less forward serves the bridge — logins, JWTs,
+# custodial signing — over PLAIN HTTP from 0.0.0.0/0. That is tolerated ONLY
+# for explicitly non-production use (the default primary stack targets
+# Stellar testnet). It is refused where real money is at stake: variable
+# validations reject environment = "production" without certificate_arn, and
+# reject live_enabled / any pubnet ecs-stack without a certificate (see
+# variables.tf and modules/ecs-stack/variables.tf).
 resource "aws_lb_listener" "http" {
   load_balancer_arn = aws_lb.main.arn
   port              = 80

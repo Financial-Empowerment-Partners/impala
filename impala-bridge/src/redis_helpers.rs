@@ -508,6 +508,42 @@ pub async fn claim_refresh_rotation(
     Ok(claimed.is_some())
 }
 
+/// Atomically claim a one-time MFA code as consumed. Returns `true` if this
+/// call was the first to present `code` (accept it), `false` if it was
+/// already consumed (a replay — reject). The marker keys on a hash of the
+/// code (never the code itself) and lives for `ttl_secs`, which the caller
+/// sizes to cover the code's whole acceptance window so a valid TOTP cannot
+/// be replayed anywhere inside its ±skew validity. Fail-closed: a Redis error
+/// surfaces as a service error rather than silently permitting a replay.
+pub async fn claim_mfa_code(
+    pool: &RedisPool,
+    account_id: &str,
+    mfa_type: &str,
+    code: &str,
+    ttl_secs: usize,
+) -> Result<bool, AppError> {
+    use sha2::{Digest, Sha256};
+    let mut conn = pool.get().await.map_err(|e| {
+        error!("claim_mfa_code: failed to get Redis connection: {}", e);
+        AppError::InternalError("Service temporarily unavailable".to_string())
+    })?;
+    let digest = hex::encode(Sha256::digest(code.as_bytes()));
+    let key = format!("impala:mfa_used:{account_id}:{mfa_type}:{digest}");
+    let claimed: Option<String> = redis::cmd("SET")
+        .arg(&key)
+        .arg("1")
+        .arg("NX")
+        .arg("EX")
+        .arg(ttl_secs as u64)
+        .query_async(&mut *conn)
+        .await
+        .map_err(|e| {
+            warn!("claim_mfa_code: Redis SET NX failed for {}: {}", key, e);
+            AppError::InternalError("Service temporarily unavailable".to_string())
+        })?;
+    Ok(claimed.is_some())
+}
+
 // NOTE: there is deliberately no `is_refresh_rotated` read helper. Checking
 // the marker and then writing it is two round trips, and the window between
 // them is exactly where concurrent reuse slipped through undetected.

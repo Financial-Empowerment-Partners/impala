@@ -14,6 +14,12 @@ pub enum AppError {
     Forbidden,
     #[allow(dead_code)] // part of the error taxonomy; not yet returned by a handler
     Conflict(String),
+    /// A transient failure that provably left NO side effect — e.g. a Horizon
+    /// error reading the source sequence *before* a transaction was ever
+    /// signed or submitted. Distinct from `InternalError` so a caller can
+    /// safely retry rather than treating the operation as ambiguous. Maps to
+    /// 503 for HTTP clients.
+    Retryable(String),
 }
 
 #[derive(Serialize)]
@@ -62,6 +68,9 @@ impl axum::response::IntoResponse for AppError {
                 "Access denied".to_string(),
             ),
             AppError::Conflict(msg) => (StatusCode::CONFLICT, "conflict", msg),
+            AppError::Retryable(msg) => {
+                (StatusCode::SERVICE_UNAVAILABLE, "service_unavailable", msg)
+            }
         };
 
         let body = ErrorBody {
@@ -87,6 +96,7 @@ impl std::fmt::Display for AppError {
             AppError::InternalError(msg) => write!(f, "Internal error: {}", msg),
             AppError::Forbidden => write!(f, "Forbidden"),
             AppError::Conflict(msg) => write!(f, "Conflict: {}", msg),
+            AppError::Retryable(msg) => write!(f, "Retryable: {}", msg),
         }
     }
 }

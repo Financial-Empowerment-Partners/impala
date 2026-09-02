@@ -140,9 +140,13 @@ var OktaAuth = (function () {
             return;
         }
 
-        // Validate state
+        // Validate state. Both the returned and the saved state must be
+        // present AND equal: without the presence check, a callback carrying
+        // no `state` (null) matched an absent saved state (also null), so
+        // `state !== savedState` was false and an unsolicited callback was
+        // accepted — a login-CSRF / session-fixation hole.
         var savedState = sessionStorage.getItem('okta_state');
-        if (state !== savedState) {
+        if (!state || !savedState || state !== savedState) {
             if (statusEl) statusEl.textContent = 'Invalid state parameter';
             setTimeout(function () {
                 sessionStorage.setItem('okta_error', 'Invalid state parameter');

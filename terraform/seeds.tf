@@ -157,3 +157,26 @@ resource "aws_iam_role_policy" "testnet_ecs_task_kms_seeds" {
     }]
   })
 }
+
+# The live stack is pubnet like the legacy primary stack, so it uses the
+# primary seed CMK (local.seed_kms_key_arn) — see the module call in live.tf,
+# which passes local.seed_protection_env for the same reason.
+resource "aws_iam_role_policy" "live_ecs_task_kms_seeds" {
+  count = local.seed_kms_enabled && var.live_enabled ? 1 : 0
+  name  = "${local.name_prefix}-live-task-kms-seeds"
+  role  = module.live[0].ecs_task_role_name
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Action = [
+        "kms:GenerateDataKey",
+        "kms:Encrypt",
+        "kms:Decrypt",
+        "kms:DescribeKey",
+      ]
+      Resource = local.seed_kms_key_arn
+    }]
+  })
+}

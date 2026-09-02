@@ -10,7 +10,7 @@ once unless that's the intent.
 
 | Secret | Purpose | Blast radius on rotation |
 |---|---|---|
-| `JWT_SECRET` | HMAC-SHA256 key for all bridge-issued JWTs | All refresh + temporal tokens invalidated; every user must re-auth |
+| `JWT_SECRET` | HMAC-SHA256 key for all bridge-issued JWTs | None if rotated with the `JWT_SECRET_PREVIOUS` overlap (below); rotating without it invalidates every token and logs every user out |
 | `DATABASE_URL` (or the password inside it) | Bridge → RDS auth | Bridge tasks restart on refresh |
 | `REDIS_AUTH_TOKEN` (if ElastiCache AUTH is enabled) | Bridge → Redis auth | Same as DB |
 | `TWILIO_TOKEN` | Outbound SMS | SMS notifications silently fail until rotated on both ends |
@@ -36,22 +36,26 @@ need an overlap window (both old and new accepted simultaneously).
 
 ### JWT_SECRET
 
-**There is no overlap window.** Rotating this secret invalidates every
-existing token. Choose a maintenance window OR accept that all users will
-be logged out.
+**Scheduled rotation is zero-downtime.** The bridge supports a verify-only
+overlap secret: `JWT_SECRET` signs and verifies every new token, and the
+optional `JWT_SECRET_PREVIOUS` is **verify-only** — tokens signed with the
+old secret keep verifying while they age out. Verification selects the key
+by the token's `kid` header (`impala-bridge/src/jwt.rs`; the env var is
+read at startup in `main.rs`). Startup validates both secrets: ≥ 32
+characters, and the two must differ. Nobody gets logged out.
+
+**Step 1 — deploy the overlap:**
 
 1. Generate a new secret:
     ```
     openssl rand -hex 32
     ```
-2. Write it to Secrets Manager:
+2. Set `JWT_SECRET=<new>` and `JWT_SECRET_PREVIOUS=<old>` in the task
+   environment, then force a new ECS deployment so tasks pick up both:
     ```
     aws secretsmanager put-secret-value \
       --secret-id impala-bridge/jwt-secret \
       --secret-string <new>
-    ```
-3. Force a new ECS deployment so tasks pick up the new value:
-    ```
     aws ecs update-service \
       --cluster impala-bridge \
       --service impala-bridge-server \
@@ -61,8 +65,32 @@ be logged out.
       --service impala-bridge-worker \
       --force-new-deployment
     ```
-4. Announce to users that they need to log in again.
-5. Confirm via `/healthz` + a sample login flow.
+3. Confirm via `/healthz` + a sample login flow, and confirm an
+   already-logged-in session still refreshes.
+
+**Step 2 — retire the old secret:** after all tokens signed with the old
+secret have aged out — at most the 14-day refresh-token TTL — unset
+`JWT_SECRET_PREVIOUS` and redeploy. The rotation is not finished until the
+previous secret is removed (the bridge refuses to start if the two secrets
+are equal, so a forgotten `JWT_SECRET_PREVIOUS` surfaces on the *next*
+rotation at the latest).
+
+> **Known gap:** the Terraform task definitions currently plumb only
+> `JWT_SECRET` (`terraform/ecs.tf`, `terraform/modules/ecs-stack/main.tf`)
+> — there is no `JWT_SECRET_PREVIOUS` entry to populate. To use the overlap
+> on ECS you must add the variable to the task definition (or Terraform)
+> yourself; `impala-bridge/docker-compose.yml` already passes it through
+> for local stacks.
+
+**No-overlap variant:** rotating `JWT_SECRET` *without* setting
+`JWT_SECRET_PREVIOUS` invalidates every refresh and temporal token at once
+and logs every user, admin session, and API client out. That is the correct
+move for a suspected secret compromise (see "Emergency rotation" below) —
+not for scheduled rotation.
+
+This matches the rotation runbook in `impala-bridge/SECURITY.md`
+("Authentication" section) and the notes in
+`impala-bridge/examples/api_examples.sh`.
 
 ### DATABASE_URL (password rotation)
 
@@ -112,7 +140,8 @@ be logged out; every in-flight notification will fail. This is preferable
 to letting an attacker with stolen credentials continue.
 
 Order suggested:
-1. `JWT_SECRET` (kills all tokens).
+1. `JWT_SECRET` — rotate **without** `JWT_SECRET_PREVIOUS` (kills all tokens,
+   including any the attacker minted).
 2. `DATABASE_URL` password.
 3. Exchange provider credentials — **revoke at the provider first**, then
    `impalactl keys revoke <kind>`, then scrub the environment variables (see

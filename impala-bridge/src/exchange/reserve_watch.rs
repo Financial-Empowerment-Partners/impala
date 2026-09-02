@@ -138,15 +138,29 @@ const PERMANENT_RESULT_CODES: &[&str] = &[
     "op_not_authorized",
 ];
 
-/// Classify a signer result. `Err(BadRequest)` is the signer's encoding of
-/// "Horizon 400 with parsed result codes" (see stellar/signer.rs); every
-/// other error variant is ambiguous by construction.
+/// Classify a signer result.
+///
+/// - `Err(BadRequest)` is the signer's encoding of "Horizon 400 with parsed
+///   result codes": a definitive rejection, safe to re-sign.
+/// - `Err(Retryable)` is a failure that provably happened BEFORE submission
+///   (e.g. reading the source sequence failed) — nothing was signed or sent,
+///   so it is a transient rejection, not an ambiguous outcome. Retrying is
+///   double-spend-safe and, crucially, it must NOT freeze the order: a
+///   transient Horizon read error during a mass outage would otherwise
+///   convert every fulfillable payout into a frozen order that can only exit
+///   as a refund.
+/// - Every other error variant means the POST may have reached Horizon and
+///   the transaction may still land, so it is ambiguous by construction.
 pub(crate) fn classify_submit<T>(result: &Result<T, AppError>) -> SubmitOutcome {
     match result {
         Ok(_) => SubmitOutcome::Settled,
         Err(AppError::BadRequest(msg)) => SubmitOutcome::Rejected {
             msg: msg.clone(),
             permanent: PERMANENT_RESULT_CODES.iter().any(|c| msg.contains(c)),
+        },
+        Err(AppError::Retryable(msg)) => SubmitOutcome::Rejected {
+            msg: msg.clone(),
+            permanent: false,
         },
         Err(_) => SubmitOutcome::Ambiguous,
     }
@@ -374,12 +388,14 @@ async fn tick(deps: &ReserveWatchDeps) -> Result<(), AppError> {
 
 async fn tick_inner(deps: &ReserveWatchDeps) -> Result<(), AppError> {
     let deposits_drained = drain_deposits(deps).await;
-    drive_payouts(deps).await;
-    // Refunds are chain-dependent: the signer fetches a sequence number
-    // before signing, so during a Horizon outage every submit would classify
-    // as ambiguous and freeze — turning a transient outage into a fully
-    // frozen queue needing per-row manual work.
+    // Payouts and refunds are chain-dependent: the signer fetches a sequence
+    // number before signing, so during a Horizon outage every attempt would
+    // fail. Pre-submit failures now classify as retryable (no freeze), but
+    // burning retry attempts against a known-down chain would still march an
+    // order toward its max-attempts freeze — so, like refunds, payouts run
+    // only when this tick saw the chain up to now.
     if deposits_drained.is_ok() {
+        drive_payouts(deps).await;
         drive_refunds(deps).await;
     }
     freeze_stale_intents(deps).await;
@@ -2158,6 +2174,7 @@ mod tests {
             asset_issuer: None,
             amount: amount.to_string(),
             memo_text: Some("REF".to_string()),
+            created_at: None,
         }
     }
 
@@ -2537,6 +2554,21 @@ mod tests {
             let r: Result<(), AppError> = Err(e);
             assert_eq!(classify_submit(&r), SubmitOutcome::Ambiguous);
         }
+    }
+
+    #[test]
+    fn presubmit_retryable_is_transient_rejection_not_ambiguous() {
+        // A pre-submit Horizon failure (Retryable) provably never submitted,
+        // so it must NOT freeze — it is a non-permanent rejection the driver
+        // retries. Freezing here is the mass-freeze-on-outage bug.
+        let r: Result<(), AppError> = Err(AppError::Retryable("seq fetch failed".into()));
+        assert_eq!(
+            classify_submit(&r),
+            SubmitOutcome::Rejected {
+                msg: "seq fetch failed".to_string(),
+                permanent: false,
+            }
+        );
     }
 
     // ── SQL shape pins ─────────────────────────────────────────────────

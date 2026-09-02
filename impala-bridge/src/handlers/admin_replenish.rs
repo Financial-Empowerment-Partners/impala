@@ -2,7 +2,8 @@
 //! (`/admin/exchange-reserve/replenishment/*`).
 //!
 //! Kept out of `admin_reserve.rs`, which is already large. All endpoints are
-//! `AdminUser`-gated; the ones that can move value carry the custodial-sign
+//! capability-gated (`Privileged<ReadReserve>` reads, `Privileged<ManageReserve>`
+//! mutations); the ones that can move value carry the custodial-sign
 //! rate limit and write audit lines.
 //!
 //! The manual "run now" endpoint takes the **watcher's own advisory lock**
@@ -18,7 +19,7 @@ use sqlx::PgPool;
 use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::auth::AdminUser;
+use crate::auth::{ManageReserve, Privileged, ReadReserve};
 use crate::constants::{
     RESERVE_CURRENCY_USD, RESERVE_WATCHER_LOCK_KEY, SIGN_RATE_LIMIT_MAX_REQUESTS,
     SIGN_RATE_LIMIT_WINDOW_SECS, VALID_REPLENISH_KINDS,
@@ -66,7 +67,7 @@ fn cycle_columns() -> String {
 
 /// `GET /admin/exchange-reserve/replenishment` — policies plus recent cycles.
 pub async fn get_status(
-    _user: AdminUser,
+    _user: Privileged<ReadReserve>,
     Extension(pool): Extension<PgPool>,
     Query(q): Query<PaginationParams>,
 ) -> Result<Json<ReplenishStatusResponse>, AppError> {
@@ -98,7 +99,7 @@ pub async fn get_status(
 
 /// `PUT /admin/exchange-reserve/replenishment/policies/{kind}`.
 pub async fn update_policy(
-    user: AdminUser,
+    user: Privileged<ManageReserve>,
     Extension(pool): Extension<PgPool>,
     Path(kind): Path<String>,
     Json(p): Json<ReplenishPolicyUpdateRequest>,
@@ -189,7 +190,7 @@ pub async fn update_policy(
 /// would collide.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_now(
-    user: AdminUser,
+    user: Privileged<ManageReserve>,
     Extension(pool): Extension<PgPool>,
     Extension(redis_pool): Extension<Arc<deadpool_redis::Pool>>,
     Extension(metrics): Extension<Arc<AppMetrics>>,
@@ -280,7 +281,7 @@ pub async fn run_now(
 /// credit — so the fiat sits in `held` until a human confirms it arrived.
 /// This is the one step that cannot be automated honestly.
 pub async fn confirm_fiat(
-    user: AdminUser,
+    user: Privileged<ManageReserve>,
     Extension(pool): Extension<PgPool>,
     Extension(redis_pool): Extension<Arc<deadpool_redis::Pool>>,
     Path(cycle_id): Path<Uuid>,
@@ -389,7 +390,7 @@ pub async fn confirm_fiat(
 /// column stays poisoned and the kind stays permanently blocked — but it
 /// writes off real money, so it demands a note and is loudly audited.
 pub async fn write_off(
-    user: AdminUser,
+    user: Privileged<ManageReserve>,
     Extension(pool): Extension<PgPool>,
     Extension(redis_pool): Extension<Arc<deadpool_redis::Pool>>,
     Path(cycle_id): Path<Uuid>,

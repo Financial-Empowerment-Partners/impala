@@ -61,7 +61,7 @@ class NotificationPreferencesFragment :
 
         viewLifecycleOwner.lifecycleScope.launch {
             try {
-                val items = api.listSubscriptions()
+                val items = api.listSubscriptions().data
                 subscriptions.clear()
                 subscriptions.addAll(items)
                 adapter.notifyDataSetChanged()

@@ -102,13 +102,21 @@ header:
 - the session is absent from Redis, or expired, or predates a logout-everywhere epoch
 - **Redis is unreachable**
 
-403 comes from only two checks, both after successful authentication:
-`require_owner` (the account in the path is not the caller's) and
-`require_admin` (`role != "admin"`).
+403 comes from three checks, all after successful authentication:
+`require_owner` (the account in the path is not the caller's),
+`require_admin` (`role != "admin"` — the governance endpoints: role grants,
+account deletion, sync, webhook register/delete/test, transaction review),
+and the **capability matrix** (`role_has_capability` in `src/auth.rs`) that
+gates the split privileged surfaces — reserve, keys, cross-account reads,
+the event feed. A treasurer on `/admin/keys`, an auditor POSTing a
+disbursement, or a key-custodian on `/admin/exchange-reserve` all get the
+same fixed `Access denied`; the rejection deliberately does not say which
+gate fired. Check the caller's role (`impalactl whoami`) against the matrix.
 
 > **A JWT minted before the role claim existed decodes to `view-only` and fails
-> every admin check with a 403.** After deploying the role migrations, existing
-> sessions must refresh or re-login. See [`deploy.md`](./deploy.md).
+> every admin and capability check with a 403.** After deploying the role
+> migrations, existing sessions must refresh or re-login. See
+> [`deploy.md`](./deploy.md).
 
 > **Redis down looks exactly like bad credentials.** Auth is fail-closed on
 > Redis, so a Redis outage presents as a fleet-wide 401 storm with nothing in
@@ -283,9 +291,18 @@ state. A "missing" webhook is usually better fixed by letting
 **Everything 401s, no logs.** Redis. Check `/health`. Auth is fail-closed on
 Redis for revocation, epoch and session lookups.
 
-**One admin gets 403 on admin routes; others fine.** Their token predates the
-role claim, or their DB role is not `admin`. Refresh the token. `impalactl
-whoami` shows the role in the stored token without a network call.
+**One operator gets 403 on privileged routes; others fine.** Their token
+predates the role claim, their DB role does not carry the capability (a
+treasurer on the keys surface, an auditor on any mutation), or the endpoint
+is governance and they are not `admin`. `impalactl whoami` shows the role in
+the stored token without a network call. For a read-only investigation, an
+auditor token covers the whole privileged surface — mint that rather than an
+admin token.
+
+**One account starts 401ing right after a role change.** Expected: a role
+grant (and account deletion) revokes the target's tokens and sessions on the
+spot. They sign in again and receive the new role — refresh alone will not
+resurrect the old credentials.
 
 **429s from one account.** Per-account API rate limit, charged only after
 successful authentication. `Retry-After` carries the delay.

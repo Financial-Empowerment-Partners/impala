@@ -46,7 +46,7 @@ use log::{error, info, warn};
 use sqlx::PgPool;
 use zeroize::{Zeroize, Zeroizing};
 
-use crate::auth::AdminUser;
+use crate::auth::{ManageKeys, Privileged, ReadKeys};
 use crate::constants::{
     CREDENTIAL_NOTE_MAX_LEN, CREDENTIAL_SOURCE_DB, CREDENTIAL_SOURCE_UNCONFIGURED,
     EXCHANGE_PROVIDER_CHANGELLY_CRYPTO, EXCHANGE_PROVIDER_CHANGELLY_FIAT, EXCHANGE_PROVIDER_OWLPAY,
@@ -284,7 +284,7 @@ pub struct ProbeConfig(pub crate::config::Config);
 /// rows that are currently inert — the alternative hides exactly the state
 /// most likely to confuse them.
 pub async fn list_keys(
-    _user: AdminUser,
+    _user: Privileged<ReadKeys>,
     Extension(pool): Extension<PgPool>,
     Extension(runtime): Extension<Arc<KeyRuntime>>,
     Extension(stellar_config): Extension<Arc<crate::config::StellarConfig>>,
@@ -620,7 +620,7 @@ async fn store_and_audit(
 /// confirmation.
 #[allow(clippy::too_many_arguments)]
 pub async fn import_key(
-    user: AdminUser,
+    user: Privileged<ManageKeys>,
     Extension(pool): Extension<PgPool>,
     Extension(redis_pool): Extension<Arc<deadpool_redis::Pool>>,
     Extension(protector): Extension<Arc<dyn SeedProtector>>,
@@ -692,7 +692,7 @@ pub async fn import_key(
 /// would silently promote the deployment's secrets into the database.
 #[allow(clippy::too_many_arguments)]
 pub async fn merge_key(
-    user: AdminUser,
+    user: Privileged<ManageKeys>,
     Extension(pool): Extension<PgPool>,
     Extension(redis_pool): Extension<Arc<deadpool_redis::Pool>>,
     Extension(protector): Extension<Arc<dyn SeedProtector>>,
@@ -800,7 +800,7 @@ pub async fn merge_key(
 /// key is believed compromised, revoke it there first; this only stops the
 /// bridge using it, and only from the next restart.
 pub async fn revoke_key(
-    user: AdminUser,
+    user: Privileged<ManageKeys>,
     Extension(pool): Extension<PgPool>,
     Extension(redis_pool): Extension<Arc<deadpool_redis::Pool>>,
     Extension(runtime): Extension<Arc<KeyRuntime>>,
@@ -949,7 +949,7 @@ fn seed_probe_blocks(probe: &Option<SeedProbe>) -> Option<String> {
 /// bridge subsequently directs at the reserve address.
 #[allow(clippy::too_many_arguments)]
 pub async fn generate_seed(
-    user: AdminUser,
+    user: Privileged<ManageKeys>,
     Extension(pool): Extension<PgPool>,
     Extension(redis_pool): Extension<Arc<deadpool_redis::Pool>>,
     Extension(protector): Extension<Arc<dyn SeedProtector>>,
@@ -1127,7 +1127,7 @@ pub async fn generate_seed(
 /// custodial signer does not support.
 #[allow(clippy::too_many_arguments)]
 pub async fn import_seed(
-    user: AdminUser,
+    user: Privileged<ManageKeys>,
     Extension(pool): Extension<PgPool>,
     Extension(redis_pool): Extension<Arc<deadpool_redis::Pool>>,
     Extension(protector): Extension<Arc<dyn SeedProtector>>,

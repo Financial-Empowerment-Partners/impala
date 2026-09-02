@@ -62,8 +62,8 @@
             })
             .catch(function (err) {
                 if (err && err.status === 403) {
-                    listContainer.innerHTML = emptyState('🔒', 'Admin access required',
-                        'Listing accounts requires the admin role. You can still open a specific account from a link that targets it.');
+                    listContainer.innerHTML = emptyState('🔒', 'Your role cannot list accounts',
+                        'The accounts list requires the admin, auditor, or key-custodian role. If you need it, an admin can change your role from this page.');
                 } else {
                     listContainer.innerHTML = '<div class="callout alert">' + escapeHtml(err.message) + '</div>';
                 }
@@ -102,7 +102,7 @@
                 '<td>' + escapeHtml(displayName(a)) + '</td>' +
                 '<td class="mono">' + escapeHtml(a.payala_account_id || '') + '</td>' +
                 '<td class="mono nowrap" title="' + escapeHtml(a.stellar_account_id || '') + '">' + escapeHtml(truncate(a.stellar_account_id, 14)) + '</td>' +
-                '<td>' + roleBadge(a.role) + '</td>' +
+                '<td>' + roleBadge(a.role, a.allowlisted) + '</td>' +
                 '<td>' + sourceBadge(a.profile_source) + '</td>' +
                 '<td class="nowrap">' + escapeHtml(formatDate(a.created_at)) + '</td>' +
                 '<td><div class="row-actions">' +
@@ -171,7 +171,7 @@
             field('Nickname', acct.nickname) +
             field('Affiliation', acct.affiliation) +
             field('Gender', acct.gender) +
-            '<dt>Role</dt><dd>' + roleBadge(acct.role) + '</dd>' +
+            '<dt>Role</dt><dd>' + roleBadge(acct.role, acct.allowlisted) + '</dd>' +
             '</dl>';
 
         // Role grant
@@ -180,8 +180,13 @@
             html += '<div class="detail-section"><h6>Role grant</h6>';
             html += '<div class="grid-x grid-margin-x"><div class="cell auto">' +
                 '<select id="drawer-role"' + (isSelf ? ' disabled title="You cannot change your own role"' : '') + '>';
+            var roleKnown = Roles.isKnownRole(acct.role);
+            if (!roleKnown) {
+                html += '<option value="" selected disabled>Unknown role: ' +
+                    escapeHtml(String(acct.role)) + ' (update the UI before changing it)</option>';
+            }
             Object.keys(Roles.DEFINITIONS).forEach(function (r) {
-                html += '<option value="' + r + '"' + (r === acct.role ? ' selected' : '') + '>' +
+                html += '<option value="' + r + '"' + (roleKnown && r === acct.role ? ' selected' : '') + '>' +
                     escapeHtml(Roles.DEFINITIONS[r].label) + '</option>';
             });
             html += '</select></div><div class="cell shrink">' +
@@ -219,6 +224,10 @@
             roleBtn.addEventListener('click', function () {
                 var sel = drawer.body.querySelector('#drawer-role');
                 var newRole = sel.value;
+                if (!newRole) {
+                    Router.showToast('Pick a role first — this account holds a role this UI build does not know.', 'warning');
+                    return;
+                }
                 if (acct.payala_account_id === Auth.getUsername() && newRole !== 'admin') {
                     Router.showToast('You cannot demote your own admin role', 'warning');
                     return;
@@ -226,7 +235,11 @@
                 API.setButtonLoading(roleBtn, true);
                 API.put('/admin/accounts/' + encodeURIComponent(acct.payala_account_id) + '/role', { role: newRole })
                     .then(function (res) {
-                        Router.showToast(res.message || 'Role updated', 'success');
+                        // An allowlisted target keeps issuing admin tokens no
+                        // matter what was stored — that warning must persist,
+                        // not vanish in a 4-second success toast.
+                        var severity = (res && res.allowlisted && newRole !== 'admin') ? 'alert' : 'success';
+                        Router.showToast(res.message || 'Role updated', severity);
                         acct.role = (res && res.role) || newRole;
                         loadList();
                     })
@@ -437,10 +450,22 @@
         return '<dt>' + escapeHtml(label) + '</dt><dd' + (mono ? ' class="mono"' : '') + '>' + escapeHtml(value) + '</dd>';
     }
 
-    function roleBadge(role) {
-        var key = Roles.DEFINITIONS[role] ? role : 'view-only';
-        var label = Roles.DEFINITIONS[key] ? Roles.DEFINITIONS[key].label : key;
-        return '<span class="role-badge ' + escapeHtml(key) + '">' + escapeHtml(label) + '</span>';
+    function roleBadge(role, allowlisted) {
+        // An unknown role (bridge deployed ahead of this UI) must NEVER wear
+        // another role's badge: an admin verifying a grant would read a
+        // treasurer as "View Only" and might "fix" it — an accidental
+        // demotion. Show the raw name on a neutral badge instead.
+        var known = Roles.isKnownRole(role);
+        var label = known ? Roles.getDefinition(role).label : String(role || 'unknown');
+        var html = '<span class="role-badge ' + (known ? escapeHtml(role) : 'unknown') + '">' +
+            escapeHtml(label) + '</span>';
+        if (allowlisted) {
+            // The env allowlist overrides the DB role to admin at issuance —
+            // the badge must show effective privilege, not a comfortable lie.
+            html += ' <span class="badge warning" title="On the ADMIN_ACCOUNT_IDS allowlist: ' +
+                'this account receives admin tokens regardless of its stored role.">effective admin</span>';
+        }
+        return html;
     }
 
     function sourceBadge(source) {

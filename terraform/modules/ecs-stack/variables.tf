@@ -20,6 +20,15 @@ variable "vpc_cidr" {
 variable "certificate_arn" {
   description = "ACM certificate ARN for the HTTPS listener (empty disables the listener)"
   type        = string
+
+  # A certificate-less stack serves the bridge over plain HTTP (see the http
+  # listener in main.tf) — acceptable only for testnet/dev. A pubnet (mainnet,
+  # real-money) stack must never expose credentials and custodial operations
+  # over cleartext, so refuse the combination outright.
+  validation {
+    condition     = var.stellar.network != "pubnet" || var.certificate_arn != ""
+    error_message = "certificate_arn is required for a pubnet (mainnet) stack: without it the ALB serves the custodial API over plain HTTP. Plain HTTP is allowed only for non-production (testnet/dev) stacks."
+  }
 }
 
 variable "rds_engine_version" {
@@ -433,4 +442,21 @@ variable "stellar" {
     network_passphrase  = optional(string)
     debug_mode          = string
   })
+}
+
+variable "seed_protection_environment" {
+  description = <<-EOT
+    Custodial seed-protection env entries (SEED_PROTECTION_BACKEND,
+    KMS_SEED_KEY_ID, VAULT_ADDR, VAULT_TRANSIT_KEY) appended to both task
+    definitions — the root builds these in ../../seeds.tf per stack. The
+    bridge defaults SEED_PROTECTION_BACKEND to "none" when the var is absent,
+    so the [] default preserves both today's runtime behavior AND the
+    byte-identical env list (zero container_definitions churn) until the root
+    wires a backend.
+  EOT
+  type = list(object({
+    name  = string
+    value = string
+  }))
+  default = []
 }

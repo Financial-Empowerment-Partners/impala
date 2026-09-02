@@ -5,9 +5,10 @@
 # deploys to AWS via Terraform.
 #
 # Triggers:
-#   - Push to main: build + push to ECR + optional deploy
-#   - Pull request: build + test only (no push)
-#   - Manual dispatch: full control over architecture, deploy, and environment
+#   - Push to main: build + push to ECR + terraform plan (informational only)
+#   - Pull request: test + terraform validate (no push, no plan)
+#   - Manual dispatch: full control over architecture, deploy, and environment.
+#     `terraform apply` runs ONLY from a dispatch with terraform_action=apply.
 #
 # Required GitHub Secrets:
 #   AWS_ACCOUNT_ID         - AWS account ID for ECR
@@ -37,6 +38,7 @@ on:
     paths:
       - 'impala-bridge/**'
       - '.github/workflows/ci.yml'
+      - 'terraform/**'
   workflow_dispatch:
     inputs:
       architecture:
@@ -124,6 +126,39 @@ jobs:
         run: cargo audit
 
   # ===========================================================================
+  # Terraform check — PR-time validation, no AWS credentials and no state.
+  # Terraform changes merge straight into the tree an operator dispatch will
+  # apply, so they must at least validate pre-merge. (A full plan against the
+  # real state needs credentials and the operator's tfvars; that still happens
+  # on push — plan-only — and on workflow_dispatch.)
+  # ===========================================================================
+  terraform-check:
+    name: Terraform validate
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    defaults:
+      run:
+        working-directory: terraform
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          # main.tf pins required_version = ">= 1.9, < 2.0"
+          terraform_version: "~> 1.9"
+
+      - name: Terraform Init (no backend)
+        run: terraform init -backend=false
+
+      - name: Terraform Validate
+        run: terraform validate -no-color
+
+      - name: Terraform Format Check
+        run: terraform fmt -check -recursive -no-color
+
+  # ===========================================================================
   # Build — Multi-arch Docker image build + push to ECR
   # ===========================================================================
   build:
@@ -171,17 +206,11 @@ jobs:
         if: steps.check_arch.outputs.should_build == 'true'
         uses: docker/setup-buildx-action@v3
 
-      - name: Docker metadata
-        if: steps.check_arch.outputs.should_build == 'true'
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          tags: |
-            type=sha,prefix=
-            type=raw,value=latest
-            type=ref,event=branch
-
+      # The ECR repo is IMMUTABLE (terraform/ecr.tf) — every pushed tag must be
+      # unique per run, so only the per-commit :<sha>-<arch> tag is pushed.
+      # There is deliberately no :latest / :latest-<arch> chain: reused tags
+      # are rejected by the immutable repo, and terraform deploys pin
+      # container_image_tag = <sha> anyway.
       - name: Build and push (per-arch)
         if: steps.check_arch.outputs.should_build == 'true'
         uses: docker/build-push-action@v6
@@ -191,7 +220,6 @@ jobs:
           push: true
           tags: |
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}-${{ matrix.arch_tag }}
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest-${{ matrix.arch_tag }}
           cache-from: type=gha,scope=${{ matrix.arch_tag }}
           cache-to: type=gha,mode=max,scope=${{ matrix.arch_tag }}
           provenance: false
@@ -203,7 +231,17 @@ jobs:
     name: Create multi-arch manifest
     needs: build
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    # The :<sha> manifest is the canonical deploy reference (terraform pins
+    # container_image_tag = <sha>, and the default task cpu_architecture is
+    # ARM64). Publishing it from a single-arch build would put a partial
+    # manifest under the canonical tag — and the immutable repo would then
+    # refuse to ever complete it. So single-architecture dispatch runs push
+    # only their :<sha>-<arch> tag and skip the manifest, which also skips
+    # deploy (needs: manifest): a build that can't serve both platforms is
+    # never deployable.
+    if: >
+      github.event_name == 'push' ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.architecture == 'linux/amd64,linux/arm64')
 
     steps:
       - name: Configure AWS credentials
@@ -215,41 +253,13 @@ jobs:
       - name: Login to Amazon ECR
         uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Determine architectures
-        id: archs
-        run: |
-          PLATFORMS="${{ github.event.inputs.architecture || 'linux/amd64,linux/arm64' }}"
-          SOURCES=""
-          if echo "$PLATFORMS" | grep -q "linux/amd64"; then
-            SOURCES="$SOURCES ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}-amd64"
-          fi
-          if echo "$PLATFORMS" | grep -q "linux/arm64"; then
-            SOURCES="$SOURCES ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}-arm64"
-          fi
-          echo "sources=$SOURCES" >> "$GITHUB_OUTPUT"
-
-          LATEST_SOURCES=""
-          if echo "$PLATFORMS" | grep -q "linux/amd64"; then
-            LATEST_SOURCES="$LATEST_SOURCES ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest-amd64"
-          fi
-          if echo "$PLATFORMS" | grep -q "linux/arm64"; then
-            LATEST_SOURCES="$LATEST_SOURCES ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest-arm64"
-          fi
-          echo "latest_sources=$LATEST_SOURCES" >> "$GITHUB_OUTPUT"
-
       - name: Create and push SHA manifest
         run: |
           docker manifest create \
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }} \
-            ${{ steps.archs.outputs.sources }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}-amd64 \
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}-arm64
           docker manifest push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
-
-      - name: Create and push latest manifest
-        run: |
-          docker manifest create \
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest \
-            ${{ steps.archs.outputs.latest_sources }}
-          docker manifest push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
 
   # ===========================================================================
   # Deploy — Terraform plan/apply (optional)
@@ -258,9 +268,20 @@ jobs:
     name: Terraform ${{ github.event.inputs.terraform_action || 'plan' }}
     needs: manifest
     runs-on: ubuntu-latest
+    # Push to main runs a PLAN ONLY, and non-blocking (continue-on-error):
+    # it is informational drift/review output, never an apply. All stacks
+    # share the single state key impala/terraform.tfstate and the stack
+    # enable flags (testnet_enabled, live_enabled, dr_enabled,
+    # impala_enabled) all default to false, so an unattended apply with
+    # default variables would plan away any stack an operator enabled with
+    # out-of-band tfvars — i.e. destroy live money infrastructure. Applying
+    # therefore requires an explicit workflow_dispatch with deploy=true and
+    # terraform_action=apply (see the Terraform Apply step). Never re-add a
+    # push-triggered apply.
     if: >
       (github.event_name == 'workflow_dispatch' && github.event.inputs.deploy == 'true') ||
       (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    continue-on-error: ${{ github.event_name == 'push' }}
     environment: ${{ github.event.inputs.environment || 'staging' }}
 
     defaults:
@@ -311,10 +332,13 @@ jobs:
           TF_VAR_testnet_jwt_secret: ${{ secrets.TF_VAR_testnet_jwt_secret }}
           TF_VAR_testnet_soroban_contract_id: ${{ secrets.TF_VAR_testnet_soroban_contract_id }}
 
+      # Apply ONLY on an explicit operator dispatch with terraform_action=apply
+      # — never on push. See the job-level comment: push-applies with default
+      # variables are destructive over the shared state.
       - name: Terraform Apply
         if: >
-          github.event.inputs.terraform_action == 'apply' ||
-          (github.event_name == 'push' && github.ref == 'refs/heads/main')
+          github.event_name == 'workflow_dispatch' &&
+          github.event.inputs.terraform_action == 'apply'
         run: terraform apply -auto-approve tfplan
         env:
           TF_VAR_jwt_secret: ${{ secrets.TF_VAR_jwt_secret }}

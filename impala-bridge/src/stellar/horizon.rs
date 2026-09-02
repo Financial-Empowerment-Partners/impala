@@ -44,6 +44,13 @@ pub struct HorizonPayment {
     pub amount: String,
     /// Joined transaction memo, only when `memo_type == "text"`.
     pub memo_text: Option<String>,
+    /// Ledger close time (`created_at`), RFC3339 as Horizon returns it. Lets a
+    /// backward feed walk stop once records predate the event it is looking
+    /// for, so an on-chain search can be exhaustive over a bounded window
+    /// instead of only the newest page. `None` if Horizon omitted or
+    /// malformed it (never on a real payment) — a missing bound just makes the
+    /// walk continue, never stop short.
+    pub created_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// One fetched page, with RAW feed accounting kept separate from the parsed
@@ -121,6 +128,10 @@ fn parse_payment_record(r: &Value) -> Option<HorizonPayment> {
         asset_issuer,
         amount,
         memo_text,
+        created_at: r["created_at"]
+            .as_str()
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+            .map(|dt| dt.with_timezone(&chrono::Utc)),
     })
 }
 
@@ -169,6 +180,113 @@ pub async fn fetch_latest_cursor(
             .and_then(|rec| rec["paging_token"].as_str())
             .map(|s| s.to_string())
     }))
+}
+
+/// Outcome of an exhaustive backward walk of the reserve's payments feed
+/// looking for one specific outgoing payment.
+#[derive(Debug, PartialEq)]
+pub enum FeedSearch {
+    /// A matching payment was found; carries its transaction hash.
+    Found(String),
+    /// The walk completed — it reached records older than `not_before`, or
+    /// exhausted the feed — and no match exists. Trustworthy absence.
+    VerifiedAbsent,
+    /// The walk could NOT be completed within `max_pages` without crossing
+    /// `not_before`. Absence is NOT proven; the caller must fail closed.
+    Inconclusive,
+}
+
+/// Per-page decision of the descending walk, factored out so the money-safe
+/// stop logic is unit-testable without network I/O.
+#[derive(Debug, PartialEq)]
+enum PageScan {
+    Found(String),
+    /// A record older than the floor was seen — nothing older can match, so
+    /// absence over the window is proven.
+    CrossedFloor,
+    /// No match and no floor crossing on this page; keep walking older pages.
+    Continue,
+}
+
+/// Scan one page (newest-first) for a match or a floor crossing. Pure.
+fn scan_page_desc<F>(
+    records: &[HorizonPayment],
+    not_before: chrono::DateTime<chrono::Utc>,
+    matches: &mut F,
+) -> PageScan
+where
+    F: FnMut(&HorizonPayment) -> bool,
+{
+    for p in records {
+        if matches(p) {
+            return PageScan::Found(p.tx_hash.clone());
+        }
+        if let Some(ts) = p.created_at {
+            if ts < not_before {
+                return PageScan::CrossedFloor;
+            }
+        }
+    }
+    PageScan::Continue
+}
+
+/// Walk the account's payments feed newest-first, applying `matches` to each
+/// record, until a match is found, a record older than `not_before` is seen
+/// (proving nothing older can match), or the feed is exhausted. `max_pages`
+/// bounds the work: hitting it without crossing `not_before` yields
+/// `Inconclusive` so a money-path caller fails closed rather than treating a
+/// scrolled-past record as absent.
+///
+/// This is the money-safe replacement for a single-page scan: a settled
+/// payout/refund that has scrolled past the newest page is still found (or,
+/// if genuinely absent, absence is *proven* over the window rather than
+/// assumed). Any Horizon error propagates and the caller fails closed.
+pub async fn search_payments_desc<F>(
+    http: &reqwest::Client,
+    horizon_url: &str,
+    account_id: &str,
+    not_before: chrono::DateTime<chrono::Utc>,
+    max_pages: usize,
+    limit: u32,
+    mut matches: F,
+) -> Result<FeedSearch, AppError>
+where
+    F: FnMut(&HorizonPayment) -> bool,
+{
+    let base = horizon_url.trim_end_matches('/');
+    let mut cursor: Option<String> = None;
+    for _ in 0..max_pages {
+        let mut url = format!(
+            "{}/accounts/{}/payments?order=desc&limit={}&join=transactions",
+            base, account_id, limit
+        );
+        if let Some(c) = &cursor {
+            url.push_str("&cursor=");
+            url.push_str(c);
+        }
+        // 404 (unfunded account) means the feed cannot hold the payment.
+        let Some(body) = horizon_get(http, &url, "search_payments_desc").await? else {
+            return Ok(FeedSearch::VerifiedAbsent);
+        };
+        let page = parse_payments_page(&body);
+        if page.raw_count == 0 {
+            return Ok(FeedSearch::VerifiedAbsent); // reached the start of the feed
+        }
+        match scan_page_desc(&page.records, not_before, &mut matches) {
+            PageScan::Found(hash) => return Ok(FeedSearch::Found(hash)),
+            PageScan::CrossedFloor => return Ok(FeedSearch::VerifiedAbsent),
+            PageScan::Continue => {}
+        }
+        // A short page is the end of the feed.
+        if page.raw_count < limit as usize {
+            return Ok(FeedSearch::VerifiedAbsent);
+        }
+        cursor = page.last_token;
+        if cursor.is_none() {
+            return Ok(FeedSearch::VerifiedAbsent);
+        }
+    }
+    Ok(FeedSearch::Inconclusive)
 }
 
 /// Shared GET with the module's error taxonomy: 404 -> Ok(None), other
@@ -357,5 +475,112 @@ mod tests {
             }]));
             assert!(parse_payments_page(&body).records[0].memo_text.is_none());
         }
+    }
+
+    #[test]
+    fn parses_created_at() {
+        let body = page(json!([{
+            "type": "payment", "paging_token": "9", "transaction_hash": "h9",
+            "to": "G", "asset_type": "native", "amount": "1.0000000",
+            "created_at": "2026-01-15T12:00:00Z",
+            "transaction": { "memo_type": "none" }
+        }]));
+        let p = &parse_payments_page(&body).records[0];
+        assert_eq!(
+            p.created_at,
+            Some(
+                chrono::DateTime::parse_from_rfc3339("2026-01-15T12:00:00Z")
+                    .unwrap()
+                    .with_timezone(&chrono::Utc)
+            )
+        );
+    }
+
+    fn rec(hash: &str, to: &str, created_at: Option<&str>) -> HorizonPayment {
+        HorizonPayment {
+            paging_token: hash.to_string(),
+            tx_hash: hash.to_string(),
+            op_type: "payment".to_string(),
+            to: to.to_string(),
+            from: Some("GRESERVE".to_string()),
+            from_muxed: None,
+            asset_type: "native".to_string(),
+            asset_code: None,
+            asset_issuer: None,
+            amount: "1.0000000".to_string(),
+            memo_text: None,
+            created_at: created_at.map(|s| {
+                chrono::DateTime::parse_from_rfc3339(s)
+                    .unwrap()
+                    .with_timezone(&chrono::Utc)
+            }),
+        }
+    }
+
+    fn floor(s: &str) -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::parse_from_rfc3339(s)
+            .unwrap()
+            .with_timezone(&chrono::Utc)
+    }
+
+    #[test]
+    fn scan_page_finds_match_before_floor_crossing() {
+        // The target sits on this page above a below-floor record; it must be
+        // found, not stopped short — the exact fail-open a single-page scan
+        // had once records scrolled past the newest page.
+        let recs = [
+            rec("newer", "GDEST", Some("2026-01-15T12:00:05Z")),
+            rec("target", "GDEST", Some("2026-01-15T12:00:03Z")),
+            rec("older", "GX", Some("2026-01-15T11:00:00Z")), // below floor
+        ];
+        let mut m = |p: &HorizonPayment| p.tx_hash == "target";
+        assert_eq!(
+            scan_page_desc(&recs, floor("2026-01-15T12:00:00Z"), &mut m),
+            PageScan::Found("target".to_string())
+        );
+    }
+
+    #[test]
+    fn scan_page_crosses_floor_proves_absence() {
+        // No match, and a record older than the floor: absence is proven over
+        // the window, so the walk stops with CrossedFloor (VerifiedAbsent).
+        let recs = [
+            rec("a", "GX", Some("2026-01-15T12:00:05Z")),
+            rec("b", "GX", Some("2026-01-15T11:59:00Z")), // below floor
+            rec("target", "GDEST", Some("2026-01-15T10:00:00Z")), // older than floor: unreachable
+        ];
+        let mut m = |p: &HorizonPayment| p.tx_hash == "target";
+        assert_eq!(
+            scan_page_desc(&recs, floor("2026-01-15T12:00:00Z"), &mut m),
+            PageScan::CrossedFloor
+        );
+    }
+
+    #[test]
+    fn scan_page_continues_when_all_within_window() {
+        // No match and every record is at/after the floor — the target may be
+        // on an older page, so keep walking (the single-page scan's bug was
+        // treating this as absence).
+        let recs = [
+            rec("a", "GX", Some("2026-01-15T12:00:05Z")),
+            rec("b", "GX", Some("2026-01-15T12:00:01Z")),
+        ];
+        let mut m = |p: &HorizonPayment| p.tx_hash == "target";
+        assert_eq!(
+            scan_page_desc(&recs, floor("2026-01-15T12:00:00Z"), &mut m),
+            PageScan::Continue
+        );
+    }
+
+    #[test]
+    fn scan_page_missing_created_at_never_stops_short() {
+        // A record with no created_at cannot cross the floor: the walk must
+        // continue rather than falsely proving absence.
+        let recs = [rec("a", "GX", None)];
+        let mut m = |p: &HorizonPayment| p.tx_hash == "target";
+        assert_eq!(
+            scan_page_desc(&recs, floor("2026-01-15T12:00:00Z"), &mut m),
+            PageScan::Continue
+        );
     }
 }

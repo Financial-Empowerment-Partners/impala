@@ -54,25 +54,20 @@
         ]);
         if (error) { Router.showToast(error, 'warning'); return; }
 
-        var body = {
-            source_account: source,
-            destination_account: destination,
-            amount: amount,
-            asset_code: document.getElementById('tx-asset-code').value.trim() || undefined,
-            memo: document.getElementById('tx-memo').value.trim() || undefined
-        };
-
-        var submitBtn = txForm.querySelector('button[type="submit"]');
-        API.setButtonLoading(submitBtn, true);
-        API.post('/subscribe', body)
-            .then(function () {
-                Router.showToast('Transaction submitted', 'success');
-                txForm.reset();
-                currentPage = 1;
-                loadList();
-            })
-            .catch(function (err) { Router.showToast('Error: ' + err.message, 'alert'); })
-            .then(function () { API.setButtonLoading(submitBtn, false); });
+        // NOTE: there is no bridge endpoint that builds and submits a payment
+        // from (source, destination, amount). The old code POSTed this
+        // payment-shaped body to /subscribe (an admin stream-subscription
+        // endpoint), which simply 422'd — it never moved funds, but it read
+        // like a working "submit" button. `POST /transaction` only *records*
+        // an already-executed transaction (stellar_tx_id/hash), a different
+        // contract. Rather than silently mis-call an endpoint, this reports
+        // the gap honestly. Building payments belongs to the signing clients
+        // (lumencli / impalactl / the card), not this read-and-review console.
+        Router.showToast(
+            'Submitting payments from the admin console is not supported — build and sign ' +
+            'transactions with lumencli, impalactl, or a card. This page lists and reviews them.',
+            'warning'
+        );
     }
 
     /* ---- list ------------------------------------------------------------ */

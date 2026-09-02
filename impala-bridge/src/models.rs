@@ -109,6 +109,12 @@ pub struct GetAccountQuery {
 
 #[derive(Serialize, sqlx::FromRow)]
 pub struct GetAccountResponse {
+    /// True when the account is on the live ADMIN_ACCOUNT_IDS allowlist (see
+    /// AdminAccountListItem.allowlisted) — the detail drawer hosts the
+    /// role-grant control, so effective privilege must be visible there too.
+    /// Not a DB column — filled in by the handler.
+    #[sqlx(default)]
+    pub allowlisted: bool,
     pub payala_account_id: String,
     pub stellar_account_id: String,
     pub first_name: String,
@@ -137,6 +143,12 @@ pub struct ListAccountsQuery {
 
 #[derive(Serialize, sqlx::FromRow)]
 pub struct AdminAccountListItem {
+    /// True when the account is on the live ADMIN_ACCOUNT_IDS allowlist, which
+    /// overrides the DB role to admin at every token issuance. Surfaced so the
+    /// UI can show effective privilege instead of a misleading DB-role badge.
+    /// Not a DB column — filled in by the handler.
+    #[sqlx(default)]
+    pub allowlisted: bool,
     pub payala_account_id: String,
     pub stellar_account_id: String,
     pub first_name: String,
@@ -162,6 +174,11 @@ pub struct SetRoleResponse {
     pub message: String,
     pub account_id: String,
     pub role: String,
+    /// True when the target sits on the ADMIN_ACCOUNT_IDS allowlist, which
+    /// overrides the stored role to admin at every token issuance — the UI
+    /// must surface this persistently, not as prose inside an auto-dismissing
+    /// success toast.
+    pub allowlisted: bool,
 }
 
 #[derive(Serialize)]

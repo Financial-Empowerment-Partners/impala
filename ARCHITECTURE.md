@@ -86,7 +86,7 @@ graph TB
     end
 
     subgraph Storage["Data Layer"]
-        Postgres[("PostgreSQL 16<br/><i>27 migrations, slow query logs</i>")]
+        Postgres[("PostgreSQL 16<br/><i>35 migrations, slow query logs</i>")]
         Redis[("Redis 7<br/><i>TLS in transit, connection pool</i>")]
         Vault["HashiCorp Vault / OpenBao"]
     end
@@ -590,7 +590,10 @@ A vanilla JavaScript single-page application served by Nginx on port 3000, style
 
 ### Role-Based Access Control (server-driven)
 
-The dashboard gates four roles via `[data-permission]` HTML attributes:
+The dashboard gates seven roles via `[data-permission]` HTML attributes
+and permission-driven page guards (the ladder below plus three lateral
+privileged roles — treasurer, key-custodian, auditor — that split the admin
+surface; matrix in `docs/runbooks/accounts-and-roles.md`):
 
 | Role | Permissions |
 |------|-------------|
@@ -599,14 +602,14 @@ The dashboard gates four roles via `[data-permission]` HTML attributes:
 | **token** | All device permissions + `manage_accounts`, `manage_mfa` |
 | **admin** | All permissions including `manage_roles` |
 
-Authorization is **server-driven**: each account's role lives in `impala_account.role` and is embedded in every issued JWT as the `role` claim. `roles.js` only *reads* that claim (via `API.parseJwt`) to gate `[data-permission]` elements — there is no client-side role store (it actively clears the legacy `impala_roles` key). The **first account ever created is bootstrapped to `admin` server-side** by a `BEFORE INSERT` trigger (`impala-bridge/migrations/023_add_account_role.sql`), covering all sign-up paths including SSO auto-provisioning; subsequent grants use `PUT /admin/accounts/:id/role` and take effect at the target's next token refresh.
+Authorization is **server-driven**: each account's role lives in `impala_account.role` and is embedded in every issued JWT as the `role` claim. `roles.js` only *reads* that claim (via `API.parseJwt`) to gate `[data-permission]` elements — there is no client-side role store (it actively clears the legacy `impala_roles` key). The **first account ever created is bootstrapped to `admin` server-side** by a `BEFORE INSERT` trigger (`impala-bridge/migrations/023_add_account_role.sql`), covering all sign-up paths including SSO auto-provisioning; subsequent grants use `PUT /admin/accounts/:id/role` and revoke the target's sessions immediately; the new role applies at their next sign-in.
 
 ### Core Modules
 
 - **`api.js`** — HTTP client with automatic JWT refresh on 401, concurrent request deduplication during refresh, `X-Request-Nonce` header for CSRF mitigation, error sanitization (strips HTML/SQL, truncates at 200 chars), and retry logic with exponential backoff for GET requests
 - **`router.js`** — SPA navigation with toast notifications (Foundation callout styles)
 - **`sso-auth.js`** — multi-provider OIDC authorization code flow with PKCE (RFC 7636); renders one button per enabled SSO provider (Okta / Auth0 / Duo)
-- **`session-timer.js`** — 1-hour inactivity timeout matching temporal token TTL
+- **`session-timer.js`** — 15-minute inactivity auto-logout with a warning modal at 13 minutes (deliberately shorter than the 1-hour temporal token TTL)
 
 ### Pages
 
@@ -799,7 +802,7 @@ erDiagram
 
 Each account carries a `sync_mode` (`reserve` default, or `mirror`) selecting how `POST /sync/payala` applies a batch of offline Payala transactions: reserve mode nets each batch into `payala_reserve` (one balance update per batch, per currency), mirror mode inserts each fresh item 1:1 into `transaction` with `origin = 'payala_sync'`. `payala_sync_item` is the shared idempotency ledger — its `(payala_account_id, payala_tx_id)` primary key makes batch replay a no-op — and `payala_sync_batch` audits every ingestion.
 
-The database schema is managed by 27 sequential SQL migrations. Performance indices cover: `card(account_id)` filtered on active cards, `impala_mfa(account_id, mfa_type)`, `notify(account_id)` filtered on active entries, `transaction(created_at)`, and `notification_subscription(account_id, event_type)` filtered on enabled subscriptions.
+The database schema is managed by sequential SQL migrations in `impala-bridge/migrations/` (currently 35, `001` through `035`). Performance indices cover: `card(account_id)` filtered on active cards, `impala_mfa(account_id, mfa_type)`, `notify(account_id)` filtered on active entries, `transaction(created_at)`, and `notification_subscription(account_id, event_type)` filtered on enabled subscriptions.
 
 ---
 
@@ -908,7 +911,7 @@ sequenceDiagram
 graph TB
     subgraph DockerCompose["Docker Compose Stack"]
         BridgeContainer["impala-bridge<br/><i>Rust / Axum</i><br/>:8080"]
-        PGContainer["PostgreSQL 16<br/><i>27 migrations</i><br/>:5432"]
+        PGContainer["PostgreSQL 16<br/><i>35 migrations</i><br/>:5432"]
         RedisContainer["Redis 7<br/><i>Connection pool + event cache</i><br/>:6379"]
     end
 
@@ -1143,7 +1146,7 @@ graph LR
     subgraph Test["Test Job"]
         Fmt["cargo fmt --check"]
         Clippy["cargo clippy"]
-        Tests["cargo test<br/><i>158 tests</i>"]
+        Tests["cargo test<br/><i>~695 tests</i>"]
         Audit["cargo audit"]
     end
 
@@ -1177,7 +1180,11 @@ graph LR
 
 ## Testing Strategy
 
-The bridge has **158 unit tests** covering:
+The bridge has **~695 unit tests** (`cargo test` in `impala-bridge/` is the
+source of truth for the current count). The per-area figures below are from an
+earlier ~158-test baseline and undercount today's suite — later subsystems
+(exchange, conversion reserve, key import, webhooks, card auth) added most of
+the growth — but the areas and testing approach remain accurate:
 
 | Area | Tests | What They Cover |
 |------|-------|-----------------|

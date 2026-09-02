@@ -22,7 +22,7 @@ here as net‑new infrastructure.
 | OpenBao/Vault **server** | ❌ Terraform only injects `VAULT_ADDR`/`VAULT_TRANSIT_KEY` *pointers* (`seeds.tf:23‑43`); no server, no `seal "awskms"` anywhere | **§3 — you stand it up** (KMS auto‑unseal) |
 | Admin UI hosting | ❌ Not in Terraform — only local `docker compose` nginx | **§6 — new S3 origin (or nginx/ECS alt)** |
 | CloudFlare / any CDN / public DNS | ❌ Zero CloudFlare; Route 53 is failover‑only and off by default | **§7 — you add it** |
-| DB **migration** runner | ❌ No `RUN_MODE=migrate` task in Terraform (the `terraform/README.md` claims one — it's wrong) | **§5 — one‑off `ecs run-task`** |
+| DB **migration** runner | ✅ Dedicated `aws_ecs_task_definition.migrate` (`RUN_MODE=migrate`) plus `migrate_task_definition` / `migrate_network_config` outputs (`terraform/ecs.tf`, `outputs.tf`) | **§5 — one‑off `ecs run-task`** |
 | `PUBLIC_ENDPOINT` / `CORS_ALLOWED_ORIGINS` on the bridge task | ❌ Unset → insecure defaults (`http://localhost:8080` / `*`) | **§4 — you set them** |
 
 ### Target topology
@@ -243,24 +243,24 @@ def, so this edit is required for a correct front‑end.)
 
 ## 5. Run database migrations (one‑off task)  ⟵ net‑new
 
-There is **no migrate task in Terraform**. The bridge runs all migrations (incl. the new
-**019–021**: account `role` + first‑account‑admin bootstrap trigger + backfill, `profile_source`,
-`transaction_review`) when started with `RUN_MODE=migrate`, then exits. Run it as a one‑off against
-the server task definition, overriding `RUN_MODE`:
+Terraform ships a dedicated one‑off migration task definition
+(`aws_ecs_task_definition.migrate` in `terraform/ecs.tf`, `RUN_MODE=migrate`) with matching
+`migrate_task_definition` / `migrate_network_config` outputs — use it rather than overriding the
+server task definition; it carries the correct one‑off configuration. The bridge applies all
+migrations (incl. **023–025**: account `role` + first‑account‑admin bootstrap trigger + backfill,
+`profile_source`, `transaction_review` — and **035**, which widens the role set to the seven
+privileged roles), then exits:
 
 ```bash
 CL=$(cd terraform && terraform output -raw ecs_cluster_name)
-TD=impala-bridge-staging-server     # family; or the full ARN from the console
-SUBNETS=<private-subnet-ids-csv>; SG=<ecs_tasks-sg-id>
 aws ecs run-task --cluster "$CL" --launch-type FARGATE \
-  --task-definition "$TD" \
-  --network-configuration "awsvpcConfiguration={subnets=[$SUBNETS],securityGroups=[$SG],assignPublicIp=DISABLED}" \
-  --overrides '{"containerOverrides":[{"name":"impala-bridge-server","environment":[{"name":"RUN_MODE","value":"migrate"}]}]}'
+  --task-definition $(cd terraform && terraform output -raw migrate_task_definition) \
+  --network-configuration "$(cd terraform && terraform output -json migrate_network_config)"
 ```
-Watch the `/ecs/impala-bridge-staging-server` log group; it should log "Migrations completed
-successfully" and the task should exit 0.
+Watch the `/ecs/impala-bridge-staging-server` log group (stream prefix `migrate`); it should log
+"Migrations completed successfully" and the task should exit 0.
 
-**Post‑migration admin bootstrap.** Migration 019 promotes the earliest account to `admin` if none
+**Post‑migration admin bootstrap.** Migration 023 promotes the earliest account to `admin` if none
 exists; on a brand‑new DB the **first account to register** becomes admin automatically. Confirm at
 least one admin exists before relying on the admin console:
 ```sql
@@ -408,8 +408,9 @@ Staging RDS has `deletion_protection=false` (only `production` enables it), so `
 - **Terraform edits required:** the bridge task def must be extended (§4a) for `BAO_ROLE_ID/SECRET_ID`
   + `PUBLIC_ENDPOINT` + `CORS_ALLOWED_ORIGINS`; these are net‑new to `ecs.tf`. The UI `ui.tf` and the
   CloudFlare config are net‑new modules. None of this is in the repo today.
-- **Migration runner** is a manual one‑off (`§5`) — there is no migrate task/`migrate_*` outputs in
-  Terraform despite the `terraform/README.md`.
+- **Migration runner** is a manual one‑off (`§5`) using the `aws_ecs_task_definition.migrate` task
+  and the `migrate_task_definition` / `migrate_network_config` Terraform outputs, per
+  `terraform/README.md` and [`deploy.md`](./deploy.md).
 - **State is local** (no S3/DynamoDB backend, no workspaces). Use a remote backend before sharing the
   staging state across operators.
 - **`stellar_rpc_url` default is testnet while `stellar_horizon_url` default is mainnet** — always set

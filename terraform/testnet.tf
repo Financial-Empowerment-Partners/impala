@@ -39,6 +39,12 @@ module "testnet" {
   ses_from_address = var.ses_from_address
   fcm_project_id   = var.fcm_project_id
 
+  # Custodial seed protection (seeds.tf): testnet uses its own independent
+  # CMK, kept separate from pubnet seeds. Gated on the backend so the default
+  # ("none") passes [] and the task definitions stay byte-identical (the
+  # bridge already defaults SEED_PROTECTION_BACKEND to "none").
+  seed_protection_environment = var.seed_protection_backend == "none" ? [] : local.seed_protection_env_testnet
+
   stellar = {
     network             = "testnet"
     horizon_url         = "https://horizon-testnet.stellar.org"

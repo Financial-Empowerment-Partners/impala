@@ -303,17 +303,21 @@ jobs:
           ORG_GRADLE_PROJECT_githubPackagesPassword: ${{ secrets.GITHUB_TOKEN }}
         run: ./gradlew :sdk:publishAllPublicationsToGithubPackagesRepository --no-daemon --stacktrace
 
+      # Action paths are workspace-rooted — the job's working-directory only
+      # applies to `run:` steps — so the download destination must carry the
+      # impala-card/ prefix the upload steps below read from (same pattern as
+      # the caprunner job).
       - name: Download testnet CAP
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: ImpalaApplet-testnet-cap-${{ github.sha }}
-          path: dist/testnet/
+          path: impala-card/dist/testnet/
 
       - name: Download live CAP
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: ImpalaApplet-live-cap-${{ github.sha }}
-          path: dist/live/
+          path: impala-card/dist/live/
 
       - name: Upload testnet CAP (long retention)
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -369,17 +373,20 @@ jobs:
       - name: Assemble SDK
         run: ./gradlew :sdk:assemble --no-daemon --stacktrace
 
+      # Action paths are workspace-rooted (working-directory covers only
+      # `run:` steps), so download into impala-card/ where the Stage release
+      # assets step — which does run in impala-card/ — reads them.
       - name: Download testnet CAP
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: ImpalaApplet-testnet-cap-${{ github.sha }}
-          path: applet/build/testnet/
+          path: impala-card/applet/build/testnet/
 
       - name: Download live CAP
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: ImpalaApplet-live-cap-${{ github.sha }}
-          path: applet/build/live/
+          path: impala-card/applet/build/live/
 
       - name: Stage release assets
         run: |

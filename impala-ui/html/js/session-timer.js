@@ -52,7 +52,10 @@ var SessionTimer = (function () {
         modal.setAttribute('aria-modal', 'true');
         modal.setAttribute('aria-labelledby', 'session-warning-title');
         modal.setAttribute('aria-describedby', 'session-warning-desc');
-        modal.style.cssText = 'background:#fff;padding:2rem;border-radius:4px;max-width:420px;width:90%;text-align:center;';
+        // Styled via app.css tokens (not a hardcoded #fff) so the dialog stays
+        // legible in dark mode — text inherits var(--text), and this is the
+        // one dialog that races a forced logout.
+        modal.style.cssText = 'background:var(--surface);color:var(--text);border:1px solid var(--border);box-shadow:var(--shadow-lg);padding:2rem;border-radius:4px;max-width:420px;width:90%;text-align:center;';
 
         modal.innerHTML =
             '<h5 id="session-warning-title">Session Expiring</h5>' +

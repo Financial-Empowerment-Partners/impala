@@ -49,6 +49,12 @@ pub struct OktaAccessTokenClaims {
     pub iat: usize,
     pub uid: Option<String>,
     pub email: Option<String>,
+    /// Whether the IdP asserts the email is verified. Load-bearing: the bridge
+    /// shares one account namespace across every configured IdP, so an
+    /// unverified (or absent) email must NOT key an account — see the
+    /// `derive_sso_account_id`/`derive_google_account_id` guards this mirrors.
+    #[serde(default)]
+    pub email_verified: Option<bool>,
     pub preferred_username: Option<String>,
 }
 

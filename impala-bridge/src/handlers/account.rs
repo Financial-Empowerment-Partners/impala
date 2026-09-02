@@ -122,6 +122,7 @@ pub async fn create_account(
 pub async fn get_account(
     user: AuthenticatedUser,
     Extension(pool): Extension<PgPool>,
+    Extension(admin_ids): Extension<Arc<std::collections::HashSet<String>>>,
     Query(params): Query<GetAccountQuery>,
 ) -> Result<Json<GetAccountResponse>, AppError> {
     debug!(
@@ -139,19 +140,29 @@ pub async fn get_account(
         WHERE stellar_account_id = $1
         "#,
     );
-    if !user.is_admin() {
+    // ReadAccounts holders (admin, auditor, key-custodian) read any account —
+    // the console drawer and compliance reads are cross-account by nature.
+    let cross_account =
+        crate::auth::role_has_capability(&user.role, crate::auth::Capability::ReadAccounts);
+    if !cross_account {
         sql.push_str(" AND payala_account_id = $2");
     }
 
     let mut query = sqlx::query_as::<_, GetAccountResponse>(&sql).bind(&params.stellar_account_id);
-    if !user.is_admin() {
+    if !cross_account {
         query = query.bind(&user.account_id);
     }
 
     let result = query.fetch_optional(&pool).await;
 
     match result {
-        Ok(Some(account)) => Ok(Json(account)),
+        Ok(Some(mut account)) => {
+            // Same effective-privilege marking as the accounts list: the
+            // drawer hosting the role-grant control must not understate an
+            // allowlisted account's real authority.
+            account.allowlisted = admin_ids.contains(&account.payala_account_id);
+            Ok(Json(account))
+        }
         Ok(None) => {
             debug!(
                 "get_account: not found for stellar_id={}",
@@ -190,7 +201,9 @@ pub async fn get_account_onchain(
     })?;
 
     let is_owner = owner.as_deref() == Some(user.account_id.as_str());
-    if !is_owner && !user.is_admin() {
+    if !is_owner
+        && !crate::auth::role_has_capability(&user.role, crate::auth::Capability::ReadAccounts)
+    {
         return Err(AppError::Forbidden);
     }
 

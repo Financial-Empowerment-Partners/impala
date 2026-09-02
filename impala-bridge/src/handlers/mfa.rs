@@ -262,9 +262,21 @@ pub async fn verify_mfa(
                     "verify_mfa: MFA disabled for account_id={} mfa_type={}",
                     payload.account_id, payload.mfa_type
                 );
+                // Same generic message and attempt increment as the
+                // not-enrolled path: a distinct "disabled" reply would let a
+                // caller enumerate which accounts have a (disabled) enrollment
+                // — the exact enumeration the not-enrolled branch guards
+                // against, undone one branch over.
+                crate::redis_helpers::increment_mfa_attempts(
+                    &redis_pool,
+                    &payload.account_id,
+                    &payload.mfa_type,
+                    crate::constants::LOCKOUT_DURATION_SECS,
+                )
+                .await;
                 return Ok(Json(MfaResponse {
                     success: false,
-                    message: "MFA is disabled for this enrollment".to_string(),
+                    message: "Invalid verification code".to_string(),
                     provisioning_uri: None,
                 }));
             }
@@ -327,6 +339,30 @@ pub async fn verify_mfa(
                     })?;
 
                     if is_valid {
+                        // Anti-replay: a valid TOTP code is single-use. Claim
+                        // it atomically over its whole acceptance window (the
+                        // 30s step plus the ±1-step skew ≈ 90s); a second
+                        // presentation of the same code is a replay and is
+                        // rejected even though it still checks as "current".
+                        let first_use = crate::redis_helpers::claim_mfa_code(
+                            &redis_pool,
+                            &payload.account_id,
+                            &payload.mfa_type,
+                            &payload.code,
+                            crate::constants::MFA_CODE_REPLAY_WINDOW_SECS,
+                        )
+                        .await?;
+                        if !first_use {
+                            warn!(
+                                "verify_mfa: replayed TOTP code for account_id={}",
+                                payload.account_id
+                            );
+                            return Ok(Json(MfaResponse {
+                                success: false,
+                                message: "Invalid verification code".to_string(),
+                                provisioning_uri: None,
+                            }));
+                        }
                         info!(
                             "verify_mfa: TOTP verified for account_id={}",
                             payload.account_id

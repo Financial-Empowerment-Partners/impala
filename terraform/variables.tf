@@ -320,9 +320,19 @@ variable "live_jwt_secret" {
 }
 
 variable "live_certificate_arn" {
-  description = "ACM certificate ARN for live HTTPS listener (recommended for production)"
+  description = "ACM certificate ARN for live HTTPS listener (required when live_enabled = true)"
   type        = string
   default     = ""
+
+  # The live stack is Stellar pubnet — real money. Without a certificate the
+  # stack ALB forwards plain HTTP :80 straight to the bridge, putting
+  # credentials and custodial operations on the wire in cleartext. Refuse the
+  # combination here (the ecs-stack module also refuses any pubnet stack
+  # without a certificate).
+  validation {
+    condition     = !var.live_enabled || var.live_certificate_arn != ""
+    error_message = "live_certificate_arn is required when live_enabled = true: the live (mainnet) stack must not serve the custodial API over plain HTTP."
+  }
 }
 
 # =============================================================================
@@ -435,9 +445,18 @@ variable "rds_backup_retention_days" {
 }
 
 variable "certificate_arn" {
-  description = "ACM certificate ARN for the primary ALB HTTPS listener (empty = HTTP only)"
+  description = "ACM certificate ARN for the primary ALB HTTPS listener (empty = HTTP only; required when environment = \"production\")"
   type        = string
   default     = ""
+
+  # Plain HTTP on the primary ALB is an explicit non-production posture (the
+  # default primary stack points at Stellar testnet). .trivyignore's
+  # AVD-AWS-0054 entry asserts "Production sets certificate_arn" — this
+  # validation makes that assertion enforced instead of aspirational.
+  validation {
+    condition     = var.environment != "production" || var.certificate_arn != ""
+    error_message = "certificate_arn is required when environment = \"production\": a production deployment must not serve the bridge over plain HTTP."
+  }
 }
 
 # --- Auto scaling (primary cluster) ---

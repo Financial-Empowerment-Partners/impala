@@ -200,23 +200,25 @@ bridge refreshes JWKS on a timer and on an unknown `kid`.
 ## 8. Roles are server-driven
 
 The bridge is the source of truth; the role rides in the JWT's `role` claim and
-the UI only reflects it.
+the UI only reflects it. Seven roles: the original ladder plus three lateral
+privileged roles that split the admin surface by blast radius (full detail and
+the capability matrix: `docs/runbooks/accounts-and-roles.md`).
 
-| Role | Permissions |
+| Role | Holds |
 |---|---|
-| `view-only` | view_accounts, view_mfa, view_transactions, view_cards |
+| `view-only` | read access to accounts, MFA, transactions, cards |
 | `device` | + create_transactions, manage_cards |
-| `token` | + manage_accounts, manage_mfa, review_transactions |
-| `admin` | + manage_roles, delete_accounts, sync_profile |
+| `token` | + manage_accounts, manage_mfa |
+| `treasurer` | reserve & replenishment money operations (lateral) |
+| `key-custodian` | bridge credentials & custodial seeds (lateral) |
+| `auditor` | read-only oversight of every privileged surface (lateral) |
+| `admin` | everything, including governance (role grants, deletion, sync, webhooks, transaction review) |
 
-Elements carrying `data-permission="..."` are hidden when the current user lacks
-the permission. **This is presentation, not enforcement** — the bridge
-re-authorizes every request. A token with no `role` claim resolves to
-`view-only`, fail-closed.
-
-Grants take effect at the target's **next token refresh**. "I was made an admin
-but the UI still hides everything" is almost always a stale token: log out and
-back in.
+Grant a role from the Accounts drawer (or `PUT /admin/accounts/{id}/role`).
+The grant **revokes the target's existing sessions and tokens immediately** —
+they sign in again and receive the new role. Accounts on the
+`ADMIN_ACCOUNT_IDS` allowlist keep issuing admin tokens regardless of the
+stored role; the UI marks them "effective admin" and the grant response warns.
 
 ## 9. Verify a deploy
 

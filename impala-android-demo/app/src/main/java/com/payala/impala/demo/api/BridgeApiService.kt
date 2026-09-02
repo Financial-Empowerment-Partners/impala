@@ -112,9 +112,9 @@ interface BridgeApiService {
 
     // ── Notify ────────────────────────────────────────────────────────
 
-    /** List notification preferences for the authenticated user. */
+    /** List notification preferences for the authenticated user (paginated envelope). */
     @GET("notify")
-    suspend fun listNotify(): List<NotifyListItem>
+    suspend fun listNotify(): PaginatedList<NotifyListItem>
 
     /** Create a notification preference record. */
     @POST("notify")
@@ -126,9 +126,9 @@ interface BridgeApiService {
 
     // ── Notification Subscriptions ────────────────────────────────────
 
-    /** List all event→medium subscriptions for the authenticated user. */
+    /** List all event→medium subscriptions for the authenticated user (paginated envelope). */
     @GET("notification/subscriptions")
-    suspend fun listSubscriptions(): List<SubscriptionListItem>
+    suspend fun listSubscriptions(): PaginatedList<SubscriptionListItem>
 
     /** Subscribe to an event on a delivery medium. */
     @POST("notification/subscriptions")

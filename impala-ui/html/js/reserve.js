@@ -14,11 +14,15 @@
     'use strict';
 
     Router.init();
-    if (!Router.requireAdmin()) return;
-    if (!Roles.currentUserHasPermission('manage_reserve')) {
-        Router.showToast('Reserve management requires the admin role', 'alert');
-        return;
-    }
+    if (!Router.requirePermission('view_reserve', 'Reserve')) return;
+
+    // One flag, applied at every action-injection point below: viewers
+    // without it (the auditor) get the same live page, read-only. The bridge
+    // enforces the same boundary server-side regardless — which is also why
+    // the injection points carry no unit tests (they live in DOM rendering,
+    // outside the DOM-free test style): a missed gate here shows a button
+    // whose request 403s, never an unauthorized mutation.
+    var canManage = Roles.currentUserHasPermission('manage_reserve');
 
     var escapeHtml = EscapeHtml.escape;
 
@@ -87,7 +91,9 @@
                 '<dt>Low water</dt><dd>' + escapeHtml(ReserveMath.display(b.low_water_minor, b.minor_scale)) + '</dd>' +
                 '<dt>On-chain</dt><dd>' + (b.onchain_balance ? escapeHtml(b.onchain_balance) : '<span class="text-muted">unavailable</span>') + '</dd>' +
                 '</dl>' +
-                '<button type="button" class="button tiny secondary bucket-edit" data-currency="' + escapeHtml(b.currency) + '" data-low="' + b.low_water_minor + '" data-scale="' + b.minor_scale + '">Set low water</button>' +
+                (canManage
+                    ? '<button type="button" class="button tiny secondary bucket-edit" data-currency="' + escapeHtml(b.currency) + '" data-low="' + b.low_water_minor + '" data-scale="' + b.minor_scale + '">Set low water</button>'
+                    : '') +
                 '</div></div>';
         });
         html += '</div>';
@@ -119,7 +125,7 @@
                 '<td>' + enabledBadge + '</td>' +
                 '<td>' + escapeHtml(ReserveMath.centsToUsd(p.threshold_usd_cents)) + '</td>' +
                 '<td>' + escapeHtml(p.updated_at || '') + '</td>' +
-                '<td>' + (p.supported
+                '<td>' + (p.supported && canManage
                     ? '<button type="button" class="button tiny secondary policy-edit" data-provider="' + escapeHtml(p.provider) + '" data-enabled="' + p.enabled + '" data-threshold="' + p.threshold_usd_cents + '">Edit</button>'
                     : '') + '</td></tr>';
         });
@@ -305,13 +311,15 @@
     function renderQueues(disbursements, frozen) {
         var html = '';
         if (!disbursements.length && !frozen.length) {
-            html = '<p class="text-muted">Nothing waiting on an admin.</p>';
+            html = '<p class="text-muted">No disbursements pending and no frozen payouts.</p>';
         }
         if (disbursements.length) {
             html += '<h6>Fiat disbursements pending (' + disbursements.length + ')</h6>' +
                 '<div class="table-wrap"><table><thead><tr><th>Order</th><th>Account</th><th>Conversion</th><th>State</th><th></th></tr></thead><tbody>';
             disbursements.forEach(function (o) {
-                html += orderRow(o, '<button type="button" class="button tiny disburse-btn" data-id="' + escapeHtml(o.order_id) + '" data-amount="' + escapeHtml(o.amount_to || '') + '">Disburse</button>');
+                html += orderRow(o, canManage
+                    ? '<button type="button" class="button tiny disburse-btn" data-id="' + escapeHtml(o.order_id) + '" data-amount="' + escapeHtml(o.amount_to || '') + '">Disburse</button>'
+                    : '');
             });
             html += '</tbody></table></div>';
         }
@@ -319,7 +327,9 @@
             html += '<h6>Frozen payouts (' + frozen.length + ')</h6>' +
                 '<div class="table-wrap"><table><thead><tr><th>Order</th><th>Account</th><th>Conversion</th><th>Reason</th><th></th></tr></thead><tbody>';
             frozen.forEach(function (o) {
-                html += orderRow(o, '<button type="button" class="button tiny alert resolve-btn" data-id="' + escapeHtml(o.order_id) + '">Resolve</button>');
+                html += orderRow(o, canManage
+                    ? '<button type="button" class="button tiny alert resolve-btn" data-id="' + escapeHtml(o.order_id) + '">Resolve</button>'
+                    : '');
             });
             html += '</tbody></table></div>';
         }
@@ -578,6 +588,7 @@
     }
 
     function refundActions(r) {
+        if (!canManage) return '';
         var btn = function (action, label, cls) {
             return '<button type="button" class="button tiny ' + cls +
                 ' refund-action" data-id="' + escapeHtml(r.refund_id) +
@@ -648,8 +659,10 @@
                     '<td>' + escapeHtml(ReserveMath.display(p.max_spend_minor, scale)) + '</td>' +
                     '<td>' + escapeHtml(ReserveMath.display(p.daily_spend_cap_minor, scale)) + '</td>' +
                     '<td>' + escapeHtml(ReserveMath.display(p.min_float_minor, scale)) + '</td>' +
-                    '<td><button type="button" class="button tiny replenish-run" data-kind="' +
-                    escapeHtml(p.kind) + '">Run now</button></td></tr>';
+                    '<td>' + (canManage
+                        ? '<button type="button" class="button tiny replenish-run" data-kind="' +
+                          escapeHtml(p.kind) + '">Run now</button>'
+                        : '') + '</td></tr>';
             });
             html += '</tbody></table></div>';
 
@@ -662,7 +675,7 @@
                     var got = c.actual_recv_minor !== null && c.actual_recv_minor !== undefined
                         ? ReserveMath.display(c.actual_recv_minor, 7) + ' ' + c.recv_currency
                         : '—';
-                    var action = c.state === 'in_transit'
+                    var action = c.state === 'in_transit' && canManage
                         ? '<button type="button" class="button tiny cycle-confirm" data-id="' +
                           escapeHtml(c.cycle_id) + '">Confirm receipt</button>'
                         : '';
@@ -694,15 +707,34 @@
         });
     }
 
+    // A replenishment cycle SPENDS real reserve funds the moment the bridge
+    // accepts it, so a bare one-click table button is not enough: confirm
+    // with the kind and the active network named — the same discipline every
+    // other money mutation on this page already gets.
     function runReplenishment(kind, btn) {
-        API.setButtonLoading(btn, true);
-        API.post('/admin/exchange-reserve/replenishment/run', { kind: kind })
-            .then(function (res) {
-                Router.showToast((res && res.message) || 'Cycle requested', 'success');
-                refreshAll();
-            })
-            .catch(function (err) { Router.showToast('Error: ' + err.message, 'alert'); })
-            .then(function () { API.setButtonLoading(btn, false); });
+        var network = (typeof API.currentNetworkKey === 'function' && API.currentNetworkKey()) || 'unknown';
+        Modal.open({
+            title: 'Run a replenishment cycle now?',
+            bodyHtml:
+                '<p>This starts a <span class="mono">' + escapeHtml(kind) + '</span> cycle on ' +
+                '<strong>' + escapeHtml(network) + '</strong>. The bridge will spend reserve funds ' +
+                'up to the per-cycle cap immediately; there is no undo once the transfer is sent.</p>',
+            confirmLabel: 'Run cycle',
+            onConfirm: function (dialog, helpers) {
+                API.setButtonLoading(btn, true);
+                API.post('/admin/exchange-reserve/replenishment/run', { kind: kind })
+                    .then(function (res) {
+                        Router.showToast((res && res.message) || 'Cycle requested', 'success');
+                        helpers.close();
+                        refreshAll();
+                    })
+                    .catch(function (err) {
+                        Router.showToast('Error: ' + err.message, 'alert');
+                        helpers.close();
+                    })
+                    .then(function () { API.setButtonLoading(btn, false); });
+            }
+        });
     }
 
     function openConfirmFiatModal(cycleId) {
@@ -774,7 +806,13 @@
     document.getElementById('forecast-window').addEventListener('change', function () {
         loadForecast().catch(function (err) { Router.showToast('Error: ' + err.message, 'alert'); });
     });
-    document.getElementById('entry-btn').addEventListener('click', openEntryModal);
+    // Hidden via data-permission for read-only viewers; wire null-safely.
+    var entryBtn = document.getElementById('entry-btn');
+    if (canManage && entryBtn) entryBtn.addEventListener('click', openEntryModal);
+
+    if (!canManage) {
+        Router.showReadOnlyBanner('Reserve actions', 'the admin or treasurer role');
+    }
 
     refreshAll();
 })();

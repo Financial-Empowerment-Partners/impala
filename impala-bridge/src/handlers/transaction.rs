@@ -301,7 +301,10 @@ pub async fn list_transactions(
     }
     .clamped();
 
-    let (where_sql, binds) = build_tx_filters(&params, user.is_admin(), &user.account_id);
+    // ReadTransactions holders (admin, auditor) list across accounts.
+    let cross_account =
+        crate::auth::role_has_capability(&user.role, crate::auth::Capability::ReadTransactions);
+    let (where_sql, binds) = build_tx_filters(&params, cross_account, &user.account_id);
     let n_limit = binds.len() + 1;
     let n_offset = binds.len() + 2;
 
@@ -381,7 +384,9 @@ pub async fn get_transaction(
          WHERE t.btxid = $1",
         ts = TS_FMT
     );
-    if !user.is_admin() {
+    let cross_account =
+        crate::auth::role_has_capability(&user.role, crate::auth::Capability::ReadTransactions);
+    if !cross_account {
         sql.push_str(
             " AND t.source_account IN (SELECT stellar_account_id FROM impala_account \
              WHERE payala_account_id = $2)",
@@ -389,7 +394,7 @@ pub async fn get_transaction(
     }
 
     let mut q = sqlx::query_as::<_, TransactionDetail>(&sql).bind(btxid);
-    if !user.is_admin() {
+    if !cross_account {
         q = q.bind(&user.account_id);
     }
 

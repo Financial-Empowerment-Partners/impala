@@ -976,6 +976,9 @@ resource "aws_ecs_task_definition" "server" {
           { name = "SES_FROM_ADDRESS", value = var.ses_from_address },
           { name = "FCM_PROJECT_ID", value = var.fcm_project_id },
         ],
+        # Appended last so the historical element order above stays intact
+        # ([] default = zero churn).
+        var.seed_protection_environment,
       )
 
       secrets = concat(
@@ -1056,6 +1059,9 @@ resource "aws_ecs_task_definition" "worker" {
           { name = "SES_FROM_ADDRESS", value = var.ses_from_address },
           { name = "FCM_PROJECT_ID", value = var.fcm_project_id },
         ],
+        # Appended last so the historical element order above stays intact
+        # ([] default = zero churn).
+        var.seed_protection_environment,
       )
 
       secrets = concat(

@@ -9,8 +9,9 @@ beforeAll(() => {
 });
 
 describe('Roles.DEFINITIONS', () => {
-    it('defines the four roles', () => {
-        expect(Object.keys(Roles.DEFINITIONS).sort()).toEqual(['admin', 'device', 'token', 'view-only']);
+    it('defines the seven roles', () => {
+        expect(Object.keys(Roles.DEFINITIONS).sort()).toEqual(
+            ['admin', 'auditor', 'device', 'key-custodian', 'token', 'treasurer', 'view-only']);
     });
 });
 
@@ -23,8 +24,8 @@ describe('Roles.roleHasPermission', () => {
         expect(Roles.roleHasPermission('admin', 'review_transactions')).toBe(true);
     });
 
-    it('token can review transactions but not delete accounts or manage roles', () => {
-        expect(Roles.roleHasPermission('token', 'review_transactions')).toBe(true);
+    it('token cannot review transactions (bridge requires admin — a button that always 403s is a lie)', () => {
+        expect(Roles.roleHasPermission('token', 'review_transactions')).toBe(false);
         expect(Roles.roleHasPermission('token', 'delete_accounts')).toBe(false);
         expect(Roles.roleHasPermission('token', 'manage_roles')).toBe(false);
         expect(Roles.roleHasPermission('token', 'manage_reserve')).toBe(false);

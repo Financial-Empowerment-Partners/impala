@@ -1,0 +1,13 @@
+{
+  "//": "THE role -> capability contract, shared by both stacks. The bridge asserts its authorization matrix (impala-bridge/src/auth.rs role_has_capability) against this file, and the UI asserts its permission gating (impala-ui/html/js/roles.js DEFINITIONS) against it, so the two tables cannot drift apart silently. Edit this file only together with both of those.",
+  "capabilities": {
+    "ManageReserve": ["admin", "treasurer"],
+    "ReadReserve": ["admin", "treasurer", "auditor"],
+    "ManageKeys": ["admin", "key-custodian"],
+    "ReadKeys": ["admin", "key-custodian", "auditor"],
+    "ReadAccounts": ["admin", "auditor", "key-custodian"],
+    "ReadTransactions": ["admin", "auditor"],
+    "ReadEvents": ["admin", "auditor"]
+  },
+  "roles": ["view-only", "device", "token", "treasurer", "key-custodian", "auditor", "admin"]
+}

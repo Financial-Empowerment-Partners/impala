@@ -39,6 +39,14 @@ module "live" {
   ses_from_address = var.ses_from_address
   fcm_project_id   = var.fcm_project_id
 
+  # Custodial seed protection (seeds.tf): live is pubnet, so it shares the
+  # primary pubnet CMK (seeds encrypted by the legacy stack stay decryptable
+  # here); the task-role KMS grant is aws_iam_role_policy.live_ecs_task_kms_seeds.
+  # Gated on the backend so the default ("none") passes [] and the task
+  # definitions stay byte-identical (the bridge already defaults
+  # SEED_PROTECTION_BACKEND to "none").
+  seed_protection_environment = var.seed_protection_backend == "none" ? [] : local.seed_protection_env
+
   stellar = {
     network            = "pubnet"
     horizon_url        = "https://horizon.stellar.org"

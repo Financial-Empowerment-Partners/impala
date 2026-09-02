@@ -208,6 +208,35 @@ label { color: var(--text-muted); font-weight: 600; font-size: 0.86rem; }
 
 .theme-toggle:hover { background: rgba(255, 255, 255, 0.12); }
 
+/* Hamburger toggle (router.js buildNav). Hidden at wide widths; the collapse
+   media block below the Responsive section makes it visible. */
+.nav-toggle {
+    display: none;
+    background: transparent;
+    border: 1px solid rgba(255, 255, 255, 0.18);
+    color: var(--topbar-text);
+    border-radius: var(--radius-sm);
+    width: 2.1rem;
+    height: 2.1rem;
+    font-size: 1.05rem;
+    line-height: 1;
+    margin: 0;
+    padding: 0;
+    cursor: pointer;
+}
+
+.nav-toggle:hover { background: rgba(255, 255, 255, 0.12); }
+
+/* Separator between ordinary and privileged nav links: a vertical rule in
+   the horizontal bar (the collapse block flips it horizontal). The top bar
+   is dark in both themes, so the rule keys off the top-bar text color. */
+.nav-separator {
+    width: 1px;
+    align-self: stretch;
+    margin: 0.3rem 0.5rem;
+    background: color-mix(in srgb, var(--topbar-text) 25%, transparent);
+}
+
 /* Network selector */
 .net-selector-item {
     display: flex;
@@ -236,8 +265,11 @@ label { color: var(--text-muted); font-weight: 600; font-size: 0.86rem; }
     opacity: 0.85;
 }
 
-.net-badge.net-testnet { background: var(--warning-soft); color: var(--warning); border-color: color-mix(in srgb, var(--warning) 35%, transparent); }
-.net-badge.net-mainnet { background: var(--success-soft); color: var(--success); border-color: color-mix(in srgb, var(--success) 35%, transparent); }
+/* Risk salience: mainnet moves real money, so it carries the loud filled
+   amber treatment; testnet is the calm one. (This used to be inverted —
+   green mainnet read as "safe" on a real-money console.) */
+.net-badge.net-testnet { background: var(--info-soft); color: var(--info); border-color: color-mix(in srgb, var(--info) 35%, transparent); }
+.net-badge.net-mainnet { background: var(--warning); color: #1b1300; border-color: color-mix(in srgb, var(--warning) 60%, transparent); font-weight: 800; }
 .net-badge.net-warn { box-shadow: 0 0 0 2px color-mix(in srgb, var(--danger) 50%, transparent); }
 .net-badge.net-ok .net-dot { box-shadow: 0 0 0 3px color-mix(in srgb, currentColor 25%, transparent); }
 
@@ -253,6 +285,9 @@ label { color: var(--text-muted); font-weight: 600; font-size: 0.86rem; }
 }
 
 .net-select option { color: #1b2433; }
+/* color-scheme:dark renders the native dropdown popup dark — the fixed dark
+   text above would vanish into it. */
+[data-theme="dark"] .net-select option { color: var(--text); background: var(--surface); }
 
 /* Login-page network selector (rendered on a light surface) */
 .login-card .net-select {
@@ -328,6 +363,32 @@ label { color: var(--text-muted); font-weight: 600; font-size: 0.86rem; }
     gap: 0.6rem;
     flex-wrap: wrap;
 }
+
+/* One-line purpose subtitle: a full flex row under the h3 (the header is a
+   wrapping flex box, so without the basis the paragraph floats beside it). */
+.page-header > .text-muted {
+    flex: 1 1 100%;
+    margin: 0;
+    font-size: 0.9rem;
+}
+
+/* Read-only banner (router.showReadOnlyBanner): states a role property, not
+   an error — info-soft, slim, appended as a full row inside .page-header. */
+.read-only-banner {
+    flex: 1 1 100%;
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    padding: 0.45rem 0.7rem;
+    background: var(--info-soft);
+    border: 1px solid color-mix(in srgb, var(--info) 25%, transparent);
+    border-radius: var(--radius-sm);
+    color: var(--text-muted);
+    font-size: 0.85rem;
+}
+
+.read-only-banner .role-badge { flex: 0 0 auto; }
 
 /* -------------------------------------------------------------------------- */
 /* Cards                                                                      */
@@ -461,15 +522,29 @@ table tbody tr:hover { background: var(--surface-3); }
 /* -------------------------------------------------------------------------- */
 /* Toasts                                                                     */
 /* -------------------------------------------------------------------------- */
+/* The outer container holds two persistent live regions (#toast-assertive,
+   #toast-polite — router.toastContainer); toasts land inside those. The
+   empty fixed region must never eat clicks, hence pointer-events. */
 .toast-container {
     position: fixed;
     top: 1rem;
     right: 1rem;
     z-index: 11000;
     max-width: 400px;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    pointer-events: none;
 }
 
+/* Errors always stack above routine notices, whichever region was created
+   first. */
+#toast-assertive { order: -1; }
+
 .toast {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.75rem;
     padding: 0.8rem 1.1rem;
     margin-bottom: 0.5rem;
     border-radius: var(--radius-sm);
@@ -477,7 +552,29 @@ table tbody tr:hover { background: var(--surface-3); }
     font-weight: 600;
     box-shadow: var(--shadow-md);
     animation: toast-in 0.3s ease-out;
+    pointer-events: auto;
 }
+
+.toast > span { flex: 1 1 auto; }
+
+/* Dismiss button: inherits the toast's text color; padding + negative margin
+   buy a comfortable hit area without inflating the toast. */
+.toast-close {
+    flex: 0 0 auto;
+    background: transparent;
+    border: 0;
+    color: inherit;
+    font-size: 1.15rem;
+    font-weight: 700;
+    line-height: 1;
+    padding: 0.25rem 0.45rem;
+    margin: -0.25rem -0.45rem -0.25rem 0;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    opacity: 0.75;
+}
+
+.toast-close:hover { opacity: 1; }
 
 .toast.success { background: var(--success); }
 .toast.warning { background: var(--warning); color: #1b1300; }
@@ -506,6 +603,13 @@ table tbody tr:hover { background: var(--surface-3); }
 .badge.ok       { background: var(--success-soft); color: var(--success); border-color: color-mix(in srgb, var(--success) 30%, transparent); }
 .badge.error    { background: var(--danger-soft);  color: var(--danger);  border-color: color-mix(in srgb, var(--danger) 30%, transparent); }
 .badge.pending  { background: var(--warning-soft); color: var(--warning); border-color: color-mix(in srgb, var(--warning) 30%, transparent); }
+.badge.warning {
+    /* Filled, not soft-on-soft: this badge flags allowlisted effective-admin
+       accounts, and the soft pairing fails WCAG AA contrast in light mode. */
+    background: var(--warning);
+    color: #1b1300;
+    border-color: transparent;
+}
 .badge.info     { background: var(--info-soft);    color: var(--info);    border-color: color-mix(in srgb, var(--primary) 30%, transparent); }
 .badge.neutral  { background: var(--surface-3);    color: var(--text-muted); border-color: var(--border); }
 
@@ -516,7 +620,14 @@ table tbody tr:hover { background: var(--surface-3); }
 .badge.cleared     { background: var(--success-soft); color: var(--success); border-color: color-mix(in srgb, var(--success) 30%, transparent); }
 .badge.escalated   { background: var(--warning-soft); color: var(--warning); border-color: color-mix(in srgb, var(--warning) 35%, transparent); }
 
-/* Role badges */
+/* Role badges — colored by RISK TIER, not one hue per role:
+     danger fill   = governance (admin)
+     warning fill  = moves money (treasurer)
+     brand fill    = key custody (key-custodian)
+     neutral       = read-only oversight (auditor, view-only)
+     dashed neutral = a role this build does not know (deploy skew)
+   The transparent base border keeps every pill the same size as the
+   bordered ones. */
 .role-badge {
     display: inline-block;
     padding: 0.15rem 0.5rem;
@@ -524,12 +635,26 @@ table tbody tr:hover { background: var(--surface-3); }
     font-size: 0.72rem;
     font-weight: 700;
     letter-spacing: 0.2px;
+    border: 1px solid transparent;
 }
 
 .role-badge.admin     { background: var(--danger);  color: #fff; }
 .role-badge.token     { background: var(--brand-600); color: #fff; }
 .role-badge.device    { background: var(--success); color: #fff; }
-.role-badge.view-only { background: var(--surface-3); color: var(--text-muted); }
+/* Dark text on amber, like .toast.warning — white fails contrast on amber. */
+.role-badge.treasurer     { background: var(--warning); color: #1b1300; }
+.role-badge.key-custodian { background: var(--primary); color: var(--primary-contrast); }
+.role-badge.view-only,
+.role-badge.auditor {
+    background: var(--surface-3);
+    color: var(--text-muted);
+    border-color: var(--border-strong);
+}
+.role-badge.unknown {
+    background: var(--surface-2);
+    color: var(--text-muted);
+    border: 1px dashed var(--text-faint);
+}
 
 /* -------------------------------------------------------------------------- */
 /* Empty state + skeleton loaders                                             */
@@ -539,8 +664,22 @@ table tbody tr:hover { background: var(--surface-3); }
     padding: 2.5rem 1rem;
     color: var(--text-muted);
 }
-.empty-state .empty-icon { font-size: 1.8rem; opacity: 0.6; display: block; margin-bottom: 0.5rem; }
+/* Two icon spellings ship: .empty-icon (tables) and .empty-state-icon
+   (router.requirePermission). */
+.empty-state .empty-icon,
+.empty-state .empty-state-icon { font-size: 1.8rem; opacity: 0.6; display: block; margin-bottom: 0.5rem; }
 .empty-state h6 { color: var(--text); margin-bottom: 0.25rem; }
+
+/* Page guard (router.requirePermission): replaces an entire page body, so it
+   gets room to breathe and a heading-scale icon. */
+.empty-state.page-denied {
+    padding: 4.5rem 1.5rem;
+    max-width: 34rem;
+    margin: 0 auto;
+}
+.empty-state.page-denied .empty-state-icon { font-size: 2.6rem; margin-bottom: 0.85rem; }
+.empty-state.page-denied h4 { color: var(--text); margin-bottom: 0.6rem; }
+.empty-state.page-denied p { margin-bottom: 0.6rem; }
 
 .skeleton {
     position: relative;
@@ -636,14 +775,16 @@ table tbody tr:hover { background: var(--surface-3); }
 .drawer-body { padding: 1.25rem; overflow-y: auto; flex: 1; }
 
 /* Detail layout used inside the drawer */
-.detail-grid {
+/* .kv is the same shape emitted by keys.js */
+.detail-grid,
+.kv {
     display: grid;
     grid-template-columns: minmax(7rem, auto) 1fr;
     gap: 0.45rem 1rem;
     margin-bottom: 1rem;
 }
-.detail-grid dt { color: var(--text-muted); font-weight: 600; font-size: 0.84rem; }
-.detail-grid dd { margin: 0; color: var(--text); word-break: break-word; }
+.detail-grid dt, .kv dt { color: var(--text-muted); font-weight: 600; font-size: 0.84rem; }
+.detail-grid dd, .kv dd { margin: 0; color: var(--text); word-break: break-word; }
 
 .detail-section {
     border-top: 1px solid var(--border);
@@ -726,6 +867,29 @@ table tbody tr:hover { background: var(--surface-3); }
     outline-offset: 2px;
 }
 
+/* Accessibility: skip-to-content link — first tab stop on every page,
+   invisible until keyboard focus lands on it. */
+.skip-link {
+    position: fixed;
+    top: 0.6rem;
+    left: 0.6rem;
+    z-index: 13000;
+    padding: 0.55rem 0.9rem;
+    background: var(--surface);
+    color: var(--primary);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    box-shadow: var(--shadow-md);
+    font-weight: 600;
+    transform: translateY(-300%);
+}
+
+.skip-link:focus { transform: none; }
+
+/* The skip target takes programmatic focus (tabindex="-1"); no ring around
+   the whole page body. */
+#main-content:focus { outline: none; }
+
 /* Button loading spinner */
 .btn-loading {
     position: relative;
@@ -747,19 +911,100 @@ table tbody tr:hover { background: var(--surface-3); }
     animation: spin 0.6s linear infinite;
 }
 
-/* Form validation error text */
-.field-error {
+/* Form validation error text (.form-error is the spelling the reserve/keys
+   modals emit) */
+.field-error,
+.form-error {
     color: var(--danger);
     font-size: 0.8rem;
     margin-top: 0.25rem;
 }
 
+/* Stat tiles (reserve.js bucket cards) */
+.stat-card {
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 0.85rem 1rem;
+    margin-bottom: 1rem;
+    height: calc(100% - 1rem);
+}
+
+.stat-value {
+    font-size: 1.45rem;
+    font-weight: 700;
+    color: var(--text);
+    font-variant-numeric: tabular-nums;
+    margin: 0.15rem 0;
+}
+
 /* -------------------------------------------------------------------------- */
 /* Responsive                                                                 */
 /* -------------------------------------------------------------------------- */
+
+/* Nav collapse. The wrappers and menus flatten (display: contents) so every
+   menu item is a flex child of the bar itself: brand, network selector and
+   hamburger form a persistent top row, and the remaining items stack
+   full-width underneath only while #main-nav carries .nav-open (router.js
+   toggles the class and aria-expanded; no JS here). The breakpoint must
+   override Foundation's own top-bar rules on both sides of its 640px break. */
+@media screen and (max-width: 719px) {
+    .top-bar {
+        flex-wrap: wrap;
+        align-items: center;
+        row-gap: 0.2rem;
+    }
+
+    .top-bar .top-bar-left,
+    .top-bar .top-bar-right,
+    .top-bar .top-bar-left .menu,
+    .top-bar .top-bar-right .menu { display: contents; }
+
+    /* Persistent row: brand left, network selector, hamburger at the edge */
+    .top-bar .menu-text.brand { order: -3; margin-right: auto; }
+    .top-bar .net-selector-item { order: -2; }
+    .nav-toggle {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        order: -1;
+    }
+
+    /* Everything else renders only while open, one item per row */
+    .top-bar .menu > li:not(.brand):not(.net-selector-item) { display: none; }
+    .top-bar.nav-open .menu > li:not(.brand):not(.net-selector-item) {
+        display: block;
+        flex: 0 0 100%;
+        max-width: 100%;
+    }
+    .top-bar.nav-open .menu > li > a { display: block; }
+
+    /* The privileged-group separator reads horizontal in the stacked panel */
+    .top-bar.nav-open .nav-separator {
+        width: auto;
+        height: 1px;
+        align-self: auto;
+        margin: 0.35rem 0;
+    }
+}
+
 @media screen and (max-width: 640px) {
     .login-card { margin: 1rem; }
     .page-header { align-items: flex-start; }
     .drawer { max-width: 100%; }
     .filter-bar .field { flex: 1 1 100%; }
+}
+
+/* -------------------------------------------------------------------------- */
+/* Reduced motion: collapse every transition and animation (theme fades,      */
+/* skeleton shimmer, toast slide/fade, drawer slide) to effectively instant.  */
+/* -------------------------------------------------------------------------- */
+@media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01ms !important;
+    }
 }

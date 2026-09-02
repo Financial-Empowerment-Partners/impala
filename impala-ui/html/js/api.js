@@ -10,9 +10,12 @@
  *  - temporal_token (1-hour): obtained from refresh_token, used for API calls
  *
  * Features:
- *  - X-Request-Nonce header on all requests (server-side dedup)
+ *  - X-Request-Nonce header on all requests (per-request id for tracing; NOT
+ *    a server-side idempotency key — the bridge does not dedup on it)
  *  - Error message sanitization (strips HTML/SQL, maps status codes)
- *  - Exponential backoff retry (GET: network + 5xx; mutating: network only)
+ *  - Exponential backoff retry for idempotent GETs only (network + 5xx);
+ *    mutating requests are never auto-retried, since a network error may hide
+ *    an applied write and there is no idempotency key to make a retry safe
  *
  * Authentication is bearer-token only: every mutation carries an Authorization
  * header, so no ambient credential is attached and these requests are not
@@ -117,7 +120,13 @@ var API = (function () {
             if (parts.length !== 3) return null;
             var payload = parts[1];
             if (!payload) return null;
-            return JSON.parse(atob(payload));
+            // JWT payloads are base64URL (- and _ instead of + and /, no
+            // padding); atob wants standard base64. Translate and re-pad, or a
+            // token whose payload happens to contain - or _ fails to decode
+            // and is wrongly treated as expired forever.
+            var b64 = payload.replace(/-/g, '+').replace(/_/g, '/');
+            while (b64.length % 4 !== 0) { b64 += '='; }
+            return JSON.parse(atob(b64));
         } catch (e) {
             return null;
         }
@@ -282,7 +291,12 @@ var API = (function () {
         }).then(function (data) {
             refreshPromise = null;
             if (data.temporal_token) {
-                setTokens(data.temporal_token, null);
+                // Persist the ROTATED refresh token too: the bridge rotates
+                // the refresh family on every refresh and treats a re-use of
+                // the old token as theft (killing the family). Discarding it
+                // here meant the next refresh replayed the burned token and
+                // the session died on its second refresh — store both.
+                setTokens(data.temporal_token, data.refresh_token || null);
                 return data.temporal_token;
             }
             throw new Error('No temporal token in response');
@@ -314,11 +328,16 @@ var API = (function () {
      * @returns {boolean}
      */
     function shouldRetry(method, networkError, res) {
-        // Always retry on network errors (for any method)
+        // Only idempotent reads are auto-retried. A network error on a
+        // mutating request (POST/PUT/DELETE) is AMBIGUOUS — the request may
+        // have reached the bridge and applied before the connection dropped —
+        // and there is no server-side request-dedup, so a blind retry can
+        // double-submit a money-moving operation (a second disbursement,
+        // refund, role grant, etc.). Surface the error instead and let the
+        // operator decide. GET carries no such side effect.
+        if (method !== 'GET') return false;
         if (networkError) return true;
-        // For GET, also retry on 5xx
-        if (method === 'GET' && res && res.status >= 500) return true;
-        // Don't retry 4xx or mutating method 5xx
+        if (res && res.status >= 500) return true;
         return false;
     }
 
@@ -372,12 +391,14 @@ var API = (function () {
                             authHealed = true;
                             return refreshTemporalToken().then(doFetch).catch(function () {
                                 clearTokens();
-                                window.location.href = 'index.html';
+                                // ?reason=expired lets the login page explain the
+                                // bounce — a silent redirect reads as a crash.
+                                window.location.href = 'index.html?reason=expired';
                                 return Promise.reject(new Error('Unauthorized'));
                             });
                         }
                         clearTokens();
-                        window.location.href = 'index.html';
+                        window.location.href = 'index.html?reason=expired';
                         return Promise.reject(new Error('Unauthorized'));
                     }
 
@@ -409,7 +430,7 @@ var API = (function () {
         }).catch(function (err) {
             // No refresh token / refresh failed: bounce to login.
             if (err && err.message === 'Session expired') {
-                window.location.href = 'index.html';
+                window.location.href = 'index.html?reason=expired';
             }
             throw err;
         });
@@ -443,7 +464,8 @@ var API = (function () {
     }
 
     /**
-     * Set a button to a loading state (disabled + spinner) or restore it.
+     * Set a button to a loading state (disabled + spinner + aria-busy) or
+     * restore it.
      * @param {HTMLButtonElement} btn - The button element.
      * @param {boolean} loading - True to show loading, false to restore.
      */
@@ -454,9 +476,11 @@ var API = (function () {
                 btn.setAttribute('data-original-text', btn.textContent);
             }
             btn.disabled = true;
+            btn.setAttribute('aria-busy', 'true');
             btn.classList.add('btn-loading');
         } else {
             btn.disabled = false;
+            btn.removeAttribute('aria-busy');
             btn.classList.remove('btn-loading');
             var orig = btn.getAttribute('data-original-text');
             if (orig) {
@@ -492,9 +516,9 @@ var API = (function () {
         put: function (path, body) {
             return request('PUT', path, body).then(jsonOrError);
         },
-        /** Authenticated DELETE request. Returns parsed JSON or text. */
-        del: function (path) {
-            return request('DELETE', path).then(jsonOrError);
+        /** Authenticated DELETE request (optional JSON body). Returns parsed JSON or text. */
+        del: function (path, body) {
+            return request('DELETE', path, body).then(jsonOrError);
         },
 
         /**

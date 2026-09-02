@@ -41,7 +41,7 @@ Six components span from on-chain smart contracts through a REST API server down
 | **impala-soroban** | Rust / Soroban SDK | `MultisigUsdcWrapper` smart contract — USDC-specific wrapper with time-locked operations and multisig verification |
 | **impala-lib** | Kotlin / Android | Android library for NFC (IsoDep + NDEF) and geolocation integration |
 | **impala-android-demo** | Kotlin / Android | Demo app with 5 auth methods, card management, transfers, and push notifications |
-| **impala-ui** | JavaScript / HTML / CSS | Admin dashboard with client-side RBAC (4 roles), served via Nginx |
+| **impala-ui** | JavaScript / HTML / CSS | Admin dashboard with server-driven RBAC (7 roles, capability matrix shared with the bridge), served via Nginx |
 
 ## Key Capabilities
 
@@ -60,7 +60,7 @@ Six components span from on-chain smart contracts through a REST API server down
 cd impala-bridge
 docker compose up
 
-# Run bridge tests (158 tests covering handlers, validation, jobs, models)
+# Run bridge tests (~700 tests covering handlers, validation, jobs, models)
 cargo test
 
 # Run JavaCard SDK tests (JVM, no hardware needed)
@@ -89,12 +89,14 @@ cargo test
 ### Card-Based Payment
 
 1. Cardholder taps phone → NFC discovers Impala applet via AID `0102030405060708`
-2. App sends `GET_USER_DATA` (INS 0x1E) → card returns account ID, card ID, cardholder name
-3. App sends `GET_EC_PUB_KEY` (INS 0x24) → card returns 65-byte secp256r1 public key
-4. App sends `SIGN_AUTH` (INS 0x25) with timestamp → card returns ECDSA-SHA256 signature
-5. App derives password from `SHA-256(cardId)` and authenticates with bridge
-6. App calls `POST /transaction` with dual-chain identifiers
+2. App reads the account id (`GET_ACCOUNT_ID`, INS 0x16) and, if needed, the card id
+3. App requests a fresh single-use server challenge (`POST /auth/card/challenge`)
+4. App sends `SIGN_AUTH` (INS 0x25) → card ECDSA-signs `"IMPALA-AUTH:" || accountId || challenge`
+5. App exchanges the signature for a JWT session (`POST /auth/card`); the bridge verifies the signature against the account's registered card key
+6. App records the transaction via `POST /transaction` with dual-chain identifiers
 7. Bridge records transaction, fires `transfer_outgoing` notification to subscriber channels
+
+See `impala-card/docs/apdu.md` for the full APDU interface and login flow.
 
 ### Token Wrapping via Smart Contract
 

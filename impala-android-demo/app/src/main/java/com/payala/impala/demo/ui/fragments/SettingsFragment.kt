@@ -221,7 +221,7 @@ class SettingsFragment : Fragment(R.layout.fragment_settings) {
 
         viewLifecycleOwner.lifecycleScope.launch {
             try {
-                val subs = api.listSubscriptions()
+                val subs = api.listSubscriptions().data
                 val active = subs.count { it.enabled }
                 _binding?.tvNotificationStatus?.text = if (subs.isEmpty()) {
                     "No subscriptions configured"

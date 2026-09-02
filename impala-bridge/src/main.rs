@@ -593,7 +593,9 @@ async fn run_server(
         .route("/healthz", get(health::liveness))
         .route("/readyz", get(health::readiness))
         .route("/network", get(network::network_info))
-        // Admin-only webhook event feed (all gated by the AdminUser extractor).
+        // Webhook management and event feed: register/delete/test stay
+        // AdminUser-gated; the list/feed reads take Privileged<ReadEvents>
+        // (admin, auditor).
         .route(
             "/admin/webhooks",
             post(admin_webhook::register_webhook).get(admin_webhook::list_webhooks),
@@ -607,7 +609,9 @@ async fn run_server(
             post(admin_webhook::test_webhook),
         )
         .route("/admin/events", get(admin_webhook::list_events))
-        // Bridge key management (all AdminUser-gated). These install the
+        // Bridge key management: reads on Privileged<ReadKeys> (admin,
+        // key-custodian, auditor), mutations on Privileged<ManageKeys>
+        // (admin, key-custodian). These install the
         // credentials that move money — see the DANGER block in
         // handlers/admin_keys.rs and docs/runbooks/import-keys.md. Imports ADD
         // by default; replacing anything already in effect requires an
@@ -624,7 +628,9 @@ async fn run_server(
             post(admin_keys::generate_seed),
         )
         .route("/admin/stellar-seeds/import", post(admin_keys::import_seed))
-        // Conversion-reserve management (all AdminUser-gated): pool status,
+        // Conversion-reserve management: reads on Privileged<ReadReserve>
+        // (admin, treasurer, auditor), money mutations on
+        // Privileged<ManageReserve> (admin, treasurer): pool status,
         // per-provider routing policies ($20-$200 thresholds), the manual
         // ledger, stray-inflow queue, utilization forecast, and resolution of
         // orders waiting on an admin (fiat disbursement / frozen payouts).

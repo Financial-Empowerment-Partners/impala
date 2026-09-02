@@ -39,7 +39,9 @@ var Validate = (function () {
             return { valid: false, message: 'Phone number is required' };
         }
         value = value.trim();
-        if (!/^\+[0-9]{7,14}$/.test(value)) {
+        // E.164 allows up to 15 digits total after the '+'; the old {7,14}
+        // upper bound rejected valid 15-digit numbers.
+        if (!/^\+[0-9]{7,15}$/.test(value)) {
             return { valid: false, message: 'Phone must be E.164 format (e.g. +1234567890)' };
         }
         return { valid: true, message: '' };

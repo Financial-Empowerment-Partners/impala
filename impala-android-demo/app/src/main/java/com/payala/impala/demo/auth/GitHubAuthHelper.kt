@@ -33,6 +33,14 @@ class GitHubAuthHelper(private val activity: Activity) {
         private const val GITHUB_AUTH_URL = "https://github.com/login/oauth/authorize"
 
         var pendingCallback: ((GitHubSignInResult) -> Unit)? = null
+
+        /**
+         * CSRF `state` for the in-flight authorization request. The redirect
+         * activity is exported (BROWSABLE deep link), so any app can deliver a
+         * callback — [GitHubRedirectActivity] must reject callbacks whose
+         * `state` does not match this value (as [OktaRedirectActivity] does).
+         */
+        var pendingState: String? = null
     }
 
     /** Opens a Custom Chrome Tab for GitHub authorization. Results arrive via [pendingCallback]. */
@@ -47,6 +55,7 @@ class GitHubAuthHelper(private val activity: Activity) {
             .build()
 
         pendingCallback = callback
+        pendingState = state
 
         val customTabsIntent = CustomTabsIntent.Builder()
             .setShowTitle(true)

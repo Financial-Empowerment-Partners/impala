@@ -15,12 +15,15 @@
 
 ## First 10 minutes
 
-1. **Check dashboards.** CloudWatch `impala-bridge-ops` and SigNoz service
+1. **Check dashboards.** CloudWatch dashboard
+   `<project>-<environment>-dashboard` (e.g. `impala-bridge-staging-dashboard`;
+   URL in `terraform output -raw cloudwatch_dashboard_url`) and SigNoz service
    `impala-bridge`. Look for an obvious spike: 5xx rate, latency p99, CPU,
    memory, DB connections, Redis errors, SQS backlog, DLQ depth.
 2. **Check `/healthz` and `/readyz`** from outside the VPC (e.g. your
-   laptop). If one fails, note which of `database` or `redis` in the
-   response body is `error`.
+   laptop). Both return only a status code, no body. If `/readyz` is 503,
+   `GET /health` identifies the failing dependency — its response carries
+   `database` and `redis` fields (`ok`/`error`).
 3. **Check ECS task count.** Lower-than-desired = tasks are crash-looping.
    Same-as-desired but with elevated errors = application bug, not infra.
 4. **Announce in the incident channel** what you see, with timestamp.
@@ -45,7 +48,8 @@ and `bridge.seed_provisioned` entries nobody can account for.
 ### `/readyz` is 503
 
 The probe fails if either the Postgres SELECT 1 query or the Redis PING
-fails. Check the response body to identify which.
+fails. `/readyz` itself returns no body — call `GET /health` and read its
+`database` / `redis` fields to identify which.
 
 - **DB unhealthy:** check RDS status in console. Failover if Multi-AZ hasn't
   already (it should be automatic). If RDS is healthy, look at the ECS
@@ -84,10 +88,12 @@ Look for patterns:
 ### Auth is broken (users can't log in)
 
 1. **Check Redis health.** Auth rate limit and lockout checks fail-closed.
-2. **Check JWT_SECRET.** If it was just rotated, all existing tokens are
-   invalidated — users need to log in again. This is *expected*, not an
-   incident. If a partial rotation left services with mismatched secrets,
-   see `rotate-secrets.md`.
+2. **Check JWT_SECRET.** If it was just rotated *without* the
+   `JWT_SECRET_PREVIOUS` overlap, all existing tokens are invalidated —
+   users need to log in again. That is *expected* for an emergency rotation,
+   not an incident; a scheduled rotation done with the overlap logs nobody
+   out. If a partial rotation left services with mismatched secrets, see
+   `rotate-secrets.md`.
 3. **Check SSO providers** via `/auth/sso/<provider>/config` (e.g. `/auth/sso/okta/config`).
    If a provider that should be enabled reports `{"enabled":false}`, its discovery/JWKS
    fetch failed at startup — check the `oidc[<provider>]` logs and issuer/JWKS reachability.
@@ -121,15 +127,18 @@ Treat as Sev 1 regardless of impact.
 
 ## Logging and telemetry locations
 
+Resource names below use `<prefix>` = `<project>-<environment>` (defaults:
+`impala-bridge-staging`).
+
 | Signal | Where | Notes |
 |---|---|---|
-| Structured app logs | CloudWatch log group `/ecs/impala-bridge` | JSON; filter with Logs Insights |
+| Structured app logs | CloudWatch log groups `/ecs/<prefix>-server` and `/ecs/<prefix>-worker` (`terraform output -raw server_log_group` / `worker_log_group`) | JSON; filter with Logs Insights |
 | Traces | SigNoz (if `signoz_endpoint` configured) | Service: `impala-bridge` |
 | Metrics | CloudWatch or SigNoz | Key metrics in `telemetry.rs::AppMetrics` |
-| ALB access logs | S3 bucket (see `terraform output -raw alb_logs_bucket`) | Partitioned by date |
-| VPC flow logs | CloudWatch log group `/vpc/flow-logs` | REJECT traffic only |
+| ALB access logs | S3 bucket `<prefix>-alb-logs-<account-id>` (`terraform/s3.tf`; there is no Terraform output for it) | Partitioned by date under the `alb/` prefix |
+| VPC flow logs | CloudWatch log group `/vpc/<prefix>-flow-logs` | REJECT traffic only |
 | WAF | CloudWatch dashboards | Blocked request details |
-| SQS DLQ | CloudWatch alarm `impala-bridge-dlq-depth` (when alert_email is set) | |
+| SQS DLQ | CloudWatch alarm `<prefix>-worker-dlq` (when alert_email is set) | |
 
 ## Escalation
 

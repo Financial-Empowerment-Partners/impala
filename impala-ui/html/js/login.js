@@ -29,6 +29,21 @@
         sessionStorage.removeItem('okta_error');
     }
 
+    // Session-expiry bounce (api.js redirects here with ?reason=expired):
+    // explain politely why the user is back at login. Rendered as its own
+    // callout — reusing #login-error would restyle later real errors, and
+    // Router (toasts) is not loaded on this page.
+    if (/[?&]reason=expired(&|$)/.test(window.location.search)) {
+        var expiredNotice = document.createElement('div');
+        expiredNotice.className = 'callout primary';
+        expiredNotice.setAttribute('role', 'status');
+        expiredNotice.textContent = 'Session expired — please sign in again';
+        var loginCard = document.querySelector('.login-card');
+        if (loginCard) {
+            loginCard.insertBefore(expiredNotice, errorDiv);
+        }
+    }
+
     // Initialize SSO (renders a button per enabled provider)
     SsoAuth.init(['okta', 'auth0', 'duo', 'openbao']);
 

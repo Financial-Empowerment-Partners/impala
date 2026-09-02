@@ -8,10 +8,11 @@
     <link rel="stylesheet" href="css/app.css">
 </head>
 <body>
+    <a class="skip-link" href="#main-content">Skip to content</a>
     <div class="top-bar" id="main-nav"></div>
     <div id="toast-container" class="toast-container"></div>
 
-    <div class="grid-container">
+    <div class="grid-container" id="main-content" tabindex="-1">
         <div class="page-header">
             <h3>Bridge Keys</h3>
             <p class="text-muted">Provider credentials and custodial Stellar seeds. Imports <strong>add</strong> by default; replacing anything already in effect needs an explicit confirmation.</p>
@@ -56,7 +57,7 @@
             <div class="card-section">
                 <h5>Custodial Stellar seeds</h5>
                 <p class="text-muted">Provision a seed the bridge generates itself, or bring an existing one under custody. The conversion-reserve account is <strong>generate-only</strong>: an imported reserve seed would leave the pool&rsquo;s signing key in a person&rsquo;s hands.</p>
-                <div class="button-group">
+                <div class="button-group" data-permission="manage_keys">
                     <button class="button" id="seed-generate">Generate a seed</button>
                     <button class="button secondary" id="seed-import">Import a seed</button>
                 </div>

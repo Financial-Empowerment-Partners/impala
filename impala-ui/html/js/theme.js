@@ -1,23 +1,63 @@
 /**
- * Light/dark theme module.
+ * Light/dark theme module, three-state: an explicit choice ('light'/'dark')
+ * persisted in localStorage under `impala_theme`, or no stored value, which
+ * follows the operating system via prefers-color-scheme (and tracks live OS
+ * changes until the user chooses explicitly). The resolution is a pure
+ * function, `resolve`, so the precedence — explicit choice beats system —
+ * is unit-testable without a DOM.
  *
- * Persists the choice in localStorage under `impala_theme` and reflects it on
- * the document root via `data-theme="dark"` (the stylesheet keys all dark
- * overrides off that attribute). Applies the saved theme immediately on load to
- * avoid a flash of the wrong theme.
+ * The dark palette keys off `data-theme="dark"` on the document root, and
+ * `color-scheme` is set alongside it so native controls (scrollbars,
+ * selects, date pickers) match the rendered theme.
  *
  * @module Theme
  */
 var Theme = (function () {
     var STORAGE_KEY = 'impala_theme';
 
-    /** @returns {string} 'light' or 'dark' (defaults to 'light'). */
-    function get() {
+    /**
+     * Pure resolution: what theme should render given the stored choice and
+     * the system preference. An explicit stored choice always wins — the
+     * toggle persists one, so toggling away from the system theme sticks.
+     * @param {string|null} stored - 'light', 'dark', or null/unknown.
+     * @param {boolean} systemPrefersDark
+     * @returns {string} 'light' or 'dark'.
+     */
+    function resolve(stored, systemPrefersDark) {
+        if (stored === 'dark') return 'dark';
+        if (stored === 'light') return 'light';
+        return systemPrefersDark ? 'dark' : 'light';
+    }
+
+    /** @returns {string|null} The explicitly stored choice, or null. */
+    function stored() {
         try {
-            return localStorage.getItem(STORAGE_KEY) === 'dark' ? 'dark' : 'light';
+            var v = localStorage.getItem(STORAGE_KEY);
+            return v === 'dark' || v === 'light' ? v : null;
         } catch (e) {
-            return 'light';
+            return null;
         }
+    }
+
+    /** @returns {boolean} Whether the OS prefers dark (false when unknowable). */
+    function systemPrefersDark() {
+        try {
+            return typeof window !== 'undefined'
+                && typeof window.matchMedia === 'function'
+                && window.matchMedia('(prefers-color-scheme: dark)').matches;
+        } catch (e) {
+            return false;
+        }
+    }
+
+    /** The theme that should currently render. */
+    function resolved() {
+        return resolve(stored(), systemPrefersDark());
+    }
+
+    /** Back-compat alias: the effective theme ('light' or 'dark'). */
+    function get() {
+        return resolved();
     }
 
     /** Reflect a theme on the document root without persisting it. */
@@ -29,9 +69,10 @@ var Theme = (function () {
         } else {
             root.removeAttribute('data-theme');
         }
+        root.style.colorScheme = theme === 'dark' ? 'dark' : 'light';
     }
 
-    /** Persist and apply a theme. */
+    /** Persist an explicit choice and apply it. */
     function set(theme) {
         var normalized = theme === 'dark' ? 'dark' : 'light';
         try {
@@ -41,25 +82,42 @@ var Theme = (function () {
     }
 
     /**
-     * Toggle between light and dark.
+     * Toggle from the currently rendered theme; the result becomes an
+     * explicit choice (system-following ends at the first toggle).
      * @returns {string} The new theme.
      */
     function toggle() {
-        var next = get() === 'dark' ? 'light' : 'dark';
+        var next = resolved() === 'dark' ? 'light' : 'dark';
         set(next);
         return next;
     }
 
-    /** Apply the persisted theme (safe to call repeatedly). */
+    /** Apply the resolved theme (safe to call repeatedly). */
     function init() {
-        apply(get());
+        apply(resolved());
     }
 
-    var api = { get: get, apply: apply, set: set, toggle: toggle, init: init };
+    var api = {
+        resolve: resolve,
+        resolved: resolved,
+        get: get,
+        apply: apply,
+        set: set,
+        toggle: toggle,
+        init: init
+    };
 
-    // Apply ASAP so the page does not flash the default theme.
+    // Apply ASAP so the page does not flash the wrong theme, and track live
+    // OS switches while no explicit choice is stored.
     if (typeof document !== 'undefined') {
-        try { apply(get()); } catch (e) { /* ignore */ }
+        try { apply(resolved()); } catch (e) { /* ignore */ }
+        try {
+            if (typeof window !== 'undefined' && typeof window.matchMedia === 'function') {
+                window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', function () {
+                    if (stored() === null) apply(resolved());
+                });
+            }
+        } catch (e) { /* older browsers: no live tracking */ }
     }
 
     return api;

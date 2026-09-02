@@ -62,15 +62,20 @@
                     return;
                 }
 
+                // The bridge returns {mfa_type, enabled, configured} per
+                // enrollment (no status/verified/created_at). The old render
+                // referenced fields that never exist and mis-grouped
+                // `item.status || item.verified ? ...` so every row read
+                // "Pending" with a blank date.
                 var html = '<table><thead><tr>' +
-                    '<th>Type</th><th>Status</th><th>Created</th>' +
+                    '<th>Type</th><th>Status</th><th>Secret</th>' +
                     '</tr></thead><tbody>';
 
                 items.forEach(function (item) {
                     html += '<tr>' +
                         '<td>' + escapeHtml(item.mfa_type || '') + '</td>' +
-                        '<td>' + escapeHtml(item.status || item.verified ? 'Verified' : 'Pending') + '</td>' +
-                        '<td>' + escapeHtml(item.created_at || '') + '</td>' +
+                        '<td>' + (item.enabled ? 'Enabled' : 'Disabled') + '</td>' +
+                        '<td>' + (item.configured ? 'Configured' : 'Not configured') + '</td>' +
                         '</tr>';
                 });
                 html += '</tbody></table>';
@@ -103,30 +108,39 @@
             mfa_type: mfaTypeSelect.value
         };
 
-        if (mfaTypeSelect.value === 'totp') {
-            var secret = document.getElementById('enroll-secret').value.trim();
-            var secretCheck = Validate.required(secret);
-            if (!secretCheck.valid) {
-                Router.showToast('TOTP secret is required', 'warning');
-                return;
-            }
-            body.secret = secret;
-        } else {
+        // TOTP secrets are generated server-side; the client sends none. SMS
+        // needs a phone number, and the bridge's field is `phone_number`
+        // (the old `phone` key was silently dropped, so SMS enrollment always
+        // returned success:false while the UI toasted success).
+        if (mfaTypeSelect.value === 'sms') {
             var phone = document.getElementById('enroll-phone').value.trim();
             var phoneCheck = Validate.phone(phone);
             if (!phoneCheck.valid) {
                 Router.showToast(phoneCheck.message, 'warning');
                 return;
             }
-            body.phone = phone;
+            body.phone_number = phone;
         }
 
         var submitBtn = enrollForm.querySelector('button[type="submit"]');
         API.setButtonLoading(submitBtn, true);
+        var resultDiv = document.getElementById('enroll-result');
+        if (resultDiv) resultDiv.classList.add('hidden');
 
         API.post('/mfa', body)
             .then(function (data) {
+                // Honor the success envelope: a 200 can still be a failure.
+                if (data && data.success === false) {
+                    Router.showToast(data.message || 'Enrollment failed', 'alert');
+                    return;
+                }
                 Router.showToast('MFA enrolled successfully', 'success');
+                // Surface the TOTP setup link so the operator can register it
+                // in an authenticator — without it, TOTP MFA is unusable.
+                if (resultDiv && data && data.provisioning_uri) {
+                    resultDiv.textContent = 'Add this to your authenticator: ' + data.provisioning_uri;
+                    resultDiv.classList.remove('hidden');
+                }
                 enrollForm.reset();
                 // Reset field visibility
                 totpField.classList.remove('hidden');

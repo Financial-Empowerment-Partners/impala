@@ -38,7 +38,7 @@ Accounts:
   account show <G...>        Show an account's bridge record
   account onchain <G...>     Show live on-chain balances and signers
   account reserves <id>      Show Payala reserve balances
-  account list               List accounts (admin)
+  account list               List accounts (admin, auditor, or key-custodian)
 
 Syncing:
   sync force <G...>          Force a sync + Soroban RPC reconcile (admin)
@@ -54,9 +54,9 @@ Activity:
   activity list              List transactions with their review state
   activity show <btxid>      Show one transaction in full
   activity review <btxid>    Set review status / flag / note (admin)
-  activity events            Read the admin event feed (admin)
+  activity events            Read the admin event feed (admin or auditor)
 
-Bridge keys (admin) — installs the credentials that move money:
+Bridge keys (admin or key-custodian) — installs the credentials that move money:
   keys list                  Show provider credentials: running, stored, gap
   keys import <kind>         Import or replace a provider credential set
   keys revoke <kind>         Revoke a stored credential (not at the provider)

@@ -88,8 +88,9 @@ If you need a second admin, grant the role from the UI's Accounts page
 allowlist that overrides the database role at token issuance. The allowlist is
 the escape hatch when you have locked yourself out of the console.
 
-> **A role change takes effect at the next token refresh.** `impalactl logout`
-> then `login` is the fastest way to pick it up.
+> **A role change signs the target out on the spot** — the bridge revokes
+> their tokens and sessions with the grant. `impalactl login` again to
+> receive the new role.
 
 > **`ALLOW_OPEN_REGISTRATION=true` is not a convenience toggle.** With it on,
 > `POST /authenticate` will set a password on *any* existing account that has no

@@ -45,6 +45,12 @@ resource "aws_ecr_lifecycle_policy" "bridge" {
           type = "expire"
         }
       },
+      # Legacy cleanup only: CI (.github/workflows/ci.yml) no longer pushes
+      # "latest"/branch tags — the repo is IMMUTABLE, so CI pushes only the
+      # per-commit :<sha>(-<arch>) tags. Those sha tags are deliberately NOT
+      # expired here: terraform deploys pin container_image_tag = <sha>, and
+      # expiring an old sha that a still-running task definition references
+      # would break ECS scale-out/rollback for that service.
       {
         rulePriority = 2
         description  = "Keep last 10 tagged images"

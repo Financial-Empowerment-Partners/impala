@@ -51,18 +51,24 @@ tags:
   - name: account
     description: Account CRUD.
   - name: admin
-    description: Admin-only cross-account management (list/delete/role/profile-sync).
+    description: >
+      Privileged cross-account management. Listing accounts needs the
+      ReadAccounts capability (admin, auditor, or key-custodian);
+      delete/role/profile-sync remain admin-only.
   - name: reserve
     description: >
       Conversion reserve — a bridge-owned pool that fulfills exchange orders
       under a per-provider threshold ($20-$200) instead of routing them to the
-      external provider. Admin-only management, ledger, and utilization
-      forecasting.
+      external provider. Reads need the ReadReserve capability (admin,
+      treasurer, or auditor); mutations need ManageReserve (admin or
+      treasurer).
   - name: managed-account
     description: Custodial Stellar accounts — server-side seed generation/import and sign+submit.
   - name: keys
     description: >
-      Admin import of the credentials the bridge uses to move money — provider
+      Privileged import of the credentials the bridge uses to move money
+      (mutations: admin or key-custodian, the ManageKeys capability; listing
+      additionally: auditor, ReadKeys) — provider
       API/signing keys and custodial Stellar seeds. DANGER: a provider
       credential is spend authority over the replenishment leg's outgoing
       treasury XLM, and a seed is signing authority. Imports ADD by default;
@@ -83,7 +89,9 @@ tags:
   - name: device
     description: FCM device-token registration for mobile push.
   - name: webhook
-    description: Admin-only outbound webhook registration and event feed.
+    description: >
+      Outbound webhook registration (admin-only) and the admin event feed
+      (readable with the ReadEvents capability: admin or auditor).
   - name: exchange
     description: >
       Fiat<->USDC on/off-ramp (OwlPay Harbor, Changelly Fiat) and crypto->USDC
@@ -585,7 +593,7 @@ paths:
   /accounts:
     get:
       tags: [admin]
-      summary: List all accounts (admin only).
+      summary: List all accounts (admin, auditor, or key-custodian — the ReadAccounts capability).
       parameters:
         - in: query
           name: page
@@ -728,7 +736,7 @@ paths:
         '429': { $ref: '#/components/responses/RateLimited' }
     get:
       tags: [webhook]
-      summary: List registered admin webhooks (admin only). Never returns the signing secret.
+      summary: List registered admin webhooks (admin or auditor). Never returns the signing secret.
       responses:
         '200':
           description: Webhook list.
@@ -789,7 +797,7 @@ paths:
   /admin/events:
     get:
       tags: [webhook]
-      summary: Pull/replay the admin event feed (admin only).
+      summary: Pull/replay the admin event feed (admin or auditor).
       parameters:
         - in: query
           name: since
@@ -811,7 +819,7 @@ paths:
   /admin/keys:
     get:
       tags: [keys]
-      summary: List provider credentials — running, stored, and the gap (admin only).
+      summary: List provider credentials — running, stored, and the gap (admin, key-custodian, or auditor).
       description: |
         For each credential kind: what THIS instance resolved at startup
         (`effective_source`, `effective_fingerprint`), what is stored in the
@@ -839,7 +847,7 @@ paths:
   /admin/keys/{kind}:
     post:
       tags: [keys]
-      summary: Import (or, with confirmation, replace) a provider credential set (admin only).
+      summary: Import (or, with confirmation, replace) a provider credential set (admin or key-custodian).
       description: |
         **This installs a credential that moves money.** The replenishment
         driver sends real reserve XLM to the pay-in address the active
@@ -899,7 +907,7 @@ paths:
   /admin/keys/{kind}/merge:
     post:
       tags: [keys]
-      summary: Rotate part of a stored credential set (admin only).
+      summary: Rotate part of a stored credential set (admin or key-custodian).
       description: |
         Overlays `set_parts` onto the stored set and removes `drop_parts`,
         writing a new version. Exists because a stored secret cannot be read
@@ -936,7 +944,7 @@ paths:
   /admin/keys/{kind}/revoke:
     post:
       tags: [keys]
-      summary: Revoke a stored credential and scrub its ciphertext (admin only).
+      summary: Revoke a stored credential and scrub its ciphertext (admin or key-custodian).
       description: |
         Marks the stored credential revoked and clears its ciphertext
         immediately — unlike supersession, which keeps the previous version
@@ -976,7 +984,7 @@ paths:
   /admin/stellar-seeds/generate:
     post:
       tags: [keys]
-      summary: Provision a bridge-generated custodial Stellar seed (admin only).
+      summary: Provision a bridge-generated custodial Stellar seed (admin or key-custodian).
       description: |
         Creates the seed inside the bridge, seals it with the configured
         protection backend, and returns only the public `G...` address. The
@@ -1013,7 +1021,7 @@ paths:
   /admin/stellar-seeds/import:
     post:
       tags: [keys]
-      summary: Bring an existing Stellar secret seed under custody (admin only).
+      summary: Bring an existing Stellar secret seed under custody (admin or key-custodian).
       description: |
         Binds an existing `S...` seed to an existing account. Refused for the
         configured reserve account (see `/admin/stellar-seeds/generate`).
@@ -1061,7 +1069,7 @@ paths:
   /admin/exchange-reserve:
     get:
       tags: [reserve]
-      summary: Reserve status — buckets, policies, pending queues (admin only).
+      summary: Reserve status — buckets, policies, pending queues (admin, treasurer, or auditor).
       description: |
         Per-currency buckets carry `available`/`held`/`low_water` in BIGINT
         minor units (USDC/XLM 7 dp, USD cents) plus a best-effort live
@@ -1079,7 +1087,7 @@ paths:
   /admin/exchange-reserve/policies/{provider}:
     put:
       tags: [reserve]
-      summary: Set a provider's reserve routing policy (admin only).
+      summary: Set a provider's reserve routing policy (admin or treasurer).
       description: |
         `threshold_usd_cents` is DB-validated against [2000, 20000] — the
         "$20 to $200 as appropriate for the service" band. Only providers
@@ -1106,7 +1114,7 @@ paths:
   /admin/exchange-reserve/buckets/{currency}:
     put:
       tags: [reserve]
-      summary: Set a bucket's low-water alert mark (admin only).
+      summary: Set a bucket's low-water alert mark (admin or treasurer).
       parameters:
         - in: path
           name: currency
@@ -1131,7 +1139,7 @@ paths:
   /admin/exchange-reserve/entries:
     post:
       tags: [reserve]
-      summary: Record a manual ledger entry (admin only; rate limited 5/60s).
+      summary: Record a manual ledger entry (admin or treasurer; rate limited 5/60s).
       description: |
         `topup`/`withdrawal` (positive magnitude) and signed `adjustment`
         move `available`; `held_adjustment` repairs `held` drift. Record a
@@ -1152,7 +1160,7 @@ paths:
         '429': { $ref: '#/components/responses/RateLimited' }
     get:
       tags: [reserve]
-      summary: Paginated reserve journal (admin only).
+      summary: Paginated reserve journal (admin, treasurer, or auditor).
       parameters:
         - in: query
           name: page
@@ -1181,7 +1189,7 @@ paths:
   /admin/exchange-reserve/unmatched:
     get:
       tags: [reserve]
-      summary: Stray inflows to the reserve account (admin work queue).
+      summary: Stray inflows to the reserve account (work queue; admin, treasurer, or auditor).
       description: |
         Deposits that could not be credited to an order — late (after
         expiry), underpaid, wrong asset, or unknown memo. Known assets are
@@ -1207,7 +1215,7 @@ paths:
   /admin/exchange-reserve/refunds:
     get:
       tags: [reserve]
-      summary: Refund queue (admin only).
+      summary: Refund queue (admin, treasurer, or auditor).
       parameters:
         - in: query
           name: page
@@ -1226,7 +1234,7 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
     post:
       tags: [reserve]
-      summary: Queue a refund by hand (admin only; rate limited 5/60s).
+      summary: Queue a refund by hand (admin or treasurer; rate limited 5/60s).
       description: |
         For inflows the driver deliberately refuses — unknown memo, wrong
         asset, a muxed or missing sender, or a row predating sender capture.
@@ -1255,7 +1263,7 @@ paths:
   /admin/exchange-reserve/refunds/{refund_id}/resolve:
     post:
       tags: [reserve]
-      summary: Resolve a refund (admin only; rate limited 5/60s).
+      summary: Resolve a refund (admin or treasurer; rate limited 5/60s).
       description: |
         `approve` releases a reviewed refund to the driver; `cancel` drops
         one that never moved value; `sent` records one that did land (needs
@@ -1291,7 +1299,7 @@ paths:
   /admin/exchange-reserve/settings:
     put:
       tags: [reserve]
-      summary: Reserve master switches (admin only).
+      summary: Reserve master switches (admin or treasurer).
       requestBody:
         required: true
         content:
@@ -1314,7 +1322,7 @@ paths:
   /admin/exchange-reserve/replenishment:
     get:
       tags: [reserve]
-      summary: Replenishment policies and recent cycles (admin only).
+      summary: Replenishment policies and recent cycles (admin, treasurer, or auditor).
       responses:
         '200': { description: Policies plus cycle history. }
         '401': { $ref: '#/components/responses/Unauthorized' }
@@ -1323,7 +1331,7 @@ paths:
   /admin/exchange-reserve/replenishment/policies/{kind}:
     put:
       tags: [reserve]
-      summary: Set a replenishment policy (admin only).
+      summary: Set a replenishment policy (admin or treasurer).
       description: |
         `max_spend_minor` and `daily_spend_cap_minor` of 0 mean
         *unconfigured, refuse to run* — never "unlimited" — so enabling a
@@ -1352,7 +1360,7 @@ paths:
   /admin/exchange-reserve/replenishment/run:
     post:
       tags: [reserve]
-      summary: Start one replenishment cycle now (admin only; rate limited 5/60s).
+      summary: Start one replenishment cycle now (admin or treasurer; rate limited 5/60s).
       description: |
         Takes the reserve watcher's advisory lock and returns 409 if the
         watcher is mid-tick — the reserve account signs from a single
@@ -1378,7 +1386,7 @@ paths:
   /admin/exchange-reserve/replenishment/{cycle_id}/confirm-fiat:
     post:
       tags: [reserve]
-      summary: Confirm a bank credit landed (admin only; rate limited 5/60s).
+      summary: Confirm a bank credit landed (admin or treasurer; rate limited 5/60s).
       description: |
         The bridge can see USDC leave and the provider's transfer status, but
         never a bank credit — so a completed off-ramp books the fiat into
@@ -1414,7 +1422,7 @@ paths:
   /admin/exchange-reserve/replenishment/{cycle_id}/write-off:
     post:
       tags: [reserve]
-      summary: Write off in-transit fiat that never arrived (admin only).
+      summary: Write off in-transit fiat that never arrived (admin or treasurer).
       description: |
         Writes off real money and is loudly audited; a note is required.
         Without it the USD `held` column stays poisoned and the kind stays
@@ -1443,7 +1451,7 @@ paths:
   /admin/exchange-reserve/forecast:
     get:
       tags: [reserve]
-      summary: Reserve utilization forecast (admin only).
+      summary: Reserve utilization forecast (admin, treasurer, or auditor).
       description: |
         Integer-arithmetic projection over the journal's daily net flows:
         mean and EWMA (alpha 0.3) daily outflow, least-squares trend,
@@ -1469,7 +1477,7 @@ paths:
   /admin/exchange-reserve/orders/{order_id}/disburse:
     post:
       tags: [reserve]
-      summary: Complete a fiat disbursement order (admin only; rate limited 5/60s).
+      summary: Complete a fiat disbursement order (admin or treasurer; rate limited 5/60s).
       description: |
         For reserve orders in `processing`/`awaiting_disbursement` (owlpay
         USDC->USD off-ramps): records that `amount_usd_cents` was paid from
@@ -1499,7 +1507,7 @@ paths:
   /admin/exchange-reserve/orders/{order_id}/resolve:
     post:
       tags: [reserve]
-      summary: Resolve a reserve order waiting on an admin (rate limited 5/60s).
+      summary: Resolve a frozen reserve order (admin or treasurer; rate limited 5/60s).
       description: |
         `complete` records a payout that did land on-chain (the server finds
         the transaction by the order's memo, or accepts `stellar_tx_hash`) —
@@ -1637,7 +1645,7 @@ paths:
   /transactions:
     get:
       tags: [transaction]
-      summary: List transactions with review state (admin=all, owner=own).
+      summary: List transactions with review state (admin/auditor=all, owner=own).
       parameters:
         - in: query
           name: page
@@ -2458,6 +2466,12 @@ components:
     GetAccountResponse:
       type: object
       properties:
+        allowlisted:
+          type: boolean
+          description: >
+            True when the account is on the live ADMIN_ACCOUNT_IDS allowlist,
+            which overrides the stored role to admin at every token issuance.
+            Not a DB column — computed by the handler.
         payala_account_id: { type: string }
         stellar_account_id: { type: string }
         first_name: { type: string }
@@ -2466,7 +2480,7 @@ components:
         nickname: { type: string, nullable: true }
         affiliation: { type: string, nullable: true }
         gender: { type: string, nullable: true }
-        role: { type: string, enum: [view-only, device, token, admin] }
+        role: { type: string, enum: [view-only, device, token, treasurer, key-custodian, auditor, admin] }
         sync_mode: { type: string, enum: [reserve, mirror] }
         profile_source: { type: string, enum: [local, ldap, okta] }
         profile_synced_at: { type: string, format: date-time, nullable: true }
@@ -2495,6 +2509,12 @@ components:
     AdminAccountListItem:
       type: object
       properties:
+        allowlisted:
+          type: boolean
+          description: >
+            True when the account is on the live ADMIN_ACCOUNT_IDS allowlist,
+            which overrides the stored role to admin at every token issuance.
+            Not a DB column — computed by the handler.
         payala_account_id: { type: string }
         stellar_account_id: { type: string }
         first_name: { type: string }
@@ -2503,7 +2523,7 @@ components:
         nickname: { type: string, nullable: true }
         affiliation: { type: string, nullable: true }
         gender: { type: string, nullable: true }
-        role: { type: string, enum: [view-only, device, token, admin] }
+        role: { type: string, enum: [view-only, device, token, treasurer, key-custodian, auditor, admin] }
         sync_mode: { type: string, enum: [reserve, mirror] }
         profile_source: { type: string, enum: [local, ldap, okta] }
         created_at: { type: string, format: date-time, nullable: true }
@@ -2521,7 +2541,7 @@ components:
     SetRoleRequest:
       type: object
       properties:
-        role: { type: string, enum: [view-only, device, token, admin] }
+        role: { type: string, enum: [view-only, device, token, treasurer, key-custodian, auditor, admin] }
       required: [role]
 
     SetRoleResponse:
@@ -2531,6 +2551,13 @@ components:
         message: { type: string }
         account_id: { type: string }
         role: { type: string }
+        allowlisted:
+          type: boolean
+          description: >
+            True when the target sits on the ADMIN_ACCOUNT_IDS allowlist, which
+            overrides the stored role to admin at every token issuance — a
+            role change on an allowlisted account does not change effective
+            privilege.
 
     SetSyncModeRequest:
       type: object

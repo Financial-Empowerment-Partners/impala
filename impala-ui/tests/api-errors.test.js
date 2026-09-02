@@ -71,3 +71,32 @@ describe('API.sanitizeErrorMessage — 409 added to the fallback map', () => {
         expect(API.sanitizeErrorMessage(409, 'whatever')).toBe('Conflict');
     });
 });
+
+describe('API.parseJwt — base64url payloads', () => {
+    // Build a JWT whose payload base64url contains '-' and '_' (chars that
+    // plain atob rejects). {"sub":"a>>>?","role":"admin"} base64-encodes with
+    // '+' and '/', which base64url renders as '-' and '_'.
+    function b64url(obj) {
+        const std = Buffer.from(JSON.stringify(obj)).toString('base64');
+        return std.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    }
+
+    it('decodes a payload containing base64url - and _', () => {
+        const payload = { sub: 'a>>>?', role: 'admin', exp: 9999999999 };
+        const token = 'h.' + b64url(payload) + '.s';
+        const decoded = API.parseJwt(token);
+        expect(decoded).not.toBeNull();
+        expect(decoded.role).toBe('admin');
+        expect(decoded.sub).toBe('a>>>?');
+    });
+
+    it('decodes a payload needing re-padding', () => {
+        const token = 'h.' + b64url({ a: 1 }) + '.s'; // short payload, no padding
+        expect(API.parseJwt(token)).toEqual({ a: 1 });
+    });
+
+    it('returns null on a malformed token', () => {
+        expect(API.parseJwt('not-a-jwt')).toBeNull();
+        expect(API.parseJwt('')).toBeNull();
+    });
+});

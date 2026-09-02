@@ -2,8 +2,9 @@
 
 Web admin dashboard for the Impala bridge service. Provides a real account-management
 console, transaction review (flag / annotate), MFA enrollment, transaction submission,
-smartcard registration, directory force-sync, on-chain account refresh, and server-driven
-role-based access control for Stellar/Payala bridge operations.
+smartcard registration, directory force-sync, on-chain account refresh, a
+conversion-reserve console, a bridge-key console, and server-driven role-based access
+control (seven roles) for Stellar/Payala bridge operations.
 
 ## Running
 
@@ -27,7 +28,7 @@ no build step):
 
 ```bash
 npm install
-npm test          # vitest (Validate, NetConfig, TxFilter, Roles)
+npm test          # vitest (Roles, Router nav, Theme, KeysView, ReserveMath, Validate, NetConfig, TxFilter, …)
 npm run lint      # eslint (flat config in eslint.config.js)
 ```
 
@@ -41,8 +42,8 @@ Vanilla JavaScript SPA using Foundation 6.8.1 CSS framework. No build step or tr
 |--------|---------|
 | `config.js` | Runtime, ops-editable network config (`window.IMPALA_CONFIG`); loads first |
 | `api.js` | HTTP client; dynamic per-network base path + per-network JWT token namespacing |
-| `theme.js` | Light/dark theme, persisted in `localStorage` (`impala_theme`) |
-| `roles.js` | Server-driven RBAC: reads the `role` claim from the JWT; permission definitions |
+| `theme.js` | Light/dark theme: follows the OS `prefers-color-scheme` by default; an explicit toggle choice persists in `localStorage` (`impala_theme`) and wins |
+| `roles.js` | Server-driven RBAC: reads the `role` claim from the JWT; seven-role permission table (ladder + treasurer / key-custodian / auditor), pinned against `tests/fixtures/role-capabilities.json` shared with the bridge; unknown roles fail closed to `view-only` for authorization, with `rawUserRole` kept for honest display |
 | `auth.js` | Login/logout flow (3-step: authenticate → refresh token → temporal token) |
 | `net-config.js` | Pure network-resolution helpers (base/key resolution, token key namespacing) |
 | `net.js` | Network selector UI (top bar + login), live-network confirmation via `GET /network` |
@@ -51,14 +52,18 @@ Vanilla JavaScript SPA using Foundation 6.8.1 CSS framework. No build step or tr
 | `modal.js` | Framework-free accessible modal dialog |
 | `drawer.js` | Framework-free accessible side drawer (account detail) |
 | `tx-filter.js` | Pure `GET /transactions` query-string builder |
-| `router.js` | Nav bar (network selector + theme toggle), `[data-permission]` gating, toasts |
+| `router.js` | Role-aware nav bar with hamburger collapse (privileged links after a separator), `[data-permission]` gating, `requirePermission` in-page denial, read-only banner, severity-split toasts (errors assertive + persistent, notices polite + auto-dismiss) |
 | `session-timer.js` | Idle warning + auto-logout |
 | `accounts.js` | Account console: list, search, drawer detail, role grant, sync, on-chain, CRUD |
 | `transactions.js` | Transaction submission + server-backed review log (flag/status/note) |
 | `mfa.js` | MFA enrollment (TOTP/SMS) and verification |
 | `cards.js` | Smartcard registration and deactivation |
 | `dashboard.js` | System version/health display and session info |
-| `admin.js` | Read-only Roles & Permissions reference (admin-only) |
+| `reserve.js` | Conversion-reserve console: buckets + drift, policies, forecast chart, work queues, ledger, unmatched deposits; read-only for auditors |
+| `reserve-math.js` | Pure (DOM-free) formatting, validation and chart-geometry helpers for the reserve page |
+| `keys.js` | Bridge-key console: per-provider running vs stored credential, import / merge / revoke, custodial-seed endpoints; read-only for auditors |
+| `keys-view.js` | Pure (DOM-free) decision logic for the keys console (confirmation rules; never reconstructs server-compared values) |
+| `admin.js` | Read-only Roles & Permissions reference (any `view_roles` holder) |
 | `sso-auth.js` | Multi-provider OIDC SSO (Okta / Auth0 / Duo) — Authorization Code + PKCE login, one button per enabled provider |
 
 ### Two-bridge network routing
@@ -101,26 +106,50 @@ JWTs (the 14-day refresh token and 1-hour temporal token) are stored in `localSt
 
 Authorization is **server-driven**: the bridge is the source of truth and encodes the account's
 role in the JWT's `role` claim. The UI reads that claim (via `API.parseJwt`) and gates UI elements
-accordingly; there is no client-side role store anymore. Tokens without a `role` claim (legacy)
-resolve to the least-privileged `view-only` role (fail-closed).
+accordingly; there is no client-side role store anymore. UI permissions are display gating only —
+the bridge enforces its capability matrix on every request, and both tables assert against the
+same checked-in fixture (`tests/fixtures/role-capabilities.json`, also compiled into the bridge's
+tests) so they cannot drift apart silently. Tokens without a `role` claim (legacy) resolve to the
+least-privileged `view-only` role (fail-closed).
+
+Seven roles: the original ladder plus three lateral privileged roles (specializations of the
+admin surface — none includes another; admin remains the superset):
 
 | Role | Permissions |
 |------|-------------|
 | view-only | view_accounts, view_mfa, view_transactions, view_cards |
 | device | + create_transactions, manage_cards |
-| token | + manage_accounts, manage_mfa, review_transactions |
-| admin | + manage_roles, delete_accounts, sync_profile (all permissions) |
+| token | + manage_accounts, manage_mfa |
+| treasurer | base views + view_reserve, manage_reserve, view_roles |
+| key-custodian | base views + view_accounts_list, view_keys, manage_keys, view_roles |
+| auditor | read-only: base views + view_accounts_list, view_reserve, view_keys, view_roles |
+| admin | everything, incl. governance: manage_roles, delete_accounts, sync_profile, review_transactions |
 
 Role grants are performed server-side from the **Accounts** page (open an account → Role grant →
-`PUT /admin/accounts/:id/role`) and take effect at the target's next token refresh. HTML elements
-with `data-permission="..."` attributes are hidden when the current user lacks the permission;
-JS-rendered controls check `Roles.currentUserHasPermission(...)`.
+`PUT /admin/accounts/:id/role`). A grant revokes the target's existing sessions and tokens, so
+the new role applies at their next sign-in. HTML elements with `data-permission="..."` attributes
+are hidden when the current user lacks the permission; JS-rendered controls check
+`Roles.currentUserHasPermission(...)`; whole pages guard with `Router.requirePermission`, which
+renders an in-page explanation (role badge + missing permission) instead of silently redirecting.
+Pages a role can view but not act on (Reserve/Keys for auditors) render fully with the actions
+removed and a read-only banner naming the roles the actions require.
+
+**Deploy skew** (bridge rolled ahead of the UI): a role this build does not know authorizes as
+`view-only` (fail-closed) but is never mislabelled — the nav and account badges show the raw
+claim on a neutral badge, and the Accounts drawer's role-grant select refuses to overwrite an
+unknown role (a disabled "update the UI before changing it" option) so an admin cannot
+accidentally demote a role they cannot see. Accounts on the `ADMIN_ACCOUNT_IDS` allowlist carry
+an "effective admin" warning badge, because the env override outranks their stored role at token
+issuance.
 
 ### Theming
 
-A light/dark theme toggle (sun/moon) lives in the top bar. The stylesheet uses a two-tier token
-system — a fixed brand ramp plus semantic surface tokens on `:root`, with a single dark override
-block keyed off `[data-theme="dark"]`. The choice is persisted in `localStorage['impala_theme']`.
+A light/dark theme toggle (sun/moon) lives in the top bar. Three-state: with no stored choice the
+UI follows the operating system's `prefers-color-scheme` (tracking live OS changes); an explicit
+toggle choice is persisted in `localStorage['impala_theme']` and wins from then on. The stylesheet
+uses a two-tier token system — a fixed brand ramp plus semantic surface tokens on `:root`, with a
+single dark override block keyed off `[data-theme="dark"]` (`color-scheme` is set alongside it so
+native controls match).
 
 ### Pages
 
@@ -132,7 +161,9 @@ block keyed off `[data-theme="dark"]`. The choice is persisted in `localStorage[
 | MFA | `mfa.html` | view_mfa / manage_mfa |
 | Transactions | `transactions.html` | view_transactions / create_transactions / review_transactions |
 | Cards | `cards.html` | view_cards / manage_cards |
-| Admin | `admin.html` | admin only (read-only roles reference) |
+| Reserve | `reserve.html` | view_reserve (admin, treasurer; auditor read-only) |
+| Keys | `keys.html` | view_keys (admin, key-custodian; auditor read-only) |
+| Admin | `admin.html` | admin only (read-only roles reference; others get the in-page denial) |
 
 ### Deployment
 

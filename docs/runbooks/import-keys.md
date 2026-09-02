@@ -1,7 +1,9 @@
 # Runbook — Importing bridge keys
 
 **Audience:** engineer provisioning or rotating the credentials impala-bridge
-uses to move money.
+uses to move money. Import, rotate, revoke and seed provisioning require the
+**admin or key-custodian** role; auditors can additionally read the key
+inventory (`GET /admin/keys` — fingerprints and metadata, never material).
 
 **Read the danger section before you use these endpoints.** They are the most
 powerful surface the bridge exposes.
@@ -44,14 +46,14 @@ which Stellar account the bridge signs as. That is why:
 
 Everything these endpoints ask for — echoing the current fingerprint, typing a
 confirmation phrase, acknowledging in-flight orders — is defeated by a single
-admin bearer token, because an admin can read the fingerprint they are asked to
-echo from `GET /admin/keys`.
+admin or key-custodian bearer token, because either role can read the
+fingerprint they are asked to echo from `GET /admin/keys`.
 
 These gates exist so that an operator does not replace the wrong credential,
 and so two operators do not clobber each other. **They are not a barrier
-against a compromised admin credential.** A second factor on this surface would
-be a real improvement; it is not implemented. Treat admin credentials
-accordingly.
+against a compromised admin or key-custodian credential.** A second factor on
+this surface would be a real improvement; it is not implemented. Treat admin
+and key-custodian credentials accordingly.
 
 ### 4. Nothing takes effect until a rolling restart
 
@@ -196,7 +198,7 @@ To replace it you must supply three things together:
    `replace_target_fingerprint`: the stored credential if there is one,
    otherwise whatever this instance is running. The two differ between an
    import and the deploy that activates it, so read the field rather than
-   choosing. This is a compare-and-swap: two admins racing cannot both win,
+   choosing. This is a compare-and-swap: two operators racing cannot both win,
    and you cannot blind-replace something you never looked at;
 3. `confirm_phrase` — exactly `replace {kind} {network}`, typed out. It is
    deliberately *not* the fingerprint, which is on screen and copyable; naming
@@ -300,7 +302,7 @@ The bridge creates the key itself, seals it, and returns only the public
 there is no way to export it.
 
 **Import is refused for the configured `RESERVE_ACCOUNT_ID`**, and that is
-deliberate. An admin-supplied reserve seed means a person holds the pool's
+deliberate. An operator-supplied reserve seed means a person holds the pool's
 signing key indefinitely; and during bootstrap it would let whoever calls first
 install a key *they* control, capturing every deposit the bridge subsequently
 directs at the reserve address. Disaster recovery restores the database row,
@@ -380,7 +382,7 @@ Check `impalactl keys list`. Either nothing is configured for that kind, or the
 credential is stored but not yet activated (`pending_restart`) — roll the
 deployment.
 
-### An admin replaced the wrong credential
+### An operator replaced the wrong credential
 
 Nothing has taken effect yet unless a restart has happened since. Re-import the
 correct credential (the previous version is still listed in the history, but
@@ -415,9 +417,9 @@ admin webhooks:
 | `bridge.key_revoked` | kind, version, fingerprint, what the provider falls back to |
 | `bridge.seed_provisioned` | target account, Stellar address, generated vs imported, whether it is the reserve |
 
-`account_id` on all three is the **acting admin**. Payloads carry fingerprints
-and public identities only — never key material, and never anything derived
-from a decrypted blob.
+`account_id` on all three is the **acting operator** (admin or key-custodian).
+Payloads carry fingerprints and public identities only — never key material,
+and never anything derived from a decrypted blob.
 
 ---
 

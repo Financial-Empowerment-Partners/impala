@@ -109,6 +109,149 @@ pub fn require_admin(user: &AuthenticatedUser) -> Result<(), AppError> {
     Ok(())
 }
 
+/// A privileged capability — one slice of what used to be the monolithic
+/// admin surface. The role → capability mapping lives in ONE place,
+/// [`role_has_capability`], so the authorization matrix can be exhaustively
+/// unit-tested and can never diverge between handlers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Capability {
+    /// Mutate reserve & replenishment state: disburse, refund, write off,
+    /// record ledger entries, edit policy. Money-moving.
+    ManageReserve,
+    /// Read reserve & replenishment state, including cross-account
+    /// reserve-provider exchange orders (the disbursement work queues).
+    ReadReserve,
+    /// Mutate bridge credentials and custodial seeds. Spend authority itself.
+    ManageKeys,
+    /// Read the key inventory (fingerprints and metadata only — the handlers
+    /// never return secret bytes).
+    ReadKeys,
+    /// Read the cross-account accounts list and account detail surfaces.
+    ReadAccounts,
+    /// Read transactions across accounts (listing and detail) — the auditor's
+    /// reconciliation surface.
+    ReadTransactions,
+    /// Read the admin event feed and webhook registrations.
+    ReadEvents,
+}
+
+impl Capability {
+    /// Every capability. A new variant fails the exhaustive `match` in
+    /// [`role_has_capability`] until it gets a row, and the matrix tests
+    /// iterate this so they cannot silently go stale.
+    #[allow(dead_code)] // consumed by the test-side matrix/invariant loops
+    pub const ALL: [Capability; 7] = [
+        Capability::ManageReserve,
+        Capability::ReadReserve,
+        Capability::ManageKeys,
+        Capability::ReadKeys,
+        Capability::ReadAccounts,
+        Capability::ReadTransactions,
+        Capability::ReadEvents,
+    ];
+}
+
+/// THE authorization matrix. Fail-closed by construction: any role not
+/// explicitly listed — unknown, empty, legacy — holds nothing.
+///
+/// admin holds every capability (the unchanged superset); treasurer,
+/// key-custodian and auditor are lateral: none includes another's surface.
+/// key-custodian carries ReadAccounts because seed provisioning is keyed by
+/// account id, so the custodian must be able to resolve the account they are
+/// provisioning.
+pub fn role_has_capability(role: &str, cap: Capability) -> bool {
+    use crate::constants::{ROLE_AUDITOR, ROLE_KEY_CUSTODIAN, ROLE_TREASURER};
+    match cap {
+        Capability::ManageReserve => matches!(role, ROLE_ADMIN | ROLE_TREASURER),
+        Capability::ReadReserve => matches!(role, ROLE_ADMIN | ROLE_TREASURER | ROLE_AUDITOR),
+        Capability::ManageKeys => matches!(role, ROLE_ADMIN | ROLE_KEY_CUSTODIAN),
+        Capability::ReadKeys => matches!(role, ROLE_ADMIN | ROLE_KEY_CUSTODIAN | ROLE_AUDITOR),
+        Capability::ReadAccounts => {
+            matches!(role, ROLE_ADMIN | ROLE_AUDITOR | ROLE_KEY_CUSTODIAN)
+        }
+        Capability::ReadTransactions => matches!(role, ROLE_ADMIN | ROLE_AUDITOR),
+        Capability::ReadEvents => matches!(role, ROLE_ADMIN | ROLE_AUDITOR),
+    }
+}
+
+/// The capability check as a Result, for handlers and the extractor.
+pub fn authorize_capability(role: &str, cap: Capability) -> Result<(), AppError> {
+    if role_has_capability(role, cap) {
+        Ok(())
+    } else {
+        Err(AppError::Forbidden)
+    }
+}
+
+/// Marker-type contract for [`Privileged`]: each zero-sized marker names the
+/// capability its extractor requires.
+pub trait RequiredCapability: Send + Sync + 'static {
+    const CAPABILITY: Capability;
+}
+
+/// Marker types, one per capability.
+pub struct ManageReserve;
+pub struct ReadReserve;
+pub struct ManageKeys;
+pub struct ReadKeys;
+pub struct ReadAccounts;
+pub struct ReadEvents;
+
+impl RequiredCapability for ManageReserve {
+    const CAPABILITY: Capability = Capability::ManageReserve;
+}
+impl RequiredCapability for ReadReserve {
+    const CAPABILITY: Capability = Capability::ReadReserve;
+}
+impl RequiredCapability for ManageKeys {
+    const CAPABILITY: Capability = Capability::ManageKeys;
+}
+impl RequiredCapability for ReadKeys {
+    const CAPABILITY: Capability = Capability::ReadKeys;
+}
+impl RequiredCapability for ReadAccounts {
+    const CAPABILITY: Capability = Capability::ReadAccounts;
+}
+impl RequiredCapability for ReadEvents {
+    const CAPABILITY: Capability = Capability::ReadEvents;
+}
+
+/// An authenticated user holding a specific capability — the granular
+/// successor to [`AdminUser`], gated at the type level the same way: a route
+/// taking `Privileged<ManageReserve>` cannot be reached without that
+/// capability. Runs the full [`validate_request_auth`] pipeline (bearer or
+/// session), then [`authorize_capability`]; rejection is the same Forbidden
+/// the AdminUser extractor produces, so clients cannot distinguish the two
+/// gates. Session-cookie users carry admin or view-only only (granular roles
+/// ride the bearer path), which composes correctly here: a session admin
+/// passes every capability, everyone else on the session path fails closed.
+pub struct Privileged<C: RequiredCapability> {
+    pub account_id: String,
+    /// The concrete role that satisfied the capability — for handlers that
+    /// log or branch on it; most only need the account id.
+    #[allow(dead_code)]
+    pub role: String,
+    _marker: std::marker::PhantomData<fn() -> C>,
+}
+
+impl<S, C> FromRequestParts<S> for Privileged<C>
+where
+    S: Send + Sync,
+    C: RequiredCapability,
+{
+    type Rejection = AppError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        let context = validate_request_auth(parts, state).await?;
+        authorize_capability(&context.role, C::CAPABILITY)?;
+        Ok(Privileged {
+            account_id: context.account_id,
+            role: context.role,
+            _marker: std::marker::PhantomData,
+        })
+    }
+}
+
 /// Resolve the role to stamp into freshly-minted tokens: the account's DB
 /// role (defaulting to least privilege when the row or column read fails),
 /// with the ADMIN_ACCOUNT_IDS allowlist overriding to admin. Shared by every
@@ -495,5 +638,342 @@ mod tests {
         });
         let claims: Claims = serde_json::from_value(json).expect("should deserialize");
         assert_eq!(claims.role, crate::constants::ROLE_VIEW_ONLY);
+    }
+
+    // ── Capability matrix ──────────────────────────────────────────────
+
+    /// The exact matrix, spelled out. Kept as data so the loop below cannot
+    /// miss a row the author forgot: every (role, capability) pair is checked
+    /// in both directions.
+    fn expected_capability_roles(cap: Capability) -> &'static [&'static str] {
+        use crate::constants::*;
+        match cap {
+            Capability::ManageReserve => &[ROLE_ADMIN, ROLE_TREASURER],
+            Capability::ReadReserve => &[ROLE_ADMIN, ROLE_TREASURER, ROLE_AUDITOR],
+            Capability::ManageKeys => &[ROLE_ADMIN, ROLE_KEY_CUSTODIAN],
+            Capability::ReadKeys => &[ROLE_ADMIN, ROLE_KEY_CUSTODIAN, ROLE_AUDITOR],
+            Capability::ReadAccounts => &[ROLE_ADMIN, ROLE_AUDITOR, ROLE_KEY_CUSTODIAN],
+            Capability::ReadTransactions => &[ROLE_ADMIN, ROLE_AUDITOR],
+            Capability::ReadEvents => &[ROLE_ADMIN, ROLE_AUDITOR],
+        }
+    }
+
+    #[test]
+    fn capability_matrix_is_exactly_as_specified() {
+        for cap in Capability::ALL {
+            let expected = expected_capability_roles(cap);
+            for role in crate::constants::ALL_ROLES {
+                assert_eq!(
+                    role_has_capability(role, cap),
+                    expected.contains(role),
+                    "role {:?} capability {:?}",
+                    role,
+                    cap
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn admin_holds_every_capability() {
+        // Forgetting admin in a new capability row would brick the admin
+        // console for that surface — a lockout, not a hardening.
+        for cap in Capability::ALL {
+            assert!(
+                role_has_capability(crate::constants::ROLE_ADMIN, cap),
+                "admin must hold {:?}",
+                cap
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_roles_hold_nothing() {
+        for role in [
+            "",
+            "bogus",
+            "Admin",
+            "ADMIN",
+            "treasurer ",
+            "root",
+            "superuser",
+        ] {
+            for cap in Capability::ALL {
+                assert!(
+                    !role_has_capability(role, cap),
+                    "unknown role {:?} must fail closed for {:?}",
+                    role,
+                    cap
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn auditor_holds_no_mutation_capability() {
+        // The auditor is the read-only oversight role; a Manage* grant to it
+        // is a security incident, not a tweak.
+        for cap in [Capability::ManageReserve, Capability::ManageKeys] {
+            assert!(
+                !role_has_capability(crate::constants::ROLE_AUDITOR, cap),
+                "auditor must not hold {:?}",
+                cap
+            );
+        }
+    }
+
+    #[test]
+    fn lateral_roles_do_not_cross_surfaces() {
+        use crate::constants::{ROLE_KEY_CUSTODIAN, ROLE_TREASURER};
+        assert!(!role_has_capability(ROLE_TREASURER, Capability::ManageKeys));
+        assert!(!role_has_capability(ROLE_TREASURER, Capability::ReadKeys));
+        assert!(!role_has_capability(
+            ROLE_KEY_CUSTODIAN,
+            Capability::ManageReserve
+        ));
+        assert!(!role_has_capability(
+            ROLE_KEY_CUSTODIAN,
+            Capability::ReadReserve
+        ));
+    }
+
+    #[test]
+    fn original_ladder_roles_hold_no_privileged_capability() {
+        use crate::constants::{ROLE_DEVICE, ROLE_TOKEN, ROLE_VIEW_ONLY};
+        for role in [ROLE_VIEW_ONLY, ROLE_DEVICE, ROLE_TOKEN] {
+            for cap in Capability::ALL {
+                assert!(
+                    !role_has_capability(role, cap),
+                    "ladder role {:?} must not hold {:?}",
+                    role,
+                    cap
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn authorize_capability_matches_the_predicate() {
+        assert!(authorize_capability(crate::constants::ROLE_ADMIN, Capability::ManageKeys).is_ok());
+        assert!(matches!(
+            authorize_capability(crate::constants::ROLE_AUDITOR, Capability::ManageKeys),
+            Err(AppError::Forbidden)
+        ));
+    }
+
+    // ── Cross-stack contract fixture ───────────────────────────────────
+
+    /// The role→capability matrix is mirrored by the UI's permission table
+    /// (impala-ui/html/js/roles.js). Both stacks assert against the same
+    /// checked-in fixture so they cannot drift apart silently — the bug class
+    /// this prevents already shipped once (the token role's review
+    /// permission).
+    #[test]
+    fn capability_matrix_matches_shared_fixture() {
+        let raw = include_str!("../../impala-ui/tests/fixtures/role-capabilities.json");
+        let fixture: serde_json::Value = serde_json::from_str(raw).expect("fixture parses");
+        let caps = fixture["capabilities"]
+            .as_object()
+            .expect("capabilities object");
+        assert_eq!(
+            caps.len(),
+            Capability::ALL.len(),
+            "fixture capability count must match Capability::ALL"
+        );
+        for cap in Capability::ALL {
+            let name = format!("{:?}", cap);
+            let allowed: Vec<&str> = caps[&name]
+                .as_array()
+                .unwrap_or_else(|| panic!("fixture missing capability {}", name))
+                .iter()
+                .map(|v| v.as_str().expect("role string"))
+                .collect();
+            for role in crate::constants::ALL_ROLES {
+                assert_eq!(
+                    role_has_capability(role, cap),
+                    allowed.contains(role),
+                    "fixture drift: role {:?} capability {}",
+                    role,
+                    name
+                );
+            }
+        }
+        let roles: Vec<&str> = fixture["roles"]
+            .as_array()
+            .expect("roles array")
+            .iter()
+            .map(|v| v.as_str().expect("role string"))
+            .collect();
+        assert_eq!(
+            roles,
+            crate::constants::ALL_ROLES,
+            "fixture role list drift"
+        );
+    }
+
+    // ── Tripwires ──────────────────────────────────────────────────────
+
+    /// Migration 035 must carry every role in ALL_ROLES, quoted, in the same
+    /// CHECK constraint name migration 023 created. A drifted literal (e.g.
+    /// key_custodian for key-custodian) would make validate_role accept a
+    /// grant the DB then rejects with a bare 500 — a runtime governance-path
+    /// failure the compiler cannot see.
+    #[test]
+    fn migration_035_matches_all_roles() {
+        let sql = include_str!("../migrations/035_add_privileged_roles.sql");
+        assert!(
+            sql.contains("DROP CONSTRAINT chk_impala_account_role"),
+            "must drop the 023 constraint by its exact name"
+        );
+        assert!(
+            sql.contains("ADD CONSTRAINT chk_impala_account_role"),
+            "must re-add under the same name"
+        );
+        for role in crate::constants::ALL_ROLES {
+            assert!(
+                sql.contains(&format!("'{}'", role)),
+                "migration CHECK missing role literal '{}'",
+                role
+            );
+        }
+        // Count quoted literals on the SQL lines only (comment prose carries
+        // apostrophes): the CHECK must name exactly the ALL_ROLES set.
+        let quoted: usize = sql
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("--"))
+            .map(|l| l.matches('\'').count())
+            .sum();
+        assert_eq!(
+            quoted,
+            crate::constants::ALL_ROLES.len() * 2,
+            "migration must quote exactly the ALL_ROLES set"
+        );
+    }
+
+    /// The extractor swap must be all-or-nothing per module: a handler
+    /// accidentally left on AdminUser is a treasurer/custodian lockout, one
+    /// accidentally converted to the wrong capability is an escalation. The
+    /// fully-converted modules must not mention AdminUser at all; the files
+    /// allowed to keep it are pinned here so a future /admin route makes a
+    /// conscious choice.
+    #[test]
+    fn extractor_swap_is_complete_per_module() {
+        for (name, src) in [
+            (
+                "admin_reserve.rs",
+                include_str!("handlers/admin_reserve.rs"),
+            ),
+            (
+                "admin_replenish.rs",
+                include_str!("handlers/admin_replenish.rs"),
+            ),
+            ("admin_keys.rs", include_str!("handlers/admin_keys.rs")),
+        ] {
+            assert!(
+                !src.contains("AdminUser"),
+                "{} still references AdminUser — the capability swap is incomplete",
+                name
+            );
+        }
+        // admin_webhook keeps AdminUser for its three mutating handlers
+        // (register/delete/test) and Privileged<ReadEvents> for the reads.
+        let webhook = include_str!("handlers/admin_webhook.rs");
+        assert_eq!(
+            webhook.matches(": AdminUser").count(),
+            3,
+            "admin_webhook.rs must have exactly its three mutating handlers on AdminUser"
+        );
+        assert_eq!(
+            webhook.matches(": Privileged<ReadEvents>").count(),
+            2,
+            "admin_webhook.rs must have exactly its two read handlers on ReadEvents"
+        );
+    }
+
+    /// The extractor slice of a handler's signature: from `pub async fn name(`
+    /// to the return arrow. Panics if the handler is missing — a renamed
+    /// handler must update this test consciously.
+    fn signature_of<'a>(src: &'a str, name: &str) -> &'a str {
+        let needle = format!("pub async fn {}(", name);
+        let start = src
+            .find(&needle)
+            .unwrap_or_else(|| panic!("handler {} not found", name));
+        let rest = &src[start..];
+        let end = rest
+            .find("->")
+            .unwrap_or_else(|| panic!("{}: no return arrow", name));
+        &rest[..end]
+    }
+
+    /// Per-handler capability pinning. The module-level absence check above
+    /// proves nothing about WHICH marker each handler took: a mutating
+    /// handler accidentally on a Read capability compiles, passes every other
+    /// test, and hands the read-only auditor a money mutation (verified by
+    /// mutation before this test existed). Every privileged handler's
+    /// extractor is therefore pinned by name.
+    #[test]
+    fn every_privileged_handler_takes_its_exact_capability() {
+        let reserve = include_str!("handlers/admin_reserve.rs");
+        let replenish = include_str!("handlers/admin_replenish.rs");
+        let keys = include_str!("handlers/admin_keys.rs");
+        let webhook = include_str!("handlers/admin_webhook.rs");
+        let admin = include_str!("handlers/admin.rs");
+
+        let table: &[(&str, &str, &str)] = &[
+            // admin_reserve.rs — reads
+            (reserve, "get_status", "Privileged<ReadReserve>"),
+            (reserve, "list_entries", "Privileged<ReadReserve>"),
+            (reserve, "list_unmatched", "Privileged<ReadReserve>"),
+            (reserve, "list_refunds", "Privileged<ReadReserve>"),
+            (reserve, "get_forecast", "Privileged<ReadReserve>"),
+            // admin_reserve.rs — money mutations
+            (reserve, "update_policy", "Privileged<ManageReserve>"),
+            (reserve, "update_bucket", "Privileged<ManageReserve>"),
+            (reserve, "create_entry", "Privileged<ManageReserve>"),
+            (reserve, "update_settings", "Privileged<ManageReserve>"),
+            (reserve, "create_refund", "Privileged<ManageReserve>"),
+            (reserve, "resolve_refund", "Privileged<ManageReserve>"),
+            (reserve, "disburse_order", "Privileged<ManageReserve>"),
+            (reserve, "resolve_order", "Privileged<ManageReserve>"),
+            // admin_replenish.rs
+            (replenish, "get_status", "Privileged<ReadReserve>"),
+            (replenish, "update_policy", "Privileged<ManageReserve>"),
+            (replenish, "run_now", "Privileged<ManageReserve>"),
+            (replenish, "confirm_fiat", "Privileged<ManageReserve>"),
+            (replenish, "write_off", "Privileged<ManageReserve>"),
+            // admin_keys.rs
+            (keys, "list_keys", "Privileged<ReadKeys>"),
+            (keys, "import_key", "Privileged<ManageKeys>"),
+            (keys, "merge_key", "Privileged<ManageKeys>"),
+            (keys, "revoke_key", "Privileged<ManageKeys>"),
+            (keys, "generate_seed", "Privileged<ManageKeys>"),
+            (keys, "import_seed", "Privileged<ManageKeys>"),
+            // admin_webhook.rs — mutations stay admin, reads are auditable
+            (webhook, "register_webhook", "AdminUser"),
+            (webhook, "delete_webhook", "AdminUser"),
+            (webhook, "test_webhook", "AdminUser"),
+            (webhook, "list_webhooks", "Privileged<ReadEvents>"),
+            (webhook, "list_events", "Privileged<ReadEvents>"),
+            // admin.rs
+            (admin, "list_accounts", "Privileged<ReadAccounts>"),
+        ];
+
+        for (src, name, expected) in table {
+            let sig = signature_of(src, name);
+            assert!(
+                sig.contains(&format!(": {}", expected)),
+                "handler {} must take {} — its signature is:\n{}",
+                name,
+                expected,
+                sig
+            );
+        }
+        // Both files sharing handler names must have exactly the handlers the
+        // table expects — a count guard so a NEW privileged handler cannot
+        // ship ungated without touching this test.
+        assert_eq!(reserve.matches("pub async fn ").count(), 13);
+        assert_eq!(replenish.matches("pub async fn ").count(), 5);
+        assert_eq!(keys.matches("pub async fn ").count(), 6);
+        assert_eq!(webhook.matches("pub async fn ").count(), 5);
     }
 }

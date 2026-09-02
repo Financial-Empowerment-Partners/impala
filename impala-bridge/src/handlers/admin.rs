@@ -1,10 +1,12 @@
-//! Admin-only, cross-account endpoints backing the web admin console.
+//! Cross-account endpoints backing the web admin console.
 //!
-//! All handlers begin with `require_admin`. They deliberately bypass the
+//! Governance handlers (grant-role / delete / sync) begin with
+//! `require_admin`; the accounts list takes `Privileged<ReadAccounts>` so the
+//! auditor and key-custodian roles can read it. They deliberately bypass the
 //! per-owner `require_owner` discipline used elsewhere because acting across
-//! accounts (list / delete / grant-role / force directory sync) is the point of
-//! the admin console.
+//! accounts is the point of the admin console.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use axum::extract::{Extension, Path, Query};
@@ -12,8 +14,8 @@ use axum::Json;
 use log::{error, info, warn};
 use sqlx::PgPool;
 
-use crate::auth::{require_admin, AuthenticatedUser};
-use crate::constants::{ROLE_ADMIN, SYNC_MODE_RESERVE};
+use crate::auth::{require_admin, AuthenticatedUser, Privileged, ReadAccounts};
+use crate::constants::{REFRESH_TOKEN_TTL_SECS, ROLE_ADMIN, SYNC_MODE_RESERVE};
 use crate::error::AppError;
 use crate::ldap::LdapConfig;
 use crate::models::{
@@ -29,14 +31,14 @@ fn would_remove_last_admin(admin_count: i64, target_is_admin: bool, new_role: &s
     target_is_admin && new_role != ROLE_ADMIN && admin_count <= 1
 }
 
-/// `GET /accounts` — paginated, searchable list of all accounts (admin only).
+/// `GET /accounts` — paginated, searchable list of all accounts
+/// (admin, auditor, or key-custodian: the ReadAccounts capability).
 pub async fn list_accounts(
-    user: AuthenticatedUser,
+    _user: Privileged<ReadAccounts>,
     Extension(pool): Extension<PgPool>,
+    Extension(admin_ids): Extension<Arc<HashSet<String>>>,
     Query(q): Query<ListAccountsQuery>,
 ) -> Result<Json<PaginatedResponse<AdminAccountListItem>>, AppError> {
-    require_admin(&user)?;
-
     let (per_page, offset) = PaginationParams {
         page: q.page,
         per_page: q.per_page,
@@ -80,7 +82,7 @@ pub async fn list_accounts(
         ts = TS_FMT
     );
 
-    let rows = sqlx::query_as::<_, AdminAccountListItem>(&select_sql)
+    let mut rows = sqlx::query_as::<_, AdminAccountListItem>(&select_sql)
         .bind(&search)
         .bind(per_page)
         .bind(offset)
@@ -91,6 +93,12 @@ pub async fn list_accounts(
             AppError::InternalError("Database error".to_string())
         })?;
 
+    // Mark allowlisted accounts: their DB role badge understates their
+    // effective privilege (ADMIN_ACCOUNT_IDS overrides to admin at issuance).
+    for row in &mut rows {
+        row.allowlisted = admin_ids.contains(&row.payala_account_id);
+    }
+
     Ok(Json(PaginatedResponse {
         data: rows,
         page: q.page.max(1),
@@ -100,67 +108,141 @@ pub async fn list_accounts(
 }
 
 /// `PUT /admin/accounts/:account_id/role` — set an account's role (admin only).
+///
+/// The last-admin guard and the UPDATE run in one transaction under an
+/// advisory lock: two concurrent demotions of the two remaining admins must
+/// not both observe `admin_count = 2` and leave zero admins. (The
+/// `delete_account` admin check takes the same lock.)
+///
+/// A role change revokes the target's existing credentials by bumping their
+/// auth epoch — every bearer token and session dies immediately, and the
+/// target picks up the new role at their next sign-in. Without this, a
+/// demoted treasurer would keep live disbursement authority for up to the
+/// temporal-token lifetime with no admin-side kill switch. The bump happens
+/// before commit, so a failed bump fails the whole change (a demotion whose
+/// revocation did not take is not a demotion).
 pub async fn set_account_role(
     user: AuthenticatedUser,
     Extension(pool): Extension<PgPool>,
+    Extension(redis_pool): Extension<Arc<deadpool_redis::Pool>>,
+    Extension(admin_ids): Extension<Arc<HashSet<String>>>,
     Path(account_id): Path<String>,
     Json(payload): Json<SetRoleRequest>,
 ) -> Result<Json<SetRoleResponse>, AppError> {
     require_admin(&user)?;
     crate::validate::validate_role(&payload.role)?;
 
+    let mut tx = pool.begin().await.map_err(|e| {
+        error!("set_account_role: begin tx error: {}", e);
+        AppError::InternalError("Database error".to_string())
+    })?;
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext('impala_account_role_guard'))")
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| {
+            error!("set_account_role: advisory lock error: {}", e);
+            AppError::InternalError("Database error".to_string())
+        })?;
+
+    let old_role: String =
+        sqlx::query_scalar("SELECT role FROM impala_account WHERE payala_account_id = $1")
+            .bind(&account_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|e| {
+                error!("set_account_role: target lookup error: {}", e);
+                AppError::InternalError("Database error".to_string())
+            })?
+            .ok_or_else(|| AppError::NotFound("Account not found".to_string()))?;
+
+    // The allowlist override outranks any DB role at token issuance, so a
+    // "demotion" of an allowlisted account would be a security display lie.
+    // Warn in the response rather than refusing: storing the intended role is
+    // still right (it takes effect the moment the account leaves the list).
+    let allowlisted = admin_ids.contains(&account_id);
+    let allowlist_warning = if payload.role != ROLE_ADMIN && allowlisted {
+        " WARNING: this account is on the ADMIN_ACCOUNT_IDS allowlist and will \
+         continue to receive admin tokens until removed from it."
+    } else {
+        ""
+    };
+
+    if old_role == payload.role {
+        // Nothing changes — do not sign the target out for a no-op.
+        return Ok(Json(SetRoleResponse {
+            success: true,
+            message: format!("Role unchanged.{}", allowlist_warning),
+            account_id,
+            role: payload.role,
+            allowlisted,
+        }));
+    }
+
     // Block demoting the last remaining admin (incl. self-demotion).
     if payload.role != ROLE_ADMIN {
         let admin_count: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM impala_account WHERE role = 'admin'")
-                .fetch_one(&pool)
+                .fetch_one(&mut *tx)
                 .await
                 .map_err(|e| {
                     error!("set_account_role: admin count error: {}", e);
                     AppError::InternalError("Database error".to_string())
                 })?;
-        let target_is_admin: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM impala_account WHERE payala_account_id = $1 AND role = 'admin'",
-        )
-        .bind(&account_id)
-        .fetch_one(&pool)
-        .await
-        .map_err(|e| {
-            error!("set_account_role: target lookup error: {}", e);
-            AppError::InternalError("Database error".to_string())
-        })?;
-        if would_remove_last_admin(admin_count, target_is_admin == 1, &payload.role) {
+        if would_remove_last_admin(admin_count, old_role == ROLE_ADMIN, &payload.role) {
             return Err(AppError::Conflict(
                 "Cannot demote the last remaining admin".to_string(),
             ));
         }
     }
 
-    let res = sqlx::query(
+    sqlx::query(
         "UPDATE impala_account SET role = $1, updated_at = NOW() WHERE payala_account_id = $2",
     )
     .bind(&payload.role)
     .bind(&account_id)
-    .execute(&pool)
+    .execute(&mut *tx)
     .await
     .map_err(|e| {
         error!("set_account_role: update error: {}", e);
         AppError::InternalError("Database error".to_string())
     })?;
 
-    if res.rows_affected() == 0 {
-        return Err(AppError::NotFound("Account not found".to_string()));
-    }
+    crate::events::emit_event(
+        &mut tx,
+        &crate::events::AccountEvent::RoleChanged {
+            account_id: account_id.clone(),
+            actor: user.account_id.clone(),
+            old_role: old_role.clone(),
+            new_role: payload.role.clone(),
+        },
+    )
+    .await?;
+
+    // Revoke before commit: if the bump fails, the whole change rolls back.
+    // (The reverse order could commit a demotion the old tokens outlive.)
+    let now_ts = chrono::Utc::now().timestamp() as u64;
+    crate::redis_helpers::bump_auth_epoch(&redis_pool, &account_id, now_ts, REFRESH_TOKEN_TTL_SECS)
+        .await?;
+
+    tx.commit().await.map_err(|e| {
+        error!("set_account_role: commit error: {}", e);
+        AppError::InternalError("Database error".to_string())
+    })?;
 
     info!(
-        "set_account_role: account_id={} role={} by={}",
-        account_id, payload.role, user.account_id
+        "set_account_role: account_id={} role {}->{} by={} (target credentials revoked)",
+        account_id, old_role, payload.role, user.account_id
     );
     Ok(Json(SetRoleResponse {
         success: true,
-        message: "Role updated".to_string(),
+        message: format!(
+            "Role updated. The account's existing sessions and tokens were signed \
+             out; the new role applies at their next sign-in.{}",
+            allowlist_warning
+        ),
         account_id,
         role: payload.role,
+        allowlisted,
     }))
 }
 
@@ -265,6 +347,7 @@ pub async fn set_sync_mode(
 pub async fn delete_account(
     user: AuthenticatedUser,
     Extension(pool): Extension<PgPool>,
+    Extension(redis_pool): Extension<Arc<deadpool_redis::Pool>>,
     reserve: Option<Extension<Arc<crate::exchange::reserve::ConversionReserve>>>,
     Path(account_id): Path<String>,
 ) -> Result<Json<DeleteAccountResponse>, AppError> {
@@ -357,12 +440,26 @@ pub async fn delete_account(
         )));
     }
 
-    // Block deleting the last remaining admin.
+    let mut tx = pool.begin().await.map_err(|e| {
+        error!("delete_account: begin tx error: {}", e);
+        AppError::InternalError("Database error".to_string())
+    })?;
+
+    // Block deleting the last remaining admin. Same advisory lock as
+    // set_account_role's guard, so a deletion cannot race a demotion of the
+    // other remaining admin into a zero-admin lockout.
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext('impala_account_role_guard'))")
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| {
+            error!("delete_account: advisory lock error: {}", e);
+            AppError::InternalError("Database error".to_string())
+        })?;
     let target_is_admin: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM impala_account WHERE payala_account_id = $1 AND role = 'admin'",
     )
     .bind(&account_id)
-    .fetch_one(&pool)
+    .fetch_one(&mut *tx)
     .await
     .map_err(|e| {
         error!("delete_account: target lookup error: {}", e);
@@ -371,7 +468,7 @@ pub async fn delete_account(
     if target_is_admin == 1 {
         let admin_count: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM impala_account WHERE role = 'admin'")
-                .fetch_one(&pool)
+                .fetch_one(&mut *tx)
                 .await
                 .map_err(|e| {
                     error!("delete_account: admin count error: {}", e);
@@ -383,11 +480,6 @@ pub async fn delete_account(
             ));
         }
     }
-
-    let mut tx = pool.begin().await.map_err(|e| {
-        error!("delete_account: begin tx error: {}", e);
-        AppError::InternalError("Database error".to_string())
-    })?;
 
     // Child tables without an ON DELETE CASCADE FK to impala_account.
     // notify_log references notify(id) (RESTRICT), so purge it first.
@@ -422,6 +514,13 @@ pub async fn delete_account(
         let _ = tx.rollback().await;
         return Err(AppError::NotFound("Account not found".to_string()));
     }
+
+    // Revoke the deleted account's credentials before commit (same rationale
+    // as set_account_role): without the epoch bump, existing bearer tokens
+    // stay valid until they expire — bearer validation never re-reads the DB.
+    let now_ts = chrono::Utc::now().timestamp() as u64;
+    crate::redis_helpers::bump_auth_epoch(&redis_pool, &account_id, now_ts, REFRESH_TOKEN_TTL_SECS)
+        .await?;
 
     tx.commit().await.map_err(|e| {
         error!("delete_account: commit error: {}", e);
@@ -522,5 +621,16 @@ mod tests {
         assert!(!would_remove_last_admin(2, true, "token"));
         // setting an admin to admin (no-op) → allowed
         assert!(!would_remove_last_admin(1, true, "admin"));
+        // The lateral privileged roles are NOT admin: moving the last admin
+        // to treasurer/key-custodian/auditor is still a lockout and must be
+        // blocked, while granting them to non-admins never trips the guard.
+        // (admin_count counts DB role='admin' only; ADMIN_ACCOUNT_IDS
+        // allowlist admins are deliberately uncounted — the allowlist is a
+        // break-glass override, not a governed role.)
+        assert!(would_remove_last_admin(1, true, "treasurer"));
+        assert!(would_remove_last_admin(1, true, "key-custodian"));
+        assert!(would_remove_last_admin(1, true, "auditor"));
+        assert!(!would_remove_last_admin(2, true, "key-custodian"));
+        assert!(!would_remove_last_admin(1, false, "treasurer"));
     }
 }

@@ -87,7 +87,7 @@ impalactl account list
 impalactl account show G...             # the bridge's record for a Stellar address
 impalactl account onchain G...          # live Horizon balances, sequence, signers
 impalactl account reserves alice        # Payala reserve balances (defaults to your account)
-impalactl account list --search ada     # paginated list of all accounts (admin)
+impalactl account list --search ada     # paginated list of all accounts (admin, auditor, or key-custodian)
 impalactl account list --page 2 --per-page 50
 ```
 
@@ -187,7 +187,7 @@ impalactl activity review <btxid> --status escalated --flagged --note "duplicate
 impalactl activity events --since 42                     # admin event feed
 ```
 
-Admins see every transaction; everyone else sees only transactions sourced from
+Admins and auditors see every transaction; everyone else sees only transactions sourced from
 accounts they own. `activity review` is a **full replacement** of the review
 record: anything you don't pass is reset.
 
@@ -201,7 +201,7 @@ while :; do
 done
 ```
 
-### Bridge keys (admin)
+### Bridge keys (admin or key-custodian; the list is auditor-readable)
 
 Installs the credentials the bridge uses to move money. **Read
 `docs/runbooks/import-keys.md` first** — importing a provider credential is
