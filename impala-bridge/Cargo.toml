@@ -16,7 +16,7 @@ serde_json = "1.0"
 # tls-rustls-aws-lc-rs (not plain tls-rustls, which is ring-backed) keeps the
 # whole tree on a single rustls CryptoProvider (aws-lc-rs, shared with
 # jsonwebtoken and the AWS SDK); see the install_default() call in main.rs.
-sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls-aws-lc-rs", "postgres", "uuid", "migrate", "chrono", "json"] }
+sqlx = { version = "0.9", features = ["runtime-tokio", "tls-rustls-aws-lc-rs", "postgres", "uuid", "migrate", "chrono", "json"] }
 password-auth = { version = "1.0", features = ["argon2"] }
 reqwest = { version = "0.13", features = ["json", "rustls", "stream", "form", "http2"], default-features = false }
 redis = { version = "1", features = ["tokio-comp", "tokio-rustls-comp"] }
