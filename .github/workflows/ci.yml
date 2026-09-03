@@ -245,7 +245,7 @@ jobs:
 
       - name: Set up Docker Buildx
         if: steps.check_arch.outputs.should_build == 'true'
-        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 
       # The ECR repo is IMMUTABLE (terraform/ecr.tf) — every pushed tag must be
       # unique per run, so only the per-commit :<sha>-<arch> tag is pushed.
