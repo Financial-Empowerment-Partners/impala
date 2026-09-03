@@ -25,6 +25,9 @@ pub async fn register_device_token(
             message: "Token must not be empty".to_string(),
         }));
     }
+    // The token is stored verbatim, sent to FCM verbatim and quoted in the
+    // worker's logs: printable ASCII with a length cap, nothing else.
+    crate::validate::validate_device_token(&payload.token)?;
 
     let mut tx = pool.begin().await.map_err(|e| {
         error!("register_device_token: begin tx error: {}", e);

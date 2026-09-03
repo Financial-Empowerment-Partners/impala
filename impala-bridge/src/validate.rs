@@ -23,6 +23,76 @@ pub fn validate_stellar_account_id(id: &str) -> Result<(), AppError> {
     Ok(())
 }
 
+/// Strict form of [`validate_stellar_account_id`]: additionally decodes the
+/// strkey and verifies its version byte and CRC16-XModem checksum, so a
+/// single mistyped character is rejected rather than accepted as a
+/// well-formed address that exists nowhere.
+///
+/// Used for operator-supplied *trust anchors* (asset issuers): the
+/// structural check alone lets a typo'd issuer through configuration, after
+/// which every real deposit of that asset classifies as foreign and every
+/// payout fails at submit. Request-path addresses keep the cheap check —
+/// Horizon rejects a bad checksum at submit before any money moves.
+pub fn validate_stellar_account_id_checksum(id: &str) -> Result<(), AppError> {
+    validate_stellar_account_id(id)?;
+    let raw = base32_decode_upper(id).ok_or_else(|| {
+        AppError::BadRequest("Stellar account ID is not valid Base32".to_string())
+    })?;
+    // 1 version byte + 32 key bytes + 2 checksum bytes.
+    if raw.len() != 35 || raw[0] != STRKEY_VERSION_ACCOUNT {
+        return Err(AppError::BadRequest(
+            "Stellar account ID has an invalid version byte".to_string(),
+        ));
+    }
+    let expected = u16::from_le_bytes([raw[33], raw[34]]);
+    if crc16_xmodem(&raw[..33]) != expected {
+        return Err(AppError::BadRequest(
+            "Stellar account ID checksum mismatch (mistyped address?)".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// strkey version byte for an ed25519 public key (`6 << 3`; encodes as `G`).
+const STRKEY_VERSION_ACCOUNT: u8 = 6 << 3;
+
+/// RFC 4648 Base32 (upper-case alphabet, no padding) — the strkey encoding.
+fn base32_decode_upper(s: &str) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(s.len() * 5 / 8);
+    let mut buffer: u32 = 0;
+    let mut bits: u32 = 0;
+    for c in s.bytes() {
+        let v = match c {
+            b'A'..=b'Z' => c - b'A',
+            b'2'..=b'7' => c - b'2' + 26,
+            _ => return None,
+        } as u32;
+        buffer = (buffer << 5) | v;
+        bits += 5;
+        if bits >= 8 {
+            bits -= 8;
+            out.push(((buffer >> bits) & 0xFF) as u8);
+        }
+    }
+    Some(out)
+}
+
+/// CRC16-XModem (poly 0x1021, init 0), as used by Stellar strkeys.
+fn crc16_xmodem(data: &[u8]) -> u16 {
+    let mut crc: u16 = 0;
+    for &b in data {
+        crc ^= (b as u16) << 8;
+        for _ in 0..8 {
+            crc = if crc & 0x8000 != 0 {
+                (crc << 1) ^ 0x1021
+            } else {
+                crc << 1
+            };
+        }
+    }
+    crc
+}
+
 /// Validate a Stellar secret seed format: must start with 'S', be 56 chars, Base32.
 ///
 /// This is the cheap structural gate; strkey checksum validation happens when the
@@ -233,6 +303,19 @@ pub fn validate_transaction_id(id: &str) -> Result<(), AppError> {
 }
 
 /// Validate a hex hash string (e.g. Stellar transaction hash).
+/// A Stellar transaction hash is exactly 32 bytes = 64 hex characters. Used
+/// wherever an admin SUPPLIES a hash that the bridge will record as
+/// settlement evidence: the generic hex check (1-128 chars) let an arbitrary
+/// string be journaled as proof.
+pub fn validate_stellar_tx_hash(hash: &str) -> Result<String, AppError> {
+    if hash.len() != 64 || !hash.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(AppError::BadRequest(
+            "stellar_tx_hash must be exactly 64 hex characters".to_string(),
+        ));
+    }
+    Ok(hash.to_ascii_lowercase())
+}
+
 pub fn validate_hex_hash(hash: &str, field_name: &str) -> Result<(), AppError> {
     if hash.is_empty() || hash.len() > 128 {
         return Err(AppError::BadRequest(format!(
@@ -425,6 +508,26 @@ pub fn validate_exchange_extra_id(extra_id: &str) -> Result<(), AppError> {
     if !extra_id.chars().all(|c| c == ' ' || c.is_ascii_graphic()) {
         return Err(AppError::BadRequest(
             "extra_id must be printable ASCII".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// Validate a push device token: 1–`MAX_DEVICE_TOKEN_LEN` chars of printable
+/// ASCII with no whitespace or control characters. FCM registration tokens
+/// are opaque URL-safe strings; anything else is junk that would only be
+/// stored, sent to FCM verbatim, and quoted in worker logs (where a
+/// multibyte token once panicked a byte-sliced log line).
+pub fn validate_device_token(token: &str) -> Result<(), AppError> {
+    if token.is_empty() || token.len() > crate::constants::MAX_DEVICE_TOKEN_LEN {
+        return Err(AppError::BadRequest(format!(
+            "Device token must be between 1 and {} characters",
+            crate::constants::MAX_DEVICE_TOKEN_LEN
+        )));
+    }
+    if !token.chars().all(|c| c.is_ascii_graphic()) {
+        return Err(AppError::BadRequest(
+            "Device token must be printable ASCII without whitespace".to_string(),
         ));
     }
     Ok(())
@@ -1071,6 +1174,30 @@ mod tests {
         assert!(validate_exchange_address("addrß").is_err()); // non-ASCII
     }
 
+    // ── Device token ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_validate_device_token_valid() {
+        // FCM tokens: URL-safe base64-ish with ':' — e.g. "<id>:APA91b...".
+        let fcm = format!("dGVzdA:APA91b{}", "Xy-_z9".repeat(30));
+        assert!(validate_device_token(&fcm).is_ok());
+        assert!(validate_device_token("a").is_ok());
+        assert!(validate_device_token(&"t".repeat(crate::constants::MAX_DEVICE_TOKEN_LEN)).is_ok());
+    }
+
+    #[test]
+    fn test_validate_device_token_rejects_bad_input() {
+        assert!(validate_device_token("").is_err());
+        assert!(
+            validate_device_token(&"t".repeat(crate::constants::MAX_DEVICE_TOKEN_LEN + 1)).is_err()
+        );
+        assert!(validate_device_token("tok en").is_err());
+        assert!(validate_device_token("tok\nen").is_err());
+        assert!(validate_device_token("tok\u{7f}").is_err()); // DEL
+        assert!(validate_device_token("tok🔑en").is_err()); // multibyte
+        assert!(validate_device_token("tokén").is_err()); // non-ASCII
+    }
+
     // ── Exchange extra id ──────────────────────────────────────────────
 
     #[test]
@@ -1088,5 +1215,56 @@ mod tests {
         assert!(validate_exchange_extra_id("memo\t").is_err());
         assert!(validate_exchange_extra_id("memo\u{0}").is_err());
         assert!(validate_exchange_extra_id("mémo").is_err()); // non-ASCII
+    }
+
+    // ── strkey checksum ────────────────────────────────────────────────
+
+    // Real addresses with valid checksums: the USDT0-on-Stellar issuer
+    // (docs.usdt0.to deployments table) and the Stellar docs example key.
+    const USDT0_ISSUER: &str = "GATISXX6BZ6NC7IKQBY37CJD4SOZL3CYZJWXEDG6JVIY4WBS6KXJHN6Q";
+    const DOCS_EXAMPLE: &str = "GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN7";
+
+    #[test]
+    fn checksum_accepts_real_addresses() {
+        assert!(validate_stellar_account_id_checksum(USDT0_ISSUER).is_ok());
+        assert!(validate_stellar_account_id_checksum(DOCS_EXAMPLE).is_ok());
+    }
+
+    #[test]
+    fn checksum_rejects_a_single_mistyped_character() {
+        // Structurally perfect (56 chars, G, base32) — exactly what the cheap
+        // validator accepts — but one character off, so it is not an address.
+        let mut chars: Vec<char> = USDT0_ISSUER.chars().collect();
+        chars[10] = if chars[10] == 'A' { 'B' } else { 'A' };
+        let typo: String = chars.into_iter().collect();
+        assert!(validate_stellar_account_id(&typo).is_ok());
+        assert!(validate_stellar_account_id_checksum(&typo).is_err());
+    }
+
+    #[test]
+    fn checksum_rejects_wrong_version_byte() {
+        // A secret-seed strkey ('S' version byte) re-encoded to start with G
+        // is not an account id; the version byte catches it even when the
+        // structural check would not (the checksum covers the version byte,
+        // so this also fails the CRC — either way it must be refused).
+        let mut chars: Vec<char> = DOCS_EXAMPLE.chars().collect();
+        chars[1] = 'B';
+        let s: String = chars.into_iter().collect();
+        assert!(validate_stellar_account_id_checksum(&s).is_err());
+    }
+
+    #[test]
+    fn stellar_tx_hash_is_exactly_64_hex() {
+        let h = "10064F0DC1D4F5D04DFD65A23999AA6A9F90096A69F986580BA89F689B780FB2";
+        assert_eq!(validate_stellar_tx_hash(h).unwrap(), h.to_ascii_lowercase());
+        assert!(validate_stellar_tx_hash("deadbeef").is_err());
+        assert!(validate_stellar_tx_hash(&"a".repeat(65)).is_err());
+        assert!(validate_stellar_tx_hash(&format!("{}g", &h[..63])).is_err());
+    }
+
+    #[test]
+    fn crc16_xmodem_known_vector() {
+        // Standard check value for CRC-16/XMODEM over "123456789".
+        assert_eq!(crc16_xmodem(b"123456789"), 0x31C3);
     }
 }

@@ -165,3 +165,154 @@ describe('chartData', () => {
         expect(geo.bars[0].h).toBe(0);
     });
 });
+
+describe('scaleFor', () => {
+    // The map the status endpoint's buckets produce (migrations 031 + 036).
+    const scales = { USD: 2, USDC: 7, XLM: 7, USDT0: 7 };
+
+    it('resolves a bucket currency from the status map', () => {
+        expect(ReserveMath.scaleFor(scales, 'USD')).toEqual({ scale: 2, known: true });
+        expect(ReserveMath.scaleFor(scales, 'USDC')).toEqual({ scale: 7, known: true });
+        expect(ReserveMath.scaleFor({ X: 0 }, 'X')).toEqual({ scale: 0, known: true });
+    });
+
+    it('never guesses: an unknown currency or an empty map is known:false', () => {
+        expect(ReserveMath.scaleFor(scales, 'EURC')).toEqual({ scale: null, known: false });
+        expect(ReserveMath.scaleFor({}, 'USD')).toEqual({ scale: null, known: false });
+        expect(ReserveMath.scaleFor(null, 'USD').known).toBe(false);
+        expect(ReserveMath.scaleFor(undefined, 'USD').known).toBe(false);
+        expect(ReserveMath.scaleFor(scales, null).known).toBe(false);
+        expect(ReserveMath.scaleFor(scales, undefined).known).toBe(false);
+    });
+
+    it('treats a malformed scale as unknown rather than usable', () => {
+        expect(ReserveMath.scaleFor({ USD: '2' }, 'USD').known).toBe(false);
+        expect(ReserveMath.scaleFor({ USD: -1 }, 'USD').known).toBe(false);
+        expect(ReserveMath.scaleFor({ USD: 2.5 }, 'USD').known).toBe(false);
+        expect(ReserveMath.scaleFor({ USD: null }, 'USD').known).toBe(false);
+        // Inherited Object properties are not bucket entries.
+        expect(ReserveMath.scaleFor(scales, 'toString').known).toBe(false);
+        expect(ReserveMath.scaleFor(scales, 'hasOwnProperty').known).toBe(false);
+    });
+});
+
+describe('displayFor / fmtDeltaFor / rawMinor', () => {
+    const scales = { USD: 2, USDC: 7 };
+
+    it('renders the USD ledger row that used to show as +0.025', () => {
+        // clients-2: a $2,500.00 fiat_confirmed (250000 cents) rendered at the
+        // 7-dp fallback scale whenever the ledger landed before status.
+        expect(ReserveMath.displayFor(250000, scales, 'USD')).toBe('2,500');
+        expect(ReserveMath.fmtDeltaFor(250000, scales, 'USD')).toBe('+2,500');
+        expect(ReserveMath.fmtDeltaFor(-250000, scales, 'USD')).toBe('−2,500');
+        expect(ReserveMath.displayFor(255000000, scales, 'USDC')).toBe('25.50');
+    });
+
+    it('labels raw minor units when the scale is unknown instead of guessing 7', () => {
+        expect(ReserveMath.displayFor(250000, {}, 'USD')).toBe('250000 minor units (scale unknown)');
+        expect(ReserveMath.fmtDeltaFor(250000, {}, 'USD')).toBe('+250000 minor units (scale unknown)');
+        expect(ReserveMath.fmtDeltaFor(-250000, {}, 'USD')).toBe('−250000 minor units (scale unknown)');
+        expect(ReserveMath.fmtDeltaFor(0, {}, 'USD')).toBe('0');
+        expect(ReserveMath.displayFor(250000, {}, 'USD')).not.toBe('0.025');
+        expect(ReserveMath.displayFor(5, scales, null)).toBe('5 minor units (scale unknown)');
+    });
+
+    it('rawMinor carries the caller\'s reason verbatim', () => {
+        expect(ReserveMath.rawMinor(42, 'summed across currencies'))
+            .toBe('42 minor units (summed across currencies)');
+    });
+});
+
+describe('replenishLegs', () => {
+    it('mirrors replenish.rs: caps are denominated in the SPEND asset', () => {
+        expect(ReserveMath.replenishLegs('xlm_to_usdc')).toEqual({ spend: 'XLM', recv: 'USDC' });
+        expect(ReserveMath.replenishLegs('usdc_to_usd')).toEqual({ spend: 'USDC', recv: 'USD' });
+    });
+
+    it('does not mirror the bridge catch-all for an unknown kind', () => {
+        expect(ReserveMath.replenishLegs('eurc_to_eur')).toBeNull();
+        expect(ReserveMath.replenishLegs('')).toBeNull();
+        expect(ReserveMath.replenishLegs(undefined)).toBeNull();
+    });
+});
+
+describe('cycleArrivalCurrency', () => {
+    const fiat = { kind: 'usdc_to_usd', spend_currency: 'USDC', recv_currency: 'USD' };
+    const crypto = { kind: 'xlm_to_usdc', spend_currency: 'XLM', recv_currency: 'USDC' };
+
+    it('a refunded cycle got its SPEND asset back (classify_cycle_arrival → Refund)', () => {
+        expect(ReserveMath.cycleArrivalCurrency({ ...fiat, state: 'refunded' })).toBe('USDC');
+        expect(ReserveMath.cycleArrivalCurrency({ ...crypto, state: 'refunded' })).toBe('XLM');
+    });
+
+    it('every other state received the recv asset', () => {
+        for (const state of ['completed', 'in_transit', 'sent', 'settled', 'frozen', 'failed', 'planned']) {
+            expect(ReserveMath.cycleArrivalCurrency({ ...fiat, state })).toBe('USD');
+            expect(ReserveMath.cycleArrivalCurrency({ ...crypto, state })).toBe('USDC');
+        }
+    });
+});
+
+describe('sequenceLoads', () => {
+    function deferred() {
+        let resolve, reject;
+        const promise = new Promise((res, rej) => { resolve = res; reject = rej; });
+        return { promise, resolve, reject };
+    }
+    const flush = () => new Promise((r) => setTimeout(r, 0));
+
+    it('starts dependents only after `first` settles; independents start at once', async () => {
+        const calls = [];
+        const errors = [];
+        const status = deferred();
+        const first = () => { calls.push('status'); return status.promise; };
+        const ledger = () => { calls.push('ledger'); return Promise.resolve(); };
+        const refunds = () => { calls.push('refunds'); return Promise.resolve(); };
+        const queues = () => { calls.push('queues'); return Promise.resolve(); };
+
+        const done = ReserveMath.sequenceLoads(first, [ledger, refunds], [queues], (e) => errors.push(e));
+        await flush();
+        // Status is slow (a Horizon round-trip): the scaled sections wait,
+        // the independent ones do not.
+        expect(calls).toEqual(['status', 'queues']);
+
+        status.resolve({ buckets: [] });
+        await done;
+        expect(calls).toEqual(['status', 'queues', 'ledger', 'refunds']);
+        expect(errors).toEqual([]);
+    });
+
+    it('still runs dependents when `first` rejects, reporting that failure once', async () => {
+        const calls = [];
+        const errors = [];
+        const first = () => Promise.reject(new Error('status boom'));
+        const ledger = () => { calls.push('ledger'); return Promise.resolve(); };
+
+        await ReserveMath.sequenceLoads(first, [ledger], [], (e) => errors.push(e.message));
+        expect(calls).toEqual(['ledger']);
+        expect(errors).toEqual(['status boom']);
+    });
+
+    it('reports each failing loader exactly once (sync throws included) and never rejects', async () => {
+        const errors = [];
+        await ReserveMath.sequenceLoads(
+            () => Promise.resolve(),
+            [() => Promise.reject(new Error('a')), () => { throw new Error('b'); }],
+            [() => Promise.reject(new Error('c'))],
+            (e) => errors.push(e.message)
+        );
+        expect(errors.sort()).toEqual(['a', 'b', 'c']);
+    });
+
+    it('resolves only once every loader has settled', async () => {
+        const slow = deferred();
+        let settled = false;
+        const done = ReserveMath.sequenceLoads(() => Promise.resolve(), [], [() => slow.promise], () => {})
+            .then(() => { settled = true; });
+        await flush();
+        expect(settled).toBe(false);
+        slow.resolve();
+        await done;
+        expect(settled).toBe(true);
+    });
+});

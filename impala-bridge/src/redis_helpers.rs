@@ -2,6 +2,7 @@ use deadpool_redis::Pool as RedisPool;
 use log::{error, warn};
 use redis::AsyncCommands;
 
+use crate::client_source::source_fingerprint;
 use crate::constants::LOCKOUT_DURATION_SECS;
 use crate::error::AppError;
 
@@ -62,15 +63,26 @@ pub async fn check_rate_limit(
     Ok(())
 }
 
-/// Check whether the given identity is currently locked out due to repeated
-/// failures.  Fails closed when Redis is unavailable.
-pub async fn check_lockout(pool: &RedisPool, id: &str, threshold: u64) -> Result<(), AppError> {
+/// Check whether the given identity is currently locked out for this client
+/// source due to repeated failures.  Fails closed when Redis is unavailable.
+///
+/// Lockouts are keyed on `(identity, source)` (see `client_source.rs`): a
+/// guesser locks the identity only for the source it guesses from, so it
+/// cannot take an operator, card or MFA identity offline from anywhere at a
+/// trickle the WAF never notices. The per-identity rate limits — not this —
+/// bound a guesser spread across many sources.
+pub async fn check_lockout(
+    pool: &RedisPool,
+    id: &str,
+    source: &str,
+    threshold: u64,
+) -> Result<(), AppError> {
     let mut conn = pool.get().await.map_err(|e| {
         error!("check_lockout: failed to get Redis connection: {}", e);
         AppError::InternalError("Service temporarily unavailable".to_string())
     })?;
 
-    let key = format!("impala:lockout:{id}");
+    let key = lockout_key(id, source);
 
     let count: u64 = conn
         .get::<_, Option<u64>>(&key)
@@ -90,9 +102,15 @@ pub async fn check_lockout(pool: &RedisPool, id: &str, threshold: u64) -> Result
     Ok(())
 }
 
-/// Increment the lockout counter for the given identity.  Fire-and-forget: errors
-/// are logged but never returned.
-pub async fn increment_lockout(pool: &RedisPool, id: &str, ttl_secs: usize) {
+/// Increment the lockout counter for the given `(identity, source)` pair.
+/// Fire-and-forget: errors are logged but never returned.
+///
+/// Call this only for a real guess — a wrong password against a stored one,
+/// a bad signature over a live challenge, a wrong MFA code. Unknown
+/// identities, federated accounts and missing challenges must not count:
+/// nothing was guessed against, and counting them let a caller pre-lock an
+/// identity before it was ever provisioned.
+pub async fn increment_lockout(pool: &RedisPool, id: &str, source: &str, ttl_secs: usize) {
     let mut conn = match pool.get().await {
         Ok(c) => c,
         Err(e) => {
@@ -101,7 +119,7 @@ pub async fn increment_lockout(pool: &RedisPool, id: &str, ttl_secs: usize) {
         }
     };
 
-    let key = format!("impala:lockout:{id}");
+    let key = lockout_key(id, source);
 
     if let Err(e) = conn.incr::<_, u64, u64>(&key, 1).await {
         warn!("increment_lockout: Redis INCR failed for {}: {}", key, e);
@@ -113,8 +131,9 @@ pub async fn increment_lockout(pool: &RedisPool, id: &str, ttl_secs: usize) {
     }
 }
 
-/// Clear the lockout counter for the given identity.  Fire-and-forget.
-pub async fn clear_lockout(pool: &RedisPool, id: &str) {
+/// Clear the lockout counter for the given `(identity, source)` pair after a
+/// successful authentication from that source.  Fire-and-forget.
+pub async fn clear_lockout(pool: &RedisPool, id: &str, source: &str) {
     let mut conn = match pool.get().await {
         Ok(c) => c,
         Err(e) => {
@@ -123,18 +142,21 @@ pub async fn clear_lockout(pool: &RedisPool, id: &str) {
         }
     };
 
-    let key = format!("impala:lockout:{id}");
+    let key = lockout_key(id, source);
 
     if let Err(e) = conn.del::<_, ()>(&key).await {
         warn!("clear_lockout: Redis DEL failed for {}: {}", key, e);
     }
 }
 
-/// Check whether MFA verification attempts have been exhausted.  Fails closed.
+/// Check whether MFA verification attempts from this client source have been
+/// exhausted for the `(account, mfa_type)` pair.  Fails closed. Scoped by
+/// source for the same reason as `check_lockout`.
 pub async fn check_mfa_lockout(
     pool: &RedisPool,
     account_id: &str,
     mfa_type: &str,
+    source: &str,
     threshold: u64,
 ) -> Result<(), AppError> {
     let mut conn = pool.get().await.map_err(|e| {
@@ -142,7 +164,7 @@ pub async fn check_mfa_lockout(
         AppError::InternalError("Service temporarily unavailable".to_string())
     })?;
 
-    let key = format!("impala:mfa_attempts:{account_id}:{mfa_type}");
+    let key = mfa_attempts_key(account_id, mfa_type, source);
 
     let count: u64 = conn
         .get::<_, Option<u64>>(&key)
@@ -162,11 +184,14 @@ pub async fn check_mfa_lockout(
     Ok(())
 }
 
-/// Increment the MFA attempt counter.  Fire-and-forget.
+/// Increment the MFA attempt counter for `(account, mfa_type, source)`.
+/// Fire-and-forget. Only a wrong code against an outstanding factor counts —
+/// an absent enrollment or an SMS code that was never issued is not a guess.
 pub async fn increment_mfa_attempts(
     pool: &RedisPool,
     account_id: &str,
     mfa_type: &str,
+    source: &str,
     ttl_secs: usize,
 ) {
     let mut conn = match pool.get().await {
@@ -180,7 +205,7 @@ pub async fn increment_mfa_attempts(
         }
     };
 
-    let key = format!("impala:mfa_attempts:{account_id}:{mfa_type}");
+    let key = mfa_attempts_key(account_id, mfa_type, source);
 
     if let Err(e) = conn.incr::<_, u64, u64>(&key, 1).await {
         warn!(
@@ -198,8 +223,9 @@ pub async fn increment_mfa_attempts(
     }
 }
 
-/// Clear the MFA attempt counter after a successful verification.  Fire-and-forget.
-pub async fn clear_mfa_attempts(pool: &RedisPool, account_id: &str, mfa_type: &str) {
+/// Clear the MFA attempt counter for `(account, mfa_type, source)` after a
+/// successful verification.  Fire-and-forget.
+pub async fn clear_mfa_attempts(pool: &RedisPool, account_id: &str, mfa_type: &str, source: &str) {
     let mut conn = match pool.get().await {
         Ok(c) => c,
         Err(e) => {
@@ -208,37 +234,59 @@ pub async fn clear_mfa_attempts(pool: &RedisPool, account_id: &str, mfa_type: &s
         }
     };
 
-    let key = format!("impala:mfa_attempts:{account_id}:{mfa_type}");
+    let key = mfa_attempts_key(account_id, mfa_type, source);
 
     if let Err(e) = conn.del::<_, ()>(&key).await {
         warn!("clear_mfa_attempts: Redis DEL failed for {}: {}", key, e);
     }
 }
 
-/// Store a freshly-issued card-auth challenge (hex-encoded) for the given
-/// card.  Fails closed: when Redis is unavailable no challenge is issued
-/// (an unstored challenge could never be verified anyway).
-pub async fn store_card_challenge(
+/// Append a card-auth challenge entry to the card's bounded outstanding set,
+/// evicting the oldest beyond `max_outstanding`, in one server-side step.
+///
+/// The set is a Redis list under `impala:card_challenges:{card_id}` whose
+/// entries carry their own expiry (`{expires_at}:{challenge_hex}`, built by
+/// `card_auth`), so several challenges can be live at once — a card UID is
+/// public, and a single overwritable slot let anyone who knew one clobber the
+/// legitimate holder's challenge. The key's TTL is re-armed to the challenge
+/// TTL on every push: by the time it lapses every entry has expired too.
+///
+/// RPUSH + LTRIM + EXPIRE ride one script so the cap and the TTL can never be
+/// left unapplied by a failure between commands.
+const CARD_CHALLENGE_PUSH_SCRIPT: &str = r#"
+redis.call('RPUSH', KEYS[1], ARGV[1])
+redis.call('LTRIM', KEYS[1], -tonumber(ARGV[2]), -1)
+redis.call('EXPIRE', KEYS[1], ARGV[3])
+return 1
+"#;
+
+/// Store a freshly-issued card-auth challenge entry for the given card.
+/// Fails closed: when Redis is unavailable no challenge is issued (an
+/// unstored challenge could never be verified anyway).
+pub async fn push_card_challenge(
     pool: &RedisPool,
     card_id: &str,
-    challenge_hex: &str,
+    entry: &str,
+    max_outstanding: usize,
     ttl_secs: usize,
 ) -> Result<(), AppError> {
     let mut conn = pool.get().await.map_err(|e| {
-        error!(
-            "store_card_challenge: failed to get Redis connection: {}",
-            e
-        );
+        error!("push_card_challenge: failed to get Redis connection: {}", e);
         AppError::InternalError("Service temporarily unavailable".to_string())
     })?;
 
-    let key = format!("impala:card_challenge:{card_id}");
+    let key = card_challenges_key(card_id);
 
-    conn.set_ex::<_, &str, ()>(&key, challenge_hex, ttl_secs as u64)
+    let _pushed: i64 = redis::Script::new(CARD_CHALLENGE_PUSH_SCRIPT)
+        .key(&key)
+        .arg(entry)
+        .arg(max_outstanding as i64)
+        .arg(ttl_secs as i64)
+        .invoke_async(&mut *conn)
         .await
         .map_err(|e| {
             warn!(
-                "store_card_challenge: Redis SET_EX failed for {}: {}",
+                "push_card_challenge: Redis script failed for {}: {}",
                 key, e
             );
             AppError::InternalError("Service temporarily unavailable".to_string())
@@ -247,14 +295,44 @@ pub async fn store_card_challenge(
     Ok(())
 }
 
-/// Atomically consume the stored card-auth challenge via GETDEL, making every
-/// challenge single-use (a replayed signature finds no challenge and fails).
-/// Returns `Ok(None)` when no challenge is outstanding (expired, never issued,
-/// or already consumed).  Fails closed: a Redis error rejects the attempt.
+/// Read (without consuming) every outstanding challenge entry for a card,
+/// oldest first. Expiry is per entry and is the caller's to check. Fails
+/// closed: a Redis error rejects the attempt.
+pub async fn list_card_challenges(
+    pool: &RedisPool,
+    card_id: &str,
+) -> Result<Vec<String>, AppError> {
+    let mut conn = pool.get().await.map_err(|e| {
+        error!(
+            "list_card_challenges: failed to get Redis connection: {}",
+            e
+        );
+        AppError::InternalError("Service temporarily unavailable".to_string())
+    })?;
+
+    let key = card_challenges_key(card_id);
+
+    conn.lrange::<_, Vec<String>>(&key, 0, -1)
+        .await
+        .map_err(|e| {
+            warn!(
+                "list_card_challenges: Redis LRANGE failed for {}: {}",
+                key, e
+            );
+            AppError::InternalError("Service temporarily unavailable".to_string())
+        })
+}
+
+/// Atomically consume exactly one outstanding challenge entry (`LREM`),
+/// making every challenge single-use. Returns `Ok(true)` when this caller
+/// removed it and `Ok(false)` when it was already gone — a concurrent
+/// presentation of the same signature lost the race, or the entry expired
+/// out from under it — which the caller must treat as a replay. Fails closed.
 pub async fn consume_card_challenge(
     pool: &RedisPool,
     card_id: &str,
-) -> Result<Option<String>, AppError> {
+    entry: &str,
+) -> Result<bool, AppError> {
     let mut conn = pool.get().await.map_err(|e| {
         error!(
             "consume_card_challenge: failed to get Redis connection: {}",
@@ -263,17 +341,17 @@ pub async fn consume_card_challenge(
         AppError::InternalError("Service temporarily unavailable".to_string())
     })?;
 
-    let key = format!("impala:card_challenge:{card_id}");
+    let key = card_challenges_key(card_id);
 
-    let challenge: Option<String> = conn.get_del(&key).await.map_err(|e| {
+    let removed: i64 = conn.lrem(&key, 1, entry).await.map_err(|e| {
         warn!(
-            "consume_card_challenge: Redis GETDEL failed for {}: {}",
+            "consume_card_challenge: Redis LREM failed for {}: {}",
             key, e
         );
         AppError::InternalError("Service temporarily unavailable".to_string())
     })?;
 
-    Ok(challenge)
+    Ok(removed == 1)
 }
 
 /// A pending SMS notification-enrollment verification.
@@ -798,9 +876,10 @@ pub async fn delete_session(pool: &RedisPool, sid_hash: &str) -> Result<(), AppE
     })
 }
 
-// Canonical Redis key builders. Currently exercised only by the unit tests below
-// (the live call sites format keys inline); retained as the single source of truth
-// for the key formats.
+// Canonical Redis key builders — the single source of truth for the key
+// formats. The lockout, MFA-attempt and card-challenge helpers above build
+// their keys here; the rate-limit and revocation call sites still format
+// theirs inline and are pinned by the tests below.
 
 /// Construct a rate-limit Redis key for the given scope and identity.
 #[allow(dead_code)]
@@ -808,10 +887,11 @@ pub(crate) fn rate_limit_key(scope: &str, id: &str) -> String {
     format!("impala:rate:{scope}:{id}")
 }
 
-/// Construct a lockout Redis key for the given identity.
-#[allow(dead_code)]
-pub(crate) fn lockout_key(id: &str) -> String {
-    format!("impala:lockout:{id}")
+/// Construct a lockout Redis key for the given `(identity, source)` pair.
+/// The source rides as a fixed-width digest so IPv6 colons never enter the
+/// key structure and the identity segment stays unambiguous.
+pub(crate) fn lockout_key(id: &str, source: &str) -> String {
+    format!("impala:lockout:{id}:{}", source_fingerprint(source))
 }
 
 /// Construct a token revocation Redis key for the given JTI.
@@ -820,10 +900,20 @@ pub(crate) fn revoked_key(jti: &str) -> String {
     format!("impala:revoked:{jti}")
 }
 
-/// Construct an MFA attempts Redis key for the given account and MFA type.
-#[allow(dead_code)]
-pub(crate) fn mfa_attempts_key(account_id: &str, mfa_type: &str) -> String {
-    format!("impala:mfa_attempts:{account_id}:{mfa_type}")
+/// Construct an MFA attempts Redis key for `(account, mfa_type, source)`.
+pub(crate) fn mfa_attempts_key(account_id: &str, mfa_type: &str, source: &str) -> String {
+    format!(
+        "impala:mfa_attempts:{account_id}:{mfa_type}:{}",
+        source_fingerprint(source)
+    )
+}
+
+/// Construct the outstanding-challenge list key for a card. Deliberately a
+/// different name from the retired single-slot string key
+/// (`impala:card_challenge:{id}`): a rolling deploy must never RPUSH onto a
+/// string the previous binary SET (WRONGTYPE).
+pub(crate) fn card_challenges_key(card_id: &str) -> String {
+    format!("impala:card_challenges:{card_id}")
 }
 
 #[cfg(test)]
@@ -876,10 +966,23 @@ mod tests {
         assert_eq!(key, "impala:rate:token:admin");
     }
 
+    /// Lockouts are `(identity, source)`-scoped: the same identity from two
+    /// sources must land on two keys, and the source rides as a fixed-width
+    /// digest (an IPv6 source would otherwise inject colons into the key).
     #[test]
     fn test_lockout_key_format() {
-        let key = lockout_key("user123");
-        assert_eq!(key, "impala:lockout:user123");
+        let key = lockout_key("user123", "203.0.113.7");
+        assert_eq!(
+            key,
+            format!(
+                "impala:lockout:user123:{}",
+                source_fingerprint("203.0.113.7")
+            )
+        );
+        assert_ne!(key, lockout_key("user123", "203.0.113.8"));
+        assert_ne!(key, lockout_key("user124", "203.0.113.7"));
+        let v6 = lockout_key("user123", "2001:db8::1");
+        assert_eq!(v6.matches(':').count(), 3, "source must not add colons");
     }
 
     #[test]
@@ -890,14 +993,42 @@ mod tests {
 
     #[test]
     fn test_mfa_attempts_key_format() {
-        let key = mfa_attempts_key("user1", "totp");
-        assert_eq!(key, "impala:mfa_attempts:user1:totp");
+        let key = mfa_attempts_key("user1", "totp", "203.0.113.7");
+        assert_eq!(
+            key,
+            format!(
+                "impala:mfa_attempts:user1:totp:{}",
+                source_fingerprint("203.0.113.7")
+            )
+        );
+        assert_ne!(key, mfa_attempts_key("user1", "totp", "203.0.113.8"));
     }
 
     #[test]
     fn test_mfa_attempts_key_sms() {
-        let key = mfa_attempts_key("user2", "sms");
-        assert_eq!(key, "impala:mfa_attempts:user2:sms");
+        let key = mfa_attempts_key("user2", "sms", "unknown");
+        assert!(key.starts_with("impala:mfa_attempts:user2:sms:"));
+        assert_ne!(key, mfa_attempts_key("user2", "totp", "unknown"));
+    }
+
+    /// The challenge set must not share a key with the retired single-slot
+    /// string (`impala:card_challenge:{id}`), or a rolling deploy RPUSHes
+    /// onto a string and every card login fails with WRONGTYPE.
+    #[test]
+    fn test_card_challenges_key_is_distinct_from_legacy_slot() {
+        let key = card_challenges_key("0123456789abcdef");
+        assert_eq!(key, "impala:card_challenges:0123456789abcdef");
+        assert_ne!(key, "impala:card_challenge:0123456789abcdef");
+    }
+
+    /// The push script keeps the newest `max` entries and re-arms the TTL —
+    /// pin the three commands so a refactor cannot drop the cap or leave a
+    /// list without an expiry.
+    #[test]
+    fn test_card_challenge_push_script_shape() {
+        assert!(CARD_CHALLENGE_PUSH_SCRIPT.contains("RPUSH"));
+        assert!(CARD_CHALLENGE_PUSH_SCRIPT.contains("LTRIM', KEYS[1], -tonumber(ARGV[2]), -1"));
+        assert!(CARD_CHALLENGE_PUSH_SCRIPT.contains("EXPIRE', KEYS[1], ARGV[3]"));
     }
 
     #[test]
@@ -905,9 +1036,10 @@ mod tests {
         // Verify the helper functions produce the same keys as the inline format! calls
         // used in the async functions above
         assert!(rate_limit_key("auth", "x").starts_with("impala:rate:"));
-        assert!(lockout_key("x").starts_with("impala:lockout:"));
+        assert!(lockout_key("x", "s").starts_with("impala:lockout:"));
         assert!(revoked_key("x").starts_with("impala:revoked:"));
-        assert!(mfa_attempts_key("x", "y").starts_with("impala:mfa_attempts:"));
+        assert!(mfa_attempts_key("x", "y", "s").starts_with("impala:mfa_attempts:"));
+        assert!(card_challenges_key("x").starts_with("impala:card_challenges:"));
     }
 
     /// The pending record must survive a round trip intact: the stored number

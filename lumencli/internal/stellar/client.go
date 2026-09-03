@@ -15,6 +15,10 @@ import (
 )
 
 // httpTimeout bounds every Horizon request so the CLI cannot hang indefinitely.
+//
+// It is deliberately far shorter than a transaction's validity window
+// (txTimeoutSeconds): a submit that hits this bound has NOT failed, it has
+// merely stopped being observed, and is reported as ambiguous.
 const httpTimeout = 30 * time.Second
 
 // appVersion is reported to Horizon via the client headers (X-App-Version),
@@ -30,12 +34,22 @@ type Client struct {
 	net     netcfg.Network
 }
 
-// New builds a Client for the given network.
+// New builds a Client for the given network with the default request timeout.
 func New(net netcfg.Network) *Client {
+	return NewWithTimeout(net, 0)
+}
+
+// NewWithTimeout builds a Client whose non-streaming requests are bounded by
+// timeout; zero (or negative) selects the default. Tests use it to exercise
+// the client-side timeout path without waiting the production bound.
+func NewWithTimeout(net netcfg.Network, timeout time.Duration) *Client {
+	if timeout <= 0 {
+		timeout = httpTimeout
+	}
 	return &Client{
 		horizon: &horizonclient.Client{
 			HorizonURL: net.HorizonURL,
-			HTTP:       &http.Client{Timeout: httpTimeout},
+			HTTP:       &http.Client{Timeout: timeout},
 			AppName:    "lumencli",
 			AppVersion: appVersion,
 		},

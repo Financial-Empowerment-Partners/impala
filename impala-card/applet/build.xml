@@ -5,12 +5,22 @@
 
     <property name="applet.version" value="0.3"/>
     <!--
-      Defaults below are testnet-safe. CI overrides them per network via
+      Defaults below are testnet-safe. CI overrides the AIDs per network via
       gradle -P (forwarded to Ant in applet/build.gradle.kts):
         live build  → -Papplet.aid=$LIVE_AID -Papplet.aid.app=$LIVE_AID_APP
-                       -Papplet.issuerkey=$LIVE_ISSUER_KEY
-                      (sourced from the production-card-keys GitHub Environment)
+                      (public AIDs from the IMPALA_CARD_LIVE_* repository variables)
         testnet build → no overrides; defaults apply.
+
+      The GP issuer key (applet.issuerkey) is NOT a build input: only the
+      gp.jar card targets below (delete-applet / install / list / info) pass
+      it, via if:set, and those run against a physical card from an operator
+      workstation — never in CI. There is deliberately no default value in
+      this file: when the property is unset, no key option is passed and
+      gp.jar uses the GlobalPlatform test key (40:41:42:...:4F), which is
+      what a fresh test card ships with. For a personalized card pass
+      -Papplet.issuerkey=<16 bytes, colon-separated hex> from a no-echo prompt
+      or env var; never commit a real key here.
+
       The install target additionally accepts -Papplet.installparams=<hex> — the
       install-time provisioning TLV forwarded to the applet via the gp.jar
       "params" install option (see ImpalaApplet.applyProvisioningParameters for
@@ -19,8 +29,6 @@
     -->
     <property name="applet.aid" value="0102030405060708"/>
     <property name="applet.aid.app" value="01020304050607080102"/>
-    <property name="applet.issuerkey" value="02:0C:04:72:D8:84:78:B9:02:F3:D7:2A:FC:67:1D:95"/>
-    <property name="applet.issuerkey.default" value="40:41:42:43:44:45:46:47:48:49:4A:4B:4C:4D:4E:4F"/>
     <property name="applet.package" value="com.impala.applet"/>
     <property name="applet.class" value="ImpalaApplet"/>
     <property name="applet.sources" value="src/jvmMain/java/com/impala/applet"/>

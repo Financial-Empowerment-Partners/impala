@@ -86,7 +86,7 @@ graph TB
     end
 
     subgraph Storage["Data Layer"]
-        Postgres[("PostgreSQL 16<br/><i>35 migrations, slow query logs</i>")]
+        Postgres[("PostgreSQL 16<br/><i>36 migrations, slow query logs</i>")]
         Redis[("Redis 7<br/><i>TLS in transit, connection pool</i>")]
         Vault["HashiCorp Vault / OpenBao"]
     end
@@ -802,7 +802,7 @@ erDiagram
 
 Each account carries a `sync_mode` (`reserve` default, or `mirror`) selecting how `POST /sync/payala` applies a batch of offline Payala transactions: reserve mode nets each batch into `payala_reserve` (one balance update per batch, per currency), mirror mode inserts each fresh item 1:1 into `transaction` with `origin = 'payala_sync'`. `payala_sync_item` is the shared idempotency ledger — its `(payala_account_id, payala_tx_id)` primary key makes batch replay a no-op — and `payala_sync_batch` audits every ingestion.
 
-The database schema is managed by sequential SQL migrations in `impala-bridge/migrations/` (currently 35, `001` through `035`). Performance indices cover: `card(account_id)` filtered on active cards, `impala_mfa(account_id, mfa_type)`, `notify(account_id)` filtered on active entries, `transaction(created_at)`, and `notification_subscription(account_id, event_type)` filtered on enabled subscriptions.
+The database schema is managed by sequential SQL migrations in `impala-bridge/migrations/` (currently 36, `001` through `036`). Performance indices cover: `card(account_id)` filtered on active cards, `impala_mfa(account_id, mfa_type)`, `notify(account_id)` filtered on active entries, `transaction(created_at)`, and `notification_subscription(account_id, event_type)` filtered on enabled subscriptions.
 
 ---
 
@@ -911,7 +911,7 @@ sequenceDiagram
 graph TB
     subgraph DockerCompose["Docker Compose Stack"]
         BridgeContainer["impala-bridge<br/><i>Rust / Axum</i><br/>:8080"]
-        PGContainer["PostgreSQL 16<br/><i>35 migrations</i><br/>:5432"]
+        PGContainer["PostgreSQL 16<br/><i>36 migrations</i><br/>:5432"]
         RedisContainer["Redis 7<br/><i>Connection pool + event cache</i><br/>:6379"]
     end
 

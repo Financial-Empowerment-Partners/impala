@@ -51,6 +51,7 @@ Six components span from on-chain smart contracts through a REST API server down
 - **Five authentication methods** — username/password (Argon2), Okta SSO (OIDC), NFC smartcard (ECDSA), Google Sign-In, GitHub OAuth.
 - **Event-driven notifications** — users subscribe to events (login, transfer, profile changes) and receive alerts via SMS (Twilio), email (SES), push (FCM), or webhook.
 - **Fail-closed security** — Redis-backed rate limiting, account lockout, token revocation, and MFA brute-force protection all reject requests when Redis is unavailable, rather than silently bypassing.
+- **Issuer-pinned stablecoins in the conversion reserve** — USDC and, since its native Stellar launch, Tether's USDT0 are recognized by `(asset code, issuer)` only, through one shared list in the reserve engine; the reserve can add its own trustlines and every asset decision fails closed on anything it does not recognize.
 - **Production-ready infrastructure** — Terraform provisions ECS Fargate, RDS PostgreSQL, ElastiCache Redis with TLS, ALB with WAF, VPC endpoints, auto-scaling, and optional cross-region disaster recovery.
 
 ## Quick Start

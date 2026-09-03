@@ -120,6 +120,15 @@ KMS_SEED_KEY_ID=arn:aws:kms:...      # or VAULT_ADDR + VAULT_TRANSIT_KEY
 There is no plaintext-at-rest path and none will be added: the feature refuses
 to run with `SEED_PROTECTION_BACKEND=none`.
 
+On ECS, the backend and key pointer are the Terraform inputs
+`seed_protection_backend` / `kms_seed_key` (or `vault_addr` +
+`vault_transit_key`); the flag itself is a plain non-secret variable and goes
+in `bridge_extra_environment` (a list of `{name, value}` objects), then
+`terraform apply` and let the services roll:
+`bridge_extra_environment = [{ name = "KEY_IMPORT_ENABLED", value = "true" }]`.
+Secrets (Vault/OpenBao AppRole ids, tokens) never go there — they stay in the
+task definition's `secrets` block, sourced from Secrets Manager.
+
 The flag is also the **break-glass switch**. Turn it off and restart, and the
 whole fleet reverts to environment credentials — which is exactly why a
 rotation is not finished until the old environment variable is gone (see
@@ -315,15 +324,37 @@ There used to be no supported way to create one: the user-facing
 `/managed-account/generate` refuses for exactly that account.
 
 With `KEY_IMPORT_ENABLED=true`, a bridge configured with `RESERVE_ACCOUNT_ID`
-but no seed starts **armed but inactive**: it logs loudly, `GET /health`
-reports the state, no order diverts to the reserve, and no payout can be
-signed. The account stays quarantined from `/managed-account/*` throughout —
-that guard reads configuration, not the live reserve handle, precisely so it
-stays armed during this window.
+but no seed starts **armed but inactive**: the startup log carries an ERROR
+naming the account and the endpoint to call; `GET /admin/exchange-reserve`
+answers 200 with `configured: false` until the seed exists (readable by
+admins, treasurers, and auditors); `GET /health` reports it as
+`conversion_reserve: armed_inactive` (`off` when `RESERVE_ACCOUNT_ID` is
+unset, `active` once the reserve initialized); no order diverts to the
+reserve, and no payout can be signed. The account stays quarantined from
+`/managed-account/*` throughout — that guard reads configuration, not the
+live reserve handle, precisely so it stays armed during this window.
+(`RESERVE_ACCOUNT_ID` and the issuer variables are non-secret: on ECS they go
+in `bridge_extra_environment`, see `conversion-reserve.md` → Enabling.)
 
 1. `impalactl stellar-seed generate --account <RESERVE_ACCOUNT_ID>`
-2. Fund the returned `G...` address (base reserve, plus a USDC trustline).
-3. Restart the bridge. The reserve initializes.
+2. Fund the returned `G...` address with XLM (base reserve, plus ~0.5 XLM per
+   trustline you will add). XLM only — there are no trustlines yet, and the
+   deposit watcher is not running, so nothing sent now is booked.
+3. Restart the bridge. The reserve initializes (it logs an ERROR per
+   configured stablecoin the account has no trustline for — expected here)
+   and pins its deposit-scan cursor to *now*.
+4. Add the trustlines from inside the bridge:
+   `POST /admin/exchange-reserve/trustlines {"currency": "USDC"}` (and
+   `"USDT0"` if configured), or the **Add trustline** button on the Reserve
+   page. This is the only way: the generated seed exists nowhere outside the
+   bridge and the reserve account is quarantined from `/managed-account/sign`,
+   so no wallet can sign a `ChangeTrust` for it. (The endpoint answers 400
+   `conversion reserve is not configured` before the restart in step 3.)
+5. Fund the pool: send the stablecoin float now — the live watcher books it
+   as an `unmatched_deposit` credit, no manual entry — and record only the
+   step-2 XLM and any fiat float with a manual `topup` entry. The full
+   sequence, and why a manual `topup` on top of a watched inflow
+   double-books, is `conversion-reserve.md` → Enabling, steps 6–8.
 
 With the flag off, the old behaviour is unchanged: the bridge refuses to start.
 

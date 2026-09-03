@@ -5,9 +5,11 @@ use opentelemetry::KeyValue;
 use sqlx::PgPool;
 use std::sync::Arc;
 
+use crate::client_source::ClientSource;
 use crate::constants::{
     AUTH_PROVIDER_LOCAL, LOCKOUT_DURATION_SECS, LOCKOUT_THRESHOLD, MIN_PASSWORD_LENGTH,
-    RATE_LIMIT_MAX_REQUESTS, RATE_LIMIT_WINDOW_SECS,
+    PREAUTH_SOURCE_MAX_REQUESTS, PREAUTH_SOURCE_WINDOW_SECS, RATE_LIMIT_MAX_REQUESTS,
+    RATE_LIMIT_WINDOW_SECS,
 };
 use crate::error::AppError;
 use crate::models::{AuthenticateRequest, AuthenticateResponse};
@@ -19,6 +21,7 @@ use crate::telemetry::AppMetrics;
 /// Includes rate limiting and account lockout via Redis.
 /// Returns generic "Invalid credentials" for both missing-account and wrong-password
 /// to prevent account enumeration.
+#[allow(clippy::too_many_arguments)] // axum handler: each arg is an extractor
 pub async fn authenticate(
     Extension(pool): Extension<PgPool>,
     Extension(redis_pool): Extension<Arc<deadpool_redis::Pool>>,
@@ -26,9 +29,20 @@ pub async fn authenticate(
     Extension(auth_policy): Extension<Arc<crate::auth::AuthPolicy>>,
     sns_client: Option<Extension<Arc<aws_sdk_sns::Client>>>,
     sns_topic_arn: Option<Extension<crate::sns::SnsTopicArn>>,
+    ClientSource(source): ClientSource,
     Json(payload): Json<AuthenticateRequest>,
 ) -> Result<Json<AuthenticateResponse>, AppError> {
     info!("POST /authenticate: account_id={}", payload.account_id);
+
+    // Per-source budget before any per-identity budget is spent.
+    crate::redis_helpers::check_rate_limit(
+        &redis_pool,
+        "preauth_src",
+        &source,
+        PREAUTH_SOURCE_MAX_REQUESTS,
+        PREAUTH_SOURCE_WINDOW_SECS,
+    )
+    .await?;
 
     // Rate limiting check
     crate::redis_helpers::check_rate_limit(
@@ -40,9 +54,16 @@ pub async fn authenticate(
     )
     .await?;
 
-    // Account lockout check
-    crate::redis_helpers::check_lockout(&redis_pool, &payload.account_id, LOCKOUT_THRESHOLD)
-        .await?;
+    // Account lockout check, keyed on (account, source). Only the
+    // wrong-password branch below increments it: an unknown account, a
+    // refused registration and a federated account are not guesses.
+    crate::redis_helpers::check_lockout(
+        &redis_pool,
+        &payload.account_id,
+        &source,
+        LOCKOUT_THRESHOLD,
+    )
+    .await?;
 
     // Validate password strength
     if payload.password.len() < MIN_PASSWORD_LENGTH {
@@ -72,7 +93,7 @@ pub async fn authenticate(
         Ok(0) => {
             // Constant-time behavior: run a dummy hash verification so timing
             // does not reveal whether the account exists
-            crate::password::dummy_verify().await;
+            crate::password::dummy_verify().await?;
 
             debug!(
                 "authenticate: account not found for account_id={} (generic error returned)",
@@ -120,7 +141,7 @@ pub async fn authenticate(
             // response cannot be used to enumerate which accounts are
             // unclaimed.
             if !auth_policy.allow_open_registration {
-                crate::password::dummy_verify().await;
+                crate::password::dummy_verify().await?;
                 warn!(
                     "authenticate: refused to claim credential-less account_id={} \
                      (open registration disabled)",
@@ -183,8 +204,11 @@ pub async fn authenticate(
             }
         }
         Ok(Some((stored_hash, auth_provider))) => {
-            // Reject non-local auth provider accounts (e.g. Okta users)
+            // Reject non-local auth provider accounts (e.g. Okta users) —
+            // at the cost of a real verify, so the branch is not a timing
+            // oracle for which usernames are federated.
             if auth_provider != AUTH_PROVIDER_LOCAL {
+                crate::password::dummy_verify().await?;
                 warn!(
                     "authenticate: non-local auth user {} attempted password login",
                     payload.account_id
@@ -201,7 +225,8 @@ pub async fn authenticate(
             {
                 true => {
                     // Reset failed login counter on success
-                    crate::redis_helpers::clear_lockout(&redis_pool, &payload.account_id).await;
+                    crate::redis_helpers::clear_lockout(&redis_pool, &payload.account_id, &source)
+                        .await;
 
                     info!(
                         "authenticate: successful login for account_id={}",
@@ -232,10 +257,12 @@ pub async fn authenticate(
                     }))
                 }
                 false => {
-                    // Increment failed login counter
+                    // Increment failed login counter — a real guess against
+                    // a stored password, the only branch that counts.
                     crate::redis_helpers::increment_lockout(
                         &redis_pool,
                         &payload.account_id,
+                        &source,
                         LOCKOUT_DURATION_SECS,
                     )
                     .await;

@@ -11,7 +11,6 @@ import (
 	"github.com/stellar/go-stellar-sdk/protocols/horizon/operations"
 
 	"lumencli/internal/netcfg"
-	"lumencli/internal/stellar"
 )
 
 // followDrainWait bounds how long the command waits for the stream goroutine
@@ -51,7 +50,7 @@ func (a *App) runFollow(net netcfg.Network, address, cursor string, includeFaile
 
 	done := make(chan error, 1)
 	go func() {
-		done <- stellar.New(net).WatchPayments(ctx, address, cursor, includeFailed,
+		done <- a.horizon(net).WatchPayments(ctx, address, cursor, includeFailed,
 			func(op operations.Operation) bool {
 				e := entryFromOp(address, op)
 				if filter.match(e) {

@@ -17,9 +17,26 @@ import (
 
 const version = "0.1.0"
 
-// defaultTimeout comfortably exceeds the bridge's own request deadline, so a
-// slow-but-working call is not cut off on the client side.
-const defaultTimeout = 30 * time.Second
+// bridgeRequestDeadline mirrors the bridge's REQUEST_TIMEOUT_SECS default:
+// the point at which its TimeoutLayer abandons a handler and answers 408.
+const bridgeRequestDeadline = 30 * time.Second
+
+// defaultTimeout is the per-request client timeout. It must EXCEED
+// bridgeRequestDeadline, and by enough for the bridge's answer to travel
+// back: a client that gives up at the same instant as the server loses the
+// server's verdict — for a payment, possibly a success — and is left with
+// nothing but "timed out". With the headroom, the bridge's own 408 (or its
+// 200/500) arrives instead of a client-side cut, so the outcome is at least
+// the bridge's to report. The bridge's Horizon client also times out at 30s,
+// so a submission that is slow because Horizon is slow surfaces as the
+// bridge's 500 within this bound rather than as our timeout.
+const defaultTimeout = bridgeRequestDeadline + 15*time.Second
+
+// exitAmbiguous is the exit code for a money-moving command whose outcome is
+// unknown: the request reached (or may have reached) the bridge, and the
+// answer did not prove the payment refused. It is distinct from 1 so that a
+// script cannot mistake "maybe paid" for "not paid" and re-run.
+const exitAmbiguous = 3
 
 const usage = `impalactl ` + version + ` — command-line client for the Impala bridge API
 
@@ -96,6 +113,11 @@ reserve XLM to the pay-in address the active provider account names. Imports
 ADD by default; replacing anything in effect needs --replace plus the exact
 confirmation phrase the bridge names, and takes effect only at the next
 rolling restart. See docs/runbooks/import-keys.md.
+
+Exit codes: 0 success, 1 failure, 2 usage error, 3 ambiguous outcome — a
+"transfer send" that timed out or failed without proof the payment was
+refused. The payment MAY have been submitted; do not re-run until the notice's
+checks have settled it. See the README.
 `
 
 // App holds the I/O streams and environment the CLI runs against. Keeping

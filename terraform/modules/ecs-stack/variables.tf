@@ -444,6 +444,72 @@ variable "stellar" {
   })
 }
 
+variable "cors_allowed_origins" {
+  description = <<-EOT
+    CORS_ALLOWED_ORIGINS for the stack's bridge SERVER task: the
+    comma-separated admin-UI origins, e.g. "https://admin.example.com".
+    null (default) omits the variable entirely — the testnet task
+    definition stays byte-identical and the bridge falls back to its
+    wildcard default. That default is a STARTUP ERROR on pubnet
+    (impala-bridge/src/config.rs validate_cors_policy), so a pubnet stack
+    without explicit origins could never become healthy — refused here, the
+    same way certificate_arn refuses a pubnet stack without TLS.
+  EOT
+  type        = string
+  default     = null
+
+  validation {
+    condition     = var.cors_allowed_origins == null || (trimspace(var.cors_allowed_origins) != "" && trimspace(var.cors_allowed_origins) != "*")
+    error_message = "cors_allowed_origins must list explicit origins (or be left null); \"*\" and \"\" are not accepted."
+  }
+
+  validation {
+    condition     = var.stellar.network != "pubnet" || var.cors_allowed_origins != null
+    error_message = "cors_allowed_origins is required for a pubnet (mainnet) stack: the bridge exits at startup when CORS_ALLOWED_ORIGINS is unset or \"*\" with STELLAR_NETWORK=pubnet, so the stack could never boot."
+  }
+}
+
+variable "public_endpoint" {
+  description = <<-EOT
+    PUBLIC_ENDPOINT for the stack's bridge SERVER task — the externally
+    reachable base URL of the API (https://api.<domain>), used by the
+    bridge's startup secure-cookie sanity check. null (default) omits the
+    variable (zero churn); must be https:// on a pubnet stack.
+  EOT
+  type        = string
+  default     = null
+
+  validation {
+    condition     = var.public_endpoint == null || can(regex("^https?://[^/\\s]+", var.public_endpoint))
+    error_message = "public_endpoint must be an absolute http(s):// URL (or null)."
+  }
+
+  validation {
+    condition     = var.stellar.network != "pubnet" || var.public_endpoint == null || startswith(var.public_endpoint, "https://")
+    error_message = "public_endpoint must be an https:// URL on a pubnet stack (the bridge sets Secure session cookies, which browsers drop on a plain-HTTP endpoint)."
+  }
+}
+
+variable "extra_environment" {
+  description = <<-EOT
+    Extra NON-SECRET env entries appended LAST to both task definitions
+    (after seed_protection_environment and the CORS/PUBLIC_ENDPOINT slots).
+    The root passes var.bridge_extra_environment, whose validation refuses
+    names the stacks already manage and secret-looking names; only the name
+    shape is re-checked here. [] default = zero container_definitions churn.
+  EOT
+  type = list(object({
+    name  = string
+    value = string
+  }))
+  default = []
+
+  validation {
+    condition     = alltrue([for e in var.extra_environment : can(regex("^[A-Z][A-Z0-9_]*$", e.name))])
+    error_message = "extra_environment names must be UPPER_SNAKE_CASE environment variable names."
+  }
+}
+
 variable "seed_protection_environment" {
   description = <<-EOT
     Custodial seed-protection env entries (SEED_PROTECTION_BACKEND,

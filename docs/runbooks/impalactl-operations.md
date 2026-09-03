@@ -34,7 +34,13 @@ settings:
 |---|---|---|---|
 | Endpoint | `--endpoint <url>` | `IMPALA_ENDPOINT` | `http://localhost:8080` |
 | Token | `--token <jwt>` | `IMPALA_TOKEN` | stored credentials |
-| Timeout | `--timeout <dur>` | — | `30s` |
+| Timeout | `--timeout <dur>` | — | `45s` |
+
+> The default timeout deliberately **exceeds the bridge's own 30-second
+> request deadline**. A client that gives up at the same instant as the server
+> loses the server's verdict; with the headroom, a slow request ends with the
+> bridge's own answer (its 408, or a late 200/500). Do not set `--timeout`
+> below 30s for `transfer send`.
 
 Confirm you are talking to the bridge you think you are — this needs no
 credentials, and it is the cheapest way to avoid acting on the wrong
@@ -289,6 +295,42 @@ doing anything. On testnet it proceeds. On any other network it demands a typed
 unless `--yes` is passed**. A scripted mainnet payment has to opt in
 deliberately rather than by forgetting which bridge it was pointed at.
 
+### If `transfer send` exits 3 — outcome unknown
+
+Exit 3 means the command got no proof either way: a timeout, a dropped
+connection, the bridge's 408, its 500 `internal_error` (which is how it
+reports an ambiguous Horizon submission), or a 502/504 from something in
+front of it. The bridge signs and submits **inside** the request and writes
+its transaction row **only after settlement**, and `/managed-account/sign`
+has no idempotency key. So:
+
+- **The payment may have settled**, or may still settle — a signed
+  transaction stays valid for 300 seconds.
+- **The bridge's record may be missing even though it settled.** The
+  bridge's request deadline can fire mid-submission, dropping the bookkeeping
+  while Horizon finishes the submit. An absent row is not proof.
+- **Re-running is a second payment**, not a retry.
+
+Work through the notice's checks in order, and do not send again until one of
+them has answered:
+
+1. `impalactl activity list` — a new row (origin `api`, created just now, the
+   sending custodial address as its source) means it settled;
+   `impalactl activity show <btxid>` gives the Stellar hash.
+2. The chain — `impalactl account onchain <G...>` for the sender's sequence
+   number and balance, and the destination's payments on Horizon. This is
+   the check that catches a settled-but-unrecorded payment; if you find one,
+   reconcile it into the ledger with `transfer record` and note the bridge's
+   `SETTLED PAYMENT NOT RECORDED` log line.
+3. Only once the 300-second window has passed with nothing found is it safe
+   to send again.
+
+Exit **1** from `transfer send` is different: it is a verdict. A 503
+`service_unavailable` is the bridge's *Retryable* — a failure it proves
+happened before anything was signed — and every 4xx, a `success: false`
+body, or a connection that was never established (refused, no such host)
+likewise moved nothing. Those may be retried or fixed as usual.
+
 `transfer record` is bookkeeping only — nothing goes on-chain.
 
 ## 7. Activity and audit
@@ -345,11 +387,15 @@ is reported as `duplicates`.
 | Code | Meaning |
 |---|---|
 | `0` | Success |
-| `1` | Runtime failure — API error, validation failure, or degraded health |
+| `1` | Runtime failure — API error, validation failure, or degraded health. Nothing moved. |
 | `2` | Usage error — unknown command, missing or invalid flag |
+| `3` | **Ambiguous outcome** of `transfer send` — the payment may have been submitted. Do not retry; follow [§6](#if-transfer-send-exits-3--outcome-unknown). |
 
 API errors keep the bridge's code and message:
 `error: [403 forbidden] Access denied`. A 429 appends `(retry after Ns)`.
+A failure that never reached a bridge verdict — a timeout, a refused
+connection, an unreadable answer — names the request instead:
+`error: POST https://bridge.example.com/managed-account/sign: ...`.
 
 > **`[502 http_error]` means you never reached the bridge** — the CLI fell back
 > to a raw body because the response was not the bridge's error envelope, so

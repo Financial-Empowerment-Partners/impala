@@ -25,12 +25,12 @@ use uuid::Uuid;
 
 use crate::auth::{ManageReserve, Privileged, ReadReserve};
 use crate::constants::{
-    RESERVE_ADMIN_ENTRY_KINDS, RESERVE_CURRENCY_USDC, RESERVE_DISBURSE_MAX_MULTIPLE,
-    RESERVE_ONCHAIN_SEARCH_MAX_PAGES, RESERVE_ONCHAIN_SEARCH_SKEW_SECS,
-    RESERVE_RESOLVE_FAIL_MIN_INTENT_AGE_SECS, RESERVE_SCALE_STELLAR, RESERVE_SCALE_USD,
-    RESERVE_SUPPORTED_POLICY_PROVIDERS, RESERVE_THRESHOLD_MAX_USD_CENTS,
-    RESERVE_THRESHOLD_MIN_USD_CENTS, RESERVE_WATCH_PAGE_LIMIT, SIGN_RATE_LIMIT_MAX_REQUESTS,
-    SIGN_RATE_LIMIT_WINDOW_SECS,
+    HORIZON_MAX_LAG_SECS, RESERVE_ADMIN_ENTRY_KINDS, RESERVE_CURRENCY_XLM,
+    RESERVE_DISBURSE_MAX_MULTIPLE, RESERVE_ONCHAIN_SEARCH_MAX_PAGES,
+    RESERVE_ONCHAIN_SEARCH_SKEW_SECS, RESERVE_RESOLVE_FAIL_MIN_INTENT_AGE_SECS,
+    RESERVE_SCALE_STELLAR, RESERVE_SCALE_USD, RESERVE_SUPPORTED_POLICY_PROVIDERS,
+    RESERVE_THRESHOLD_MAX_USD_CENTS, RESERVE_THRESHOLD_MIN_USD_CENTS, RESERVE_WATCH_PAGE_LIMIT,
+    SIGN_RATE_LIMIT_MAX_REQUESTS, SIGN_RATE_LIMIT_WINDOW_SECS,
 };
 use crate::error::AppError;
 use crate::events::AccountEvent;
@@ -162,6 +162,13 @@ pub async fn get_status(
 
     // Best-effort chain snapshot; never fails the endpoint.
     if let Some(Extension(r)) = &reserve {
+        // The pinned identity is configuration, so it is reported even when
+        // Horizon is down; only balance/trustline need the chain.
+        for b in &mut buckets {
+            if let Some((code, issuer)) = r.stablecoin(&b.currency) {
+                b.asset = Some(format!("{}:{}", code, issuer));
+            }
+        }
         match crate::stellar::fetch_account_details(
             &http,
             &stellar_config.horizon_url,
@@ -171,18 +178,19 @@ pub async fn get_status(
         {
             Ok(acct) if acct.exists => {
                 for b in &mut buckets {
-                    b.onchain_balance = match b.currency.as_str() {
-                        "XLM" => acct.native_balance.clone(),
-                        "USDC" => acct
-                            .balances
-                            .iter()
-                            .find(|bal| {
-                                bal.asset_code.as_deref() == Some(r.usdc_code.as_str())
-                                    && bal.asset_issuer.as_deref() == Some(r.usdc_issuer.as_str())
-                            })
-                            .map(|bal| bal.balance.clone()),
-                        _ => None,
-                    };
+                    if b.currency == RESERVE_CURRENCY_XLM {
+                        b.onchain_balance = acct.native_balance.clone();
+                    } else if let Some((code, issuer)) = r.stablecoin(&b.currency) {
+                        let line = acct.balances.iter().find(|bal| {
+                            bal.asset_code.as_deref() == Some(code)
+                                && bal.asset_issuer.as_deref() == Some(issuer)
+                        });
+                        // A configured stablecoin the account cannot hold
+                        // yet: deposits would fail on-chain until an admin
+                        // adds the trustline (POST .../trustlines).
+                        b.trustline = Some(line.is_some());
+                        b.onchain_balance = line.map(|bal| bal.balance.clone());
+                    }
                 }
             }
             Ok(_) => warn!("admin_reserve: reserve account not found on-chain"),
@@ -647,36 +655,33 @@ pub async fn create_refund(
             "destination is the reserve account itself".to_string(),
         ));
     }
-    if payload.destination == reserve.usdc_issuer {
+    if reserve.is_asset_issuer(&payload.destination) {
         return Err(AppError::BadRequest(
-            "destination is the asset issuer; sending there would burn the asset".to_string(),
+            "destination is an asset issuer; sending there would burn the asset".to_string(),
         ));
     }
 
-    // Resolve the bucket from the ACTUAL asset. Mapping every non-native
-    // inflow to USDC would refund real USDC for a foreign-token deposit.
+    // Resolve the bucket from the ACTUAL asset, pinned on (code, issuer).
+    // Mapping every non-native inflow to a stablecoin bucket would refund
+    // real money for a foreign-token deposit.
     let row: Option<UnmatchedSourceRow> = sqlx::query_as(
-        "SELECT tx_hash, amount_minor, \
-                CASE \
-                    WHEN asset_code IS NULL THEN 'XLM' \
-                    WHEN asset_code = $2 AND asset_issuer = $3 THEN 'USDC' \
-                    ELSE NULL \
-                END AS currency, \
-                matched_order_id \
+        "SELECT tx_hash, amount_minor, asset_code, asset_issuer, matched_order_id \
          FROM conversion_reserve_unmatched WHERE paging_token = $1",
     )
     .bind(&payload.paging_token)
-    .bind(&reserve.usdc_code)
-    .bind(&reserve.usdc_issuer)
     .fetch_optional(&pool)
     .await
     .map_err(db_err("unmatched lookup"))?;
     let UnmatchedSourceRow {
         tx_hash,
         amount_minor,
-        currency,
+        asset_code,
+        asset_issuer,
         matched_order_id: order_id,
     } = row.ok_or_else(|| AppError::NotFound("No such unmatched deposit".to_string()))?;
+    let currency = reserve
+        .bucket_for_stored_asset(asset_code.as_deref(), asset_issuer.as_deref())
+        .map(str::to_string);
     let amount_minor = amount_minor.ok_or_else(|| {
         AppError::BadRequest(
             "This inflow's asset is not tracked by the reserve; refund it out of band".to_string(),
@@ -726,6 +731,136 @@ pub async fn create_refund(
     Ok(ok("Refund queued"))
 }
 
+/// `POST /admin/exchange-reserve/trustlines` — add (or re-assert) the reserve
+/// account's trustline for one of its configured stablecoin buckets.
+///
+/// Signs a `ChangeTrust` (maximum limit) from the reserve seed. This is the
+/// only supported way to give a generate-only reserve account a trustline:
+/// its seed exists nowhere outside this process and the account is
+/// quarantined from `/managed-account/sign`, so no wallet or CLI can. The
+/// asset comes from the bridge's pinned configuration — the caller names a
+/// bucket, never an arbitrary asset to trust. Moves no money; repeating it
+/// is an on-chain no-op. Needs ~0.5 XLM of base reserve on the account
+/// (`op_low_reserve` otherwise, reported verbatim).
+pub async fn add_trustline(
+    user: Privileged<ManageReserve>,
+    Extension(pool): Extension<PgPool>,
+    Extension(redis_pool): Extension<Arc<deadpool_redis::Pool>>,
+    Extension(signer): Extension<Arc<dyn crate::stellar::StellarSigner>>,
+    Extension(protector): Extension<Arc<dyn crate::seed_protect::SeedProtector>>,
+    reserve: Option<Extension<Arc<ConversionReserve>>>,
+    Json(payload): Json<crate::models::ReserveTrustlineRequest>,
+) -> Result<Json<crate::models::ReserveTrustlineResponse>, AppError> {
+    crate::redis_helpers::check_rate_limit(
+        &redis_pool,
+        "reserve_admin",
+        &user.account_id,
+        SIGN_RATE_LIMIT_MAX_REQUESTS,
+        SIGN_RATE_LIMIT_WINDOW_SECS,
+    )
+    .await?;
+    let Extension(reserve) = reserve
+        .ok_or_else(|| AppError::BadRequest("conversion reserve is not configured".to_string()))?;
+
+    let currency = payload.currency.trim().to_ascii_uppercase();
+    let (code, issuer) = reserve.stablecoin(&currency).ok_or_else(|| {
+        AppError::BadRequest(format!(
+            "{} is not a configured stablecoin bucket (USDC, or USDT0 when \
+             RESERVE_USDT0_ISSUER is set)",
+            currency
+        ))
+    })?;
+    let asset = crate::stellar::Asset::Credit {
+        code: code.to_string(),
+        issuer: issuer.to_string(),
+    };
+    let (code, issuer) = (code.to_string(), issuer.to_string());
+
+    // The reserve account signs everything from ONE sequence number, so a
+    // ChangeTrust racing a watcher payout/refund/replenish submit collides:
+    // the loser gets tx_bad_seq if the winner already settled, or a Horizon
+    // 504 (ambiguous → frozen for a human) if both are pending. Take the
+    // watcher's lock for the whole sign+submit; the guard is cancellation-
+    // safe, so a request cut by the timeout layer cannot leak it.
+    let lock = crate::exchange::reserve_watch::AdvisoryLock::new(
+        crate::constants::RESERVE_WATCHER_LOCK_KEY,
+    );
+    let Some(guard) = lock.try_acquire(&pool).await.map_err(db_err("try lock"))? else {
+        return Err(AppError::Conflict(
+            "The reserve watcher is mid-tick; retry in a moment".to_string(),
+        ));
+    };
+
+    // Write-ahead audit line: an ambiguous submit (Horizon timeout) returns
+    // an error below, yet the signed ChangeTrust may still land — this is
+    // the record that the reserve seed signed for this asset, and by whom.
+    info!(
+        "add_trustline: signing ChangeTrust {} ({}:{}) on reserve {} by={}",
+        currency, code, issuer, reserve.stellar_address, user.account_id
+    );
+    let seed = crate::handlers::managed_seed::load_protected_seed(
+        &pool,
+        &protector,
+        &signer,
+        &reserve.reserve_account_id,
+    )
+    .await?;
+    let submitted = signer
+        .sign_and_submit_change_trust(seed.as_slice(), &asset)
+        .await
+        .map_err(|e| {
+            error!(
+                "add_trustline: ChangeTrust {} ({}:{}) on reserve {} by={} failed: {} (an \
+                 ambiguous failure may still land within the validity window; the signer \
+                 logged the pre-submit hash)",
+                currency, code, issuer, reserve.stellar_address, user.account_id, e
+            );
+            e
+        })?;
+    // `seed` zeroizes on drop.
+    if let Err(e) = guard.release_now().await {
+        warn!(
+            "add_trustline: advisory unlock failed ({}); guard drop releases it",
+            e
+        );
+    }
+
+    info!(
+        "add_trustline: {} ({}:{}) on reserve {} tx={} by={}",
+        currency, code, issuer, reserve.stellar_address, submitted.stellar_hash, user.account_id
+    );
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(db_err("trustline event begin"))?;
+    crate::events::emit_event(
+        &mut tx,
+        &AccountEvent::ReserveTrustlineAdded {
+            account_id: user.account_id.clone(),
+            currency: currency.clone(),
+            asset_code: code.clone(),
+            asset_issuer: issuer.clone(),
+            stellar_tx_hash: submitted.stellar_hash.clone(),
+        },
+    )
+    .await?;
+    tx.commit()
+        .await
+        .map_err(db_err("trustline event commit"))?;
+
+    Ok(Json(crate::models::ReserveTrustlineResponse {
+        success: true,
+        message: format!(
+            "Trustline for {} is in place on the reserve account",
+            currency
+        ),
+        currency,
+        asset_code: code,
+        asset_issuer: issuer,
+        stellar_tx_hash: submitted.stellar_hash,
+    }))
+}
+
 /// `POST /admin/exchange-reserve/refunds/{refund_id}/resolve`.
 ///
 /// `approve` releases a reviewed refund to the driver; `cancel` drops one
@@ -753,10 +888,10 @@ pub async fn resolve_refund(
     .await?;
     if !matches!(
         payload.action.as_str(),
-        "approve" | "cancel" | "sent" | "reverse"
+        "approve" | "cancel" | "sent" | "reverse" | "retry"
     ) {
         return Err(AppError::BadRequest(
-            "action must be approve, cancel, sent or reverse".to_string(),
+            "action must be approve, cancel, sent, reverse or retry".to_string(),
         ));
     }
 
@@ -829,6 +964,41 @@ pub async fn resolve_refund(
             );
             Ok(ok("Refund cancelled"))
         }
+        "retry" => {
+            // A refund ends `failed` only after its debit was reversed (max
+            // attempts, or an admin reverse that proved nothing landed), so
+            // re-queueing is ledger-safe: the driver debits again at claim.
+            // Without this there was no signing path out of `failed` — a fee
+            // surge stranded customer refunds permanently.
+            if status != "failed" {
+                return Err(AppError::Conflict(
+                    "Only a failed refund can be retried".to_string(),
+                ));
+            }
+            let updated = sqlx::query(
+                "UPDATE conversion_reserve_refund \
+                 SET status = 'queued', attempts = 0, last_error = NULL, resolved_by = $2, \
+                     next_attempt_at = CURRENT_TIMESTAMP \
+                 WHERE refund_id = $1 AND status = 'failed'",
+            )
+            .bind(refund_id)
+            .bind(&user.account_id)
+            .execute(&pool)
+            .await
+            .map_err(db_err("refund retry"))?;
+            if updated.rows_affected() == 0 {
+                return Err(AppError::Conflict(
+                    "The refund is no longer in the failed state".to_string(),
+                ));
+            }
+            info!(
+                "resolve_refund: refund={} re-queued by={}",
+                refund_id, user.account_id
+            );
+            Ok(ok(
+                "Refund re-queued; the driver will retry on its next pass",
+            ))
+        }
         "sent" => {
             let hash = payload.stellar_tx_hash.clone().ok_or_else(|| {
                 AppError::BadRequest("stellar_tx_hash is required to record a refund".to_string())
@@ -838,6 +1008,26 @@ pub async fn resolve_refund(
                     "Only a frozen or in-flight refund can be recorded as sent".to_string(),
                 ));
             }
+            // The supplied hash becomes settlement evidence (status=sent, the
+            // debit stands): verify on Horizon that it IS a successful
+            // payment of this refund from the reserve, never trust the string.
+            let Extension(reserve) = reserve.ok_or_else(|| {
+                AppError::Conflict(
+                    "The reserve is not configured, so the transaction cannot be verified"
+                        .to_string(),
+                )
+            })?;
+            let asset = reserve.asset_for_bucket(&currency);
+            let hash = verify_settlement_hash(
+                &http,
+                &stellar_config.horizon_url,
+                &hash,
+                &reserve.stellar_address,
+                &destination,
+                refund_minor,
+                asset.as_ref(),
+            )
+            .await?;
             record_admin_refund_sent(
                 &pool,
                 &metrics,
@@ -870,19 +1060,44 @@ pub async fn resolve_refund(
                     "The reserve is not configured, so the chain cannot be checked".to_string(),
                 )
             })?;
-            let not_before =
-                refund_created_at - ChronoDuration::seconds(RESERVE_ONCHAIN_SEARCH_SKEW_SECS);
-            if let Some(hash) = find_onchain_refund(
-                &http,
-                &stellar_config.horizon_url,
-                &reserve.stellar_address,
-                &destination,
-                refund_minor,
-                memo.as_deref(),
-                not_before,
+            let intent_hash: Option<String> = sqlx::query_scalar(
+                "SELECT stellar_tx_hash FROM conversion_reserve_entry \
+                     WHERE refund_id = $1 AND kind = 'refund_intent'",
             )
-            .await?
-            {
+            .bind(refund_id)
+            .fetch_optional(&pool)
+            .await
+            .map_err(db_err("refund intent hash"))?
+            .flatten();
+            let found = match intent_hash.as_deref() {
+                Some(hash) => {
+                    resolve_intent_by_hash(
+                        &http,
+                        &stellar_config.horizon_url,
+                        hash,
+                        &reserve.stellar_address,
+                        &destination,
+                        refund_minor,
+                        reserve.asset_for_bucket(&currency).as_ref(),
+                    )
+                    .await?
+                }
+                None => {
+                    let not_before = refund_created_at
+                        - ChronoDuration::seconds(RESERVE_ONCHAIN_SEARCH_SKEW_SECS);
+                    find_onchain_refund(
+                        &http,
+                        &stellar_config.horizon_url,
+                        &reserve.stellar_address,
+                        &destination,
+                        refund_minor,
+                        memo.as_deref(),
+                        not_before,
+                    )
+                    .await?
+                }
+            };
+            if let Some(hash) = found {
                 return Err(AppError::Conflict(format!(
                     "A matching refund exists on-chain (tx {}); resolve with action=sent instead",
                     hash
@@ -930,6 +1145,7 @@ async fn find_onchain_refund(
         not_before,
         RESERVE_ONCHAIN_SEARCH_MAX_PAGES,
         RESERVE_WATCH_PAGE_LIMIT,
+        HORIZON_MAX_LAG_SECS,
         |p| {
             if p.to == reserve_address {
                 return false; // outgoing only
@@ -1320,12 +1536,12 @@ pub async fn get_forecast(
         .collect();
 
     let provider_utilization: Vec<ReserveProviderUtilization> = sqlx::query_as(
-        "SELECT diverted_provider AS provider, COUNT(*)::bigint AS orders, \
+        "SELECT diverted_provider AS provider, currency, COUNT(*)::bigint AS orders, \
                 COALESCE(SUM(-delta), 0)::bigint AS volume_minor \
          FROM conversion_reserve_entry \
          WHERE kind = 'hold' AND diverted_provider IS NOT NULL \
            AND created_at >= CURRENT_TIMESTAMP - make_interval(days => $1::int) \
-         GROUP BY diverted_provider ORDER BY diverted_provider",
+         GROUP BY diverted_provider, currency ORDER BY diverted_provider, currency",
     )
     .bind(window_days as i32)
     .fetch_all(&pool)
@@ -1348,7 +1564,9 @@ pub async fn get_forecast(
 struct UnmatchedSourceRow {
     tx_hash: String,
     amount_minor: Option<i64>,
-    currency: Option<String>,
+    /// Raw on-chain identity; NULL code = native XLM (031 convention).
+    asset_code: Option<String>,
+    asset_issuer: Option<String>,
     matched_order_id: Option<Uuid>,
 }
 
@@ -1550,6 +1768,7 @@ async fn find_onchain_payout(
     payout_address: Option<&str>,
     amount_to: Option<&str>,
     not_before: chrono::DateTime<Utc>,
+    asset: Option<&crate::stellar::Asset>,
 ) -> Result<Option<String>, AppError> {
     let reserve_address = reserve_address.to_string();
     let order_ref = order_ref.to_string();
@@ -1563,10 +1782,16 @@ async fn find_onchain_payout(
         not_before,
         RESERVE_ONCHAIN_SEARCH_MAX_PAGES,
         RESERVE_WATCH_PAGE_LIMIT,
+        HORIZON_MAX_LAG_SECS,
         |p| {
             // Outgoing only — the pay-in deposit carries the same memo.
             if p.to == reserve_address {
                 return false;
+            }
+            if let Some(a) = asset {
+                if !asset_matches(p, a) {
+                    return false; // right memo/amount in the WRONG asset is not this payout
+                }
             }
             match &payout_extra_id {
                 // Memo-primary, but the destination must ALSO match: refunds
@@ -1624,9 +1849,9 @@ pub async fn resolve_order(
         SIGN_RATE_LIMIT_WINDOW_SECS,
     )
     .await?;
-    if !matches!(payload.action.as_str(), "complete" | "fail") {
+    if !matches!(payload.action.as_str(), "complete" | "fail" | "retry") {
         return Err(AppError::BadRequest(
-            "action must be 'complete' or 'fail'".to_string(),
+            "action must be 'complete', 'fail' or 'retry'".to_string(),
         ));
     }
 
@@ -1657,6 +1882,17 @@ pub async fn resolve_order(
     .await
     .map_err(db_err("intent lookup"))?;
     let intent_exists = first_intent_at.is_some();
+    // The hash the driver recorded on the intent BEFORE submitting (None on
+    // intents written before hashes were persisted).
+    let intent_hash: Option<String> = sqlx::query_scalar(
+        "SELECT stellar_tx_hash FROM conversion_reserve_entry \
+             WHERE order_id = $1 AND kind = 'payout_attempt'",
+    )
+    .bind(order_id)
+    .fetch_optional(&pool)
+    .await
+    .map_err(db_err("intent hash"))?
+    .flatten();
     let state_age_secs: i64 = sqlx::query_scalar(
         "SELECT EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - updated_at))::bigint \
          FROM exchange_order WHERE order_id = $1",
@@ -1667,46 +1903,68 @@ pub async fn resolve_order(
     .map_err(db_err("state age"))?;
 
     match payload.action.as_str() {
-        "fail" => {
-            if intent_exists {
-                if state_age_secs < RESERVE_RESOLVE_FAIL_MIN_INTENT_AGE_SECS {
-                    return Err(AppError::Conflict(format!(
-                        "The order changed state {}s ago and a submitted transaction may still \
-                         land. Retry after {}s",
-                        state_age_secs, RESERVE_RESOLVE_FAIL_MIN_INTENT_AGE_SECS
-                    )));
-                }
-                // Fail closed: refuse when the chain cannot be checked. This
-                // needs the configured reserve for the account to search.
-                let Some(Extension(ref reserve)) = reserve else {
-                    return Err(AppError::Conflict(
-                        "A payout may exist on-chain but the reserve is not configured to \
-                         verify it; re-set RESERVE_ACCOUNT_ID or resolve with action=complete \
-                         and an explicit stellar_tx_hash"
-                            .to_string(),
-                    ));
-                };
-                let not_before = first_intent_at.unwrap_or_else(Utc::now)
-                    - ChronoDuration::seconds(RESERVE_ONCHAIN_SEARCH_SKEW_SECS);
-                if let Some(hash) = find_onchain_payout(
-                    &http,
-                    &stellar_config.horizon_url,
-                    &reserve.stellar_address,
-                    &order.provider_order_id,
-                    order.payout_extra_id.as_deref(),
-                    order.payout_address.as_deref(),
-                    order.amount_to.as_deref(),
-                    not_before,
-                )
-                .await?
-                {
-                    return Err(AppError::Conflict(format!(
-                        "A payout matching this order exists on-chain (tx {}); resolve with \
-                         action=complete instead",
-                        hash
-                    )));
-                }
+        "retry" => {
+            // Re-arm a frozen auto-swap payout (max_attempts / submit_failed /
+            // stale_intent) for the watcher. Exactly the guards `fail` needs:
+            // a payout may already have landed, and re-arming after a settled
+            // payout would pay twice. The hold is untouched (a freeze never
+            // released it), so the ledger stays exact.
+            if disburse_pending {
+                return Err(AppError::BadRequest(
+                    "Disbursement orders complete via the disburse endpoint".to_string(),
+                ));
             }
+            refuse_if_payout_may_exist(
+                &http,
+                &stellar_config.horizon_url,
+                reserve.as_ref().map(|Extension(r)| r.as_ref()),
+                &order,
+                intent_exists,
+                state_age_secs,
+                first_intent_at,
+                intent_hash.as_deref(),
+            )
+            .await?;
+            let updated = sqlx::query(
+                "UPDATE exchange_order \
+                 SET status = 'processing', provider_status = 'payout_retry', poll_count = 0, \
+                     last_error = NULL, next_poll_at = CURRENT_TIMESTAMP \
+                 WHERE order_id = $1 AND status = 'on_hold'",
+            )
+            .bind(order_id)
+            .execute(&pool)
+            .await
+            .map_err(db_err("payout re-arm"))?;
+            if updated.rows_affected() == 0 {
+                return Err(AppError::Conflict(
+                    "The order is no longer on hold".to_string(),
+                ));
+            }
+            metrics.record_exchange_order_update(
+                "reserve",
+                crate::constants::EXCHANGE_STATUS_PROCESSING,
+                "admin_retry",
+            );
+            info!(
+                "resolve_order: order={} payout re-armed by={}",
+                order_id, user.account_id
+            );
+            Ok(ok(
+                "Payout re-armed; the watcher will retry on its next pass",
+            ))
+        }
+        "fail" => {
+            refuse_if_payout_may_exist(
+                &http,
+                &stellar_config.horizon_url,
+                reserve.as_ref().map(|Extension(r)| r.as_ref()),
+                &order,
+                intent_exists,
+                state_age_secs,
+                first_intent_at,
+                intent_hash.as_deref(),
+            )
+            .await?;
             resolve_fail(
                 &pool,
                 &metrics,
@@ -1725,27 +1983,99 @@ pub async fn resolve_order(
                 ));
             }
             let hash = match payload.stellar_tx_hash.clone() {
-                Some(h) => h,
+                // An admin-supplied hash becomes settlement evidence — it
+                // releases the hold and marks the customer paid — so it is
+                // verified on Horizon: a successful payment from the reserve
+                // to the payout address for amount_to in the order's asset.
+                Some(h) => {
+                    let from = order
+                        .payin_address
+                        .clone()
+                        .or_else(|| {
+                            reserve
+                                .as_ref()
+                                .map(|Extension(r)| r.stellar_address.clone())
+                        })
+                        .ok_or_else(|| {
+                            AppError::Conflict(
+                                "The order records no reserve address to verify against"
+                                    .to_string(),
+                            )
+                        })?;
+                    let to = order.payout_address.clone().ok_or_else(|| {
+                        AppError::Conflict("The order has no payout address".to_string())
+                    })?;
+                    let amount_minor = order
+                        .amount_to
+                        .as_deref()
+                        .and_then(|a| parse_decimal_to_minor(a, RESERVE_SCALE_STELLAR))
+                        .ok_or_else(|| {
+                            AppError::InternalError("Corrupt order amount".to_string())
+                        })?;
+                    let asset = reserve.as_ref().and_then(|Extension(r)| {
+                        r.asset_for_bucket(
+                            crate::exchange::reserve::payout_bucket_for_hold_currency(
+                                order.hold_currency.as_deref(),
+                            ),
+                        )
+                    });
+                    verify_settlement_hash(
+                        &http,
+                        &stellar_config.horizon_url,
+                        &h,
+                        &from,
+                        &to,
+                        amount_minor,
+                        asset.as_ref(),
+                    )
+                    .await?
+                }
                 None => {
                     let Some(Extension(ref reserve)) = reserve else {
                         return Err(AppError::BadRequest(
                             "Reserve not configured; supply stellar_tx_hash explicitly".to_string(),
                         ));
                     };
-                    let not_before = first_intent_at.unwrap_or_else(Utc::now)
-                        - ChronoDuration::seconds(RESERVE_ONCHAIN_SEARCH_SKEW_SECS);
-                    find_onchain_payout(
-                        &http,
-                        &stellar_config.horizon_url,
-                        &reserve.stellar_address,
-                        &order.provider_order_id,
-                        order.payout_extra_id.as_deref(),
-                        order.payout_address.as_deref(),
-                        order.amount_to.as_deref(),
-                        not_before,
-                    )
-                    .await?
-                    .ok_or_else(|| {
+                    let asset = reserve.asset_for_bucket(
+                        crate::exchange::reserve::payout_bucket_for_hold_currency(
+                            order.hold_currency.as_deref(),
+                        ),
+                    );
+                    let found = match intent_hash.as_deref() {
+                        Some(hash) => {
+                            resolve_intent_by_hash(
+                                &http,
+                                &stellar_config.horizon_url,
+                                hash,
+                                &reserve.stellar_address,
+                                order.payout_address.as_deref().unwrap_or(""),
+                                order
+                                    .amount_to
+                                    .as_deref()
+                                    .and_then(|a| parse_decimal_to_minor(a, RESERVE_SCALE_STELLAR))
+                                    .unwrap_or(-1),
+                                asset.as_ref(),
+                            )
+                            .await?
+                        }
+                        None => {
+                            let not_before = first_intent_at.unwrap_or_else(Utc::now)
+                                - ChronoDuration::seconds(RESERVE_ONCHAIN_SEARCH_SKEW_SECS);
+                            find_onchain_payout(
+                                &http,
+                                &stellar_config.horizon_url,
+                                &reserve.stellar_address,
+                                &order.provider_order_id,
+                                order.payout_extra_id.as_deref(),
+                                order.payout_address.as_deref(),
+                                order.amount_to.as_deref(),
+                                not_before,
+                                asset.as_ref(),
+                            )
+                            .await?
+                        }
+                    };
+                    found.ok_or_else(|| {
                         AppError::BadRequest(
                             "No matching on-chain payout found; supply stellar_tx_hash".to_string(),
                         )
@@ -1755,6 +2085,227 @@ pub async fn resolve_order(
             resolve_complete(&pool, &metrics, &user.account_id, order_id, &order, &hash).await
         }
     }
+}
+
+/// The guard `fail` and `retry` share: once a payout intent exists, refuse
+/// until the order's last state change is old enough that a submitted
+/// transaction can no longer land, and until Horizon proves no matching
+/// payout settled. Fails closed when the chain cannot be checked.
+#[allow(clippy::too_many_arguments)]
+async fn refuse_if_payout_may_exist(
+    http: &reqwest::Client,
+    horizon_url: &str,
+    reserve: Option<&ConversionReserve>,
+    order: &ReserveOrderActionRow,
+    intent_exists: bool,
+    state_age_secs: i64,
+    first_intent_at: Option<chrono::DateTime<Utc>>,
+    intent_hash: Option<&str>,
+) -> Result<(), AppError> {
+    if !intent_exists {
+        return Ok(());
+    }
+    if state_age_secs < RESERVE_RESOLVE_FAIL_MIN_INTENT_AGE_SECS {
+        return Err(AppError::Conflict(format!(
+            "The order changed state {}s ago and a submitted transaction may still land. \
+             Retry after {}s",
+            state_age_secs, RESERVE_RESOLVE_FAIL_MIN_INTENT_AGE_SECS
+        )));
+    }
+    // Fail closed: refuse when the chain cannot be checked. This needs the
+    // configured reserve for the account to search.
+    let Some(reserve) = reserve else {
+        return Err(AppError::Conflict(
+            "A payout may exist on-chain but the reserve is not configured to verify it; \
+             re-set RESERVE_ACCOUNT_ID or resolve with action=complete and an explicit \
+             stellar_tx_hash"
+                .to_string(),
+        ));
+    };
+    let asset = reserve.asset_for_bucket(
+        crate::exchange::reserve::payout_bucket_for_hold_currency(order.hold_currency.as_deref()),
+    );
+    let found = match intent_hash {
+        // Exact: the intent row carries the hash of the very transaction the
+        // driver submitted, so a sibling order's identical payout is
+        // impossible to confuse with this one.
+        Some(hash) => {
+            resolve_intent_by_hash(
+                http,
+                horizon_url,
+                hash,
+                &reserve.stellar_address,
+                order.payout_address.as_deref().unwrap_or(""),
+                order
+                    .amount_to
+                    .as_deref()
+                    .and_then(|a| parse_decimal_to_minor(a, RESERVE_SCALE_STELLAR))
+                    .unwrap_or(-1),
+                asset.as_ref(),
+            )
+            .await?
+        }
+        // Legacy intents (before the hash was recorded): the bounded walk.
+        None => {
+            let not_before = first_intent_at.unwrap_or_else(Utc::now)
+                - ChronoDuration::seconds(RESERVE_ONCHAIN_SEARCH_SKEW_SECS);
+            find_onchain_payout(
+                http,
+                horizon_url,
+                &reserve.stellar_address,
+                &order.provider_order_id,
+                order.payout_extra_id.as_deref(),
+                order.payout_address.as_deref(),
+                order.amount_to.as_deref(),
+                not_before,
+                asset.as_ref(),
+            )
+            .await?
+        }
+    };
+    if let Some(hash) = found {
+        return Err(AppError::Conflict(format!(
+            "A payout matching this order exists on-chain (tx {}); resolve with \
+             action=complete instead",
+            hash
+        )));
+    }
+    Ok(())
+}
+
+/// Verify an admin-supplied transaction hash before it is recorded as
+/// settlement evidence: exactly 64 hex characters, present on Horizon,
+/// SUCCESSFUL, and carrying a payment from `from` to `to` of `amount_minor`
+/// in `asset` (asset checked whenever the reserve can name it). A failed
+/// transaction still lists its operations with their intended amounts, so
+/// `transaction_successful` is required. Fails closed when Horizon is
+/// unreachable. Returns the canonical lowercase hash.
+async fn verify_settlement_hash(
+    http: &reqwest::Client,
+    horizon_url: &str,
+    raw_hash: &str,
+    from: &str,
+    to: &str,
+    amount_minor: i64,
+    asset: Option<&crate::stellar::Asset>,
+) -> Result<String, AppError> {
+    let hash = crate::validate::validate_stellar_tx_hash(raw_hash)?;
+    let payments = crate::stellar::horizon::fetch_transaction_payments(http, horizon_url, &hash)
+        .await
+        .map_err(|_| {
+            AppError::InternalError(
+                "Cannot verify the transaction on Horizon; retry later".to_string(),
+            )
+        })?
+        .ok_or_else(|| {
+            AppError::BadRequest(format!("Transaction {} does not exist on Horizon", hash))
+        })?;
+    if !payments
+        .iter()
+        .any(|p| settles(p, from, to, amount_minor, asset))
+    {
+        return Err(AppError::Conflict(format!(
+            "Transaction {} is not a settled payment of {} from {} to {} in the expected asset; \
+             it cannot be recorded as this settlement",
+            hash,
+            minor_to_decimal_string(amount_minor, RESERVE_SCALE_STELLAR),
+            from,
+            to
+        )));
+    }
+    Ok(hash)
+}
+
+/// Resolve a write-ahead intent whose transaction hash was recorded before
+/// submission. `Some(hash)` = it settled (a successful payment from the
+/// reserve to `to` for `amount_minor` in `asset`); `None` = it provably did
+/// not: the transaction failed on-chain (a failed hash can never succeed
+/// later), or Horizon has no such transaction while its head is FRESH — the
+/// caller already waited out the 600s resolve period, which exceeds the 300s
+/// validity window, so a fresh Horizon that lacks the hash has ingested past
+/// the point where it could still appear. A lagging Horizon is not a proof
+/// and fails closed.
+async fn resolve_intent_by_hash(
+    http: &reqwest::Client,
+    horizon_url: &str,
+    hash: &str,
+    from: &str,
+    to: &str,
+    amount_minor: i64,
+    asset: Option<&crate::stellar::Asset>,
+) -> Result<Option<String>, AppError> {
+    let horizon_err =
+        |_| AppError::InternalError("Cannot verify on-chain state; retry later".to_string());
+    match crate::stellar::horizon::fetch_transaction_payments(http, horizon_url, hash)
+        .await
+        .map_err(horizon_err)?
+    {
+        Some(payments) => {
+            if payments
+                .iter()
+                .any(|p| settles(p, from, to, amount_minor, asset))
+            {
+                return Ok(Some(hash.to_string()));
+            }
+            if payments
+                .iter()
+                .any(|p| p.transaction_successful == Some(false))
+            {
+                return Ok(None);
+            }
+            error!(
+                "resolve_intent_by_hash: tx {} exists but is not the expected payment",
+                hash
+            );
+            Err(AppError::Conflict(format!(
+                "Transaction {} exists on-chain but is not the expected payment; reconcile by hand",
+                hash
+            )))
+        }
+        None => {
+            let head = crate::stellar::horizon::fetch_head_closed_at(http, horizon_url)
+                .await
+                .map_err(horizon_err)?;
+            if crate::stellar::horizon::head_is_fresh(head, Utc::now(), HORIZON_MAX_LAG_SECS) {
+                Ok(None)
+            } else {
+                onchain_search_result(
+                    "resolve_intent_by_hash",
+                    crate::stellar::horizon::FeedSearch::Inconclusive,
+                )
+            }
+        }
+    }
+}
+
+/// Whether a feed payment carries `asset` (native, or the pinned credit).
+fn asset_matches(
+    p: &crate::stellar::horizon::HorizonPayment,
+    asset: &crate::stellar::Asset,
+) -> bool {
+    match asset {
+        crate::stellar::Asset::Native => p.asset_type == "native",
+        crate::stellar::Asset::Credit { code, issuer } => {
+            p.asset_code.as_deref() == Some(code.as_str())
+                && p.asset_issuer.as_deref() == Some(issuer.as_str())
+        }
+    }
+}
+
+/// Pure predicate behind [`verify_settlement_hash`].
+fn settles(
+    p: &crate::stellar::horizon::HorizonPayment,
+    from: &str,
+    to: &str,
+    amount_minor: i64,
+    asset: Option<&crate::stellar::Asset>,
+) -> bool {
+    p.transaction_successful == Some(true)
+        && p.op_type == "payment"
+        && p.from.as_deref() == Some(from)
+        && p.to == to
+        && parse_decimal_to_minor(&p.amount, RESERVE_SCALE_STELLAR) == Some(amount_minor)
+        && asset.is_none_or(|a| asset_matches(p, a))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1929,6 +2480,12 @@ async fn resolve_complete(
         .as_deref()
         .and_then(|a| parse_decimal_to_minor(a, RESERVE_SCALE_STELLAR))
         .ok_or_else(|| AppError::InternalError("Corrupt order amount".to_string()))?;
+    // The bucket this payout settles from is the one the order HELD — the
+    // same derivation the watcher's record_fulfillment uses. Binding USDC
+    // here for a USDT0 order released the wrong bucket's held balance and
+    // left USDT0.held inflated forever (or 500'd on "held underflow").
+    let currency =
+        crate::exchange::reserve::payout_bucket_for_hold_currency(order.hold_currency.as_deref());
 
     let mut tx = pool.begin().await.map_err(db_err("complete begin"))?;
     let updated = sqlx::query(
@@ -1945,7 +2502,7 @@ async fn resolve_complete(
     }
 
     let bucket: Option<(i64, i64, i64)> = sqlx::query_as(RESERVE_BUCKET_APPLY_SQL)
-        .bind(RESERVE_CURRENCY_USDC)
+        .bind(currency)
         .bind(0i64)
         .bind(-amount_to_minor)
         .fetch_optional(&mut *tx)
@@ -1955,7 +2512,7 @@ async fn resolve_complete(
         bucket.ok_or_else(|| AppError::InternalError("Held underflow (drift)".to_string()))?;
 
     journal_insert(JournalEntry {
-        currency: RESERVE_CURRENCY_USDC.to_string(),
+        currency: currency.to_string(),
         kind: "fulfillment".to_string(),
         held_delta: -amount_to_minor,
         balance_after: bal_after,
@@ -1997,7 +2554,7 @@ async fn resolve_complete(
         &AccountEvent::ReserveFulfilled {
             account_id: order.payala_account_id.clone(),
             order_id: order_id.to_string(),
-            currency: RESERVE_CURRENCY_USDC.to_string(),
+            currency: currency.to_string(),
             amount_minor: amount_to_minor,
         },
     )

@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
@@ -53,7 +54,7 @@ func (a *App) accountNew(opts netcfg.Options, args []string) int {
 			return a.fail("%v", err)
 		}
 		a.announce(net)
-		if err := stellar.New(net).Fund(kp.Address()); err != nil {
+		if err := a.horizon(net).Fund(kp.Address()); err != nil {
 			return a.fail("%v", err)
 		}
 		fmt.Fprintf(a.out, "\nFunded via Friendbot on %s.\n", net.Name)
@@ -136,8 +137,12 @@ func (a *App) accountCreate(opts netcfg.Options, args []string) int {
 	}
 	fmt.Fprintf(a.err, "Signing from: %s\n", source.Address())
 
-	hash, err := stellar.New(net).CreateAccount(source, destination, amt, txMemo)
+	hash, err := a.horizon(net).CreateAccount(source, destination, amt, txMemo)
 	if err != nil {
+		var ambiguous *stellar.AmbiguousSubmitError
+		if errors.As(err, &ambiguous) {
+			return a.failAmbiguous(net, "account creation", ambiguous)
+		}
 		return a.fail("%v", err)
 	}
 	fmt.Fprintf(a.out, "Created account %s with %s XLM%s\nTransaction: %s\n", destination, amt, withMemo(txMemo), hash)
@@ -162,7 +167,7 @@ func (a *App) accountFund(opts netcfg.Options, args []string) int {
 		return a.fail("%v", err)
 	}
 	a.announce(net)
-	if err := stellar.New(net).Fund(address); err != nil {
+	if err := a.horizon(net).Fund(address); err != nil {
 		return a.fail("%v", err)
 	}
 	fmt.Fprintf(a.out, "Funded %s via Friendbot on %s.\n", address, net.Name)

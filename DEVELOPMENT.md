@@ -33,6 +33,21 @@ docker compose up --build     # full stack: Postgres 16 + Redis 7 + bridge :8080
 cargo run                     # RUN_MODE=server (default) | worker | migrate
 cargo test
 ```
+How `.env` is consumed differs between the two paths:
+- `cargo run` — the binary itself loads `./.env` from its working directory at
+  startup (development convenience). Variables already set in the process
+  environment always win, and the runtime Docker image carries no `.env`, so
+  production configuration still comes from the orchestrator.
+- `docker compose up` — Compose does **not** forward `.env` wholesale. The
+  bridge container sees only the explicit `environment:` map in
+  `impala-bridge/docker-compose.yml`; `.env` values are used there solely to
+  fill that map's `${VAR:-default}` placeholders. Anything not in the map —
+  `RESERVE_*`, `KEY_IMPORT_ENABLED`, `ADMIN_ACCOUNT_IDS`,
+  `CORS_ALLOWED_ORIGINS`, … — must be added to it or passed through.
+
+At startup (server and worker modes) the bridge also asserts that the
+configured Stellar network passphrase matches what the configured Horizon
+serves, and exits on a mismatch or when Horizon stays unreachable.
 
 ### impala-soroban (Soroban contracts)
 ```bash

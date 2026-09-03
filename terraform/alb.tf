@@ -24,12 +24,31 @@ resource "aws_lb_target_group" "server" {
   vpc_id      = aws_vpc.main.id
   target_type = "ip"
 
+  # Readiness, not liveness. /readyz answers 200 only when Postgres AND Redis
+  # both answer (impala-bridge/src/handlers/health.rs, empty body). /health
+  # keeps answering 200 with a JSON body whose status merely reads
+  # "degraded" — impalactl and openapi.yaml depend on that shape, so it must
+  # never be a probe target: keyed on it, every target stayed "healthy"
+  # through a full Redis outage while every request was refused (auth is
+  # fail-closed on Redis).
+  #
+  # Thresholds: 8 x 30 s = 4 min of sustained dependency failure before a
+  # target is pulled — longer than a Multi-AZ RDS / ElastiCache failover
+  # (1-2 min), so a failover does not cascade into ECS replacing every task,
+  # while a task that genuinely cannot reach its dependencies is drained in
+  # minutes instead of never. healthy_threshold 2 admits a recovered target
+  # after 60 s of green.
+  #
+  # Honest target health also feeds the Route 53 alias records'
+  # evaluate_target_health (route53.tf): a long primary dependency outage
+  # now fails DNS over to DR instead of pinning clients to a region that
+  # refuses every request. Deliberate.
   health_check {
-    path                = "/health"
+    path                = "/readyz"
     port                = "traffic-port"
     protocol            = "HTTP"
     healthy_threshold   = 2
-    unhealthy_threshold = 3
+    unhealthy_threshold = 8
     interval            = 30
     timeout             = 5
     matcher             = "200"

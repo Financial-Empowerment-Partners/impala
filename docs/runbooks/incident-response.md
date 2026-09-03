@@ -56,7 +56,44 @@ fails. `/readyz` itself returns no body — call `GET /health` and read its
   security group — a SG change could have severed the egress path.
 - **Redis unhealthy:** check ElastiCache status. The application is
   fail-closed on Redis (rate limits, lockouts, token revocation all fail
-  with 5xx when Redis is down). Auth will be impacted immediately.
+  with 5xx when Redis is down). Auth will be impacted immediately. If the
+  fix involved a failover, replacement, flush, or restore, the data is gone
+  or stale — do the "Redis lost its data" steps below **before** declaring
+  the incident over.
+
+### Redis lost its data (DR failover onto the empty DR group, a flush, a restore from snapshot)
+
+Redis is the *only* store for token revocation (`impala:revoked:*`),
+refresh-token rotation and family revocation (`impala:rotated:*`,
+`impala:revoked_family:*`), the per-account auth epochs behind
+logout-everywhere, role changes and account deletion (`impala:auth_epoch:*`),
+and the `__Host-` sessions (`impala:session:*`). Losing it does not break
+auth — it silently **un-revokes**: every bearer token that was revoked,
+rotated away, or minted before a demotion verifies again for the rest of its
+lifetime (temporal tokens up to 1 h, refresh tokens up to 14 days), and a
+stolen refresh token that had been rotated away mints a fresh pair again
+without tripping reuse detection until a second presentation of the same
+token collides. Nothing in the logs flags this; it has to be procedure.
+
+**Mandatory, before or immediately after serving traffic from the affected
+Redis:**
+
+1. Rotate `JWT_SECRET` **without** `JWT_SECRET_PREVIOUS` — the emergency
+   procedure in
+   [`rotate-secrets.md`](./rotate-secrets.md#emergency-rotation-suspected-compromise).
+   Every refresh and temporal token dies at once; API clients and admins
+   re-authenticate. This is the *only* global kill switch for bearer
+   tokens: the auth epoch is per account and lives in the Redis you just
+   lost.
+2. Force cookie re-login. An empty Redis has already done this (sessions
+   live only there). A *stale* Redis — restored from a snapshot — has not:
+   delete `impala:session:*` (SCAN + DEL; never `KEYS` on a live node).
+3. Treat the login lockout and rate-limit counters as reset: watch
+   `POST /token` and `POST /authenticate` for credential-stuffing bursts
+   over the following hour.
+
+If this was a regional failover, the same step sits in the DR procedure in
+[`deploy.md`](./deploy.md#cross-region-dr-failover).
 
 ### Elevated 5xx with DB and Redis healthy
 

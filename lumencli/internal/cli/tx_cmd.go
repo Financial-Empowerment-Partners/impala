@@ -41,7 +41,7 @@ func (a *App) runTx(opts netcfg.Options, args []string) int {
 	}
 	a.announce(net)
 
-	tx, ops, err := stellar.New(net).TransactionInfo(hash)
+	tx, ops, err := a.horizon(net).TransactionInfo(hash)
 	if err != nil {
 		return a.fail("%v", err)
 	}

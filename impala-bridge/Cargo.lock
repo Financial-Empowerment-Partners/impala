@@ -2050,6 +2050,7 @@ dependencies = [
  "base64",
  "chrono",
  "deadpool-redis",
+ "dotenvy",
  "futures",
  "hex",
  "hmac 0.13.0",

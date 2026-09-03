@@ -81,6 +81,17 @@ pub enum AccountEvent {
         currency: String,
         amount_minor: i64,
     },
+    /// An admin added (or re-asserted) a trustline on the reserve account —
+    /// the one on-chain operation the reserve signs that moves no money.
+    /// Public identities only (asset code, issuer, tx hash); `account_id` is
+    /// the acting admin.
+    ReserveTrustlineAdded {
+        account_id: String,
+        currency: String,
+        asset_code: String,
+        asset_issuer: String,
+        stellar_tx_hash: String,
+    },
     ReserveFulfilled {
         account_id: String,
         order_id: String,
@@ -110,6 +121,20 @@ pub enum AccountEvent {
         currency: String,
         amount_minor: i64,
         reason: String,
+    },
+    /// Per-tick roll-up of stray inflows whose individual
+    /// `reserve.unmatched_deposit` events were suppressed by the per-sender
+    /// feed budget (a dust flood): `count` rows totalling `amount_minor` from
+    /// `senders` distinct payers. Every one of them is still individually
+    /// recorded in the unmatched queue and the journal — only the feed is
+    /// throttled. account_id is the reserve account; no addresses, as
+    /// everywhere.
+    ReserveUnmatchedDepositSummary {
+        account_id: String,
+        currency: String,
+        count: i64,
+        amount_minor: i64,
+        senders: i64,
     },
     /// `available` crossed below the admin-set low-water mark.
     ReserveLowWater {
@@ -215,11 +240,15 @@ impl AccountEvent {
             AccountEvent::ExchangeOrderCreated { .. } => "exchange.order_created",
             AccountEvent::ExchangeOrderUpdated { .. } => "exchange.order_updated",
             AccountEvent::ReserveDepositMatched { .. } => "reserve.deposit_matched",
+            AccountEvent::ReserveTrustlineAdded { .. } => "reserve.trustline_added",
             AccountEvent::ReserveFulfilled { .. } => "reserve.fulfilled",
             AccountEvent::ReservePayoutPending { .. } => "reserve.payout_pending",
             AccountEvent::ReserveDisbursementPending { .. } => "reserve.disbursement_pending",
             AccountEvent::ReserveOrderExpired { .. } => "reserve.order_expired",
             AccountEvent::ReserveUnmatchedDeposit { .. } => "reserve.unmatched_deposit",
+            AccountEvent::ReserveUnmatchedDepositSummary { .. } => {
+                "reserve.unmatched_deposit_summary"
+            }
             AccountEvent::ReserveLowWater { .. } => "reserve.low_water",
             AccountEvent::ReservePolicyUpdated { .. } => "reserve.policy_updated",
             AccountEvent::ReserveRefundQueued { .. } => "reserve.refund_queued",
@@ -247,11 +276,13 @@ impl AccountEvent {
             | AccountEvent::ExchangeOrderCreated { account_id, .. }
             | AccountEvent::ExchangeOrderUpdated { account_id, .. }
             | AccountEvent::ReserveDepositMatched { account_id, .. }
+            | AccountEvent::ReserveTrustlineAdded { account_id, .. }
             | AccountEvent::ReserveFulfilled { account_id, .. }
             | AccountEvent::ReservePayoutPending { account_id, .. }
             | AccountEvent::ReserveDisbursementPending { account_id, .. }
             | AccountEvent::ReserveOrderExpired { account_id, .. }
             | AccountEvent::ReserveUnmatchedDeposit { account_id, .. }
+            | AccountEvent::ReserveUnmatchedDepositSummary { account_id, .. }
             | AccountEvent::ReserveLowWater { account_id, .. }
             | AccountEvent::ReservePolicyUpdated { account_id, .. }
             | AccountEvent::ReserveRefundQueued { account_id, .. }
@@ -370,6 +401,18 @@ impl AccountEvent {
                 "amount_minor": amount_minor,
                 "reason": reason,
             }),
+            AccountEvent::ReserveUnmatchedDepositSummary {
+                currency,
+                count,
+                amount_minor,
+                senders,
+                ..
+            } => json!({
+                "currency": currency,
+                "count": count,
+                "amount_minor": amount_minor,
+                "senders": senders,
+            }),
             AccountEvent::ReserveLowWater {
                 currency,
                 available_minor,
@@ -411,6 +454,18 @@ impl AccountEvent {
                 "refund_id": refund_id,
                 "currency": currency,
                 "amount_minor": amount_minor,
+            }),
+            AccountEvent::ReserveTrustlineAdded {
+                currency,
+                asset_code,
+                asset_issuer,
+                stellar_tx_hash,
+                ..
+            } => json!({
+                "currency": currency,
+                "asset_code": asset_code,
+                "asset_issuer": asset_issuer,
+                "stellar_tx_hash": stellar_tx_hash,
             }),
             AccountEvent::ReserveRefundFailed {
                 refund_id, reason, ..
@@ -617,6 +672,29 @@ mod tests {
             "transfer_instructions",
             "memo",
         ] {
+            assert!(data.get(pii).is_none(), "{} must not be in payload", pii);
+        }
+    }
+
+    #[test]
+    fn unmatched_deposit_summary_carries_aggregates_and_no_addresses() {
+        // The summary exists to throttle a dust flood's feed; it must not
+        // smuggle the payer addresses the per-row events also omit.
+        let e = AccountEvent::ReserveUnmatchedDepositSummary {
+            account_id: "svc-reserve".into(),
+            currency: "XLM".into(),
+            count: 997,
+            amount_minor: 100_697,
+            senders: 2,
+        };
+        assert_eq!(e.event_type(), "reserve.unmatched_deposit_summary");
+        assert_eq!(e.account_id(), "svc-reserve");
+        let data = e.data();
+        assert_eq!(
+            data,
+            json!({ "currency": "XLM", "count": 997, "amount_minor": 100_697, "senders": 2 })
+        );
+        for pii in ["sender_address", "sender_muxed", "memo", "addresses"] {
             assert!(data.get(pii).is_none(), "{} must not be in payload", pii);
         }
     }

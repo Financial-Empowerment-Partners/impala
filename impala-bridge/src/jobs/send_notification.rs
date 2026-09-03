@@ -22,6 +22,17 @@ pub(crate) struct NotificationPayload {
     device_tokens: Option<Vec<String>>,
 }
 
+/// Log-safe prefix of a device token: its first 20 **characters**.
+///
+/// Never a byte slice — a token is user-registered text, and `&token[..20]`
+/// panics when byte 20 falls inside a multibyte character, taking the whole
+/// job (and the `jobs_active` gauge) with it. And never `get(..20)` with a
+/// whole-token fallback, which would log the full credential on exactly the
+/// tokens that trip the boundary.
+fn token_log_prefix(token: &str) -> String {
+    token.chars().take(20).collect()
+}
+
 /// Deliver a notification via webhook or SMS (Twilio).
 pub async fn execute(ctx: &WorkerContext, payload: &serde_json::Value) -> Result<(), JobError> {
     let parsed: NotificationPayload = serde_json::from_value(payload.clone())
@@ -280,6 +291,31 @@ async fn send_push(
         JobError::Permanent("Push delivery requires FCM_PROJECT_ID to be configured".to_string())
     })?;
 
+    // FCM HTTP v1 rejects unauthenticated sends (401), so without a usable
+    // service-account key there is nothing to retry: fail permanently with
+    // the reason instead of cycling the message into the DLQ.
+    let auth = match &ctx.fcm_auth {
+        crate::fcm::FcmAuthState::Ready(auth) => auth.clone(),
+        crate::fcm::FcmAuthState::Unconfigured => {
+            return Err(JobError::Permanent(
+                "Push delivery requires FCM_SERVICE_ACCOUNT_KEY (path to the Firebase \
+                 service-account JSON) to be configured"
+                    .to_string(),
+            ));
+        }
+        crate::fcm::FcmAuthState::Unavailable(reason) => {
+            error!(
+                "send_notification: push for account={} dropped permanently: FCM \
+                 service-account key unavailable ({})",
+                payload.account_id, reason
+            );
+            return Err(JobError::Permanent(format!(
+                "FCM service-account key unavailable: {}",
+                reason
+            )));
+        }
+    };
+
     let tokens = payload
         .device_tokens
         .as_ref()
@@ -290,6 +326,12 @@ async fn send_push(
             "Push delivery: device_tokens array is empty".to_string(),
         ));
     }
+
+    // Token-endpoint trouble is transient: the key is fine, Google is not.
+    let access_token = auth.access_token().await.map_err(|e| {
+        error!("send_notification: FCM access token unavailable: {}", e);
+        JobError::Transient(format!("FCM access token: {}", e))
+    })?;
 
     let fcm_url = format!(
         "https://fcm.googleapis.com/v1/projects/{}/messages:send",
@@ -320,6 +362,7 @@ async fn send_push(
         let response = ctx
             .http_client
             .post(&fcm_url)
+            .bearer_auth(&access_token)
             .json(&body)
             .send()
             .await
@@ -332,9 +375,14 @@ async fn send_push(
             sent_count += 1;
             last_response = response_body;
         } else {
+            if status == 401 {
+                // The cached token was refused (revoked, or expired early):
+                // forget it so the retry mints a fresh one.
+                auth.invalidate().await;
+            }
             warn!(
                 "send_notification: FCM push to token {} returned HTTP {}: {}",
-                &token[..token.len().min(20)],
+                token_log_prefix(token),
                 status,
                 response_body
             );
@@ -432,6 +480,29 @@ mod tests {
         });
         let result: Result<NotificationPayload, _> = serde_json::from_value(json);
         assert!(result.is_err()); // missing account_id
+    }
+
+    /// The log prefix must be character-based: a byte slice panics when the
+    /// 20th byte is inside a multibyte character, and must never fall back
+    /// to the whole token.
+    #[test]
+    fn token_log_prefix_never_slices_inside_a_multibyte_char() {
+        // 19 ASCII bytes then a 4-byte emoji: byte offset 20 is inside it.
+        let token = format!("{}🔑{}", "a".repeat(19), "b".repeat(200));
+        assert!(
+            std::panic::catch_unwind(|| token[..token.len().min(20)].to_string()).is_err(),
+            "the byte-slice form panics on this token"
+        );
+
+        let prefix = token_log_prefix(&token);
+        assert_eq!(prefix, format!("{}🔑", "a".repeat(19)));
+        assert_eq!(prefix.chars().count(), 20);
+        assert!(prefix.len() < token.len(), "must never log the full token");
+
+        // Short tokens pass through whole; the cap is characters, not bytes.
+        assert_eq!(token_log_prefix("ab"), "ab");
+        assert_eq!(token_log_prefix(""), "");
+        assert_eq!(token_log_prefix(&"é".repeat(30)).chars().count(), 20);
     }
 
     #[test]

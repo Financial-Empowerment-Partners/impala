@@ -88,25 +88,37 @@ Physical cards authenticate via a challenge-response exchange
 (`src/handlers/card_auth.rs`):
 
 1. **`POST /auth/card/challenge {card_id}`** → `{success, challenge, expires_in: 60}`.
-   The 32-byte challenge (64 hex chars) is generated from a CSPRNG and stored
-   in Redis under `impala:card_challenge:{card_id}` with a 60s TTL,
-   **fail-closed** (no challenge is issued if Redis is down). Challenges are
-   issued unconditionally — the response never reveals whether a card is
-   registered (no enumeration oracle).
+   The 32-byte challenge (64 hex chars) is generated from a CSPRNG and joins
+   the card's **bounded set of outstanding challenges** in Redis
+   (`impala:card_challenges:{card_id}`: at most 5 live at once, each with its
+   own 60s expiry, the oldest evicted on overflow), stored **fail-closed** (no
+   challenge is issued if Redis is down). A set rather than a single slot
+   because a card UID is public (readable over NFC): with one overwritable
+   slot, anyone who knew a UID could clobber or consume the legitimate
+   holder's challenge from anywhere. Challenges are issued unconditionally —
+   the response never reveals whether a card is registered (no enumeration
+   oracle).
 2. The card signs ECDSA-SHA256 (secp256r1, ASN.1 DER) over exactly
    `"IMPALA-AUTH:" (12 bytes) || accountId (16 bytes, RFC-4122 big-endian) ||
    challenge` — the pinned cross-stream contract (`CARD_AUTH_DOMAIN_PREFIX` in
    `src/constants.rs` ⇄ `AUTH_DOMAIN_TAG` in `ImpalaApplet.java`). The domain
    prefix guarantees an auth signature can never be replayed as a transfer
    signature.
-3. **`POST /auth/card {card_id, signature}`**: the challenge is consumed
-   atomically with Redis `GETDEL` (**single-use** — a replayed signature finds
-   no challenge and fails), the active card row supplies the account id and the
-   65-byte uncompressed SEC1 public key, and the signature is verified with
-   aws-lc-rs. Success returns the standard token pair. Every failure mode
-   (unknown card, expired/replayed/missing challenge, bad signature) returns
-   the same generic 401 and counts toward a per-card lockout (5 failures →
-   15 minutes); success clears the counter.
+3. **`POST /auth/card {card_id, signature}`**: the live challenges are read
+   without consuming anything, the active card row supplies the account id
+   and the 65-byte uncompressed SEC1 public key, and the signature is verified
+   with aws-lc-rs against each live challenge (newest first — one signature
+   can verify against at most one 32-byte random challenge). The challenge
+   that verifies is then consumed atomically with Redis `LREM` (**single-use**
+   — of two concurrent presentations of the same signature exactly one
+   removes the entry; the other finds it gone and is refused as a replay).
+   Success returns the standard token pair. Every failure mode (unknown card,
+   no live challenge, bad signature, replay) returns the same generic 401, but
+   **only a bad signature over a live challenge counts** toward the
+   `(card, client source)` lockout (5 failures → 15 minutes; see Account
+   Lockout). A missing challenge or an unknown card is not a guess — counting
+   those let anyone who knew a UID lock the holder out with empty
+   submissions. Success clears the counter for that source.
 
 There is **no auto-provisioning** on the card path: a registered card implies
 an existing account (FK from migration 017), and card registration itself
@@ -115,15 +127,87 @@ ids (the signed message embeds the on-card 16-byte account UUID).
 
 ### Account Lockout
 
-After 5 failed login attempts, the account is locked for 15 minutes. Failed attempts are tracked in Redis per account ID (per card ID for `/auth/card`).
+After 5 failed attempts, the identity is locked for 15 minutes **for the
+client source the failures came from**. Counters live in Redis under
+`impala:lockout:{identity}:{sha256(source)[..16]}` — per account ID for the
+password paths, per card ID for `/auth/card`, and per account/MFA-type pair
+for `/mfa/verify` (`impala:mfa_attempts:{account}:{type}:{digest}`). A
+successful login from a source clears that source's counter.
+
+Only a **real guess** counts: a wrong password against a stored one, a bad
+signature over a live card challenge, a wrong MFA code against an outstanding
+factor. An unknown username, a federated (SSO) account presented a password,
+an unknown card, a missing challenge, an absent or disabled MFA enrollment
+and a never-issued SMS code all get the same generic response and the same
+argon2 cost as a wrong password (nothing is observable on the wire), but do
+not increment anything — counting them let a caller pre-lock an identity that
+had not been provisioned yet, or lock a federated account's SSO path with
+passwords it does not have.
+
+The federated exchanges (`/auth/okta`, `/auth/google`, `/auth/github`,
+`/auth/sso/{provider}`) never increment the counter (they prove an IdP token)
+but honour it for the same `(account, source)` pair, so a source that earned
+a lock on an account is refused every login path for that account.
+
+**Trade-off, stated plainly.** Keying on `(identity, source)` means a guesser
+locks an identity only for itself. What bounds a guesser spread across many
+sources is the **per-identity rate limit** (10 requests / 60 s per username,
+card, or account+MFA-type), not the lockout: at most 10 guesses a minute
+against any one identity, from anywhere. The residual exposure is the shared
+NAT: peers behind one egress IP share a source, so a guesser on an office
+network can still lock an identity for everyone on that network for 15
+minutes. That is the previous behaviour confined to the guesser's own
+network instead of the whole internet, and it is accepted.
+
+The source is attributed by `client_source.rs` (the `ClientSource`
+extractor): with `TRUSTED_PROXY_HOPS = N` (default 1, the ALB) it is the
+N-th `X-Forwarded-For` entry **from the right** — the address the outermost
+trusted proxy appended — never the leftmost entry or `X-Real-Ip`, both of
+which the sender writes. With `TRUSTED_PROXY_HOPS = 0` (a directly exposed
+bridge, local docker-compose) the header is ignored and the TCP peer is the
+source. A chain shorter than N falls back to the peer; a value that is not an
+IP address lands in a single narrow `unknown` bucket rather than minting a
+fresh one per forged header.
 
 ### Rate Limiting
 
-Authentication endpoints (`/authenticate`, `/token`, `/session/login`, `/auth/okta`, `/auth/google`, `/auth/github`, `/auth/card`, `/auth/card/challenge`, `/auth/sso/{provider}`) enforce per-identity rate limits of 10 requests per 60-second window via Redis (SSO is rate-limited per provider; lockout is per account across providers). `/auth/github` additionally rate-limits per credential hash **before** calling the GitHub API.
+Authentication endpoints (`/authenticate`, `/token`, `/session/login`, `/auth/okta`, `/auth/google`, `/auth/github`, `/auth/card`, `/auth/card/challenge`, `/auth/sso/{provider}`) enforce per-identity rate limits of 10 requests per 60-second window via Redis (SSO is rate-limited per provider; lockout is per `(account, source)` across providers). `/auth/github` additionally rate-limits per credential hash **before** calling the GitHub API.
+
+The pre-auth endpoints that accept a caller-chosen identity (`/token` password
+flow — not refresh rotation — `/session/login`, `/authenticate`,
+`/auth/card/challenge`, `/auth/card`, `/mfa/verify`) additionally share a
+**per-client-source** budget of 30 requests / 60 s (`impala:rate:preauth_src:{source}`,
+source attributed as described under Account Lockout), checked before any
+per-identity budget is spent. This bounds how many identities one source can
+touch per minute, which the WAF's coarse per-IP rule (thousands per five
+minutes) cannot, and it is what stops a single source from walking the
+username space at a trickle. The unverified-webhook limit on `/webhooks/*`
+keys on the same attribution.
 
 All authenticated endpoints (GET included) additionally enforce a per-account limit of 100 requests / 60 s, keyed on the validated identity and enforced inside the shared auth-validation path after full validation — only valid credentials consume quota. Rejections return 429 with `Retry-After`.
 
-MFA verification (`/mfa/verify`) enforces brute force protection with a lockout after 5 failed attempts per account/MFA-type pair.
+MFA verification (`/mfa/verify`) enforces brute force protection with a lockout after 5 failed attempts per account/MFA-type pair, per client source.
+
+### Password verification cost bound and timing equalization
+
+Every password check is an argon2id run (~19 MiB, ~10 ms). Because the
+per-identity rate limits are keyed on the *submitted username*, a caller who
+rotates usernames gets a fresh budget each time (the per-source budget above
+caps that at 30 a minute per source, but not across sources) — so the argon2
+work itself is bounded process-wide (`ARGON2_MAX_CONCURRENT`, 8 concurrent runs; a request
+waits up to `ARGON2_QUEUE_WAIT_SECS` for a slot and is otherwise shed with
+503 `service_unavailable`). The permit is held by the blocking thread that
+does the work, not by the request future, so a request timeout cannot
+release it early. This is what stops an unauthenticated client from driving
+the task out of memory.
+
+Account existence is not observable from timing or status: the
+account-not-found and federated-account branches run exactly one verify
+against a precomputed dummy hash of the same cost as a real verify (a single
+run — the earlier generate-and-verify pair took twice as long), return the
+same generic body (`/token`: 200 `success:false`; `/session/login`,
+`/authenticate`: the same generic failure as a wrong password), and shed
+identically under saturation.
 
 All Redis-backed checks above are **fail-closed**: when Redis is unreachable the request is rejected, never silently allowed.
 
@@ -240,7 +324,7 @@ TLS is terminated at the ALB with an ACM certificate. When `certificate_arn` is 
 
 ### Account Compromise
 
-1. Account lockout engages automatically after 5 failed attempts.
+1. Account lockout engages automatically after 5 failed attempts from a client source.
 2. MFA verification lockout prevents brute force of TOTP/SMS codes.
 
 ### Dependency Vulnerabilities
@@ -282,7 +366,11 @@ by an in-process worker:
   delivery (DNS-rebinding defense).
 - **Delivery**: at-least-once with exponential backoff; a delivery is marked
   `failed` after `ADMIN_WEBHOOK_MAX_ATTEMPTS`, and a webhook is auto-disabled
-  after `ADMIN_WEBHOOK_DISABLE_THRESHOLD` consecutive failures.
+  after `ADMIN_WEBHOOK_DISABLE_THRESHOLD` consecutive failures. Pending
+  deliveries are leased (`FOR UPDATE ... SKIP LOCKED`, `next_attempt_at`
+  pushed out) so the worker on every server task claims disjoint rows, but a
+  lost response or a lapsed lease can still re-POST an event: receivers must
+  deduplicate on `X-Impala-Event-Id`, which is stable across retries.
 - **Least disclosure**: payloads never include secrets/PII — no MFA secret, no
   raw device token (platform only). The signing secret is never returned by
   `GET /admin/webhooks`. Store it in Vault/KMS for production.

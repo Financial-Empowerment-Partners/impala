@@ -117,6 +117,14 @@ func (a *App) runTransferSend(opts options, args []string) int {
 
 	res, raw, err := c.SignAndSubmit(context.Background(), req)
 	if err != nil {
+		// A timeout, a dropped connection, or a 5xx does not mean "not
+		// sent": the bridge signs and submits inside this call, and the
+		// endpoint has no idempotency key, so a blind re-run is a second
+		// payment. Only a verdict that proves nothing happened is a plain
+		// failure.
+		if bridge.IsAmbiguousOutcome(err) {
+			return a.failAmbiguousTransfer(err, payalaID, dest, amt)
+		}
 		return a.fail("%v", err)
 	}
 

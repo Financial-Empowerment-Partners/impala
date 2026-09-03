@@ -8,6 +8,15 @@
  * the stray-inflow queue. All numeric/geometry logic lives in the DOM-free
  * ReserveMath module; every dynamic value rendered here is escaped.
  *
+ * Money columns depend on the per-bucket minor scales that ONLY the status
+ * call returns (the ledger, refund, and replenishment endpoints hand back
+ * bare minor integers). Two rules keep a USD row from ever painting at a
+ * 7-dp scale: those sections load only after status has settled
+ * (ReserveMath.sequenceLoads), and a currency whose scale is still unknown
+ * renders as labelled raw minor units, never at a guessed scale
+ * (ReserveMath.displayFor). Each section keeps its last payload so a status
+ * refresh re-renders it against the current scale map.
+ *
  * @module ReservePage
  */
 (function () {
@@ -26,14 +35,45 @@
 
     var escapeHtml = EscapeHtml.escape;
 
-    /** Latest status/forecast payloads (re-rendered together). */
+    /**
+     * Latest payloads. Status/forecast re-render together; ledger, refunds
+     * and replenishment are cached so a later status load (new scale map)
+     * can re-render them without a refetch.
+     */
     var state = {
         status: null,
         forecast: null,
-        scales: {},          // currency -> minor_scale
+        scales: {},          // currency -> minor_scale, from status buckets only
+        ledger: null,
+        refunds: null,
+        replenishment: null,
         ledgerPage: 1,
         unmatchedPage: 1
     };
+    var SCALED_SECTIONS = ['reserve-ledger', 'reserve-refunds', 'reserve-replenishment'];
+
+    /** Minor units in `currency`, scaled by the status bucket map or labelled raw. */
+    function money(minor, currency) {
+        return escapeHtml(ReserveMath.displayFor(minor, state.scales, currency));
+    }
+
+    /** Signed delta in `currency`, same scale rule as money(). */
+    function delta(minor, currency) {
+        return escapeHtml(ReserveMath.fmtDeltaFor(minor, state.scales, currency));
+    }
+
+    function showLoading(ids) {
+        ids.forEach(function (id) {
+            document.getElementById(id).innerHTML = '<p class="text-muted">Loading&hellip;</p>';
+        });
+    }
+
+    /** Re-render every cached scale-dependent section against state.scales. */
+    function rerenderScaled() {
+        if (state.ledger) renderLedger();
+        if (state.refunds) renderRefunds();
+        if (state.replenishment) renderReplenishment();
+    }
     var PER_PAGE = 10;
     // Mirrors chk_conversion_reserve_entry_kind (migrations 031 + 032). A
     // kind missing here silently disappears from the ledger filter.
@@ -59,6 +99,9 @@
             document.getElementById('reserve-unconfigured').hidden = !!res.configured;
             renderBuckets();
             renderPolicies();
+            // The scale map may have changed (first load, or a bucket added):
+            // anything already on screen must reflect it.
+            rerenderScaled();
         });
     }
 
@@ -90,9 +133,17 @@
                 '<dt>Held</dt><dd>' + escapeHtml(ReserveMath.display(b.held_minor, b.minor_scale)) + '</dd>' +
                 '<dt>Low water</dt><dd>' + escapeHtml(ReserveMath.display(b.low_water_minor, b.minor_scale)) + '</dd>' +
                 '<dt>On-chain</dt><dd>' + (b.onchain_balance ? escapeHtml(b.onchain_balance) : '<span class="text-muted">unavailable</span>') + '</dd>' +
+                // Stablecoin buckets carry their pinned CODE:ISSUER; a
+                // configured asset the account cannot hold yet is the one
+                // state an admin must act on, so it gets a badge + button.
+                (b.asset ? '<dt>Asset</dt><dd class="mono">' + escapeHtml(b.asset) +
+                    (b.trustline === false ? ' <span class="badge error">no trustline</span>' : '') + '</dd>' : '') +
                 '</dl>' +
                 (canManage
                     ? '<button type="button" class="button tiny secondary bucket-edit" data-currency="' + escapeHtml(b.currency) + '" data-low="' + b.low_water_minor + '" data-scale="' + b.minor_scale + '">Set low water</button>'
+                    : '') +
+                (canManage && b.asset && b.trustline === false
+                    ? ' <button type="button" class="button tiny trustline-add" data-currency="' + escapeHtml(b.currency) + '">Add trustline</button>'
                     : '') +
                 '</div></div>';
         });
@@ -107,6 +158,11 @@
                 openBucketModal(btn.getAttribute('data-currency'),
                     parseInt(btn.getAttribute('data-low'), 10),
                     parseInt(btn.getAttribute('data-scale'), 10));
+            });
+        });
+        container.querySelectorAll('.trustline-add').forEach(function (btn) {
+            btn.addEventListener('click', function () {
+                openTrustlineModal(btn.getAttribute('data-currency'));
             });
         });
     }
@@ -170,6 +226,33 @@
                 }).catch(function (err) {
                     Router.showToast('Error: ' + err.message, 'alert');
                 }).then(function () { API.setButtonLoading(helpers.button, false); });
+            }
+        });
+    }
+
+    function openTrustlineModal(currency) {
+        var body =
+            '<p>The bridge signs a <code>ChangeTrust</code> from the reserve seed so the reserve ' +
+            'account can hold <strong>' + escapeHtml(currency) + '</strong>. This moves no money; ' +
+            'it reserves ~0.5 XLM of base reserve on the account. Repeating it is a no-op.</p>';
+        Modal.open({
+            title: 'Add trustline — ' + currency,
+            bodyHtml: body,
+            confirmLabel: 'Add trustline',
+            onConfirm: function (dialog, helpers) {
+                API.setButtonLoading(helpers.button, true);
+                API.post('/admin/exchange-reserve/trustlines', { currency: currency })
+                    .then(function (res) {
+                        if (res && res.success === false) {
+                            Router.showToast(res.message || 'Trustline failed', 'alert');
+                            return;
+                        }
+                        Router.showToast('Trustline in place (tx ' + String(res.stellar_tx_hash || '').slice(0, 8) + '\u2026)', 'success');
+                        helpers.close();
+                        loadStatus();
+                    })
+                    .catch(function (err) { Router.showToast('Error: ' + err.message, 'alert'); })
+                    .then(function () { API.setButtonLoading(helpers.button, false); });
             }
         });
     }
@@ -272,11 +355,19 @@
         var util = res.provider_utilization || [];
         if (util.length) {
             html += '<h6>Diverted volume by provider (' + res.window_days + 'd)</h6>' +
-                '<div class="table-wrap"><table><thead><tr><th>Provider</th><th>Orders</th><th>Held volume</th></tr></thead><tbody>';
+                '<div class="table-wrap"><table><thead><tr><th>Provider</th><th>Bucket</th><th>Orders</th><th>Held volume</th></tr></thead><tbody>';
             util.forEach(function (u) {
+                // One row per (provider, bucket): the bridge never sums a
+                // USD-cents hold with a 7-dp stablecoin hold. Scale by the
+                // bucket map; a bucket whose scale is unknown stays raw.
+                var sc = ReserveMath.scaleFor(state.scales, u.currency);
+                var volume = sc.known
+                    ? ReserveMath.display(u.volume_minor, sc.scale) + ' ' + escapeHtml(u.currency || '')
+                    : ReserveMath.rawMinor(u.volume_minor, 'scale unknown');
                 html += '<tr><td class="mono">' + escapeHtml(u.provider) + '</td>' +
+                    '<td>' + escapeHtml(u.currency || '') + '</td>' +
                     '<td>' + u.orders + '</td>' +
-                    '<td>' + escapeHtml(ReserveMath.display(u.volume_minor, 7)) + '</td></tr>';
+                    '<td>' + escapeHtml(volume) + '</td></tr>';
             });
             html += '</tbody></table></div>';
         }
@@ -419,11 +510,13 @@
         var qs = 'page=' + state.ledgerPage + '&per_page=' + PER_PAGE +
             (kind ? '&kind=' + encodeURIComponent(kind) : '');
         return API.get('/admin/exchange-reserve/entries?' + qs).then(function (res) {
-            renderLedger(res);
+            state.ledger = res;
+            renderLedger();
         });
     }
 
-    function renderLedger(res) {
+    function renderLedger() {
+        var res = state.ledger;
         var rows = res.data || [];
         var html = '<div class="table-wrap"><table><thead><tr>' +
             '<th>When</th><th>Kind</th><th>Currency</th><th>&Delta; available</th><th>&Delta; held</th><th>After (avail/held)</th><th>Order</th><th>By</th><th>Note</th>' +
@@ -432,14 +525,13 @@
             html += '<tr><td colspan="9" class="text-muted">No entries.</td></tr>';
         }
         rows.forEach(function (e) {
-            var scale = state.scales[e.currency] !== undefined ? state.scales[e.currency] : 7;
             html += '<tr><td>' + escapeHtml(e.created_at) + '</td>' +
                 '<td><span class="badge neutral">' + escapeHtml(e.kind) + '</span></td>' +
                 '<td>' + escapeHtml(e.currency) + '</td>' +
-                '<td>' + escapeHtml(ReserveMath.fmtDelta(e.delta, scale)) + '</td>' +
-                '<td>' + escapeHtml(ReserveMath.fmtDelta(e.held_delta, scale)) + '</td>' +
-                '<td>' + escapeHtml(ReserveMath.display(e.balance_after, scale)) + ' / ' +
-                escapeHtml(ReserveMath.display(e.held_after, scale)) + '</td>' +
+                '<td>' + delta(e.delta, e.currency) + '</td>' +
+                '<td>' + delta(e.held_delta, e.currency) + '</td>' +
+                '<td>' + money(e.balance_after, e.currency) + ' / ' +
+                money(e.held_after, e.currency) + '</td>' +
                 '<td class="mono">' + escapeHtml(e.order_id || '') + '</td>' +
                 '<td class="mono">' + escapeHtml(e.admin_account_id || '') + '</td>' +
                 '<td>' + escapeHtml(e.note || '') + '</td></tr>';
@@ -458,10 +550,20 @@
     }
 
     function openEntryModal() {
+        // Currencies come from the status bucket map, so every option has a
+        // known scale; without that map an amount cannot be converted to
+        // minor units, so refuse rather than guess.
+        var currencies = Object.keys(state.scales).filter(function (c) {
+            return ReserveMath.scaleFor(state.scales, c).known;
+        });
+        if (!currencies.length) {
+            Router.showToast('Bucket scales have not loaded yet; refresh and try again', 'alert');
+            return;
+        }
         var kindOpts = ADMIN_KINDS.map(function (k) {
             return '<option value="' + k + '">' + k + '</option>';
         }).join('');
-        var currencyOpts = Object.keys(state.scales).map(function (c) {
+        var currencyOpts = currencies.map(function (c) {
             return '<option value="' + escapeHtml(c) + '">' + escapeHtml(c) + '</option>';
         }).join('');
         var body =
@@ -479,9 +581,14 @@
             onConfirm: function (dialog, helpers) {
                 var currency = dialog.querySelector('#entry-currency').value;
                 var kind = dialog.querySelector('#entry-kind-input').value;
-                var scale = state.scales[currency] !== undefined ? state.scales[currency] : 7;
-                var check = ReserveMath.validateAmount(dialog.querySelector('#entry-amount').value, scale);
                 var errEl = dialog.querySelector('#entry-error');
+                var scaleInfo = ReserveMath.scaleFor(state.scales, currency);
+                if (!scaleInfo.known) {
+                    errEl.textContent = 'Scale for ' + currency + ' is unknown; refresh and try again';
+                    errEl.hidden = false;
+                    return;
+                }
+                var check = ReserveMath.validateAmount(dialog.querySelector('#entry-amount').value, scaleInfo.scale);
                 if (!check.ok) {
                     errEl.textContent = check.error;
                     errEl.hidden = false;
@@ -555,36 +662,40 @@
     function loadRefunds() {
         return API.get('/admin/exchange-reserve/refunds?page=1&per_page=' + PER_PAGE)
             .then(function (res) {
-                var rows = res.data || [];
-                var html = '<div class="table-wrap"><table><thead><tr>' +
-                    '<th>When</th><th>Status</th><th>Reason</th><th>Amount</th>' +
-                    '<th>Destination</th><th>Detail</th><th></th>' +
-                    '</tr></thead><tbody>';
-                if (!rows.length) {
-                    html += '<tr><td colspan="7" class="text-muted">No refunds.</td></tr>';
-                }
-                rows.forEach(function (r) {
-                    var scale = state.scales[r.currency] !== undefined ? state.scales[r.currency] : 7;
-                    html += '<tr><td>' + escapeHtml(r.created_at) + '</td>' +
-                        '<td><span class="badge ' + ReserveMath.refundBadge(r.status) + '">' +
-                        escapeHtml(r.status) + '</span></td>' +
-                        '<td>' + escapeHtml(r.reason) + '</td>' +
-                        '<td>' + escapeHtml(ReserveMath.display(r.refund_minor, scale)) + ' ' +
-                        escapeHtml(r.currency) + '</td>' +
-                        '<td class="mono">' + escapeHtml(r.destination) + '</td>' +
-                        '<td>' + escapeHtml(r.last_error || r.skip_reason || '') + '</td>' +
-                        '<td>' + refundActions(r) + '</td></tr>';
-                });
-                html += '</tbody></table></div>';
-                var container = document.getElementById('reserve-refunds');
-                container.innerHTML = html;
-                container.querySelectorAll('.refund-action').forEach(function (btn) {
-                    btn.addEventListener('click', function () {
-                        openRefundModal(btn.getAttribute('data-id'),
-                            btn.getAttribute('data-action'));
-                    });
-                });
+                state.refunds = res;
+                renderRefunds();
             });
+    }
+
+    function renderRefunds() {
+        var rows = state.refunds.data || [];
+        var html = '<div class="table-wrap"><table><thead><tr>' +
+            '<th>When</th><th>Status</th><th>Reason</th><th>Amount</th>' +
+            '<th>Destination</th><th>Detail</th><th></th>' +
+            '</tr></thead><tbody>';
+        if (!rows.length) {
+            html += '<tr><td colspan="7" class="text-muted">No refunds.</td></tr>';
+        }
+        rows.forEach(function (r) {
+            html += '<tr><td>' + escapeHtml(r.created_at) + '</td>' +
+                '<td><span class="badge ' + ReserveMath.refundBadge(r.status) + '">' +
+                escapeHtml(r.status) + '</span></td>' +
+                '<td>' + escapeHtml(r.reason) + '</td>' +
+                '<td>' + money(r.refund_minor, r.currency) + ' ' +
+                escapeHtml(r.currency) + '</td>' +
+                '<td class="mono">' + escapeHtml(r.destination) + '</td>' +
+                '<td>' + escapeHtml(r.last_error || r.skip_reason || '') + '</td>' +
+                '<td>' + refundActions(r) + '</td></tr>';
+        });
+        html += '</tbody></table></div>';
+        var container = document.getElementById('reserve-refunds');
+        container.innerHTML = html;
+        container.querySelectorAll('.refund-action').forEach(function (btn) {
+            btn.addEventListener('click', function () {
+                openRefundModal(btn.getAttribute('data-id'),
+                    btn.getAttribute('data-action'));
+            });
+        });
     }
 
     function refundActions(r) {
@@ -643,66 +754,80 @@
 
     function loadReplenishment() {
         return API.get('/admin/exchange-reserve/replenishment').then(function (res) {
-            var html = '<div class="table-wrap"><table><thead><tr>' +
-                '<th>Kind</th><th>Enabled</th><th>Per cycle</th><th>Daily cap</th>' +
-                '<th>Min float</th><th></th></tr></thead><tbody>';
-            (res.policies || []).forEach(function (p) {
-                // 0 means unconfigured, which is NOT the same as unlimited.
-                var unset = p.max_spend_minor === 0 || p.daily_spend_cap_minor === 0;
-                var badge = p.enabled
-                    ? '<span class="badge ok">enabled</span>'
-                    : '<span class="badge neutral">disabled</span>';
-                if (unset) badge += ' <span class="badge pending">caps unset</span>';
-                var scale = p.kind === 'usdc_to_usd' ? 7 : 7;
-                html += '<tr><td class="mono">' + escapeHtml(p.kind) + '</td>' +
-                    '<td>' + badge + '</td>' +
-                    '<td>' + escapeHtml(ReserveMath.display(p.max_spend_minor, scale)) + '</td>' +
-                    '<td>' + escapeHtml(ReserveMath.display(p.daily_spend_cap_minor, scale)) + '</td>' +
-                    '<td>' + escapeHtml(ReserveMath.display(p.min_float_minor, scale)) + '</td>' +
-                    '<td>' + (canManage
-                        ? '<button type="button" class="button tiny replenish-run" data-kind="' +
-                          escapeHtml(p.kind) + '">Run now</button>'
-                        : '') + '</td></tr>';
+            state.replenishment = res;
+            renderReplenishment();
+        });
+    }
+
+    function renderReplenishment() {
+        var res = state.replenishment;
+        var html = '<div class="table-wrap"><table><thead><tr>' +
+            '<th>Kind</th><th>Enabled</th><th>Per cycle</th><th>Daily cap</th>' +
+            '<th>Min float</th><th></th></tr></thead><tbody>';
+        (res.policies || []).forEach(function (p) {
+            // 0 means unconfigured, which is NOT the same as unlimited.
+            var unset = p.max_spend_minor === 0 || p.daily_spend_cap_minor === 0;
+            var badge = p.enabled
+                ? '<span class="badge ok">enabled</span>'
+                : '<span class="badge neutral">disabled</span>';
+            if (unset) badge += ' <span class="badge pending">caps unset</span>';
+            // Every cap is denominated in the kind's SPEND asset (replenish.rs
+            // checks them against spend_available); an unknown kind has no
+            // leg to scale by and renders raw.
+            var legs = ReserveMath.replenishLegs(p.kind);
+            var spend = legs ? legs.spend : null;
+            var unit = spend ? ' ' + escapeHtml(spend) : '';
+            html += '<tr><td class="mono">' + escapeHtml(p.kind) + '</td>' +
+                '<td>' + badge + '</td>' +
+                '<td>' + money(p.max_spend_minor, spend) + unit + '</td>' +
+                '<td>' + money(p.daily_spend_cap_minor, spend) + unit + '</td>' +
+                '<td>' + money(p.min_float_minor, spend) + unit + '</td>' +
+                '<td>' + (canManage
+                    ? '<button type="button" class="button tiny replenish-run" data-kind="' +
+                      escapeHtml(p.kind) + '">Run now</button>'
+                    : '') + '</td></tr>';
+        });
+        html += '</tbody></table></div>';
+
+        var cycles = res.cycles || [];
+        if (cycles.length) {
+            html += '<h6>Recent cycles</h6><div class="table-wrap"><table><thead><tr>' +
+                '<th>When</th><th>Kind</th><th>State</th><th>Spend</th>' +
+                '<th>Received</th><th>Detail</th><th></th></tr></thead><tbody>';
+            cycles.forEach(function (c) {
+                // A refunded cycle got its SPEND asset back, not the recv
+                // asset: scale and label the arrival accordingly.
+                var arrival = ReserveMath.cycleArrivalCurrency(c);
+                var got = c.actual_recv_minor !== null && c.actual_recv_minor !== undefined
+                    ? money(c.actual_recv_minor, arrival) + ' ' + escapeHtml(arrival)
+                    : '—';
+                var action = c.state === 'in_transit' && canManage
+                    ? '<button type="button" class="button tiny cycle-confirm" data-id="' +
+                      escapeHtml(c.cycle_id) + '">Confirm receipt</button>'
+                    : '';
+                html += '<tr><td>' + escapeHtml(c.created_at) + '</td>' +
+                    '<td class="mono">' + escapeHtml(c.kind) + '</td>' +
+                    '<td><span class="badge ' + ReserveMath.cycleBadge(c.state) + '">' +
+                    escapeHtml(c.state) + '</span></td>' +
+                    '<td>' + money(c.spend_minor, c.spend_currency) + ' ' +
+                    escapeHtml(c.spend_currency) + '</td>' +
+                    '<td>' + got + '</td>' +
+                    '<td>' + escapeHtml(c.last_error || c.quote_pricing || '') + '</td>' +
+                    '<td>' + action + '</td></tr>';
             });
             html += '</tbody></table></div>';
+        }
 
-            var cycles = res.cycles || [];
-            if (cycles.length) {
-                html += '<h6>Recent cycles</h6><div class="table-wrap"><table><thead><tr>' +
-                    '<th>When</th><th>Kind</th><th>State</th><th>Spend</th>' +
-                    '<th>Received</th><th>Detail</th><th></th></tr></thead><tbody>';
-                cycles.forEach(function (c) {
-                    var got = c.actual_recv_minor !== null && c.actual_recv_minor !== undefined
-                        ? ReserveMath.display(c.actual_recv_minor, 7) + ' ' + c.recv_currency
-                        : '—';
-                    var action = c.state === 'in_transit' && canManage
-                        ? '<button type="button" class="button tiny cycle-confirm" data-id="' +
-                          escapeHtml(c.cycle_id) + '">Confirm receipt</button>'
-                        : '';
-                    html += '<tr><td>' + escapeHtml(c.created_at) + '</td>' +
-                        '<td class="mono">' + escapeHtml(c.kind) + '</td>' +
-                        '<td><span class="badge ' + ReserveMath.cycleBadge(c.state) + '">' +
-                        escapeHtml(c.state) + '</span></td>' +
-                        '<td>' + escapeHtml(ReserveMath.display(c.spend_minor, 7)) + ' ' +
-                        escapeHtml(c.spend_currency) + '</td>' +
-                        '<td>' + escapeHtml(got) + '</td>' +
-                        '<td>' + escapeHtml(c.last_error || c.quote_pricing || '') + '</td>' +
-                        '<td>' + action + '</td></tr>';
-                });
-                html += '</tbody></table></div>';
-            }
-
-            var container = document.getElementById('reserve-replenishment');
-            container.innerHTML = html;
-            container.querySelectorAll('.replenish-run').forEach(function (btn) {
-                btn.addEventListener('click', function () {
-                    runReplenishment(btn.getAttribute('data-kind'), btn);
-                });
+        var container = document.getElementById('reserve-replenishment');
+        container.innerHTML = html;
+        container.querySelectorAll('.replenish-run').forEach(function (btn) {
+            btn.addEventListener('click', function () {
+                runReplenishment(btn.getAttribute('data-kind'), btn);
             });
-            container.querySelectorAll('.cycle-confirm').forEach(function (btn) {
-                btn.addEventListener('click', function () {
-                    openConfirmFiatModal(btn.getAttribute('data-id'));
-                });
+        });
+        container.querySelectorAll('.cycle-confirm').forEach(function (btn) {
+            btn.addEventListener('click', function () {
+                openConfirmFiatModal(btn.getAttribute('data-id'));
             });
         });
     }
@@ -781,15 +906,45 @@
 
     /* ---- boot ------------------------------------------------------------- */
 
+    function showError(err) {
+        Router.showToast('Error: ' + err.message, 'alert');
+    }
+
+    /** Wrap a section loader so a failure replaces its loading placeholder. */
+    function sectionLoad(id, loader) {
+        return function () {
+            return loader().catch(function (err) {
+                document.getElementById(id).innerHTML =
+                    '<p class="text-muted">Could not load: ' + escapeHtml(err.message) + '</p>';
+                throw err;
+            });
+        };
+    }
+
     function refreshAll() {
-        loadStatus()
-            .then(loadForecast)
-            .catch(function (err) { Router.showToast('Error: ' + err.message, 'alert'); });
-        loadQueues().catch(function (err) { Router.showToast('Error: ' + err.message, 'alert'); });
-        loadLedger().catch(function (err) { Router.showToast('Error: ' + err.message, 'alert'); });
-        loadUnmatched().catch(function (err) { Router.showToast('Error: ' + err.message, 'alert'); });
-        loadRefunds().catch(function (err) { Router.showToast('Error: ' + err.message, 'alert'); });
-        loadReplenishment().catch(function (err) { Router.showToast('Error: ' + err.message, 'alert'); });
+        // Status first: it is the only call that returns the bucket scales,
+        // and /admin/exchange-reserve waits on a Horizon round-trip while the
+        // ledger is one query, so unordered loads painted USD rows at 7 dp
+        // on essentially every visit. The scaled sections drop their cached
+        // payloads (a post-action refresh must not flash pre-action rows)
+        // and show a loading state until status settles (a Horizon hang can
+        // hold it for up to ~30s); the forecast depends on status for the
+        // bucket badges.
+        state.ledger = null;
+        state.refunds = null;
+        state.replenishment = null;
+        showLoading(SCALED_SECTIONS);
+        return ReserveMath.sequenceLoads(
+            loadStatus,
+            [
+                loadForecast,
+                sectionLoad('reserve-ledger', loadLedger),
+                sectionLoad('reserve-refunds', loadRefunds),
+                sectionLoad('reserve-replenishment', loadReplenishment)
+            ],
+            [loadQueues, loadUnmatched],
+            showError
+        );
     }
 
     var kindSelect = document.getElementById('ledger-kind');
@@ -801,10 +956,10 @@
     });
     kindSelect.addEventListener('change', function () {
         state.ledgerPage = 1;
-        loadLedger().catch(function (err) { Router.showToast('Error: ' + err.message, 'alert'); });
+        loadLedger().catch(showError);
     });
     document.getElementById('forecast-window').addEventListener('change', function () {
-        loadForecast().catch(function (err) { Router.showToast('Error: ' + err.message, 'alert'); });
+        loadForecast().catch(showError);
     });
     // Hidden via data-permission for read-only viewers; wire null-safely.
     var entryBtn = document.getElementById('entry-btn');

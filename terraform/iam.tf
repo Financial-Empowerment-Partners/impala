@@ -32,10 +32,15 @@ resource "aws_iam_role_policy" "ecs_execution_secrets" {
       {
         Effect = "Allow"
         Action = "secretsmanager:GetSecretValue"
-        Resource = [
-          aws_secretsmanager_secret.database_url.arn,
-          aws_secretsmanager_secret.jwt_secret.arn,
-        ]
+        Resource = concat(
+          [
+            aws_secretsmanager_secret.database_url.arn,
+            aws_secretsmanager_secret.jwt_secret.arn,
+          ],
+          # SigNoz token for the OTEL sidecar (otel.tf); the secret exists
+          # only when the sidecar does.
+          var.signoz_endpoint != "" ? [aws_secretsmanager_secret.signoz_access_token[0].arn] : [],
+        )
       }
     ]
   })

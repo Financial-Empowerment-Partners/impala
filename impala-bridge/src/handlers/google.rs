@@ -4,6 +4,7 @@ use log::{debug, info};
 use sqlx::PgPool;
 use std::sync::Arc;
 
+use crate::client_source::ClientSource;
 use crate::constants::{
     AUTH_PROVIDER_GOOGLE, LOCKOUT_THRESHOLD, RATE_LIMIT_MAX_REQUESTS, RATE_LIMIT_WINDOW_SECS,
 };
@@ -35,6 +36,7 @@ fn derive_google_account_id(claims: &GoogleIdTokenClaims) -> String {
 /// Validates the ID token against Google's JWKS (RS256, issuer, audience =
 /// `GOOGLE_CLIENT_ID`, expiry), auto-provisions the user if needed, and
 /// issues a local refresh + temporal token pair. Rate-limited per account.
+#[allow(clippy::too_many_arguments)] // axum handler: each arg is an extractor
 pub async fn google_token_exchange(
     Extension(pool): Extension<PgPool>,
     Extension(jwt_keys): Extension<Arc<crate::jwt::JwtKeys>>,
@@ -42,6 +44,7 @@ pub async fn google_token_exchange(
     Extension(admin_ids): Extension<Arc<std::collections::HashSet<String>>>,
     Extension(metrics): Extension<Arc<AppMetrics>>,
     google_provider: Option<Extension<Arc<GoogleProvider>>>,
+    ClientSource(source): ClientSource,
     Json(payload): Json<GoogleTokenExchangeRequest>,
 ) -> Result<Json<TokenResponse>, AppError> {
     let result = google_token_exchange_inner(
@@ -50,6 +53,7 @@ pub async fn google_token_exchange(
         redis_pool,
         admin_ids,
         google_provider,
+        &source,
         payload,
     )
     .await;
@@ -63,6 +67,7 @@ async fn google_token_exchange_inner(
     redis_pool: Arc<deadpool_redis::Pool>,
     admin_ids: Arc<std::collections::HashSet<String>>,
     google_provider: Option<Extension<Arc<GoogleProvider>>>,
+    source: &str,
     payload: GoogleTokenExchangeRequest,
 ) -> Result<Json<TokenResponse>, AppError> {
     debug!("POST /auth/google: token exchange request received");
@@ -80,8 +85,11 @@ async fn google_token_exchange_inner(
 
     info!("google: token exchange for account_id={}", account_id);
 
-    // Rate limiting and lockout checks (fail-closed on Redis errors)
-    crate::redis_helpers::check_lockout(&redis_pool, &account_id, LOCKOUT_THRESHOLD).await?;
+    // Rate limiting and lockout checks (fail-closed on Redis errors). The
+    // lockout is the password paths' (account, source) counter: a guesser
+    // that locked this account from this source is refused here too.
+    crate::redis_helpers::check_lockout(&redis_pool, &account_id, source, LOCKOUT_THRESHOLD)
+        .await?;
     crate::redis_helpers::check_rate_limit(
         &redis_pool,
         "google",
@@ -111,16 +119,27 @@ async fn google_token_exchange_inner(
 
 /// `GET /auth/google/config` — Return Google client configuration.
 ///
-/// No auth required. Returns `{ enabled: false }` if Google is not configured.
+/// No auth required. Returns `{ enabled: false }` if Google is not configured,
+/// and `{ enabled: false, pending: true }` while the configured provider is
+/// still waiting on Google's JWKS.
 pub async fn google_config(
     google_provider: Option<Extension<Arc<GoogleProvider>>>,
 ) -> Json<GoogleConfigResponse> {
     match google_provider {
-        Some(Extension(provider)) => {
+        Some(Extension(provider)) if provider.is_ready().await => {
             debug!("GET /auth/google/config: returning Google configuration");
             Json(GoogleConfigResponse {
                 enabled: true,
                 client_id: Some(provider.client_id.clone()),
+                pending: false,
+            })
+        }
+        Some(_) => {
+            debug!("GET /auth/google/config: Google configured but PENDING");
+            Json(GoogleConfigResponse {
+                enabled: false,
+                client_id: None,
+                pending: true,
             })
         }
         None => {
@@ -128,6 +147,7 @@ pub async fn google_config(
             Json(GoogleConfigResponse {
                 enabled: false,
                 client_id: None,
+                pending: false,
             })
         }
     }

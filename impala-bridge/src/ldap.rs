@@ -1,10 +1,19 @@
 use crate::config::Config;
+use crate::constants::{LDAP_CONNECT_TIMEOUT_SECS, LDAP_OP_TIMEOUT_SECS};
 use crate::error::AppError;
 use crate::validate::ldap_escape;
 use log::{debug, error, info, warn};
 use serde::Serialize;
 use sqlx::PgPool;
 use std::collections::HashMap;
+use std::time::Duration;
+
+/// Per-operation deadline. ldap3 applies `with_timeout` to the NEXT operation
+/// only, so every bind/search/unbind re-arms it through this helper rather
+/// than trusting an earlier call to still be in effect.
+fn op_timeout() -> Duration {
+    Duration::from_secs(LDAP_OP_TIMEOUT_SECS)
+}
 
 /// Narrow LDAP configuration carried as shared state (`Arc<LdapConfig>`), so the
 /// per-account sync handler can reach LDAP without exposing the full `Config`
@@ -61,10 +70,17 @@ async fn connect_bind(cfg: &LdapConfig) -> Result<ldap3::Ldap, AppError> {
         .as_ref()
         .ok_or_else(|| AppError::BadRequest("LDAP is not configured".to_string()))?;
 
-    let (conn, mut ldap) = ldap3::LdapConnAsync::new(url).await.map_err(|e| {
-        error!("ldap: failed to connect to {}: {}", url, e);
-        AppError::InternalError("LDAP connection failed".to_string())
-    })?;
+    // ldap3 has NO default connect timeout: a black-holed directory would
+    // otherwise park the caller forever (at startup that meant a deploy that
+    // never bound its listener).
+    let settings = ldap3::LdapConnSettings::new()
+        .set_conn_timeout(Duration::from_secs(LDAP_CONNECT_TIMEOUT_SECS));
+    let (conn, mut ldap) = ldap3::LdapConnAsync::with_settings(settings, url)
+        .await
+        .map_err(|e| {
+            error!("ldap: failed to connect to {}: {}", url, e);
+            AppError::InternalError("LDAP connection failed".to_string())
+        })?;
 
     tokio::spawn(async move {
         if let Err(e) = conn.drive().await {
@@ -73,7 +89,11 @@ async fn connect_bind(cfg: &LdapConfig) -> Result<ldap3::Ldap, AppError> {
     });
 
     if let (Some(bind_dn), Some(bind_pw)) = (&cfg.bind_dn, &cfg.bind_password) {
-        match ldap.simple_bind(bind_dn, bind_pw).await {
+        match ldap
+            .with_timeout(op_timeout())
+            .simple_bind(bind_dn, bind_pw)
+            .await
+        {
             Ok(result) if result.rc == 0 => {
                 debug!("ldap: bind successful as {}", bind_dn);
             }
@@ -82,7 +102,7 @@ async fn connect_bind(cfg: &LdapConfig) -> Result<ldap3::Ldap, AppError> {
                     "ldap: bind failed (rc={}, message={})",
                     result.rc, result.text
                 );
-                let _ = ldap.unbind().await;
+                let _ = ldap.with_timeout(op_timeout()).unbind().await;
                 return Err(AppError::InternalError("LDAP bind failed".to_string()));
             }
             Err(e) => {
@@ -116,6 +136,7 @@ pub async fn sync_account_profile(
     let mut ldap = connect_bind(cfg).await?;
 
     let search = ldap
+        .with_timeout(op_timeout())
         .search(
             &base_dn,
             ldap3::Scope::Subtree,
@@ -132,7 +153,7 @@ pub async fn sync_account_profile(
         Ok((entries, _res)) => entries,
         Err(e) => {
             error!("sync_account_profile: search result error: {}", e);
-            let _ = ldap.unbind().await;
+            let _ = ldap.with_timeout(op_timeout()).unbind().await;
             return Err(AppError::InternalError("LDAP search failed".to_string()));
         }
     };
@@ -143,7 +164,7 @@ pub async fn sync_account_profile(
             map_ldap_attrs(&se.attrs)
         }
         None => {
-            let _ = ldap.unbind().await;
+            let _ = ldap.with_timeout(op_timeout()).unbind().await;
             warn!(
                 "sync_account_profile: account_id={} not found in LDAP (filter={})",
                 payala_account_id, filter
@@ -154,7 +175,7 @@ pub async fn sync_account_profile(
         }
     };
 
-    let _ = ldap.unbind().await;
+    let _ = ldap.with_timeout(op_timeout()).unbind().await;
 
     sqlx::query(
         r#"
@@ -187,44 +208,51 @@ pub async fn sync_account_profile(
     Ok(profile)
 }
 
-/// Synchronize local accounts with an LDAP directory at startup.
+/// Synchronize local accounts with an LDAP directory after startup.
 ///
 /// Connects to the configured LDAP server, iterates over every
 /// `payala_account_id` in the `impala_account` table, and performs an
 /// LDAP search for each one using the configured filter and base DN. This is a
 /// read-only reconciliation check (it only logs found/not-found); per-account
 /// writeback is handled on demand by [`sync_account_profile`].
-pub async fn directory_sync(pool: &PgPool, config: &Config) {
-    if config.ldap_url.is_none() {
+///
+/// Runs as a spawned background task AFTER the listener is bound: it is
+/// log-only, so nothing about serving depends on it, and awaiting it before
+/// bind once let an unreachable directory crash-loop a deploy (the health
+/// check never saw a listener). Every LDAP operation carries a timeout.
+pub async fn directory_sync(pool: PgPool, cfg: std::sync::Arc<LdapConfig>) {
+    if cfg.url.is_none() {
         debug!("directory_sync: LDAP_URL not configured, skipping");
         return;
     }
-    let cfg = LdapConfig::from_config(config);
     let base_dn = cfg.base_dn.clone().unwrap_or_default();
     let filter_template = cfg
         .search_filter
         .clone()
         .unwrap_or_else(|| "(uid={})".to_string());
 
-    info!("directory_sync: connecting to LDAP (base_dn={})", base_dn);
+    info!(
+        "directory_sync: starting background directory sweep (base_dn={})",
+        base_dn
+    );
 
     let mut ldap = match connect_bind(&cfg).await {
         Ok(ldap) => ldap,
         Err(e) => {
-            error!("directory_sync: {}", e);
+            error!("directory_sync: aborted — {}", e);
             return;
         }
     };
 
     let accounts = sqlx::query_as::<_, (String,)>("SELECT payala_account_id FROM impala_account")
-        .fetch_all(pool)
+        .fetch_all(&pool)
         .await;
 
     let account_ids = match accounts {
         Ok(rows) => rows,
         Err(e) => {
-            error!("directory_sync: failed to query accounts: {}", e);
-            let _ = ldap.unbind().await;
+            error!("directory_sync: aborted — failed to query accounts: {}", e);
+            let _ = ldap.with_timeout(op_timeout()).unbind().await;
             return;
         }
     };
@@ -244,6 +272,7 @@ pub async fn directory_sync(pool: &PgPool, config: &Config) {
         let filter = filter_template.replace("{}", &escaped_id);
 
         match ldap
+            .with_timeout(op_timeout())
             .search(&base_dn, ldap3::Scope::Subtree, &filter, vec!["*"])
             .await
         {
@@ -289,7 +318,7 @@ pub async fn directory_sync(pool: &PgPool, config: &Config) {
         account_ids.len()
     );
 
-    let _ = ldap.unbind().await;
+    let _ = ldap.with_timeout(op_timeout()).unbind().await;
 }
 
 #[cfg(test)]

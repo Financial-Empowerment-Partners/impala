@@ -35,19 +35,22 @@
 //! dedup and retry PACING (backoff/poll_count bookkeeping) assume a single
 //! ticker, so a lock that fails open degrades to noise, not loss.
 
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
-use log::{error, info, warn};
+use futures::FutureExt;
+use log::{debug, error, info, warn};
 use sqlx::PgPool;
 use tokio::time::{sleep, Duration};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::constants::{
-    RESERVE_AUTO_REFUND_REASONS, RESERVE_CURRENCY_USD, RESERVE_CURRENCY_USDC, RESERVE_CURRENCY_XLM,
-    RESERVE_MAX_PAYOUT_ATTEMPTS, RESERVE_REFUND_COOLDOWN_SECS, RESERVE_REFUND_MAX_ATTEMPTS,
-    RESERVE_REFUND_MAX_PER_TICK, RESERVE_REFUND_MEMO_PREFIX, RESERVE_REFUND_MIN_MINOR,
-    RESERVE_SCALE_STELLAR, RESERVE_WATCHER_LOCK_KEY, RESERVE_WATCH_PAGE_LIMIT,
+    RESERVE_AUTO_REFUND_REASONS, RESERVE_CURRENCY_USD, RESERVE_CURRENCY_USDC,
+    RESERVE_CURRENCY_USDT0, RESERVE_CURRENCY_XLM, RESERVE_MAX_PAYOUT_ATTEMPTS,
+    RESERVE_REFUND_COOLDOWN_SECS, RESERVE_REFUND_MAX_ATTEMPTS, RESERVE_REFUND_MAX_PER_TICK,
+    RESERVE_REFUND_MEMO_PREFIX, RESERVE_REFUND_MIN_MINOR, RESERVE_SCALE_STELLAR,
+    RESERVE_WATCHER_LOCK_KEY, RESERVE_WATCH_PAGE_LIMIT,
 };
 use crate::error::AppError;
 use crate::events::AccountEvent;
@@ -58,7 +61,7 @@ use crate::exchange::reserve::{
 };
 use crate::seed_protect::SeedProtector;
 use crate::stellar::horizon::{fetch_latest_cursor, fetch_payments_page, HorizonPayment};
-use crate::stellar::{Asset, PaymentParams, StellarSigner};
+use crate::stellar::{PaymentParams, StellarSigner};
 use crate::telemetry::AppMetrics;
 
 /// Intent age after which a `processing` order with no recorded submit
@@ -82,7 +85,8 @@ const PS_AWAITING_DISBURSEMENT: &str = "awaiting_disbursement";
 /// intent and any other marker are in flight or frozen — never selected.
 const DUE_PAYOUTS_SQL: &str = "SELECT o.order_id, o.payala_account_id, \
         o.amount_to, o.payout_address, o.payout_extra_id, o.provider_order_id, \
-        o.provider_status, o.poll_count \
+        o.provider_status, o.poll_count, \
+        o.provider_payload->>'hold_currency' AS hold_currency \
      FROM exchange_order o \
      LEFT JOIN conversion_reserve_entry e \
        ON e.order_id = o.order_id AND e.kind = 'payout_attempt' \
@@ -196,14 +200,17 @@ pub(crate) enum RefundDecision {
         destination: String,
         refund_minor: i64,
     },
-    /// Queued but parked for a human (over cap, or dust).
+    /// Queued but parked for a human (over cap).
     Review {
         destination: String,
         refund_minor: i64,
         why: &'static str,
     },
     /// No obligation. `why` is recorded on the source row so the manual
-    /// queue explains itself instead of going silent.
+    /// queue explains itself instead of going silent. Dust lands here: the
+    /// inflow is still recorded and credited, but a flood of 101-stroop
+    /// payments carrying harvested order memos must not mint a review-queue
+    /// row and a `reserve.refund_queued` event apiece.
     Skip(&'static str),
 }
 
@@ -222,7 +229,8 @@ pub(crate) struct RefundContext<'a> {
     pub sender_address: Option<&'a str>,
     pub sender_muxed: Option<&'a str>,
     pub reserve_address: &'a str,
-    pub usdc_issuer: &'a str,
+    /// Every configured asset issuer (USDC, and USDT0 when enabled).
+    pub issuers: &'a [&'a str],
     /// Per-currency cap; 0 disables refunds for that bucket entirely.
     pub max_minor: i64,
 }
@@ -271,8 +279,10 @@ pub(crate) fn refund_decision(ctx: &RefundContext<'_>) -> RefundDecision {
         // Paying ourselves would debit the ledger for a no-op.
         return RefundDecision::Skip("self_refund");
     }
-    if destination == ctx.usdc_issuer {
-        // Sending an issued asset back to its issuer BURNS it.
+    if ctx.issuers.contains(&destination.as_str()) {
+        // Sending an issued asset back to its issuer BURNS it. Any configured
+        // issuer is refused, not only the one matching the refund's asset: a
+        // refund to an issuer address is never a customer's wallet.
         return RefundDecision::Skip("issuer_destination");
     }
     let (currency, refund_minor) = match (ctx.currency, ctx.amount_minor) {
@@ -287,13 +297,13 @@ pub(crate) fn refund_decision(ctx: &RefundContext<'_>) -> RefundDecision {
         return RefundDecision::Skip("disabled");
     }
     if refund_minor < RESERVE_REFUND_MIN_MINOR {
-        // Dust is never silently absorbed — the point of the feature is that
-        // customer money stops living in a log line.
-        return RefundDecision::Review {
-            destination,
-            refund_minor,
-            why: "dust",
-        };
+        // Dust is never silently absorbed — the caller has already recorded
+        // the unmatched row and the journal credit, and this reason lands on
+        // that row — but it earns no obligation and no feed event: a dust
+        // flood carrying harvested order memos would otherwise fill the
+        // refund review queue and the webhook feed one row per payment. An
+        // admin can still return it by hand (POST /admin/exchange-reserve/refunds).
+        return RefundDecision::Skip("dust");
     }
     if refund_minor > ctx.max_minor {
         return RefundDecision::Review {
@@ -331,6 +341,13 @@ pub struct ReserveWatchDeps {
     /// Needed by the replenishment leg that sells accumulated XLM. Absent
     /// when the provider is unconfigured, which simply means no cycles run.
     pub changelly_crypto: Option<Arc<crate::exchange::changelly::ChangellyCrypto>>,
+    /// Process shutdown signal. The money drivers (payouts, refunds) check it
+    /// BETWEEN orders so that no new on-chain submit starts once shutdown
+    /// begins: the drain in `main` then only ever waits on one in-flight
+    /// submit, whose outcome gets recorded instead of being torn down after
+    /// Horizon accepted it. The manual `run_now` handler passes the same
+    /// process token.
+    pub cancel: CancellationToken,
 }
 
 /// Watcher entrypoint (reconcile-loop shape): tick every `watch_secs`,
@@ -350,38 +367,83 @@ pub async fn run(deps: ReserveWatchDeps, cancel: CancellationToken) {
                 return;
             }
             _ = sleep(Duration::from_secs(deps.reserve.watch_secs)) => {
-                if let Err(e) = tick(&deps).await {
-                    error!("reserve watcher tick failed: {:?}", e);
+                // A panic inside one tick must not kill the watcher for the
+                // life of the process: isolate it, log it, keep looping. The
+                // advisory lock guard releases during the unwind.
+                match std::panic::AssertUnwindSafe(tick(&deps)).catch_unwind().await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => error!("reserve watcher tick failed: {:?}", e),
+                    Err(_) => error!("reserve watcher tick PANICKED; continuing on the next pass"),
                 }
             }
         }
     }
 }
 
+/// A session-level Postgres advisory lock that is safe to hold across
+/// cancellable and panicking work.
+///
+/// The hand-rolled `pg_try_advisory_lock` / `pg_advisory_unlock` pair it
+/// replaces had one failure that mattered: when the future holding the lock
+/// was DROPPED — a request cut by the 30s timeout layer or a client
+/// disconnect, or a task unwinding on a panic — the unlock never ran and the
+/// pooled connection went back to the pool still holding the session lock,
+/// silently stalling every instance's watcher until the pool recycled that
+/// connection (up to 30 minutes). sqlx's guard queues the unlock on the
+/// connection when dropped, so cancellation and unwinding both release it
+/// (reproduced live by the reviewers on sqlx 0.8.6 / Postgres 16).
+/// `release_now` is still called on the happy path so the lock is gone
+/// before the connection is reused.
+pub(crate) struct AdvisoryLock {
+    lock: sqlx::postgres::PgAdvisoryLock,
+}
+
+pub(crate) type AdvisoryLockGuard<'a> =
+    sqlx::postgres::PgAdvisoryLockGuard<'a, sqlx::pool::PoolConnection<sqlx::Postgres>>;
+
+impl AdvisoryLock {
+    pub(crate) fn new(key: i64) -> Self {
+        AdvisoryLock {
+            lock: sqlx::postgres::PgAdvisoryLock::with_key(
+                sqlx::postgres::PgAdvisoryLockKey::BigInt(key),
+            ),
+        }
+    }
+
+    /// `Ok(None)` when another holder has it (skip this pass).
+    pub(crate) async fn try_acquire(
+        &self,
+        pool: &PgPool,
+    ) -> Result<Option<AdvisoryLockGuard<'_>>, sqlx::Error> {
+        let conn = pool.acquire().await?;
+        Ok(match self.lock.try_acquire(conn).await? {
+            sqlx::Either::Left(guard) => Some(guard),
+            sqlx::Either::Right(_conn) => None,
+        })
+    }
+}
+
 /// One watcher pass under the cross-instance advisory lock.
 async fn tick(deps: &ReserveWatchDeps) -> Result<(), AppError> {
-    let mut lock_conn = deps.pool.acquire().await.map_err(db_err("acquire"))?;
-    let got: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock($1)")
-        .bind(RESERVE_WATCHER_LOCK_KEY)
-        .fetch_one(&mut *lock_conn)
+    let lock = AdvisoryLock::new(RESERVE_WATCHER_LOCK_KEY);
+    let Some(guard) = lock
+        .try_acquire(&deps.pool)
         .await
-        .map_err(db_err("try lock"))?;
-    if !got {
+        .map_err(db_err("try lock"))?
+    else {
+        debug!("reserve watcher: another instance holds the lock; skipping this pass");
         return Ok(());
-    }
+    };
 
     let result = tick_inner(deps).await;
 
-    // Unlock, and if that fails CLOSE the connection instead of returning it
-    // to the pool — a pooled connection still holding the session lock would
-    // silently stall every instance's watcher until the pool recycles it.
-    let unlocked = sqlx::query_scalar::<_, bool>("SELECT pg_advisory_unlock($1)")
-        .bind(RESERVE_WATCHER_LOCK_KEY)
-        .fetch_one(&mut *lock_conn)
-        .await;
-    if unlocked.is_err() {
-        warn!("reserve watcher: advisory unlock failed; closing the lock connection");
-        drop(lock_conn.detach());
+    // Happy path: release before the connection is reused. Any other exit
+    // (error, cancellation, panic) releases through the guard's drop.
+    if let Err(e) = guard.release_now().await {
+        warn!(
+            "reserve watcher: advisory unlock failed ({}); the guard's drop will release it",
+            e
+        );
     }
     result
 }
@@ -456,7 +518,116 @@ fn db_err(context: &'static str) -> impl FnOnce(sqlx::Error) -> AppError {
 
 // ── Phase 1: deposits ──────────────────────────────────────────────────
 
+/// Per-tick feed budget for stray-inflow events.
+///
+/// The unmatched QUEUE and the JOURNAL are never throttled: every payment
+/// records its paging_token there, and that anchor is what makes a replayed
+/// Horizon page a no-op. Only the outbox EVENTS are. Past
+/// `RESERVE_UNMATCHED_EVENTS_PER_SENDER_PER_TICK` per sender, further rows
+/// fold into one `reserve.unmatched_deposit_summary` per currency, emitted
+/// when the tick's deposit scan ends. Without this a dust flood carrying
+/// harvested order memos minted one outbox row — and one webhook delivery
+/// per registered webhook — per 101-stroop payment.
+#[derive(Default)]
+pub(crate) struct UnmatchedEventBudget {
+    per_sender: HashMap<String, u32>,
+    suppressed: BTreeMap<&'static str, SuppressedInflows>,
+}
+
+#[derive(Default)]
+struct SuppressedInflows {
+    count: i64,
+    amount_minor: i64,
+    senders: HashSet<String>,
+}
+
+impl UnmatchedEventBudget {
+    /// Whether the next row from `sender` may emit its own event. A pure
+    /// peek: the caller decides inside its transaction and settles after
+    /// the commit, so a rolled-back row never consumes budget.
+    fn admits(&self, sender: Option<&str>) -> bool {
+        self.per_sender
+            .get(sender.unwrap_or(""))
+            .copied()
+            .unwrap_or(0)
+            < crate::constants::RESERVE_UNMATCHED_EVENTS_PER_SENDER_PER_TICK
+    }
+
+    /// Record a committed row: consume budget if its event went out,
+    /// otherwise fold it into the currency's summary.
+    fn settle(
+        &mut self,
+        sender: Option<&str>,
+        currency: &'static str,
+        amount_minor: i64,
+        emitted: bool,
+    ) {
+        let key = sender.unwrap_or("").to_string();
+        if emitted {
+            *self.per_sender.entry(key).or_insert(0) += 1;
+            return;
+        }
+        let s = self.suppressed.entry(currency).or_default();
+        s.count += 1;
+        s.amount_minor = s.amount_minor.saturating_add(amount_minor);
+        s.senders.insert(key);
+    }
+
+    /// `(currency, count, amount_minor, distinct senders)` per currency that
+    /// had suppressed rows, in a stable order.
+    fn summaries(&self) -> impl Iterator<Item = (&'static str, i64, i64, i64)> + '_ {
+        self.suppressed
+            .iter()
+            .filter(|(_, s)| s.count > 0)
+            .map(|(c, s)| (*c, s.count, s.amount_minor, s.senders.len() as i64))
+    }
+}
+
 async fn drain_deposits(deps: &ReserveWatchDeps) -> Result<(), AppError> {
+    let mut budget = UnmatchedEventBudget::default();
+    let result = drain_deposit_pages(deps, &mut budget).await;
+    // Summaries go out even when the scan failed part-way: the rows they
+    // describe are already committed, and the feed must not lose them.
+    flush_unmatched_summaries(deps, &budget).await;
+    result
+}
+
+/// One `reserve.unmatched_deposit_summary` per currency whose rows were
+/// suppressed this tick. Informational (the money is already booked), so a
+/// failure is logged rather than failing the tick.
+async fn flush_unmatched_summaries(deps: &ReserveWatchDeps, budget: &UnmatchedEventBudget) {
+    for (currency, count, amount_minor, senders) in budget.summaries() {
+        let emitted = async {
+            let mut tx = deps.pool.begin().await.map_err(db_err("summary begin"))?;
+            crate::events::emit_event(
+                &mut tx,
+                &AccountEvent::ReserveUnmatchedDepositSummary {
+                    account_id: deps.reserve.reserve_account_id.clone(),
+                    currency: currency.to_string(),
+                    count,
+                    amount_minor,
+                    senders,
+                },
+            )
+            .await?;
+            tx.commit().await.map_err(db_err("summary commit"))
+        }
+        .await;
+        match emitted {
+            Ok(()) => warn!(
+                "reserve unmatched deposits: {} further {} inflow(s) totalling {} from {} \
+                 sender(s) this tick were recorded without individual feed events",
+                count, currency, amount_minor, senders
+            ),
+            Err(e) => error!("reserve unmatched summary for {}: {:?}", currency, e),
+        }
+    }
+}
+
+async fn drain_deposit_pages(
+    deps: &ReserveWatchDeps,
+    budget: &mut UnmatchedEventBudget,
+) -> Result<(), AppError> {
     let mut cursor: Option<String> =
         sqlx::query_scalar("SELECT horizon_cursor FROM conversion_reserve_state WHERE id")
             .fetch_one(&deps.pool)
@@ -492,7 +663,7 @@ async fn drain_deposits(deps: &ReserveWatchDeps) -> Result<(), AppError> {
         // /payments feed) or a run of them stalls the scan forever.
         let full = page.raw_count as u32 == RESERVE_WATCH_PAGE_LIMIT;
         for payment in &page.records {
-            process_payment(deps, payment).await?;
+            process_payment(deps, payment, budget).await?;
         }
         // Only after every record's transaction committed.
         let last_token = match page.last_token {
@@ -529,6 +700,9 @@ struct MatchOrderRow {
     amount_from: String,
     shape: Option<String>,
     hold_minor: Option<i64>,
+    /// Stablecoin bucket a disburse order's pay-in must arrive in (recorded
+    /// at creation from the order's ticker); `None` on pre-036 rows = USDC.
+    deposit_currency: Option<String>,
 }
 
 /// What to do with one incoming payment. Pure decision, unit-tested.
@@ -551,25 +725,35 @@ enum DepositAction {
 }
 
 /// The expected pay-in asset per shape: auto-swap orders deposit native XLM,
-/// disburse orders deposit the configured USDC.
-fn expected_currency(shape: Option<&str>) -> &'static str {
+/// disburse orders deposit the stablecoin recorded on the order at creation
+/// (`deposit_currency`; pre-036 rows carry none and mean USDC). Only bucket
+/// keys the reserve defines are honored — an unknown value falls back to
+/// USDC rather than being trusted as a bucket name.
+fn expected_currency(shape: Option<&str>, deposit_currency: Option<&str>) -> &'static str {
     match shape {
-        Some("disburse") => RESERVE_CURRENCY_USDC,
+        Some("disburse") => match deposit_currency {
+            Some(c) if c == RESERVE_CURRENCY_USDT0 => RESERVE_CURRENCY_USDT0,
+            _ => RESERVE_CURRENCY_USDC,
+        },
         _ => RESERVE_CURRENCY_XLM,
     }
 }
 
-/// Map a payment's asset onto a reserve bucket, if it is one we track.
+/// Map a payment's asset onto a reserve bucket, if it is one we track:
+/// native XLM, or a configured stablecoin matched on BOTH code and issuer.
 fn payment_currency(p: &HorizonPayment, reserve: &ConversionReserve) -> Option<&'static str> {
-    if p.asset_type == "native" {
-        return Some(RESERVE_CURRENCY_XLM);
-    }
-    if p.asset_code.as_deref() == Some(reserve.usdc_code.as_str())
-        && p.asset_issuer.as_deref() == Some(reserve.usdc_issuer.as_str())
-    {
-        return Some(RESERVE_CURRENCY_USDC);
-    }
-    None
+    reserve.bucket_for_asset(
+        &p.asset_type,
+        p.asset_code.as_deref(),
+        p.asset_issuer.as_deref(),
+    )
+}
+
+/// The bucket an auto-swap order pays out of: its recorded hold currency.
+/// Pre-036 rows carry `hold_currency` too (it was always persisted), so the
+/// USDC fallback only covers a malformed payload — and never a foreign key.
+fn payout_currency_of(order: &PayoutOrderRow) -> &'static str {
+    crate::exchange::reserve::payout_bucket_for_hold_currency(order.hold_currency.as_deref())
 }
 
 fn classify_deposit(
@@ -599,7 +783,7 @@ fn classify_deposit(
             amount_minor,
         };
     }
-    let expected = expected_currency(order.shape.as_deref());
+    let expected = expected_currency(order.shape.as_deref(), order.deposit_currency.as_deref());
     match (currency, amount_minor) {
         (Some(c), Some(amount)) if c == expected => {
             match parse_decimal_to_minor(&order.amount_from, RESERVE_SCALE_STELLAR) {
@@ -628,7 +812,11 @@ fn classify_deposit(
     }
 }
 
-async fn process_payment(deps: &ReserveWatchDeps, p: &HorizonPayment) -> Result<(), AppError> {
+async fn process_payment(
+    deps: &ReserveWatchDeps,
+    p: &HorizonPayment,
+    budget: &mut UnmatchedEventBudget,
+) -> Result<(), AppError> {
     // Payment-level idempotency FIRST: a replayed page must be a no-op even
     // when the payment's classification changed between passes (matched on
     // pass one, "late" on replay because its order already left
@@ -704,7 +892,8 @@ async fn process_payment(deps: &ReserveWatchDeps, p: &HorizonPayment) -> Result<
         Some(memo) if !memo.trim().is_empty() => sqlx::query_as(
             "SELECT order_id, payala_account_id, status, amount_from, \
                     provider_payload->>'shape' AS shape, \
-                    (provider_payload->>'hold_minor')::bigint AS hold_minor \
+                    (provider_payload->>'hold_minor')::bigint AS hold_minor, \
+                    provider_payload->>'deposit_currency' AS deposit_currency \
              FROM exchange_order \
              WHERE provider = 'reserve' AND provider_order_id = UPPER(TRIM($1))",
         )
@@ -730,7 +919,7 @@ async fn process_payment(deps: &ReserveWatchDeps, p: &HorizonPayment) -> Result<
             overpaid,
         } => {
             let o = order.expect("Match requires an order");
-            apply_deposit(deps, p, &o, currency, amount_minor, overpaid).await
+            apply_deposit(deps, p, &o, currency, amount_minor, overpaid, budget).await
         }
         DepositAction::Unmatched {
             reason,
@@ -744,12 +933,14 @@ async fn process_payment(deps: &ReserveWatchDeps, p: &HorizonPayment) -> Result<
                 currency,
                 amount_minor,
                 order.as_ref().map(|o| o.order_id),
+                budget,
             )
             .await
         }
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn apply_deposit(
     deps: &ReserveWatchDeps,
     p: &HorizonPayment,
@@ -757,6 +948,7 @@ async fn apply_deposit(
     currency: &'static str,
     amount_minor: i64,
     overpaid: bool,
+    budget: &mut UnmatchedEventBudget,
 ) -> Result<(), AppError> {
     let disburse = order.shape.as_deref() == Some("disburse");
     let mut tx = deps.pool.begin().await.map_err(db_err("deposit begin"))?;
@@ -790,6 +982,7 @@ async fn apply_deposit(
             Some(currency),
             Some(amount_minor),
             Some(order.order_id),
+            budget,
         )
         .await;
     }
@@ -890,8 +1083,11 @@ async fn record_unmatched(
     currency: Option<&'static str>,
     amount_minor: Option<i64>,
     matched_order_id: Option<Uuid>,
+    budget: &mut UnmatchedEventBudget,
 ) -> Result<(), AppError> {
     let mut tx = deps.pool.begin().await.map_err(db_err("unmatched begin"))?;
+    // What to settle against the feed budget once the row has committed.
+    let mut settled: Option<(&'static str, i64, bool)> = None;
     let inserted = sqlx::query(UNMATCHED_INSERT_SQL)
         .bind(&p.paging_token)
         .bind(&p.tx_hash)
@@ -955,19 +1151,28 @@ async fn record_unmatched(
                 Err(e) => return Err(db_err("unmatched entry")(e)),
             }
         }
-        crate::events::emit_event(
-            &mut tx,
-            &AccountEvent::ReserveUnmatchedDeposit {
-                account_id: deps.reserve.reserve_account_id.clone(),
-                currency: c.to_string(),
-                amount_minor: amount,
-                reason: reason.to_string(),
-            },
-        )
-        .await?;
+        // The feed event is budgeted per sender per tick (the row and the
+        // journal entry above never are): past the budget this row folds
+        // into the tick's summary event instead of minting its own.
+        let emit = budget.admits(p.from.as_deref());
+        if emit {
+            crate::events::emit_event(
+                &mut tx,
+                &AccountEvent::ReserveUnmatchedDeposit {
+                    account_id: deps.reserve.reserve_account_id.clone(),
+                    currency: c.to_string(),
+                    amount_minor: amount,
+                    reason: reason.to_string(),
+                },
+            )
+            .await?;
+        }
+        settled = Some((c, amount, emit));
 
         // Queue the return in the SAME transaction as the credit, so an
-        // obligation exists iff the money was booked.
+        // obligation exists iff the money was booked. Dust earns no
+        // obligation (refund_decision → Skip("dust")): the row and the
+        // credit above are its whole record.
         queue_refund(
             &deps.reserve,
             &deps.metrics,
@@ -990,6 +1195,9 @@ async fn record_unmatched(
         .await?;
     }
     tx.commit().await.map_err(db_err("unmatched commit"))?;
+    if let Some((c, amount, emitted)) = settled {
+        budget.settle(p.from.as_deref(), c, amount, emitted);
+    }
     deps.metrics.reserve_unmatched_deposits.add(1, &[]);
     warn!(
         "reserve unmatched deposit: reason={} tx={} amount={} asset={:?} memo={:?}",
@@ -1010,6 +1218,8 @@ struct PayoutOrderRow {
     provider_order_id: String,
     provider_status: Option<String>,
     poll_count: i32,
+    /// The stablecoin bucket held for (and paid out of) this order.
+    hold_currency: Option<String>,
 }
 
 async fn drive_payouts(deps: &ReserveWatchDeps) {
@@ -1022,6 +1232,13 @@ async fn drive_payouts(deps: &ReserveWatchDeps) {
         }
     };
     for order in due {
+        // Shutdown: start nothing new. Whatever is still due stays due for
+        // the next process; a submit started now would race the drain
+        // deadline and could be torn down after Horizon accepted it.
+        if deps.cancel.is_cancelled() {
+            info!("reserve payouts: shutdown requested; leaving due orders for the next tick");
+            return;
+        }
         if let Err(e) = drive_one_payout(deps, &order).await {
             error!("reserve payout {}: {:?}", order.order_id, e);
         }
@@ -1054,12 +1271,12 @@ async fn drive_one_payout(deps: &ReserveWatchDeps, order: &PayoutOrderRow) -> Re
         let (bal, held): (i64, i64) = sqlx::query_as(
             "SELECT available, held FROM conversion_reserve WHERE currency = $1 FOR UPDATE",
         )
-        .bind(RESERVE_CURRENCY_USDC)
+        .bind(payout_currency_of(order))
         .fetch_one(&mut *tx)
         .await
         .map_err(db_err("intent bucket read"))?;
         let inserted = journal_insert(JournalEntry {
-            currency: RESERVE_CURRENCY_USDC.to_string(),
+            currency: payout_currency_of(order).to_string(),
             kind: "payout_attempt".to_string(),
             balance_after: bal,
             held_after: held,
@@ -1126,13 +1343,30 @@ async fn drive_one_payout(deps: &ReserveWatchDeps, order: &PayoutOrderRow) -> Re
         &deps.reserve.reserve_account_id,
     )
     .await?;
+    // The intent is written and the funds are committed: an asset the
+    // reserve can no longer send (e.g. USDT0 deconfigured since the order
+    // was created) freezes for an admin rather than guessing another asset.
+    let asset = match deps.reserve.asset_for_bucket(payout_currency_of(order)) {
+        Some(a) => a,
+        None => {
+            error!(
+                "reserve payout {}: bucket {} has no sendable asset configured",
+                order.order_id,
+                payout_currency_of(order)
+            );
+            return freeze_on_hold(
+                deps,
+                order.order_id,
+                &order.payala_account_id,
+                "submit_failed",
+            )
+            .await;
+        }
+    };
     let params = PaymentParams {
         destination: payout_address,
         amount: amount_to.clone(),
-        asset: Asset::Credit {
-            code: deps.reserve.usdc_code.clone(),
-            issuer: deps.reserve.usdc_issuer.clone(),
-        },
+        asset,
         // The receiver's required memo wins; otherwise tag the payment with
         // the order ref so on-chain audit ties it back.
         memo: Some(
@@ -1255,7 +1489,7 @@ async fn record_fulfillment(
     }
 
     let bucket: Option<(i64, i64, i64)> = sqlx::query_as(RESERVE_BUCKET_APPLY_SQL)
-        .bind(RESERVE_CURRENCY_USDC)
+        .bind(payout_currency_of(order))
         .bind(0i64)
         .bind(-amount_to_minor)
         .fetch_optional(&mut *tx)
@@ -1270,7 +1504,7 @@ async fn record_fulfillment(
     })?;
 
     journal_insert(JournalEntry {
-        currency: RESERVE_CURRENCY_USDC.to_string(),
+        currency: payout_currency_of(order).to_string(),
         kind: "fulfillment".to_string(),
         held_delta: -amount_to_minor,
         balance_after: bal_after,
@@ -1310,7 +1544,7 @@ async fn record_fulfillment(
         &AccountEvent::ReserveFulfilled {
             account_id: order.payala_account_id.clone(),
             order_id: order.order_id.to_string(),
-            currency: RESERVE_CURRENCY_USDC.to_string(),
+            currency: payout_currency_of(order).to_string(),
             amount_minor: amount_to_minor,
         },
     )
@@ -1430,7 +1664,7 @@ pub(crate) async fn queue_refund(
         sender_address: input.sender_address,
         sender_muxed: input.sender_muxed,
         reserve_address: &reserve.stellar_address,
-        usdc_issuer: &reserve.usdc_issuer,
+        issuers: &reserve.issuer_addresses(),
         max_minor,
     });
 
@@ -1624,6 +1858,11 @@ async fn drive_refunds(deps: &ReserveWatchDeps) {
         }
     };
     for r in due {
+        // Same rule as payouts: no new submit once shutdown has begun.
+        if deps.cancel.is_cancelled() {
+            info!("reserve refunds: shutdown requested; leaving due refunds for the next tick");
+            return;
+        }
         if let Err(e) = drive_one_refund(deps, &r).await {
             error!("reserve refund {}: {:?}", r.refund_id, e);
         }
@@ -1638,6 +1877,23 @@ async fn drive_one_refund(deps: &ReserveWatchDeps, r: &DueRefundRow) -> Result<(
     // leaves the ledger CORRECT and only the metadata missing, whereas a
     // post-submit debit would overstate `available` by the refunded amount
     // with no marker that a submission exists at all.
+    // Resolve the asset BEFORE claiming. An unsendable bucket (USDT0
+    // deconfigured while refunds for it are queued) must not consume the
+    // claim and commit a write-ahead debit for a submission that can never
+    // happen: that froze the refund with the debit standing although the
+    // money provably never moved. Deferred instead — hourly retry, still
+    // cancellable, resumes by itself when the asset is configured again.
+    let asset = match deps.reserve.asset_for_bucket(&r.currency) {
+        Some(a) => a,
+        None => {
+            error!(
+                "reserve refund {}: bucket {} has no sendable asset configured; deferring",
+                r.refund_id, r.currency
+            );
+            return defer_refund(deps, r, "unsupported_asset").await;
+        }
+    };
+
     let mut tx = deps.pool.begin().await.map_err(db_err("refund begin"))?;
     let claimed = sqlx::query(CLAIM_REFUND_SQL)
         .bind(r.refund_id)
@@ -1704,20 +1960,6 @@ async fn drive_one_refund(deps: &ReserveWatchDeps, r: &DueRefundRow) -> Result<(
     tx.commit().await.map_err(db_err("refund claim commit"))?;
 
     // ── Submit ────────────────────────────────────────────────────────
-    let asset = match r.currency.as_str() {
-        RESERVE_CURRENCY_XLM => Asset::Native,
-        RESERVE_CURRENCY_USDC => Asset::Credit {
-            code: deps.reserve.usdc_code.clone(),
-            issuer: deps.reserve.usdc_issuer.clone(),
-        },
-        other => {
-            error!(
-                "reserve refund {}: unsupported asset {}",
-                r.refund_id, other
-            );
-            return freeze_refund(deps, r.refund_id, "unsupported_asset").await;
-        }
-    };
     let seed = crate::handlers::managed_seed::load_protected_seed(
         &deps.pool,
         &deps.protector,
@@ -2155,10 +2397,23 @@ mod tests {
             stellar_address: "GRESERVE".to_string(),
             usdc_code: "USDC".to_string(),
             usdc_issuer: "GISSUER".to_string(),
+            usdt0: None,
+            usdt0_tickers: vec![],
             deposit_ttl_secs: 1800,
             watch_secs: 30,
             quote_ttl_secs: 300,
         }
+    }
+
+    /// The same reserve with USDT0 configured (pinned to its own issuer).
+    fn reserve_with_usdt0() -> ConversionReserve {
+        let mut r = reserve();
+        r.usdt0 = Some(crate::exchange::reserve::ReserveAsset {
+            currency: RESERVE_CURRENCY_USDT0,
+            code: "USDT0".to_string(),
+            issuer: "GTETHER".to_string(),
+        });
+        r
     }
 
     fn xlm_payment(to: &str, amount: &str) -> HorizonPayment {
@@ -2175,6 +2430,7 @@ mod tests {
             amount: amount.to_string(),
             memo_text: Some("REF".to_string()),
             created_at: None,
+            transaction_successful: Some(true),
         }
     }
 
@@ -2186,6 +2442,7 @@ mod tests {
             amount_from: amount_from.to_string(),
             shape: Some(shape.to_string()),
             hold_minor: Some(2000),
+            deposit_currency: None,
         }
     }
 
@@ -2324,9 +2581,167 @@ mod tests {
 
     #[test]
     fn expected_currency_by_shape() {
-        assert_eq!(expected_currency(Some("auto_swap")), RESERVE_CURRENCY_XLM);
-        assert_eq!(expected_currency(Some("disburse")), RESERVE_CURRENCY_USDC);
-        assert_eq!(expected_currency(None), RESERVE_CURRENCY_XLM);
+        assert_eq!(
+            expected_currency(Some("auto_swap"), None),
+            RESERVE_CURRENCY_XLM
+        );
+        assert_eq!(
+            expected_currency(Some("disburse"), None),
+            RESERVE_CURRENCY_USDC
+        );
+        assert_eq!(expected_currency(None, None), RESERVE_CURRENCY_XLM);
+        // The recorded deposit stablecoin selects the bucket for disburse...
+        assert_eq!(
+            expected_currency(Some("disburse"), Some("USDT0")),
+            RESERVE_CURRENCY_USDT0
+        );
+        assert_eq!(
+            expected_currency(Some("disburse"), Some("USDC")),
+            RESERVE_CURRENCY_USDC
+        );
+        // ...but only known bucket keys are honored, and never for auto_swap
+        // (whose pay-in is always native XLM).
+        assert_eq!(
+            expected_currency(Some("disburse"), Some("EURC")),
+            RESERVE_CURRENCY_USDC
+        );
+        assert_eq!(
+            expected_currency(Some("auto_swap"), Some("USDT0")),
+            RESERVE_CURRENCY_XLM
+        );
+    }
+
+    // ── USDT0: issuer-pinned classification ─────────────────────────────
+
+    fn usdt0_payment(to: &str, amount: &str, issuer: &str) -> HorizonPayment {
+        HorizonPayment {
+            asset_type: "credit_alphanum12".to_string(),
+            asset_code: Some("USDT0".to_string()),
+            asset_issuer: Some(issuer.to_string()),
+            ..xlm_payment(to, amount)
+        }
+    }
+
+    #[test]
+    fn usdt0_is_foreign_until_configured() {
+        // Without RESERVE_USDT0_ISSUER the bucket is inert: a genuine USDT0
+        // payment classifies as a foreign asset, never as money.
+        let r = reserve();
+        let p = usdt0_payment("GRESERVE", "10.0000000", "GTETHER");
+        assert_eq!(payment_currency(&p, &r), None);
+    }
+
+    #[test]
+    fn usdt0_matches_a_disburse_order_expecting_it() {
+        let r = reserve_with_usdt0();
+        let mut o = awaiting_order("10.0000000", "disburse");
+        o.deposit_currency = Some("USDT0".to_string());
+        let p = usdt0_payment("GRESERVE", "10.0000000", "GTETHER");
+        assert_eq!(
+            classify_deposit(&p, &r, Some(&o)),
+            DepositAction::Match {
+                currency: RESERVE_CURRENCY_USDT0,
+                amount_minor: 100_000_000,
+                overpaid: false,
+            }
+        );
+    }
+
+    #[test]
+    fn usdt0_from_the_wrong_issuer_is_not_money() {
+        // The whole trust anchor: same code, different issuer -> no bucket,
+        // and against an order expecting USDT0 it is a wrong_asset inflow
+        // (manual-only; never auto-refunded, never credited).
+        let r = reserve_with_usdt0();
+        let mut o = awaiting_order("10.0000000", "disburse");
+        o.deposit_currency = Some("USDT0".to_string());
+        let p = usdt0_payment("GRESERVE", "10.0000000", "GIMPOSTOR");
+        assert_eq!(payment_currency(&p, &r), None);
+        assert_eq!(
+            classify_deposit(&p, &r, Some(&o)),
+            DepositAction::Unmatched {
+                reason: "wrong_asset",
+                currency: None,
+                amount_minor: Some(100_000_000),
+            }
+        );
+    }
+
+    #[test]
+    fn usdc_against_a_usdt0_order_is_wrong_asset() {
+        // Real USDC (right issuer) sent to an order that expects USDT0 is a
+        // tracked bucket but the wrong one: recorded, not matched.
+        let r = reserve_with_usdt0();
+        let mut o = awaiting_order("10.0000000", "disburse");
+        o.deposit_currency = Some("USDT0".to_string());
+        let p = HorizonPayment {
+            asset_type: "credit_alphanum4".to_string(),
+            asset_code: Some("USDC".to_string()),
+            asset_issuer: Some("GISSUER".to_string()),
+            ..xlm_payment("GRESERVE", "10.0000000")
+        };
+        assert_eq!(
+            classify_deposit(&p, &r, Some(&o)),
+            DepositAction::Unmatched {
+                reason: "wrong_asset",
+                currency: Some(RESERVE_CURRENCY_USDC),
+                amount_minor: Some(100_000_000),
+            }
+        );
+    }
+
+    #[test]
+    fn legacy_disburse_orders_still_expect_usdc() {
+        // A pre-036 order row has no deposit_currency; USDC must keep
+        // matching it exactly as before, with USDT0 configured or not.
+        for r in [reserve(), reserve_with_usdt0()] {
+            let o = awaiting_order("10.0000000", "disburse");
+            let p = HorizonPayment {
+                asset_type: "credit_alphanum4".to_string(),
+                asset_code: Some("USDC".to_string()),
+                asset_issuer: Some("GISSUER".to_string()),
+                ..xlm_payment("GRESERVE", "10.0000000")
+            };
+            assert!(matches!(
+                classify_deposit(&p, &r, Some(&o)),
+                DepositAction::Match {
+                    currency: RESERVE_CURRENCY_USDC,
+                    ..
+                }
+            ));
+        }
+    }
+
+    #[test]
+    fn payout_bucket_follows_the_recorded_hold_currency() {
+        let base = PayoutOrderRow {
+            order_id: Uuid::new_v4(),
+            payala_account_id: "acct".to_string(),
+            amount_to: Some("1".to_string()),
+            payout_address: Some("GDEST".to_string()),
+            payout_extra_id: None,
+            provider_order_id: "REF".to_string(),
+            provider_status: None,
+            poll_count: 0,
+            hold_currency: Some("USDT0".to_string()),
+        };
+        assert_eq!(payout_currency_of(&base), RESERVE_CURRENCY_USDT0);
+        let usdc = PayoutOrderRow {
+            hold_currency: Some("USDC".to_string()),
+            ..base
+        };
+        assert_eq!(payout_currency_of(&usdc), RESERVE_CURRENCY_USDC);
+        let legacy = PayoutOrderRow {
+            hold_currency: None,
+            ..usdc
+        };
+        assert_eq!(payout_currency_of(&legacy), RESERVE_CURRENCY_USDC);
+        // An unknown bucket name is never trusted as a bucket.
+        let bogus = PayoutOrderRow {
+            hold_currency: Some("EURC".to_string()),
+            ..legacy
+        };
+        assert_eq!(payout_currency_of(&bogus), RESERVE_CURRENCY_USDC);
     }
 
     // ── Refund decisions ───────────────────────────────────────────────
@@ -2350,7 +2765,7 @@ mod tests {
             sender_address: sender,
             sender_muxed: None,
             reserve_address: T_RESERVE,
-            usdc_issuer: T_ISSUER,
+            issuers: &[T_ISSUER],
             max_minor: 1_000_000_000,
         }
     }
@@ -2448,7 +2863,7 @@ mod tests {
     }
 
     #[test]
-    fn caps_and_dust_park_for_review_rather_than_absorbing() {
+    fn caps_park_for_review_and_dust_is_recorded_without_an_obligation() {
         // Over the per-refund cap: never partially refund to fit under it —
         // that turns an operational limit into a silent haircut.
         let mut c = refund_ctx("late", Some(T_SENDER));
@@ -2462,15 +2877,27 @@ mod tests {
             }
         );
 
-        // Dust is queued for review, never silently kept.
+        // Dust: NO obligation and no refund_queued event. A flood of
+        // 101-stroop payments carrying harvested order memos must not mint
+        // a review-queue row apiece. The money-safety property survives:
+        // the caller still records the unmatched row and the journal
+        // credit, and the skip reason lands on that row so the queue
+        // explains itself — dust is recorded, never silently absorbed.
         let mut c = refund_ctx("late", Some(T_SENDER));
         c.amount_minor = Some(1);
+        assert_eq!(refund_decision(&c), RefundDecision::Skip("dust"));
+        let mut c = refund_ctx("late", Some(T_SENDER));
+        c.amount_minor = Some(RESERVE_REFUND_MIN_MINOR - 1);
+        assert_eq!(refund_decision(&c), RefundDecision::Skip("dust"));
+
+        // Exactly at the floor is a real refund.
+        let mut c = refund_ctx("late", Some(T_SENDER));
+        c.amount_minor = Some(RESERVE_REFUND_MIN_MINOR);
         assert_eq!(
             refund_decision(&c),
-            RefundDecision::Review {
+            RefundDecision::Queue {
                 destination: T_SENDER.to_string(),
-                refund_minor: 1,
-                why: "dust",
+                refund_minor: RESERVE_REFUND_MIN_MINOR,
             }
         );
 
@@ -2478,6 +2905,41 @@ mod tests {
         let mut c = refund_ctx("late", Some(T_SENDER));
         c.max_minor = 0;
         assert_eq!(refund_decision(&c), RefundDecision::Skip("disabled"));
+    }
+
+    #[test]
+    fn unmatched_feed_budget_is_per_sender_and_folds_the_rest_into_summaries() {
+        let n = crate::constants::RESERVE_UNMATCHED_EVENTS_PER_SENDER_PER_TICK;
+        let mut b = UnmatchedEventBudget::default();
+        for _ in 0..n {
+            assert!(b.admits(Some("GFLOOD")));
+            b.settle(Some("GFLOOD"), RESERVE_CURRENCY_XLM, 101, true);
+        }
+        // The flooding sender is out of budget; another sender is not.
+        assert!(!b.admits(Some("GFLOOD")));
+        assert!(b.admits(Some("GOTHER")));
+
+        // Suppressed rows fold into per-currency totals with distinct
+        // sender counts, and never carry an address out.
+        for _ in 0..997 {
+            b.settle(Some("GFLOOD"), RESERVE_CURRENCY_XLM, 101, false);
+        }
+        b.settle(Some("GOTHER"), RESERVE_CURRENCY_XLM, 5, false);
+        b.settle(Some("GFLOOD"), RESERVE_CURRENCY_USDC, 7, false);
+        let summaries: Vec<_> = b.summaries().collect();
+        assert_eq!(
+            summaries,
+            vec![
+                (RESERVE_CURRENCY_USDC, 1, 7, 1),
+                (RESERVE_CURRENCY_XLM, 998, 997 * 101 + 5, 2),
+            ]
+        );
+
+        // A peek never consumes budget: a rolled-back row costs nothing.
+        let fresh = UnmatchedEventBudget::default();
+        assert!(fresh.admits(None));
+        assert!(fresh.admits(None));
+        assert!(fresh.summaries().next().is_none());
     }
 
     #[test]

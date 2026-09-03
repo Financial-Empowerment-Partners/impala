@@ -23,6 +23,7 @@ use std::sync::Arc;
 use subtle::ConstantTimeEq;
 use uuid::Uuid;
 
+use crate::client_source::ClientSource;
 use crate::constants::{
     EXCHANGE_PROVIDER_CHANGELLY_FIAT, EXCHANGE_PROVIDER_OWLPAY, EXCHANGE_WEBHOOK_RATE_LIMIT_MAX,
     RATE_LIMIT_WINDOW_SECS,
@@ -49,50 +50,29 @@ const CHANGELLY_SIGNATURE_HEADER: &str = "x-callback-signature";
 /// requests touch the per-provider bucket below.
 const WEBHOOK_UNVERIFIED_RATE_LIMIT_MAX: u64 = 20;
 
-/// Rate-limit an unverified inbound webhook by client IP, then (once the
+/// Rate-limit an unverified inbound webhook by client source, then (once the
 /// signature checks out) charge the shared per-provider bucket.
 ///
 /// Keying the pre-verification limit on the source means a flood from one
 /// forger cannot lock out the real provider, while still bounding the
-/// signature-verification work any single source can force.
+/// signature-verification work any single source can force. The source is
+/// the shared `ClientSource` attribution (`client_source.rs`): the
+/// `X-Forwarded-For` entry the trusted proxy appended, never the leftmost
+/// one or `X-Real-Ip` — both are sender-written, and a sender-chosen key
+/// would hand every forger its own fresh bucket.
 async fn check_webhook_rate_limits(
     redis_pool: &Arc<deadpool_redis::Pool>,
     scope: &str,
-    headers: &HeaderMap,
+    source: &str,
 ) -> Result<(), AppError> {
-    let source = webhook_source_key(headers);
     crate::redis_helpers::check_rate_limit(
         redis_pool,
         scope,
-        &source,
+        source,
         WEBHOOK_UNVERIFIED_RATE_LIMIT_MAX,
         RATE_LIMIT_WINDOW_SECS,
     )
     .await
-}
-
-/// Identify the request source for the pre-verification limit. Falls back to
-/// a shared `unknown` bucket when no proxy header is present — that bucket is
-/// deliberately narrow, and legitimate providers always arrive through the
-/// ingress that sets these headers.
-pub(crate) fn webhook_source_key(headers: &HeaderMap) -> String {
-    let candidate = headers
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.split(',').next())
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .or_else(|| {
-            headers
-                .get("x-real-ip")
-                .and_then(|v| v.to_str().ok())
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-        });
-    match candidate {
-        Some(ip) if ip.parse::<std::net::IpAddr>().is_ok() => ip.to_string(),
-        _ => "unknown".to_string(),
-    }
 }
 
 /// Order UPDATE applied by verified webhooks, lifted to a const so the test
@@ -257,6 +237,7 @@ pub async fn owlpay_webhook(
     Extension(redis_pool): Extension<Arc<deadpool_redis::Pool>>,
     Extension(metrics): Extension<Arc<AppMetrics>>,
     owlpay: Option<Extension<Arc<OwlPayProvider>>>,
+    ClientSource(source): ClientSource,
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Json<serde_json::Value>, AppError> {
@@ -268,7 +249,7 @@ pub async fn owlpay_webhook(
         .ok_or_else(|| AppError::BadRequest("owlpay is not configured".to_string()))?;
 
     // Charged to the caller's own bucket, before any crypto work.
-    check_webhook_rate_limits(&redis_pool, "webhook_owlpay_unverified", &headers).await?;
+    check_webhook_rate_limits(&redis_pool, "webhook_owlpay_unverified", &source).await?;
 
     let signature = headers
         .get(OWLPAY_SIGNATURE_HEADER)
@@ -344,6 +325,7 @@ pub async fn changelly_webhook(
     Extension(redis_pool): Extension<Arc<deadpool_redis::Pool>>,
     Extension(metrics): Extension<Arc<AppMetrics>>,
     changelly_fiat: Option<Extension<Arc<ChangellyFiat>>>,
+    ClientSource(source): ClientSource,
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Json<serde_json::Value>, AppError> {
@@ -354,7 +336,7 @@ pub async fn changelly_webhook(
         .map(|Extension(p)| p)
         .ok_or_else(|| AppError::BadRequest("changelly_fiat is not configured".to_string()))?;
 
-    check_webhook_rate_limits(&redis_pool, "webhook_changelly_unverified", &headers).await?;
+    check_webhook_rate_limits(&redis_pool, "webhook_changelly_unverified", &source).await?;
 
     let presented_key = headers
         .get(CHANGELLY_API_KEY_HEADER)
@@ -444,36 +426,47 @@ pub async fn changelly_webhook(
 mod tests {
     use super::*;
 
+    /// The unverified-webhook bucket is keyed by the shared source
+    /// attribution: the `X-Forwarded-For` entry the trusted proxy (one hop,
+    /// the ALB) APPENDED — the rightmost — never the leftmost, which is
+    /// whatever the sender wrote and would give every forger a fresh bucket.
     #[test]
-    fn test_webhook_source_key_prefers_forwarded_chain() {
+    fn test_webhook_source_is_the_rightmost_trusted_hop() {
+        use crate::client_source::client_source;
+
         let mut h = HeaderMap::new();
         h.insert(
             "x-forwarded-for",
             "203.0.113.7, 70.41.3.18".parse().unwrap(),
         );
-        // The left-most entry is the originating client.
-        assert_eq!(webhook_source_key(&h), "203.0.113.7");
+        assert_eq!(client_source(&h, None, 1), "70.41.3.18");
 
+        // `X-Real-Ip` is sender-written on our path and is never consulted.
         let mut h = HeaderMap::new();
         h.insert("x-real-ip", "198.51.100.4".parse().unwrap());
-        assert_eq!(webhook_source_key(&h), "198.51.100.4");
+        assert_eq!(client_source(&h, None, 1), "unknown");
     }
 
     #[test]
-    fn test_webhook_source_key_falls_back_for_unusable_headers() {
-        // No proxy headers at all.
-        assert_eq!(webhook_source_key(&HeaderMap::new()), "unknown");
+    fn test_webhook_source_falls_back_for_unusable_headers() {
+        use crate::client_source::client_source;
+        let peer: std::net::SocketAddr = "10.0.0.1:443".parse().unwrap();
+
+        // No proxy headers at all: the TCP peer, or the narrow shared
+        // `unknown` bucket without one.
+        assert_eq!(client_source(&HeaderMap::new(), Some(peer), 1), "10.0.0.1");
+        assert_eq!(client_source(&HeaderMap::new(), None, 1), "unknown");
 
         // A forged/garbage value must not become its own rate-limit bucket —
         // otherwise an attacker mints unlimited quota by varying the header.
         let mut h = HeaderMap::new();
         h.insert("x-forwarded-for", "not-an-ip".parse().unwrap());
-        assert_eq!(webhook_source_key(&h), "unknown");
+        assert_eq!(client_source(&h, None, 1), "unknown");
 
         let mut h = HeaderMap::new();
         h.insert("x-forwarded-for", "".parse().unwrap());
         h.insert("x-real-ip", "10.0.0.1".parse().unwrap());
-        assert_eq!(webhook_source_key(&h), "10.0.0.1");
+        assert_eq!(client_source(&h, Some(peer), 1), "10.0.0.1");
     }
 
     /// A representative Harbor transfer event (transfer.status.* family).

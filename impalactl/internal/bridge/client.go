@@ -152,6 +152,115 @@ func StatusCode(err error) int {
 // rejected (expired, revoked, or from a token family the bridge killed).
 func IsUnauthorized(err error) bool { return StatusCode(err) == http.StatusUnauthorized }
 
+// RequestPhase is how far a request got before it failed. It is what decides
+// whether the bridge may have acted on the request: nothing sent means
+// nothing happened; anything after that is open.
+type RequestPhase int
+
+const (
+	// PhaseBuild — the request was never sent: the body could not be
+	// encoded or the request could not be constructed.
+	PhaseBuild RequestPhase = iota
+	// PhaseSend — the round trip failed: a dial failure, a TLS failure, a
+	// timeout waiting for the response, or a connection dropped mid-flight.
+	PhaseSend
+	// PhaseRead — the status line and headers arrived but the body could
+	// not be read in full.
+	PhaseRead
+	// PhaseDecode — a 2xx body that is not the JSON this client expected.
+	// The bridge answered success; we simply could not read what it said.
+	PhaseDecode
+)
+
+// RequestError is a failure that is not a bridge verdict: the request could
+// not be built or delivered, or its response could not be read or decoded.
+// A bridge verdict (any status the bridge chose to send) is an APIError.
+type RequestError struct {
+	Method string
+	URL    string
+	Phase  RequestPhase
+	Err    error
+}
+
+func (e *RequestError) Error() string {
+	switch e.Phase {
+	case PhaseSend:
+		return fmt.Sprintf("%s %s: %v", e.Method, e.URL, e.Err)
+	case PhaseRead:
+		return fmt.Sprintf("read response: %v", e.Err)
+	case PhaseDecode:
+		return fmt.Sprintf("decode response from %s %s: %v", e.Method, e.URL, e.Err)
+	default:
+		return e.Err.Error()
+	}
+}
+
+// Unwrap exposes the cause so errors.Is/As keep working through the wrapper.
+func (e *RequestError) Unwrap() error { return e.Err }
+
+// IsAmbiguousOutcome reports whether err leaves open the possibility that
+// the bridge acted on the request before the failure. It exists for the
+// money-moving calls: a caller that reads an ambiguous failure as "nothing
+// happened" and retries makes a second payment.
+//
+// Ambiguous:
+//
+//   - 408: the bridge's own request deadline fired while the handler was
+//     still running — for a payment, possibly inside the Horizon submit,
+//     which then completes on its own. The bridge sends this with an empty
+//     body, so it arrives without the error envelope.
+//   - 500 internal_error: the bridge maps every ambiguous Horizon submission
+//     (its 504 timeout, any other 5xx, an undecodable 2xx) to this.
+//   - 502, 504 and any other 5xx: something in front of the bridge gave up
+//     on a request it had already forwarded.
+//   - a send that failed after the connection was established: a timeout
+//     waiting for the response, a reset, an EOF.
+//   - a response whose body could not be read, or a 2xx whose body could
+//     not be decoded — a success we cannot see.
+//
+// Not ambiguous:
+//
+//   - 503 service_unavailable: the bridge's Retryable, reserved for failures
+//     that provably happened before anything was signed or submitted. A
+//     proxy's 503 likewise means the request was never forwarded.
+//   - every other 4xx: validation, authentication, authorization, rate
+//     limiting, not found — the bridge refused before doing anything.
+//   - a request that could not be built, or whose connection was never
+//     established (refused, no such host, unreachable, dial timeout): not
+//     one byte of it left this machine.
+func IsAmbiguousOutcome(err error) bool {
+	var apiErr *APIError
+	if errors.As(err, &apiErr) {
+		switch apiErr.Status {
+		case http.StatusRequestTimeout:
+			return true
+		case http.StatusServiceUnavailable:
+			return false
+		}
+		return apiErr.Status >= 500
+	}
+	var reqErr *RequestError
+	if errors.As(err, &reqErr) {
+		switch reqErr.Phase {
+		case PhaseBuild:
+			return false
+		case PhaseSend:
+			return !neverConnected(reqErr.Err)
+		default:
+			return true
+		}
+	}
+	return false
+}
+
+// neverConnected reports whether a send failed before a connection existed:
+// a dial error (connection refused, no such host, network unreachable, dial
+// timeout). Anything later may have happened with the request delivered.
+func neverConnected(err error) bool {
+	var opErr *net.OpError
+	return errors.As(err, &opErr) && opErr.Op == "dial"
+}
+
 // Result is the {success, message} envelope shared by the bridge's mutating
 // endpoints. Several of them report a *failed* operation as HTTP 200 with
 // success=false (duplicate account, no fields to update, bad credentials), so
@@ -189,24 +298,31 @@ func (c *Client) put(ctx context.Context, path string, in, out any) ([]byte, err
 
 // call performs one request/response round trip. It returns the raw response
 // body; when out is non-nil the body is also JSON-decoded into it.
+//
+// A non-2xx status is an *APIError; every other failure is a *RequestError
+// whose Phase says how far the exchange got, so a money-moving caller can
+// tell "never sent" from "sent, answer lost" (see IsAmbiguousOutcome).
 func (c *Client) call(ctx context.Context, method, path string, query url.Values, in, out any) ([]byte, error) {
-	var body io.Reader
-	if in != nil {
-		encoded, err := json.Marshal(in)
-		if err != nil {
-			return nil, fmt.Errorf("encode request: %w", err)
-		}
-		body = bytes.NewReader(encoded)
-	}
-
 	target := c.endpoint + path
 	if len(query) > 0 {
 		target += "?" + query.Encode()
 	}
+	fail := func(phase RequestPhase, err error) *RequestError {
+		return &RequestError{Method: method, URL: target, Phase: phase, Err: err}
+	}
+
+	var body io.Reader
+	if in != nil {
+		encoded, err := json.Marshal(in)
+		if err != nil {
+			return nil, fail(PhaseBuild, fmt.Errorf("encode request: %w", err))
+		}
+		body = bytes.NewReader(encoded)
+	}
 
 	req, err := http.NewRequestWithContext(ctx, method, target, body)
 	if err != nil {
-		return nil, fmt.Errorf("build request: %w", err)
+		return nil, fail(PhaseBuild, fmt.Errorf("build request: %w", err))
 	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", c.agent)
@@ -219,13 +335,13 @@ func (c *Client) call(ctx context.Context, method, path string, query url.Values
 
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("%s %s: %w", method, target, err)
+		return nil, fail(PhaseSend, err)
 	}
 	defer resp.Body.Close()
 
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
 	if err != nil {
-		return nil, fmt.Errorf("read response: %w", err)
+		return nil, fail(PhaseRead, err)
 	}
 
 	if resp.StatusCode >= 300 {
@@ -234,7 +350,7 @@ func (c *Client) call(ctx context.Context, method, path string, query url.Values
 
 	if out != nil {
 		if err := json.Unmarshal(raw, out); err != nil {
-			return raw, fmt.Errorf("decode response from %s %s: %w", method, path, err)
+			return raw, fail(PhaseDecode, err)
 		}
 	}
 	return raw, nil

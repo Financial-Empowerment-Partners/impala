@@ -151,6 +151,9 @@ services:
       JWT_SECRET_PREVIOUS: ${JWT_SECRET_PREVIOUS:-}
       # Local stack is plain HTTP: Secure cookies would be dropped by browsers.
       SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-false}
+      # No proxy in front of the bridge here: attribute pre-auth requests to
+      # the TCP peer, not to a client-written X-Forwarded-For header.
+      TRUSTED_PROXY_HOPS: ${TRUSTED_PROXY_HOPS:-0}
       STELLAR_NETWORK: ${STELLAR_NETWORK:-testnet}
       OKTA_ISSUER_URL: ${OKTA_ISSUER_URL:-}
       OKTA_CLIENT_ID: ${OKTA_CLIENT_ID:-}

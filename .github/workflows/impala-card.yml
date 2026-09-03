@@ -12,20 +12,26 @@
 #   test               JVM SDK tests (network-agnostic).
 #   build-cap-testnet  Builds CAP with build.xml defaults. Uploads
 #                      ImpalaApplet-testnet-cap-<sha> (90d retention).
-#   build-cap-live     Builds CAP with live AID + issuer key from
-#                      production-card-keys env. Uploads
-#                      ImpalaApplet-live-cap-<sha> (90d retention).
+#   build-cap-live     Builds CAP with the live AIDs (repository variables).
+#                      Uploads ImpalaApplet-live-cap-<sha> (90d retention).
 #   caprunner          Non-blocking. Downloads testnet CAP, runs APDU emulator.
 #   publish            main only. Publishes SDK; re-uploads both CAPs at 365d.
 #   release            Tag only. Bundles both CAPs + SDK zip into the release.
 #
-# Required secrets (live CAP build, production-card-keys environment):
+# Repository VARIABLES (live CAP build — AIDs are public identifiers, not
+# secrets, so they live in `vars`, not in a secret or an environment):
 #   IMPALA_CARD_LIVE_AID         - applet package AID (8 bytes hex)
 #   IMPALA_CARD_LIVE_AID_APP     - applet instance AID (10 bytes hex)
-#   IMPALA_CARD_LIVE_ISSUER_KEY  - GP issuer key (16 bytes, colon-separated hex)
+#
+# The GP issuer key is deliberately NOT available to CI. The CAP build never
+# uses it — build.xml only passes applet.issuerkey to the gp.jar card targets
+# (install/delete/list/info), which run against a physical card from an
+# operator workstation and never on a hosted runner. Exposing the key to a
+# PR-triggered job (as the former production-card-keys environment + argv
+# did) added nothing to the build and put the key in process listings.
 #
 # The testnet CAP is built unconditionally with the build.xml defaults
-# (AID 0102030405060708, default GP key 40:41:42:...:4F).
+# (AID 0102030405060708). No GP key is involved in either CAP build.
 # The publish job uses the built-in GITHUB_TOKEN with packages:write permission.
 # =============================================================================
 
@@ -142,15 +148,16 @@ jobs:
           retention-days: 90
 
   # ===========================================================================
-  # Build live CAP — gated on production-card-keys environment so the issuer
-  # key requires reviewer approval. Skipped on PRs from forks.
+  # Build live CAP — same build as testnet with the live AIDs substituted.
+  # No secret and no deployment environment: the AIDs are public and the GP
+  # issuer key is never part of a CAP build (see the header). Fork PRs skip
+  # it (they still get the testnet CAP build, which needs no variables).
   # ===========================================================================
   build-cap-live:
     name: Build CAP (live)
     needs: test
     runs-on: ubuntu-latest
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    environment: production-card-keys
 
     defaults:
       run:
@@ -175,20 +182,18 @@ jobs:
         with:
           cache-read-only: ${{ github.ref != 'refs/heads/main' }}
 
-      - name: Build applet CAP (live AID + issuer key)
+      - name: Build applet CAP (live AIDs)
         env:
-          LIVE_AID: ${{ secrets.IMPALA_CARD_LIVE_AID }}
-          LIVE_AID_APP: ${{ secrets.IMPALA_CARD_LIVE_AID_APP }}
-          LIVE_ISSUER_KEY: ${{ secrets.IMPALA_CARD_LIVE_ISSUER_KEY }}
+          LIVE_AID: ${{ vars.IMPALA_CARD_LIVE_AID }}
+          LIVE_AID_APP: ${{ vars.IMPALA_CARD_LIVE_AID_APP }}
         run: |
-          if [ -z "$LIVE_AID" ] || [ -z "$LIVE_AID_APP" ] || [ -z "$LIVE_ISSUER_KEY" ]; then
-            echo "::error::Missing IMPALA_CARD_LIVE_* secrets in production-card-keys environment"
+          if [ -z "$LIVE_AID" ] || [ -z "$LIVE_AID_APP" ]; then
+            echo "::error::Missing IMPALA_CARD_LIVE_AID / IMPALA_CARD_LIVE_AID_APP repository variables"
             exit 1
           fi
           ./gradlew :applet:buildJavacard --no-daemon --stacktrace \
             -Papplet.aid="$LIVE_AID" \
-            -Papplet.aid.app="$LIVE_AID_APP" \
-            -Papplet.issuerkey="$LIVE_ISSUER_KEY"
+            -Papplet.aid.app="$LIVE_AID_APP"
 
       - name: Upload live CAP
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

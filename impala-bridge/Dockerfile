@@ -49,7 +49,16 @@ USER appuser
 
 EXPOSE 8080
 
-HEALTHCHECK --interval=30s --timeout=5s --retries=3 --start-period=60s \
-    CMD curl -f http://localhost:8080/health || exit 1
+# Readiness, not liveness: /readyz is 200 only when Postgres and Redis both
+# answer (src/handlers/health.rs), so anything acting on this check sees a
+# container that cannot serve (auth is fail-closed on Redis) rather than one
+# that merely has a listener. /health stays 200 with a JSON body even while
+# degraded — that shape is a contract for humans, impalactl and openapi.yaml,
+# so never probe it. retries=6 (3 min at 30 s) rides out a Multi-AZ RDS /
+# ElastiCache failover without a restart storm under Swarm or autoheal;
+# docker compose only reports the state. The ECS target groups
+# (terraform/) run their own /readyz check with the same philosophy.
+HEALTHCHECK --interval=30s --timeout=5s --retries=6 --start-period=60s \
+    CMD curl -f http://localhost:8080/readyz || exit 1
 
 CMD ["impala-bridge"]

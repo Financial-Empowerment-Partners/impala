@@ -54,6 +54,10 @@ pub struct AuthPolicy {
     /// that has no credentials yet. Off by default — turning it on makes any
     /// credential-less account claimable by whoever knows its id.
     pub allow_open_registration: bool,
+    /// Trusted reverse proxies in front of the bridge (`TRUSTED_PROXY_HOPS`),
+    /// read by the `ClientSource` extractor to attribute pre-auth requests to
+    /// a client IP for per-source throttling and `(identity, source)` lockouts.
+    pub trusted_proxy_hops: u32,
 }
 
 /// Represents an authenticated user (bearer JWT or cookie session).
@@ -935,6 +939,7 @@ mod tests {
             (reserve, "resolve_refund", "Privileged<ManageReserve>"),
             (reserve, "disburse_order", "Privileged<ManageReserve>"),
             (reserve, "resolve_order", "Privileged<ManageReserve>"),
+            (reserve, "add_trustline", "Privileged<ManageReserve>"),
             // admin_replenish.rs
             (replenish, "get_status", "Privileged<ReadReserve>"),
             (replenish, "update_policy", "Privileged<ManageReserve>"),
@@ -971,7 +976,8 @@ mod tests {
         // Both files sharing handler names must have exactly the handlers the
         // table expects — a count guard so a NEW privileged handler cannot
         // ship ungated without touching this test.
-        assert_eq!(reserve.matches("pub async fn ").count(), 13);
+        // 14 = the 13 money/read handlers above + add_trustline.
+        assert_eq!(reserve.matches("pub async fn ").count(), 14);
         assert_eq!(replenish.matches("pub async fn ").count(), 5);
         assert_eq!(keys.matches("pub async fn ").count(), 6);
         assert_eq!(webhook.matches("pub async fn ").count(), 5);

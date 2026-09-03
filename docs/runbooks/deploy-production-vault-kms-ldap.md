@@ -253,6 +253,11 @@ terraform plan  -var-file=production.tfvars -var "jwt_secret=$JWT_SECRET" \
 terraform apply plan.tfplan
 ```
 
+This first apply creates the database, so it necessarily precedes the migration run — do §8
+immediately after it, before any account is created. From the second rollout onward the migrate
+task definition is applied and run **before** the full apply (see §8 and
+[`deploy.md`](./deploy.md)).
+
 The stock task def carries only `DATABASE_URL` + `JWT_SECRET` secrets and sets neither
 `PUBLIC_ENDPOINT` nor `CORS_ALLOWED_ORIGINS`. **Extend both server (`ecs.tf:61‑86`) and worker
 (`ecs.tf:128‑152`) task definitions:**
@@ -375,12 +380,23 @@ aws s3 sync impala-ui/html/ s3://impala-ui-production-<acct>/ --delete --cache-c
 
 ## 8. Database migrations (one‑off task)
 
+Run this **immediately after the §5 apply and before anything else touches the database** — the
+services from §5 are up against an empty schema and cannot serve anything that touches a table
+until this finishes, and no account may be created before it.
+
 Terraform ships a dedicated one‑off migration task definition
 (`aws_ecs_task_definition.migrate` in `terraform/ecs.tf`, `RUN_MODE=migrate`) with matching
 `migrate_task_definition` / `migrate_network_config` outputs — use it rather than overriding the
-server task definition. Migrations include **023–025** (account `role` + first‑admin bootstrap +
-backfill, `profile_source`, `transaction_review`) and **035** (widens the role set to the seven
-privileged roles):
+server task definition. Migrations are compiled into the image (`sqlx::migrate!`), so the task
+runs whichever set the image its task definition points at carries. On this first stand‑up the §5
+apply created that task definition against the same `container_image_tag`, so nothing extra is
+needed. **On every later rollout the order inverts**: `terraform apply
+-target=aws_ecs_task_definition.migrate` with the new tag → run the task → verify exit 0 → full
+`terraform apply` — see [`deploy.md`](./deploy.md#deploy-checklist-normal-change). Migrations
+include **023–025** (account `role` + first‑admin bootstrap + backfill, `profile_source`,
+`transaction_review`), **035** (widens the role set to the seven privileged roles), and **036**
+(seeds the USDT0 reserve bucket — required before `RESERVE_USDT0_ISSUER` is set, the bridge refuses
+to start otherwise; no rollback needed):
 ```bash
 CL=$(cd terraform && terraform output -raw ecs_cluster_name)
 aws ecs run-task --cluster "$CL" --launch-type FARGATE \

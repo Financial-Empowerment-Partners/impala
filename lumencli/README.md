@@ -465,6 +465,89 @@ or wrong memo can lose the funds as surely as a wrong address. Accordingly:
 - The 28-byte text limit is bytes, not characters — non-ASCII memos run out of
   room sooner.
 
+## Exit codes
+
+| Code | Meaning |
+| ---- | ------- |
+| `0`  | Success. An empty `history` result is a success too — test for emptiness, not the exit code. |
+| `1`  | Failure: a validation error, a refused confirmation, a Horizon error, a mid-walk network error (stdout is truncated at the point of failure — see [Machine-readable output](#machine-readable-output)). Nothing moved. |
+| `2`  | Usage error: unknown command, missing or invalid flag. |
+| `3`  | **Ambiguous outcome** of a fund-moving command (`send`, `account create`): the transaction was signed and submitted, and the answer did not prove it rejected. It **may still be applied**. Do not re-run — see below. |
+
+### Ambiguous submissions (exit 3)
+
+A signed transaction is valid for **300 seconds** from the moment it is built.
+Horizon's `POST /transactions` forwards it to the network and then waits for
+it to be applied — but only for about 30 seconds, after which Horizon answers
+**504 Timeout** with the transaction still pending. lumencli's own HTTP
+timeout, a dropped connection, or a proxy giving up look the same from here.
+None of these mean "not sent": the transaction can land at any point in the
+rest of its window, whether or not anyone is still watching.
+
+Re-running the command in that state is the trap. The re-run reloads the
+account, sees the *next* sequence number, and builds a second, equally valid
+transaction. If the first one lands too, the funds move twice.
+
+So instead of a bare error, an ambiguous outcome prints a notice with the
+full transaction hash (computed locally before submission, so it is known
+even when Horizon never answered), the exact time until which the
+transaction can still be applied, and the lookup to run — and exits **3**,
+distinct from a plain failure so that a script cannot mistake "maybe paid"
+for "not paid":
+
+```
+error: submit transaction: Timeout — Your request timed out before completing. ...
+
+WARNING: the outcome of this payment is UNKNOWN.
+The transaction was signed and handed to Horizon, and the error above does not
+prove it was rejected: it MAY STILL BE APPLIED at any moment until its time
+bound expires.
+
+  Transaction hash: 7b1f0c...  (64 hex digits, never abbreviated)
+  Valid until:      2026-09-03 12:04:47 UTC (in 287s)
+
+DO NOT re-run this command until you know what happened. A re-run signs a NEW
+transaction with the next sequence number; if the first one is applied as well,
+the funds move twice. Look the transaction up with:
+
+  lumencli tx 7b1f0c... --network mainnet
+
+A "not found" answer inside the window proves nothing — the transaction can
+still be applied later. Keep checking until the time bound has passed; only
+then does "not found" mean it was never applied and it is safe to try again.
+```
+
+The procedure is exactly what the notice says:
+
+1. Run the printed `lumencli tx <hash>` command. If it shows the transaction,
+   it was applied (check `Status:` — a failed transaction moved nothing but
+   its fee). Do not send again.
+2. If it is **not found**, wait and check again. Inside the window this
+   proves nothing: Horizon may still be holding the transaction, and it can
+   land seconds later.
+3. Once the `Valid until` time has passed, a not-found answer is definitive
+   — the transaction can no longer be applied — and re-running is safe.
+
+Only a **definitive rejection** is a plain exit 1: a Horizon 400 carrying
+result codes (`tx_bad_seq`, `tx_insufficient_fee`, `op_underfunded`, ...),
+any other 4xx verdict, or a connection that could never be established, so
+that no byte of the request left the machine. Everything else — Horizon's
+504, a 5xx, a 429 or 503 (which may come from anything between here and
+Horizon), a client-side timeout, a reset, an undecodable answer — is exit 3.
+The rule errs towards "check" because the cost of a needless check is a
+minute, and the cost of a needless retry is the payment.
+
+Scripts should treat exit 3 as "stop and page a human", never as "retry":
+
+```bash
+lumencli send --to G... --amount 25 --yes
+case $? in
+  0) echo "sent" ;;
+  3) echo "OUTCOME UNKNOWN — see the hash on stderr; do not retry" >&2; exit 3 ;;
+  *) echo "not sent" >&2; exit 1 ;;
+esac
+```
+
 ## Security
 
 This is a wallet for real money, so key handling matters:

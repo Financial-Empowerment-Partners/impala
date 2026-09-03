@@ -29,7 +29,13 @@ default**:
 | -------- | ------------------- | -------------------- | ----------------------- |
 | Endpoint | `--endpoint <url>`  | `IMPALA_ENDPOINT`    | `http://localhost:8080` |
 | Token    | `--token <jwt>`     | `IMPALA_TOKEN`       | stored credentials      |
-| Timeout  | `--timeout <dur>`   | —                    | `30s`                   |
+| Timeout  | `--timeout <dur>`   | —                    | `45s`                   |
+
+The default timeout deliberately exceeds the bridge's own 30-second request
+deadline: a client that gives up at the same instant as the server loses the
+server's verdict. With the headroom, a slow request ends with the bridge's own
+answer (its 408, or a late 200/500) rather than a client-side cut. Setting
+`--timeout` below 30s reintroduces that gap.
 
 Check that you are talking to the right one (no credentials needed):
 
@@ -175,6 +181,68 @@ non-interactive unless `--yes` is passed. A scripted mainnet payment therefore
 has to opt in deliberately rather than by forgetting which bridge it was
 pointed at.
 
+**An unknown outcome is exit 3, not a failure.** The bridge signs and submits
+inside the request, records the transaction row only *after* settlement, and
+the endpoint has no idempotency key — so a timeout, a dropped connection, or a
+5xx says nothing about whether the funds moved, and re-running "because it
+failed" is how a payment gets made twice. When the answer does not prove the
+payment refused, `transfer send` prints a notice naming the payment and the
+checks to make, and exits **3**:
+
+```
+error: [408 http_error] Request Timeout
+
+WARNING: the outcome of this payment is UNKNOWN.
+The request reached (or may have reached) the bridge, and the error above does
+not prove the payment was refused. The bridge signs and submits server-side, so
+the payment MAY HAVE BEEN SUBMITTED and can still settle: a signed transaction
+stays valid for up to 300 seconds.
+
+  From:    alice
+  To:      G...
+  Amount:  12.5 XLM
+
+DO NOT re-run this command until you know what happened: a re-run is a second
+payment, not a retry. Check, in this order:
+
+  1. impalactl activity list
+     A new row (origin "api", created just now, the sending custodial address as
+     its source) means the payment settled; "impalactl activity show <btxid>"
+     gives its Stellar hash. Do not send again.
+  2. The chain. The bridge records that row only AFTER settlement, and a bridge
+     timeout can drop the record while the payment still lands — so an absent
+     row is not proof. Check the sending account's sequence number and balance
+     ("impalactl account onchain <G...>") and the destination's payments on
+     Horizon.
+  3. Wait out the 300-second window before concluding the payment did not
+     happen; only then is it safe to send again.
+```
+
+What counts as ambiguous: the bridge's **408** (its request deadline fired
+mid-handler, possibly inside the Horizon submit, which then completes on its
+own — and drops the bookkeeping row), **500 `internal_error`** (the bridge
+maps every ambiguous Horizon submission — a 504 timeout, a 5xx, an
+undecodable answer — to this), **502/504 and any other 5xx** from something
+in front of the bridge, a **client-side timeout**, a connection **dropped
+after the request went out**, and a 2xx whose body could not be read. What
+does not: **503 `service_unavailable`**, the bridge's *Retryable*, reserved
+for failures that provably happened before anything was signed (a proxy's 503
+likewise never forwarded the request); every other **4xx** — validation,
+authentication, rate limiting; a `success: false` body; and a connection that
+could **never be established** (refused, no such host), since not one byte
+left the machine. Those stay exit 1 and may be retried or fixed as usual.
+
+Scripts should treat exit 3 as "stop and page a human", never as "retry":
+
+```bash
+impalactl transfer send --to G... --amount 12.5 --yes
+case $? in
+  0) echo "sent" ;;
+  3) echo "OUTCOME UNKNOWN — check activity and the chain; do not retry" >&2; exit 3 ;;
+  *) echo "not sent" >&2; exit 1 ;;
+esac
+```
+
 ### Account activity
 
 ```bash
@@ -245,12 +313,15 @@ and `jq` sees exactly what the bridge sent.
 | Code | Meaning                                                              |
 | ---- | -------------------------------------------------------------------- |
 | `0`  | Success                                                              |
-| `1`  | Runtime failure — API error, validation failure, or degraded health  |
+| `1`  | Runtime failure — API error, validation failure, or degraded health. Nothing moved. |
 | `2`  | Usage error — unknown command, missing or invalid flag               |
+| `3`  | **Ambiguous outcome** of `transfer send`: a timeout, a dropped connection, or a 5xx that does not prove the payment was refused. It may have been submitted — do not retry blindly; see [Transfers](#transfers). |
 
 API errors are rendered from the bridge's error envelope, keeping its code and
 message: `error: [403 forbidden] Access denied`. Rate limits report the
-`Retry-After` delay.
+`Retry-After` delay. Failures that never reached a bridge verdict — a timeout,
+a refused connection, an unreadable answer — name the request instead:
+`error: POST https://bridge.example.com/managed-account/sign: ...`.
 
 ## Security
 

@@ -15,6 +15,31 @@ resource "aws_cloudwatch_log_group" "otel_collector" {
   }
 }
 
+# --- SigNoz access token: Secrets Manager, not plaintext task env ---
+#
+# The token authenticates the collector to SigNoz Cloud. As a plain
+# `environment` entry it was readable by anyone with
+# ecs:DescribeTaskDefinition and printed in every plan; it now rides the
+# sidecar's `secrets` block (the jwt_secret pattern in rds.tf) and the
+# execution role is granted GetSecretValue on it in iam.tf.
+# NOTE: the value still lands in Terraform STATE through
+# aws_secretsmanager_secret_version, exactly like jwt_secret. To keep it out
+# of state entirely, drop the version resource below and set the value
+# out-of-band (`aws secretsmanager put-secret-value`).
+resource "aws_secretsmanager_secret" "signoz_access_token" {
+  count = var.signoz_endpoint != "" ? 1 : 0
+
+  name        = "${local.name_prefix}-signoz-access-token"
+  description = "SigNoz ingestion access token for the OTEL collector sidecar"
+}
+
+resource "aws_secretsmanager_secret_version" "signoz_access_token" {
+  count = var.signoz_endpoint != "" ? 1 : 0
+
+  secret_id     = aws_secretsmanager_secret.signoz_access_token[0].id
+  secret_string = var.signoz_access_token
+}
+
 locals {
   # OTEL Collector config YAML — uses collector-native ${env:VAR} substitution
   # for SigNoz endpoint and access token at runtime.
@@ -67,7 +92,15 @@ EOT
       environment = [
         { name = "OTEL_COLLECTOR_CONFIG", value = local.otel_collector_config },
         { name = "SIGNOZ_ENDPOINT", value = var.signoz_endpoint },
-        { name = "SIGNOZ_ACCESS_TOKEN", value = var.signoz_access_token },
+      ]
+
+      # Resolved by the ECS agent from Secrets Manager at task start — never
+      # in the task definition plaintext (see the secret resources above).
+      secrets = [
+        {
+          name      = "SIGNOZ_ACCESS_TOKEN"
+          valueFrom = aws_secretsmanager_secret.signoz_access_token[0].arn
+        },
       ]
 
       portMappings = [

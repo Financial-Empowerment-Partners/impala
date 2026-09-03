@@ -307,9 +307,17 @@ pub(crate) async fn divert_quoted_order(
 
     // Re-checked before the transaction, because these can change between
     // minting and consuming and both are cheap to verify.
-    let shape = crate::exchange::reserve::divert_shape(payload).ok_or_else(|| {
-        AppError::BadRequest("this order cannot be served from the conversion reserve".to_string())
-    })?;
+    // Widened to the configured stablecoin tickers: a quote minted for the
+    // USDT0 leg must still claim after a restart, and one whose leg was
+    // deconfigured in between must refuse here (rolling back, quote left
+    // open) rather than default to a different asset than was quoted.
+    let divert =
+        crate::exchange::reserve::divert_with(payload, Some(ctx.reserve)).ok_or_else(|| {
+            AppError::BadRequest(
+                "this order cannot be served from the conversion reserve".to_string(),
+            )
+        })?;
+    let shape = divert.shape;
 
     // `enabled: false` is the operator's kill switch — it must actually stop
     // new exposure, even against an already-issued lock.
@@ -338,12 +346,17 @@ pub(crate) async fn divert_quoted_order(
             .payout_address
             .as_deref()
             .ok_or_else(|| AppError::BadRequest("payout_address is required".to_string()))?;
-        if !crate::exchange::reserve::payout_has_usdc_trustline(
+        let Some((code, issuer)) = ctx.reserve.stablecoin(divert.stablecoin) else {
+            return Err(AppError::BadRequest(
+                "the quoted payout asset is no longer configured".to_string(),
+            ));
+        };
+        if !crate::exchange::reserve::payout_has_trustline(
             ctx.http,
             ctx.horizon_url,
             payout_address,
-            &ctx.reserve.usdc_code,
-            &ctx.reserve.usdc_issuer,
+            code,
+            issuer,
         )
         .await
         {
@@ -413,6 +426,7 @@ pub(crate) async fn divert_quoted_order(
         "pricing": claimed.pricing,
         "hold_currency": claimed.hold_currency,
         "hold_minor": claimed.hold_minor,
+        "deposit_currency": crate::exchange::reserve::deposit_currency_for(&divert),
         "shape": claimed.shape,
         "beneficiary": payload.beneficiary,
         "payout_instrument": payload.payout_instrument,

@@ -778,6 +778,17 @@ pub struct HealthResponse {
     /// orchestrator acts on readiness, and one unreadable credential row must
     /// degrade a provider rather than cycle every task in the fleet.
     pub key_resolution: String,
+    /// `off` (RESERVE_ACCOUNT_ID unset) | `armed_inactive` (configured, but
+    /// the reserve handle is absent — e.g. no seed yet, so no order diverts
+    /// and no payout can sign; the account stays quarantined) | `active`.
+    /// Coarse by design: `/health` is unauthenticated.
+    pub conversion_reserve: String,
+    /// SSO provider readiness, keyed by provider name: `ready` | `pending`.
+    /// Registry providers appear under their configured name; the legacy
+    /// `/auth/okta` flow as `okta-legacy` and Google sign-in as `google`,
+    /// each only when configured. `pending` = discovery/JWKS not loaded yet
+    /// (token exchanges answer 503 meanwhile). Sorted for stable output.
+    pub sso_providers: std::collections::BTreeMap<String, String>,
 }
 
 // ── Network Info ──────────────────────────────────────────────────────
@@ -826,6 +837,10 @@ pub struct OktaConfigResponse {
     pub token_endpoint: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scopes: Option<Vec<String>>,
+    /// True while the provider is configured but its discovery document /
+    /// JWKS have not loaded yet; `enabled` is false meanwhile. Appended
+    /// field — clients that only read `enabled` keep working.
+    pub pending: bool,
 }
 
 #[derive(Serialize)]
@@ -845,6 +860,10 @@ pub struct SsoConfigResponse {
     pub token_endpoint: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scopes: Option<Vec<String>>,
+    /// True while the provider is configured but its discovery document /
+    /// JWKS have not loaded yet; `enabled` is false meanwhile. Appended
+    /// field — clients that only read `enabled` keep working.
+    pub pending: bool,
 }
 
 // ── Google ─────────────────────────────────────────────────────────────
@@ -859,6 +878,9 @@ pub struct GoogleConfigResponse {
     pub enabled: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub client_id: Option<String>,
+    /// True while Google sign-in is configured but its JWKS has not loaded
+    /// yet; `enabled` is false meanwhile. Appended field.
+    pub pending: bool,
 }
 
 // ── GitHub ─────────────────────────────────────────────────────────────
@@ -1294,6 +1316,17 @@ pub struct ReserveBucketView {
     /// Horizon is unreachable). Lets admins see ledger-vs-chain drift.
     #[sqlx(skip)]
     pub onchain_balance: Option<String>,
+    /// The pinned on-chain identity behind a Stellar stablecoin bucket as
+    /// `CODE:ISSUER` (None for XLM/USD, and for a stablecoin bucket whose
+    /// issuer is not configured — i.e. an inert bucket).
+    #[sqlx(skip)]
+    pub asset: Option<String>,
+    /// Whether the reserve account currently holds a trustline for `asset`
+    /// (None when unknown: no asset, or Horizon unreachable). A configured
+    /// stablecoin with `Some(false)` cannot receive deposits until
+    /// `POST /admin/exchange-reserve/trustlines` adds one.
+    #[sqlx(skip)]
+    pub trustline: Option<bool>,
 }
 
 /// One provider policy in the status view.
@@ -1489,6 +1522,27 @@ pub struct ReserveRefundCreateRequest {
     pub note: Option<String>,
 }
 
+/// `POST /admin/exchange-reserve/trustlines` — add (or re-assert) the
+/// reserve account's trustline for one of its configured stablecoin buckets.
+#[derive(Debug, Deserialize)]
+pub struct ReserveTrustlineRequest {
+    /// Bucket key: `USDC` or `USDT0`. The asset behind it comes from the
+    /// bridge's own pinned configuration — a caller can never name an
+    /// arbitrary asset to trust.
+    pub currency: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ReserveTrustlineResponse {
+    pub success: bool,
+    pub message: String,
+    pub currency: String,
+    pub asset_code: String,
+    pub asset_issuer: String,
+    /// Hash of the submitted ChangeTrust transaction.
+    pub stellar_tx_hash: String,
+}
+
 /// `POST /admin/exchange-reserve/refunds/{refund_id}/resolve`.
 #[derive(Debug, Deserialize)]
 pub struct ReserveRefundResolveRequest {
@@ -1575,6 +1629,10 @@ pub struct ReserveCurrencyForecast {
 pub struct ReserveProviderUtilization {
     pub provider: String,
     pub orders: i64,
+    /// Bucket the held volume is denominated in — one row per (provider,
+    /// currency): a USD-cents hold and a 7-dp stablecoin hold must never be
+    /// summed into one number.
+    pub currency: String,
     pub volume_minor: i64,
 }
 
@@ -2018,10 +2076,53 @@ mod tests {
             authorization_endpoint: None,
             token_endpoint: None,
             scopes: None,
+            pending: false,
         };
         let json = serde_json::to_string(&resp).unwrap();
         assert!(json.contains("\"enabled\":false"));
+        assert!(json.contains("\"pending\":false"));
         assert!(!json.contains("issuer"));
+    }
+
+    /// A pending provider must keep `enabled: false` (the UI's only gate) and
+    /// say so with the appended `pending` flag.
+    #[test]
+    fn test_sso_config_response_pending_keeps_enabled_false() {
+        let resp = SsoConfigResponse {
+            enabled: false,
+            provider: Some("okta".to_string()),
+            issuer: None,
+            client_id: None,
+            audience: None,
+            authorization_endpoint: None,
+            token_endpoint: None,
+            scopes: None,
+            pending: true,
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains("\"enabled\":false"));
+        assert!(json.contains("\"pending\":true"));
+        assert!(!json.contains("token_endpoint"));
+    }
+
+    #[test]
+    fn test_health_response_serializes_reserve_and_sso_fields() {
+        let mut sso = std::collections::BTreeMap::new();
+        sso.insert("okta".to_string(), "pending".to_string());
+        sso.insert("google".to_string(), "ready".to_string());
+        let resp = HealthResponse {
+            status: "healthy".to_string(),
+            database: "ok".to_string(),
+            redis: "ok".to_string(),
+            stellar_network: "testnet".to_string(),
+            key_resolution: "ok".to_string(),
+            conversion_reserve: "armed_inactive".to_string(),
+            sso_providers: sso,
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains("\"conversion_reserve\":\"armed_inactive\""));
+        // BTreeMap: sorted keys, stable output.
+        assert!(json.contains("\"sso_providers\":{\"google\":\"ready\",\"okta\":\"pending\"}"));
     }
 
     #[test]

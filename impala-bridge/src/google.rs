@@ -7,7 +7,7 @@
 //! (both `https://accounts.google.com` and `accounts.google.com` — Google
 //! emits either form).
 
-use log::{debug, error, info, warn};
+use log::{debug, info, warn};
 use serde::Deserialize;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -36,106 +36,74 @@ pub struct GoogleIdTokenClaims {
 }
 
 /// Shared Google provider state.
+///
+/// Same boot semantics as the OIDC registry: constructed without network
+/// I/O, PENDING until [`provider_task`] loads the JWKS (immediately, with
+/// retries), 503 on token exchange and `enabled: false, pending: true` on
+/// `/config` meanwhile.
 pub struct GoogleProvider {
-    pub jwks: Arc<RwLock<JwksResponse>>,
     pub client_id: String,
     pub http_client: reqwest::Client,
     /// Debounce for the unauthenticated on-demand JWKS refetch path.
     pub refresh_cooldown: crate::oidc::RefreshCooldown,
+    jwks: RwLock<Option<JwksResponse>>,
 }
 
-/// Initialize the Google provider if configured. Returns `None` if
-/// `GOOGLE_CLIENT_ID` is not set (or the initial JWKS fetch fails).
-pub async fn init_google_provider(config: &Config) -> Option<Arc<GoogleProvider>> {
+impl GoogleProvider {
+    pub async fn is_ready(&self) -> bool {
+        self.jwks.read().await.is_some()
+    }
+
+    /// Readiness as reported by `GET /health`.
+    pub async fn state_label(&self) -> &'static str {
+        if self.is_ready().await {
+            crate::oidc::PROVIDER_STATE_READY
+        } else {
+            crate::oidc::PROVIDER_STATE_PENDING
+        }
+    }
+
+    /// One JWKS fetch; the first success makes the provider READY.
+    pub async fn sync_from_idp(&self) -> Result<(), AppError> {
+        let jwks = fetch_jwks(&self.http_client, GOOGLE_JWKS_URL).await?;
+        *self.jwks.write().await = Some(jwks);
+        Ok(())
+    }
+}
+
+/// Construct the Google provider (PENDING) if `GOOGLE_CLIENT_ID` is set.
+/// No network I/O happens here; see [`provider_task`].
+pub fn init_google_provider(config: &Config) -> Option<Arc<GoogleProvider>> {
     let client_id = config.google_client_id.as_ref()?;
-    if client_id.is_empty() {
+    if client_id.trim().is_empty() {
         return None;
     }
 
-    info!("google: initializing provider for client_id={}", client_id);
-
-    let http_client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(
-            config.http_client_timeout_secs,
-        ))
-        .redirect(reqwest::redirect::Policy::limited(5))
-        .build()
-        .expect("Failed to create HTTP client");
-
-    let jwks = match fetch_jwks(&http_client, GOOGLE_JWKS_URL).await {
-        Ok(j) => j,
-        Err(e) => {
-            error!("google: failed to fetch initial JWKS: {}", e);
-            return None;
-        }
-    };
+    info!(
+        "google: provider configured for client_id={} (pending JWKS)",
+        client_id
+    );
 
     Some(Arc::new(GoogleProvider {
-        jwks: Arc::new(RwLock::new(jwks)),
         client_id: client_id.clone(),
-        http_client,
+        http_client: crate::oidc::build_idp_client(config.http_client_timeout_secs),
         refresh_cooldown: crate::oidc::RefreshCooldown::new(),
+        jwks: RwLock::new(None),
     }))
 }
 
-/// Background task that periodically refreshes the Google JWKS key set.
-/// Same backoff/staleness behavior as `okta::jwks_refresh_task`.
-pub async fn jwks_refresh_task(
+/// Background task: initial JWKS fetch with immediate retries, then periodic
+/// refresh (see `crate::oidc::drive_provider`).
+pub async fn provider_task(
     provider: Arc<GoogleProvider>,
     interval_secs: u64,
     cancel: tokio_util::sync::CancellationToken,
 ) {
-    use tokio::time::{Duration, Instant};
-
-    let mut consecutive_failures: u32 = 0;
-    let mut last_success = Instant::now();
-
-    // Skip the first immediate tick since we already fetched during init
-    tokio::select! {
-        _ = tokio::time::sleep(Duration::from_secs(interval_secs)) => {}
-        _ = cancel.cancelled() => {
-            info!("google: jwks_refresh_task shutting down");
-            return;
-        }
-    }
-
-    loop {
-        debug!("google: refreshing JWKS keys");
-        match fetch_jwks(&provider.http_client, GOOGLE_JWKS_URL).await {
-            Ok(new_jwks) => {
-                consecutive_failures = 0;
-                last_success = Instant::now();
-                let mut jwks = provider.jwks.write().await;
-                *jwks = new_jwks;
-                info!("google: JWKS keys refreshed successfully");
-            }
-            Err(e) => {
-                consecutive_failures += 1;
-                let stale_secs = last_success.elapsed().as_secs();
-                if stale_secs > interval_secs * 2 {
-                    error!("google: JWKS keys are {} seconds stale", stale_secs);
-                } else {
-                    warn!("google: failed to refresh JWKS keys: {}", e);
-                }
-            }
-        }
-
-        let wait_secs = if consecutive_failures > 0 {
-            std::cmp::min(
-                interval_secs.saturating_mul(2u64.saturating_pow(consecutive_failures)),
-                300,
-            )
-        } else {
-            interval_secs
-        };
-        tokio::select! {
-            _ = tokio::time::sleep(Duration::from_secs(wait_secs)) => {}
-            _ = cancel.cancelled() => {
-                info!("google: jwks_refresh_task shutting down");
-                return;
-            }
-        }
-    }
+    crate::oidc::drive_provider("google".to_string(), interval_secs, cancel, move || {
+        let p = provider.clone();
+        Box::pin(async move { p.sync_from_idp().await })
+    })
+    .await;
 }
 
 /// Validate a Google ID token and return its claims.
@@ -153,10 +121,15 @@ pub async fn validate_google_id_token(
 
     let kid = header.kid.as_deref().unwrap_or("");
 
-    // Try to find the key in the cached JWKS
+    // Try to find the key in the cached JWKS. PENDING (no keys yet) is a
+    // 503, not a 401: the token has not been judged at all.
     let claims = {
         let jwks = provider.jwks.read().await;
-        try_validate_with_jwks(&jwks, token, kid, provider)
+        let Some(jwks) = jwks.as_ref() else {
+            warn!("google: token exchange refused: provider still PENDING (JWKS not loaded)");
+            return Err(crate::oidc::pending_error("google"));
+        };
+        try_validate_with_jwks(jwks, token, kid, provider)
     };
 
     match claims {
@@ -182,8 +155,7 @@ pub async fn validate_google_id_token(
                 Ok(new_jwks) => {
                     let result = try_validate_with_jwks(&new_jwks, token, kid, provider);
                     // Update the cache with the refreshed keys
-                    let mut cached = provider.jwks.write().await;
-                    *cached = new_jwks;
+                    *provider.jwks.write().await = Some(new_jwks);
                     result
                 }
                 Err(_) => {
@@ -275,6 +247,26 @@ mod tests {
 
         let claims: GoogleIdTokenClaims = serde_json::from_str(json).unwrap();
         assert!(!claims.email_verified);
+    }
+
+    #[tokio::test]
+    async fn configured_provider_starts_pending_and_refuses_with_503() {
+        let mut config = crate::config::test_config();
+        config.google_client_id = Some("1234567890-abc.apps.googleusercontent.com".to_string());
+        let provider = init_google_provider(&config).expect("configured");
+        assert!(!provider.is_ready().await);
+        assert_eq!(
+            provider.state_label().await,
+            crate::oidc::PROVIDER_STATE_PENDING
+        );
+        let token = "eyJhbGciOiJSUzI1NiIsImtpZCI6ImsxIn0.e30.c2ln";
+        assert!(matches!(
+            validate_google_id_token(&provider, token).await,
+            Err(AppError::Retryable(_))
+        ));
+
+        config.google_client_id = Some("  ".to_string());
+        assert!(init_google_provider(&config).is_none());
     }
 
     #[test]

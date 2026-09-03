@@ -215,6 +215,10 @@ terraform plan  -var-file=staging.tfvars -var "jwt_secret=$JWT_SECRET" -out plan
 terraform apply plan.tfplan
 ```
 
+This first apply creates the database, so it necessarily precedes the migration run — go straight
+to §5 once it finishes. From the second rollout onward the migrate task definition is applied and
+run **before** the full apply (see §5 and [`deploy.md`](./deploy.md)).
+
 ### 4a. Add the bridge → OpenBao auth + public‑origin env (task‑definition edit)
 
 The stock `terraform/ecs.tf` task `secrets` block only carries `DATABASE_URL` and `JWT_SECRET`, and
@@ -243,13 +247,24 @@ def, so this edit is required for a correct front‑end.)
 
 ## 5. Run database migrations (one‑off task)  ⟵ net‑new
 
+Run this **immediately after the §4 apply and before anything else touches the database** — the
+server and worker services from §4 are up against an empty schema and cannot serve anything that
+touches a table until this finishes, and the first account (§8) must not be created before it.
+
 Terraform ships a dedicated one‑off migration task definition
 (`aws_ecs_task_definition.migrate` in `terraform/ecs.tf`, `RUN_MODE=migrate`) with matching
 `migrate_task_definition` / `migrate_network_config` outputs — use it rather than overriding the
-server task definition; it carries the correct one‑off configuration. The bridge applies all
-migrations (incl. **023–025**: account `role` + first‑account‑admin bootstrap trigger + backfill,
-`profile_source`, `transaction_review` — and **035**, which widens the role set to the seven
-privileged roles), then exits:
+server task definition; it carries the correct one‑off configuration. Migrations are compiled into
+the image (`sqlx::migrate!`), so the task runs whichever set the image its task definition points
+at carries. On this first stand‑up the §4 apply created that task definition against the same
+`container_image_tag`, so nothing extra is needed. **On every later rollout the order inverts**:
+`terraform apply -target=aws_ecs_task_definition.migrate` with the new tag → run the task → verify
+exit 0 → full `terraform apply` — see [`deploy.md`](./deploy.md#deploy-checklist-normal-change).
+The bridge applies all migrations (incl. **023–025**: account `role` + first‑account‑admin
+bootstrap trigger + backfill, `profile_source`, `transaction_review`; **035**, which widens the
+role set to the seven privileged roles; and **036**, which seeds the USDT0 reserve bucket — required
+before `RESERVE_USDT0_ISSUER` is set, the bridge refuses to start otherwise; no rollback needed),
+then exits:
 
 ```bash
 CL=$(cd terraform && terraform output -raw ecs_cluster_name)

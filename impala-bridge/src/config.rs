@@ -32,6 +32,8 @@ pub struct StellarConfig {
     pub rpc_url: String,
     pub network_passphrase: String,
     pub contract_id: Option<String>,
+    /// Per-operation fee bid in stroops (see `Config::stellar_max_fee_stroops`).
+    pub max_fee_stroops: u32,
 }
 
 /// Which token the bridge JWKS-validates for an OIDC provider.
@@ -172,13 +174,19 @@ pub struct Config {
     pub sqs_visibility_timeout: i32,
     pub ses_from_address: Option<String>,
     pub fcm_project_id: Option<String>,
-    #[allow(dead_code)] // loaded config, not currently read in code paths
+    /// Path to the Firebase service-account JSON; read by the worker at
+    /// startup to mint FCM access tokens (`crate::fcm`). The path is not a
+    /// secret, but the file it names is.
     pub fcm_service_account_key: Option<String>,
     pub otel_exporter_endpoint: Option<String>,
     pub otel_service_name: Option<String>,
     pub otel_environment: Option<String>,
     pub stellar_network: StellarNetwork,
     pub stellar_horizon_url: String,
+    /// Per-operation fee BID (stroops) for every bridge-signed transaction.
+    /// A bid is a maximum — the network charges the ledger's effective fee —
+    /// so it is set high enough to ride through surge pricing. Clamped.
+    pub stellar_max_fee_stroops: u32,
     pub stellar_rpc_url: String,
     pub stellar_network_passphrase: String,
     pub soroban_contract_id: Option<String>,
@@ -198,6 +206,11 @@ pub struct Config {
     /// that has no credentials yet. Default **false** (fail closed) — see the
     /// account-claiming note in `handlers::authenticate`.
     pub allow_open_registration: bool,
+    /// Number of trusted reverse proxies in front of the bridge
+    /// (TRUSTED_PROXY_HOPS). Selects which `X-Forwarded-For` entry, counted
+    /// from the right, is the client for per-source throttling; 0 ignores the
+    /// header and uses the TCP peer. Default 1 (the ALB). See `client_source.rs`.
+    pub trusted_proxy_hops: u32,
     /// deadpool-redis pool size (REDIS_POOL_SIZE).
     pub redis_pool_size: usize,
     /// Global HTTP request timeout in seconds (REQUEST_TIMEOUT_SECS).
@@ -248,6 +261,18 @@ pub struct Config {
     pub reserve_usdc_issuer: Option<String>,
     /// Asset code of that asset. ["USDC"]
     pub reserve_usdc_code: String,
+    /// Stellar issuer (`G...`) of the USDT0 asset. Optional: when unset the
+    /// USDT0 bucket exists but is inert (nothing classifies to it, nothing
+    /// pays out of it). Validated with a strkey checksum at startup.
+    pub reserve_usdt0_issuer: Option<String>,
+    /// Asset code of the USDT0 asset. ["USDT0"]
+    pub reserve_usdt0_code: String,
+    /// Exchange-provider tickers (lowercased) that mean "USDT0 on Stellar" —
+    /// AutoSwap `to_currency` and Disburse `from_currency` values that make an
+    /// order divert to the USDT0 leg. Empty by default: provider ticker
+    /// strings are provider-specific and must be verified by the operator
+    /// against the provider's own currency list, never guessed.
+    pub reserve_usdt0_tickers: Vec<String>,
     /// Deposit window for reserve orders (seconds) — also the price-validity
     /// window (a long TTL is a free price option on the pool). Clamped to
     /// [300, 7200]. [1800]
@@ -290,6 +315,7 @@ impl std::fmt::Debug for Config {
             .field("cors_allowed_origins", &self.cors_allowed_origins)
             .field("stellar_network", &self.stellar_network)
             .field("stellar_horizon_url", &self.stellar_horizon_url)
+            .field("stellar_max_fee_stroops", &self.stellar_max_fee_stroops)
             .field("stellar_rpc_url", &self.stellar_rpc_url)
             .field("soroban_contract_id", &self.soroban_contract_id)
             .field("db_max_connections", &self.db_max_connections)
@@ -298,6 +324,7 @@ impl std::fmt::Debug for Config {
             .field("request_timeout_secs", &self.request_timeout_secs)
             .field("http_client_timeout_secs", &self.http_client_timeout_secs)
             .field("session_cookie_secure", &self.session_cookie_secure)
+            .field("trusted_proxy_hops", &self.trusted_proxy_hops)
             .field("admin_account_ids", &self.admin_account_ids.len())
             .field("seed_protection_backend", &self.seed_protection_backend)
             .field("key_import_enabled", &self.key_import_enabled)
@@ -310,6 +337,9 @@ impl std::fmt::Debug for Config {
             .field("reserve_account_id", &self.reserve_account_id)
             .field("reserve_usdc_issuer", &self.reserve_usdc_issuer)
             .field("reserve_usdc_code", &self.reserve_usdc_code)
+            .field("reserve_usdt0_issuer", &self.reserve_usdt0_issuer)
+            .field("reserve_usdt0_code", &self.reserve_usdt0_code)
+            .field("reserve_usdt0_tickers", &self.reserve_usdt0_tickers)
             .field("reserve_deposit_ttl_secs", &self.reserve_deposit_ttl_secs)
             .field("reserve_watch_secs", &self.reserve_watch_secs)
             .field("reserve_quote_ttl_secs", &self.reserve_quote_ttl_secs)
@@ -596,6 +626,17 @@ pub fn load_config() -> Config {
         ),
     };
 
+    let stellar_max_fee_stroops = env::var("STELLAR_MAX_FEE_STROOPS")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .or_else(|| from_file("stellar_max_fee_stroops"))
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(crate::constants::DEFAULT_STELLAR_MAX_FEE_STROOPS)
+        .clamp(
+            crate::constants::STELLAR_MAX_FEE_STROOPS_MIN,
+            crate::constants::STELLAR_MAX_FEE_STROOPS_MAX,
+        );
+
     let stellar_horizon_url = env::var("STELLAR_HORIZON_URL")
         .ok()
         .or_else(|| from_file("stellar_horizon_url"))
@@ -657,6 +698,15 @@ pub fn load_config() -> Config {
         .or_else(|| from_file("allow_open_registration"))
         .map(|v| v == "true" || v == "1")
         .unwrap_or(false);
+
+    // Which X-Forwarded-For entry (from the right) is the client. Defaults to
+    // the ALB's one hop; a direct-exposed bridge must set 0 or every caller
+    // can pick its own per-source bucket by writing the header itself.
+    let trusted_proxy_hops = env::var("TRUSTED_PROXY_HOPS")
+        .ok()
+        .or_else(|| from_file("trusted_proxy_hops"))
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        .unwrap_or(crate::constants::DEFAULT_TRUSTED_PROXY_HOPS);
 
     let redis_pool_size = env::var("REDIS_POOL_SIZE")
         .ok()
@@ -758,6 +808,33 @@ pub fn load_config() -> Config {
         .filter(|v| !v.is_empty())
         .unwrap_or_else(|| "USDC".to_string());
 
+    let reserve_usdt0_issuer = env::var("RESERVE_USDT0_ISSUER")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .or_else(|| from_file("reserve_usdt0_issuer"))
+        .filter(|v| !v.is_empty());
+
+    let reserve_usdt0_code = env::var("RESERVE_USDT0_CODE")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .or_else(|| from_file("reserve_usdt0_code"))
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| crate::constants::RESERVE_DEFAULT_USDT0_CODE.to_string());
+
+    // Comma-separated, whitespace-tolerant, compared case-insensitively
+    // downstream — normalized to lowercase once here.
+    let reserve_usdt0_tickers: Vec<String> = env::var("RESERVE_USDT0_TICKERS")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .or_else(|| from_file("reserve_usdt0_tickers"))
+        .map(|v| {
+            v.split(',')
+                .map(|t| t.trim().to_ascii_lowercase())
+                .filter(|t| !t.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+
     // Clamped: too short races real deposits, too long hands out a free
     // price option on the pool (the quote is honored for the whole window).
     let reserve_deposit_ttl_secs = env::var("RESERVE_DEPOSIT_TTL_SECS")
@@ -824,6 +901,7 @@ pub fn load_config() -> Config {
         otel_environment,
         stellar_network,
         stellar_horizon_url,
+        stellar_max_fee_stroops,
         stellar_rpc_url,
         stellar_network_passphrase,
         soroban_contract_id,
@@ -833,6 +911,7 @@ pub fn load_config() -> Config {
         admin_webhook_poll_secs,
         session_cookie_secure,
         allow_open_registration,
+        trusted_proxy_hops,
         redis_pool_size,
         request_timeout_secs,
         db_acquire_timeout_secs,
@@ -848,6 +927,9 @@ pub fn load_config() -> Config {
         reserve_account_id,
         reserve_usdc_issuer,
         reserve_usdc_code,
+        reserve_usdt0_issuer,
+        reserve_usdt0_code,
+        reserve_usdt0_tickers,
         reserve_deposit_ttl_secs,
         reserve_watch_secs,
         reserve_quote_ttl_secs,
@@ -898,6 +980,7 @@ pub(crate) fn test_config() -> Config {
         otel_environment: None,
         stellar_network: StellarNetwork::Testnet,
         stellar_horizon_url: "https://horizon-testnet.stellar.org".to_string(),
+        stellar_max_fee_stroops: crate::constants::DEFAULT_STELLAR_MAX_FEE_STROOPS,
         stellar_rpc_url: "https://soroban-testnet.stellar.org".to_string(),
         stellar_network_passphrase: "Test SDF Network ; September 2015".to_string(),
         soroban_contract_id: None,
@@ -907,6 +990,7 @@ pub(crate) fn test_config() -> Config {
         admin_webhook_poll_secs: DEFAULT_ADMIN_WEBHOOK_POLL_SECS,
         session_cookie_secure: false,
         allow_open_registration: false,
+        trusted_proxy_hops: crate::constants::DEFAULT_TRUSTED_PROXY_HOPS,
         redis_pool_size: DEFAULT_REDIS_POOL_SIZE,
         request_timeout_secs: REQUEST_TIMEOUT_SECS,
         db_acquire_timeout_secs: DB_ACQUIRE_TIMEOUT_SECS,
@@ -922,6 +1006,9 @@ pub(crate) fn test_config() -> Config {
         reserve_account_id: None,
         reserve_usdc_issuer: None,
         reserve_usdc_code: "USDC".to_string(),
+        reserve_usdt0_issuer: None,
+        reserve_usdt0_code: crate::constants::RESERVE_DEFAULT_USDT0_CODE.to_string(),
+        reserve_usdt0_tickers: Vec::new(),
         reserve_deposit_ttl_secs: DEFAULT_RESERVE_DEPOSIT_TTL_SECS,
         reserve_watch_secs: DEFAULT_RESERVE_WATCH_SECS,
         reserve_quote_ttl_secs: DEFAULT_RESERVE_QUOTE_TTL_SECS,
@@ -936,6 +1023,7 @@ impl Config {
             rpc_url: self.stellar_rpc_url.clone(),
             network_passphrase: self.stellar_network_passphrase.clone(),
             contract_id: self.soroban_contract_id.clone(),
+            max_fee_stroops: self.stellar_max_fee_stroops,
         }
     }
 }

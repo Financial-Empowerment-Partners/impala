@@ -73,7 +73,7 @@ func (a *App) confirmMissingMemo(net netcfg.Network, dest string, memo stellar.M
 	case known:
 		reason = fmt.Sprintf("it is a known %s deposit address", label)
 	case checkLedger:
-		required, err := stellar.New(net).MemoRequiredOnLedger(dest)
+		required, err := a.horizon(net).MemoRequiredOnLedger(dest)
 		if err != nil {
 			// Say so rather than proceeding as if the answer were "no": a
 			// check that silently fails open is worse than none, because it

@@ -11,8 +11,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"time"
 
 	"lumencli/internal/netcfg"
+	"lumencli/internal/stellar"
 )
 
 // version identifies a build. It is a var so release builds can stamp it:
@@ -86,6 +88,13 @@ Secrets:
   Commands needing a secret seed read it from $%s, or interactively from the
   terminal (no echo) — never from a command-line argument, since argv is
   visible to other processes and shell history.
+
+Exit codes:
+  0 success   1 failure   2 usage error
+  3 ambiguous outcome: a fund-moving command submitted a transaction and got
+    no definite answer (Horizon timeout, dropped connection). The transaction
+    MAY STILL BE APPLIED; the notice names its hash. Do not re-run until
+    "lumencli tx <hash>" has settled the question — see the README.
 `
 
 // App holds the I/O streams and environment the CLI runs against. Keeping these
@@ -102,6 +111,17 @@ type App struct {
 	// signalCtx overrides the Ctrl+C context used by history --follow; nil
 	// means the real signal handler. Tests set it to drive cancellation.
 	signalCtx func() (context.Context, context.CancelFunc)
+
+	// horizonTimeout overrides the per-request Horizon timeout; zero means
+	// the production default. Tests set it to exercise the client-side
+	// timeout path without waiting out the real bound.
+	horizonTimeout time.Duration
+}
+
+// horizon returns the Horizon client for net. Every command goes through
+// here so the test-only timeout override applies uniformly.
+func (a *App) horizon(net netcfg.Network) *stellar.Client {
+	return stellar.NewWithTimeout(net, a.horizonTimeout)
 }
 
 // lineReader returns the one buffered reader over a.in that all prompts share.

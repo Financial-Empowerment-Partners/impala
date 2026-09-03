@@ -18,8 +18,10 @@ use sqlx::PgPool;
 use std::sync::Arc;
 
 use crate::auth::SessionUser;
+use crate::client_source::ClientSource;
 use crate::constants::{
-    LOCKOUT_DURATION_SECS, LOCKOUT_THRESHOLD, RATE_LIMIT_MAX_REQUESTS, RATE_LIMIT_WINDOW_SECS,
+    LOCKOUT_DURATION_SECS, LOCKOUT_THRESHOLD, PREAUTH_SOURCE_MAX_REQUESTS,
+    PREAUTH_SOURCE_WINDOW_SECS, RATE_LIMIT_MAX_REQUESTS, RATE_LIMIT_WINDOW_SECS,
 };
 use crate::error::AppError;
 use crate::session::{self, SessionConfig};
@@ -52,8 +54,19 @@ pub async fn session_login(
     Extension(session_config): Extension<Arc<SessionConfig>>,
     Extension(admin_ids): Extension<Arc<std::collections::HashSet<String>>>,
     Extension(metrics): Extension<Arc<AppMetrics>>,
+    ClientSource(source): ClientSource,
     Json(payload): Json<SessionLoginRequest>,
 ) -> Result<impl IntoResponse, AppError> {
+    // Per-source budget before any per-identity budget is spent.
+    crate::redis_helpers::check_rate_limit(
+        &redis_pool,
+        "preauth_src",
+        &source,
+        PREAUTH_SOURCE_MAX_REQUESTS,
+        PREAUTH_SOURCE_WINDOW_SECS,
+    )
+    .await?;
+
     crate::redis_helpers::check_rate_limit(
         &redis_pool,
         "session_login",
@@ -63,27 +76,33 @@ pub async fn session_login(
     )
     .await?;
 
-    crate::redis_helpers::check_lockout(&redis_pool, &payload.username, LOCKOUT_THRESHOLD).await?;
+    crate::redis_helpers::check_lockout(&redis_pool, &payload.username, &source, LOCKOUT_THRESHOLD)
+        .await?;
 
-    match super::token::verify_local_credentials(&pool, &payload.username, &payload.password).await
+    match super::token::verify_local_credentials(&pool, &payload.username, &payload.password)
+        .await?
     {
         Ok(()) => {
-            crate::redis_helpers::clear_lockout(&redis_pool, &payload.username).await;
+            crate::redis_helpers::clear_lockout(&redis_pool, &payload.username, &source).await;
         }
-        Err(AppError::Unauthorized) => {
-            crate::redis_helpers::increment_lockout(
-                &redis_pool,
-                &payload.username,
-                LOCKOUT_DURATION_SECS,
-            )
-            .await;
+        // Same 401 for an unknown, federated or wrong-password attempt; only
+        // the last is a guess against a stored password and counts.
+        Err(failure) => {
+            if failure.counts_toward_lockout() {
+                crate::redis_helpers::increment_lockout(
+                    &redis_pool,
+                    &payload.username,
+                    &source,
+                    LOCKOUT_DURATION_SECS,
+                )
+                .await;
+            }
             warn!(
                 "session_login: invalid credentials for username={}",
                 payload.username
             );
             return Err(AppError::Unauthorized);
         }
-        Err(e) => return Err(e),
     }
 
     let is_admin = admin_ids.contains(&payload.username);

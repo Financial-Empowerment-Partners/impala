@@ -55,6 +55,17 @@ module "live" {
     debug_mode         = "false"
   }
 
+  # Pubnet bridge refuses wildcard CORS at startup, so the live server task
+  # needs explicit origins before it can ever pass a health check
+  # (live_cors_allowed_origins is validated non-null when live_enabled).
+  # PUBLIC_ENDPOINT is the https://api.<domain> base URL.
+  cors_allowed_origins = var.live_cors_allowed_origins
+  public_endpoint      = var.live_public_endpoint
+
+  # Non-secret operator extras (RESERVE_*, KEY_IMPORT_ENABLED,
+  # ADMIN_ACCOUNT_IDS, TRUSTED_PROXY_HOPS, ...), appended last.
+  extra_environment = var.bridge_extra_environment
+
   # --- C3 hardening (full production posture) ---
 
   # Two AZs: subnets, route tables and NAT gateways fan out (nat_count

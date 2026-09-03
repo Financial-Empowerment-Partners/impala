@@ -4,6 +4,7 @@ use log::{debug, error, info, warn};
 use sqlx::PgPool;
 use std::sync::Arc;
 
+use crate::client_source::ClientSource;
 use crate::config::TokenKind;
 use crate::constants::{
     LOCKOUT_THRESHOLD, MAX_EMAIL_LENGTH, RATE_LIMIT_MAX_REQUESTS, RATE_LIMIT_WINDOW_SECS,
@@ -38,6 +39,7 @@ fn derive_sso_account_id(provider_name: &str, claims: &oidc::OidcTokenClaims) ->
 /// (access token, or id token for `token_kind = id`), auto-provisions the user
 /// if needed, and issues a local refresh + temporal token pair. Rate-limited
 /// per account and scoped by provider name.
+#[allow(clippy::too_many_arguments)] // axum handler: each arg is an extractor
 pub async fn sso_token_exchange(
     Path(provider_name): Path<String>,
     Extension(pool): Extension<PgPool>,
@@ -45,6 +47,7 @@ pub async fn sso_token_exchange(
     Extension(redis_pool): Extension<Arc<deadpool_redis::Pool>>,
     Extension(admin_ids): Extension<Arc<std::collections::HashSet<String>>>,
     Extension(registry): Extension<Arc<ProviderRegistry>>,
+    ClientSource(source): ClientSource,
     Json(payload): Json<SsoTokenExchangeRequest>,
 ) -> Result<Json<TokenResponse>, AppError> {
     let provider_name = provider_name.to_lowercase();
@@ -110,8 +113,10 @@ pub async fn sso_token_exchange(
     );
 
     // Rate limiting and lockout checks. Rate limit is scoped per provider;
-    // lockout is per account across all providers/local (locking the human).
-    crate::redis_helpers::check_lockout(&redis_pool, &account_id, LOCKOUT_THRESHOLD).await?;
+    // lockout is per (account, source) across all providers/local — locking
+    // the human, but only from the source that earned it.
+    crate::redis_helpers::check_lockout(&redis_pool, &account_id, &source, LOCKOUT_THRESHOLD)
+        .await?;
     crate::redis_helpers::check_rate_limit(
         &redis_pool,
         &provider.name,
@@ -206,14 +211,34 @@ pub async fn sso_token_exchange(
 /// `GET /auth/sso/:provider/config` — Return an SSO provider's client config.
 ///
 /// No auth required. Returns `{ enabled: false }` if the named provider is not
-/// configured, so the dashboard can hide the button.
+/// configured, so the dashboard can hide the button — and
+/// `{ enabled: false, pending: true }` while a configured provider is still
+/// waiting on its IdP (discovery/JWKS), so the button stays hidden until a
+/// token exchange could actually succeed.
 pub async fn sso_config(
     Path(provider_name): Path<String>,
     Extension(registry): Extension<Arc<ProviderRegistry>>,
 ) -> Json<SsoConfigResponse> {
     let provider_name = provider_name.to_lowercase();
-    match registry.get(&provider_name) {
-        Some(provider) => {
+    let Some(provider) = registry.get(&provider_name) else {
+        debug!(
+            "GET /auth/sso/{}/config: provider not configured",
+            provider_name
+        );
+        return Json(SsoConfigResponse {
+            enabled: false,
+            provider: None,
+            issuer: None,
+            client_id: None,
+            audience: None,
+            authorization_endpoint: None,
+            token_endpoint: None,
+            scopes: None,
+            pending: false,
+        });
+    };
+    match provider.discovery().await {
+        Some(discovery) => {
             debug!(
                 "GET /auth/sso/{}/config: returning configuration",
                 provider_name
@@ -224,25 +249,27 @@ pub async fn sso_config(
                 issuer: Some(provider.issuer_url.clone()),
                 client_id: Some(provider.client_id.clone()),
                 audience: Some(provider.audience.clone()),
-                authorization_endpoint: Some(provider.discovery.authorization_endpoint.clone()),
-                token_endpoint: Some(provider.discovery.token_endpoint.clone()),
-                scopes: Some(provider.discovery.scopes_supported.clone()),
+                authorization_endpoint: Some(discovery.authorization_endpoint),
+                token_endpoint: Some(discovery.token_endpoint),
+                scopes: Some(discovery.scopes_supported),
+                pending: false,
             })
         }
         None => {
             debug!(
-                "GET /auth/sso/{}/config: provider not configured",
+                "GET /auth/sso/{}/config: provider configured but PENDING",
                 provider_name
             );
             Json(SsoConfigResponse {
                 enabled: false,
-                provider: None,
+                provider: Some(provider.name.clone()),
                 issuer: None,
                 client_id: None,
                 audience: None,
                 authorization_endpoint: None,
                 token_endpoint: None,
                 scopes: None,
+                pending: true,
             })
         }
     }

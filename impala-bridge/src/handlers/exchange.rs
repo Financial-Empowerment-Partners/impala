@@ -10,7 +10,6 @@
 //! append; metrics are recorded only after commit.
 
 use axum::extract::{Extension, Path, Query};
-use axum::http::HeaderMap;
 use axum::Json;
 use log::{error, info, warn};
 use serde_json::json;
@@ -19,6 +18,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::auth::AuthenticatedUser;
+use crate::client_source::ClientSource;
 use crate::constants::{
     EXCHANGE_DIRECTION_CRYPTO_TO_CRYPTO, EXCHANGE_DIRECTION_CRYPTO_TO_FIAT,
     EXCHANGE_DIRECTION_FIAT_TO_CRYPTO, EXCHANGE_PROVIDER_CHANGELLY_CRYPTO,
@@ -342,12 +342,12 @@ pub(crate) fn validate_order_request(p: &CreateExchangeOrderRequest) -> Result<(
 }
 
 /// Resolve the end-user IP the Changelly Fiat API requires: explicit
-/// `user_ip`, else the first `X-Forwarded-For` hop, else `X-Real-Ip`.
-/// Every candidate must parse as an IP address.
-pub(crate) fn resolve_client_ip(
-    explicit: Option<&str>,
-    headers: &HeaderMap,
-) -> Result<String, AppError> {
+/// `user_ip`, else the request's attributed client source (the
+/// `X-Forwarded-For` entry the trusted proxy appended, or the TCP peer —
+/// see `client_source.rs`; never the sender-written leftmost entry or
+/// `X-Real-Ip`). An explicit value must parse as an IP address; an
+/// unattributable source is an error, not a guess.
+pub(crate) fn resolve_client_ip(explicit: Option<&str>, source: &str) -> Result<String, AppError> {
     if let Some(ip) = explicit.map(str::trim).filter(|s| !s.is_empty()) {
         return if ip.parse::<std::net::IpAddr>().is_ok() {
             Ok(ip.to_string())
@@ -357,24 +357,11 @@ pub(crate) fn resolve_client_ip(
             ))
         };
     }
-    let forwarded = headers
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.split(',').next())
-        .map(str::trim)
-        .filter(|s| !s.is_empty());
-    let real_ip = headers
-        .get("x-real-ip")
-        .and_then(|v| v.to_str().ok())
-        .map(str::trim)
-        .filter(|s| !s.is_empty());
-    for candidate in [forwarded, real_ip].into_iter().flatten() {
-        if candidate.parse::<std::net::IpAddr>().is_ok() {
-            return Ok(candidate.to_string());
-        }
+    if source != crate::client_source::UNKNOWN_SOURCE {
+        return Ok(source.to_string());
     }
     Err(AppError::BadRequest(
-        "user_ip is required (no client IP could be determined from headers)".to_string(),
+        "user_ip is required (no client IP could be determined from the connection)".to_string(),
     ))
 }
 
@@ -749,7 +736,7 @@ pub async fn create_quote(
     changelly_crypto: Option<Extension<Arc<ChangellyCrypto>>>,
     changelly_fiat: Option<Extension<Arc<ChangellyFiat>>>,
     reserve: Option<Extension<Arc<crate::exchange::reserve::ConversionReserve>>>,
-    headers: HeaderMap,
+    ClientSource(source): ClientSource,
     Json(payload): Json<ExchangeQuoteRequest>,
 ) -> Result<Json<ExchangeQuoteResponse>, AppError> {
     info!(
@@ -801,7 +788,7 @@ pub async fn create_quote(
                 "country",
                 "changelly_fiat quotes",
             )?;
-            let ip = resolve_client_ip(payload.user_ip.as_deref(), &headers)?;
+            let ip = resolve_client_ip(payload.user_ip.as_deref(), &source)?;
             let query = FiatOfferQuery {
                 currency_from: payload.from_currency.clone(),
                 currency_to: payload.to_currency.clone(),
@@ -1187,7 +1174,7 @@ pub async fn create_order(
     reserve: Option<Extension<Arc<crate::exchange::reserve::ConversionReserve>>>,
     Extension(stellar_config): Extension<Arc<crate::config::StellarConfig>>,
     Extension(http): Extension<Arc<reqwest::Client>>,
-    headers: HeaderMap,
+    ClientSource(source): ClientSource,
     Json(payload): Json<CreateExchangeOrderRequest>,
 ) -> Result<Json<ExchangeOrderResponse>, AppError> {
     info!(
@@ -1254,7 +1241,7 @@ pub async fn create_order(
     }
 
     let ip = if payload.provider == EXCHANGE_PROVIDER_CHANGELLY_FIAT {
-        Some(resolve_client_ip(payload.user_ip.as_deref(), &headers)?)
+        Some(resolve_client_ip(payload.user_ip.as_deref(), &source)?)
     } else {
         None
     };
@@ -1680,7 +1667,6 @@ pub async fn get_order(
 mod tests {
     use super::*;
     use crate::constants::{DEFAULT_EXCHANGE_POLL_SECS, TERMINAL_EXCHANGE_STATUSES};
-    use axum::http::HeaderValue;
 
     fn quote_req(v: serde_json::Value) -> ExchangeQuoteRequest {
         serde_json::from_value(v).unwrap()
@@ -1819,10 +1805,8 @@ mod tests {
 
     #[test]
     fn test_resolve_client_ip_explicit_wins() {
-        let mut headers = HeaderMap::new();
-        headers.insert("x-forwarded-for", HeaderValue::from_static("10.0.0.1"));
         assert_eq!(
-            resolve_client_ip(Some(" 203.0.113.7 "), &headers).unwrap(),
+            resolve_client_ip(Some(" 203.0.113.7 "), "10.0.0.1").unwrap(),
             "203.0.113.7"
         );
     }
@@ -1830,46 +1814,33 @@ mod tests {
     #[test]
     fn test_resolve_client_ip_explicit_invalid_rejected() {
         // A bad explicit value is an error, not silently ignored.
-        let headers = HeaderMap::new();
-        assert!(resolve_client_ip(Some("not-an-ip"), &headers).is_err());
+        assert!(resolve_client_ip(Some("not-an-ip"), "10.0.0.1").is_err());
     }
 
+    /// Without an explicit value the attributed source is used verbatim —
+    /// it has already been reduced to the trusted proxy's entry (or the
+    /// TCP peer) by `client_source`, so no header parsing happens here.
     #[test]
-    fn test_resolve_client_ip_xff_first_value() {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            "x-forwarded-for",
-            HeaderValue::from_static("203.0.113.7, 10.0.0.1, 172.16.0.1"),
+    fn test_resolve_client_ip_falls_back_to_attributed_source() {
+        assert_eq!(
+            resolve_client_ip(None, "203.0.113.7").unwrap(),
+            "203.0.113.7"
         );
-        assert_eq!(resolve_client_ip(None, &headers).unwrap(), "203.0.113.7");
+        assert_eq!(
+            resolve_client_ip(None, "2001:db8::1").unwrap(),
+            "2001:db8::1"
+        );
     }
 
     #[test]
-    fn test_resolve_client_ip_xff_garbage_falls_back_to_real_ip() {
-        let mut headers = HeaderMap::new();
-        headers.insert("x-forwarded-for", HeaderValue::from_static("unknown"));
-        headers.insert("x-real-ip", HeaderValue::from_static("2001:db8::1"));
-        assert_eq!(resolve_client_ip(None, &headers).unwrap(), "2001:db8::1");
-    }
-
-    #[test]
-    fn test_resolve_client_ip_real_ip_only() {
-        let mut headers = HeaderMap::new();
-        headers.insert("x-real-ip", HeaderValue::from_static("198.51.100.4"));
-        assert_eq!(resolve_client_ip(None, &headers).unwrap(), "198.51.100.4");
-    }
-
-    #[test]
-    fn test_resolve_client_ip_missing_everything_rejected() {
-        assert!(resolve_client_ip(None, &HeaderMap::new()).is_err());
+    fn test_resolve_client_ip_unattributable_source_rejected() {
+        assert!(resolve_client_ip(None, crate::client_source::UNKNOWN_SOURCE).is_err());
     }
 
     #[test]
     fn test_resolve_client_ip_empty_explicit_falls_through() {
-        let mut headers = HeaderMap::new();
-        headers.insert("x-real-ip", HeaderValue::from_static("198.51.100.4"));
         assert_eq!(
-            resolve_client_ip(Some("  "), &headers).unwrap(),
+            resolve_client_ip(Some("  "), "198.51.100.4").unwrap(),
             "198.51.100.4"
         );
     }

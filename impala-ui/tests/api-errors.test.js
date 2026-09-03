@@ -100,3 +100,46 @@ describe('API.parseJwt — base64url payloads', () => {
         expect(API.parseJwt('')).toBeNull();
     });
 });
+
+describe('API.classifyRefreshResponse — only a verdict on the token ends the session', () => {
+    // clients-5: any !res.ok used to wipe both stored tokens, so a 502 from
+    // Nginx mid-roll or the 500 the bridge returns on a Redis outage logged
+    // the operator out with a valid 14-day refresh token in hand.
+    it('401 is fatal: the bridge judged the refresh token', () => {
+        expect(API.classifyRefreshResponse(401, { error: { code: 'unauthorized', message: 'Unauthorized' } }))
+            .toBe('fatal');
+        expect(API.classifyRefreshResponse(401, null)).toBe('fatal');
+    });
+
+    it('a 2xx carrying a temporal token is ok', () => {
+        expect(API.classifyRefreshResponse(200, { success: true, temporal_token: 't1', refresh_token: 'r1' }))
+            .toBe('ok');
+        expect(API.classifyRefreshResponse(200, { temporal_token: 't1' })).toBe('ok');
+    });
+
+    it('a 2xx without a temporal token is fatal (malformed success)', () => {
+        expect(API.classifyRefreshResponse(200, { success: false, message: 'nope' })).toBe('fatal');
+        expect(API.classifyRefreshResponse(200, null)).toBe('fatal');
+        expect(API.classifyRefreshResponse(200, { temporal_token: '' })).toBe('fatal');
+        expect(API.classifyRefreshResponse(200, { temporal_token: 42 })).toBe('fatal');
+    });
+
+    it('outages, rate limits and network failures are retryable (tokens stay)', () => {
+        // The bridge answers 500 on a Redis outage precisely so clients keep
+        // their tokens (redis_helpers.rs: "Infrastructure failure, NOT a
+        // revoked token").
+        expect(API.classifyRefreshResponse(500, { error: { code: 'internal_error', message: 'Service temporarily unavailable' } }))
+            .toBe('retryable');
+        expect(API.classifyRefreshResponse(502, null)).toBe('retryable'); // Nginx, bridge rolling
+        expect(API.classifyRefreshResponse(503, null)).toBe('retryable');
+        expect(API.classifyRefreshResponse(504, null)).toBe('retryable');
+        expect(API.classifyRefreshResponse(429, null)).toBe('retryable');
+        expect(API.classifyRefreshResponse(0, null)).toBe('retryable');   // fetch itself failed
+    });
+
+    it('other 4xx are not a verdict on the token either', () => {
+        for (const status of [400, 403, 404, 405, 409, 422]) {
+            expect(API.classifyRefreshResponse(status, null)).toBe('retryable');
+        }
+    });
+});

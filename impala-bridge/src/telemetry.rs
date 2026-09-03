@@ -388,6 +388,9 @@ pub fn token_exchange_outcome<T>(result: &Result<T, AppError>) -> &'static str {
         Err(AppError::Unauthorized) => "unauthorized",
         Err(AppError::RateLimited { .. }) => "rate_limited",
         Err(AppError::BadRequest(_)) => "bad_request",
+        // The provider is still PENDING (IdP discovery/JWKS not loaded):
+        // distinct from a bridge-side error so dashboards can tell them apart.
+        Err(AppError::Retryable(_)) => "unavailable",
         Err(_) => "error",
     }
 }

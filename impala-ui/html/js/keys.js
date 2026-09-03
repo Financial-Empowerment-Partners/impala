@@ -312,6 +312,7 @@
     function openMergeModal(kind) {
         var view = viewFor(kind);
         if (!view) return;
+        var mergeWarn = KeysView.inFlightWarning(view);
         var stored = Object.keys(view.per_part_fingerprints || {});
 
         var body =
@@ -331,6 +332,18 @@
                 : '') +
             '<label>Type <code>' + escapeHtml(view.confirm_phrase || '') +
             '</code> to confirm<input type="text" id="key-confirm" autocomplete="off"></label>' +
+            // A merge is a replacement of the STORED version and carries the
+            // same acknowledgements as an import: without them the bridge
+            // refuses every merge while any order is in flight, and comparing
+            // against the running fingerprint refused every merge during a
+            // pending restart. KeysView.buildMerge owns the body shape.
+            (mergeWarn
+                ? '<div class="callout warning">' + escapeHtml(mergeWarn) + '</div>' +
+                  '<label><input type="checkbox" id="key-strand"> The new part is for ' +
+                  'the same provider account (or I accept stranding the in-flight work)</label>'
+                : '') +
+            '<label><input type="checkbox" id="key-skip-verify"> Skip the provider check ' +
+            '(store without proving the credential works)</label>' +
             '<p class="form-error" id="key-error" hidden></p>';
 
         var handle = Modal.open({
@@ -347,26 +360,26 @@
                     }
                 );
                 var dropEl = dialog.querySelector('#key-drop');
-                var drop = dropEl && dropEl.value ? [dropEl.value] : [];
+                var checked = function (id) {
+                    var el = dialog.querySelector(id);
+                    return !!(el && el.checked);
+                };
+                var built = KeysView.buildMerge(view, {
+                    setParts: setParts,
+                    dropPart: dropEl && dropEl.value ? dropEl.value : null,
+                    confirmTyped: dialog.querySelector('#key-confirm').value,
+                    strandInFlight: checked('#key-strand'),
+                    skipVerify: checked('#key-skip-verify')
+                });
                 var errEl = dialog.querySelector('#key-error');
-                if (Object.keys(setParts).length === 0 && drop.length === 0) {
-                    errEl.textContent = 'Change at least one part';
-                    errEl.hidden = false;
-                    return;
-                }
-                if (dialog.querySelector('#key-confirm').value !== view.confirm_phrase) {
-                    errEl.textContent = 'Type exactly: ' + view.confirm_phrase;
+                if (!built.ok) {
+                    errEl.textContent = built.error;
                     errEl.hidden = false;
                     return;
                 }
                 errEl.hidden = true;
                 API.setButtonLoading(helpers.button, true);
-                API.post('/admin/keys/' + encodeURIComponent(kind) + '/merge', {
-                    set_parts: setParts,
-                    drop_parts: drop,
-                    expected_fingerprint: view.effective_fingerprint,
-                    confirm_phrase: view.confirm_phrase
-                })
+                API.post('/admin/keys/' + encodeURIComponent(kind) + '/merge', built.body)
                     .then(function (res) {
                         scrub(dialog);
                         Router.showToast((res && res.message) || 'New version stored', 'success');

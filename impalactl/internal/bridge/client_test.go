@@ -4,10 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -376,4 +380,177 @@ func TestNewAlwaysAllowsHTTPS(t *testing.T) {
 	if _, err := New("https://bridge.example.com", time.Second, false); err != nil {
 		t.Errorf("https endpoint refused: %v", err)
 	}
+}
+
+// ── outcome classification ─────────────────────────────────────────────
+
+// TestIsAmbiguousOutcomeByStatus pins the verdict table for bridge
+// responses: only 503 (the bridge's provably-pre-submit Retryable) and the
+// ordinary 4xx refusals prove nothing happened; 408 and every other 5xx
+// leave the payment's fate open.
+func TestIsAmbiguousOutcomeByStatus(t *testing.T) {
+	cases := []struct {
+		status int
+		code   string
+		want   bool
+	}{
+		{http.StatusBadRequest, "bad_request", false},
+		{http.StatusUnauthorized, "unauthorized", false},
+		{http.StatusForbidden, "forbidden", false},
+		{http.StatusNotFound, "not_found", false},
+		{http.StatusConflict, "conflict", false},
+		{http.StatusTooManyRequests, "rate_limited", false},
+		{http.StatusRequestTimeout, "", true}, // the bridge's deadline: empty body, no envelope
+		{http.StatusInternalServerError, "internal_error", true},
+		{http.StatusBadGateway, "", true},
+		{http.StatusServiceUnavailable, "service_unavailable", false},
+		{http.StatusGatewayTimeout, "", true},
+		{520, "", true}, // a CDN's "origin returned an unknown error"
+	}
+	for _, tc := range cases {
+		t.Run(fmt.Sprintf("%d_%s", tc.status, tc.code), func(t *testing.T) {
+			err := error(&APIError{Status: tc.status, Code: tc.code})
+			if got := IsAmbiguousOutcome(err); got != tc.want {
+				t.Errorf("IsAmbiguousOutcome(%v) = %v, want %v", err, got, tc.want)
+			}
+			// Wrapping (as the CLI's session layer does) must not change the verdict.
+			if got := IsAmbiguousOutcome(fmt.Errorf("wrapped: %w", err)); got != tc.want {
+				t.Errorf("wrapped IsAmbiguousOutcome = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestIsAmbiguousOutcomeByPhase pins the transport side: a request that was
+// never built or never connected is safe to retry; anything after the
+// connection existed is not.
+func TestIsAmbiguousOutcomeByPhase(t *testing.T) {
+	dial := &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED}
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"build", &RequestError{Phase: PhaseBuild, Err: errors.New("encode request: boom")}, false},
+		{"send: dial refused", &RequestError{Phase: PhaseSend, Err: &url.Error{Op: "Post", Err: dial}}, false},
+		{"send: no such host", &RequestError{Phase: PhaseSend, Err: &url.Error{Op: "Post", Err: &net.OpError{Op: "dial", Err: &net.DNSError{IsNotFound: true}}}}, false},
+		{"send: client timeout", &RequestError{Phase: PhaseSend, Err: &url.Error{Op: "Post", Err: context.DeadlineExceeded}}, true},
+		{"send: reset", &RequestError{Phase: PhaseSend, Err: &url.Error{Op: "Post", Err: &net.OpError{Op: "read", Err: syscall.ECONNRESET}}}, true},
+		{"send: EOF", &RequestError{Phase: PhaseSend, Err: &url.Error{Op: "Post", Err: io.EOF}}, true},
+		{"read", &RequestError{Phase: PhaseRead, Err: io.ErrUnexpectedEOF}, true},
+		{"decode", &RequestError{Phase: PhaseDecode, Err: errors.New("invalid character")}, true},
+		{"success:false verdict", errors.New("Invalid destination"), false},
+		{"nil", nil, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := IsAmbiguousOutcome(tc.err); got != tc.want {
+				t.Errorf("IsAmbiguousOutcome(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestCallFailuresAreTyped drives the real client through each transport
+// failure and checks both the phase and the message the operator sees.
+func TestCallFailuresAreTyped(t *testing.T) {
+	t.Run("undecodable 2xx", func(t *testing.T) {
+		c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+			io.WriteString(w, "<html>not json</html>")
+		})
+		_, _, err := c.SignAndSubmit(context.Background(), SignSubmitRequest{})
+		var reqErr *RequestError
+		if !errors.As(err, &reqErr) || reqErr.Phase != PhaseDecode {
+			t.Fatalf("error = %v (%T), want a PhaseDecode RequestError", err, err)
+		}
+		if !strings.HasPrefix(err.Error(), "decode response from POST ") {
+			t.Errorf("message = %q", err.Error())
+		}
+		if !IsAmbiguousOutcome(err) {
+			t.Error("a success we could not read must be ambiguous")
+		}
+	})
+
+	t.Run("hang past the client timeout", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Drain the body first: the server only watches for the client
+			// going away once the request has been read, and the context
+			// is what lets the handler (and the server's Close) return.
+			io.Copy(io.Discard, r.Body)
+			<-r.Context().Done()
+		}))
+		t.Cleanup(srv.Close)
+		c, err := New(srv.URL, 200*time.Millisecond, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		start := time.Now()
+		_, _, err = c.SignAndSubmit(context.Background(), SignSubmitRequest{})
+		if time.Since(start) > 5*time.Second {
+			t.Fatalf("call took %s: the timeout did not apply", time.Since(start))
+		}
+		var reqErr *RequestError
+		if !errors.As(err, &reqErr) || reqErr.Phase != PhaseSend {
+			t.Fatalf("error = %v (%T), want a PhaseSend RequestError", err, err)
+		}
+		if !strings.HasPrefix(err.Error(), "POST "+srv.URL+"/managed-account/sign: ") {
+			t.Errorf("message = %q", err.Error())
+		}
+		if !IsAmbiguousOutcome(err) {
+			t.Error("a timeout awaiting the response must be ambiguous")
+		}
+	})
+
+	t.Run("connection refused", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+		url := srv.URL
+		srv.Close() // nothing listens on the port any more
+		c, err := New(url, time.Second, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _, err = c.SignAndSubmit(context.Background(), SignSubmitRequest{})
+		var reqErr *RequestError
+		if !errors.As(err, &reqErr) || reqErr.Phase != PhaseSend {
+			t.Fatalf("error = %v (%T), want a PhaseSend RequestError", err, err)
+		}
+		if !errors.Is(err, syscall.ECONNREFUSED) {
+			t.Fatalf("error = %v, want it to carry ECONNREFUSED", err)
+		}
+		if IsAmbiguousOutcome(err) {
+			t.Error("a connection that was never made cannot have delivered a payment")
+		}
+	})
+
+	t.Run("dropped mid-response", func(t *testing.T) {
+		c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+			conn, _, err := w.(http.Hijacker).Hijack()
+			if err != nil {
+				t.Fatalf("hijack: %v", err)
+			}
+			conn.Close()
+		})
+		_, _, err := c.SignAndSubmit(context.Background(), SignSubmitRequest{})
+		var reqErr *RequestError
+		if !errors.As(err, &reqErr) || reqErr.Phase != PhaseSend {
+			t.Fatalf("error = %v (%T), want a PhaseSend RequestError", err, err)
+		}
+		if !IsAmbiguousOutcome(err) {
+			t.Error("a connection dropped after the request went out must be ambiguous")
+		}
+	})
+
+	t.Run("bridge 408 without envelope", func(t *testing.T) {
+		// tower-http's TimeoutLayer answers with a bare status and no body.
+		c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusRequestTimeout)
+		})
+		_, _, err := c.SignAndSubmit(context.Background(), SignSubmitRequest{})
+		if got, want := err.Error(), "[408 http_error] Request Timeout"; got != want {
+			t.Errorf("message = %q, want %q", got, want)
+		}
+		if !IsAmbiguousOutcome(err) {
+			t.Error("the bridge's own deadline firing mid-handler must be ambiguous")
+		}
+	})
 }

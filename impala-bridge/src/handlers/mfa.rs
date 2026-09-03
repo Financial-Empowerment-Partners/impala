@@ -6,6 +6,8 @@ use std::sync::Arc;
 use totp_rs::{Algorithm, Secret, TOTP};
 
 use crate::auth::AuthenticatedUser;
+use crate::client_source::ClientSource;
+use crate::constants::{PREAUTH_SOURCE_MAX_REQUESTS, PREAUTH_SOURCE_WINDOW_SECS};
 use crate::error::AppError;
 use crate::models::{
     EnrollMfaRequest, MfaEnrollment, MfaEnrollmentView, MfaQuery, MfaResponse, VerifyMfaRequest,
@@ -185,12 +187,23 @@ pub async fn verify_mfa(
     Extension(pool): Extension<PgPool>,
     Extension(redis_pool): Extension<Arc<deadpool_redis::Pool>>,
     Extension(metrics): Extension<Arc<AppMetrics>>,
+    ClientSource(source): ClientSource,
     Json(payload): Json<VerifyMfaRequest>,
 ) -> Result<Json<MfaResponse>, AppError> {
     info!(
         "POST /mfa/verify: mfa_type={} for account_id={}",
         payload.mfa_type, payload.account_id
     );
+
+    // Per-source budget before any per-identity budget is spent.
+    crate::redis_helpers::check_rate_limit(
+        &redis_pool,
+        "preauth_src",
+        &source,
+        PREAUTH_SOURCE_MAX_REQUESTS,
+        PREAUTH_SOURCE_WINDOW_SECS,
+    )
+    .await?;
 
     // Per-(account, mfa_type) rate limiting in addition to the existing
     // brute-force lockout check. Lockout engages at threshold; rate limiting
@@ -204,11 +217,15 @@ pub async fn verify_mfa(
     )
     .await?;
 
-    // Brute force protection: check if account is locked out
+    // Brute force protection, keyed on (account, mfa_type, source): a
+    // guesser locks the factor only for its own source. Only a wrong code
+    // against an outstanding factor increments it (below); an absent or
+    // disabled enrollment and a never-issued SMS code are not guesses.
     crate::redis_helpers::check_mfa_lockout(
         &redis_pool,
         &payload.account_id,
         &payload.mfa_type,
+        &source,
         crate::constants::LOCKOUT_THRESHOLD,
     )
     .await?;
@@ -241,15 +258,10 @@ pub async fn verify_mfa(
                     KeyValue::new("outcome", "failed"),
                 ],
             );
-            crate::redis_helpers::increment_mfa_attempts(
-                &redis_pool,
-                &payload.account_id,
-                &payload.mfa_type,
-                crate::constants::LOCKOUT_DURATION_SECS,
-            )
-            .await;
-            // Pre-auth endpoint: same generic message as a wrong code, so
-            // enrollment status cannot be enumerated.
+            // No attempt counted: there is no factor to guess against, and
+            // counting let anyone pre-lock an identity's MFA before it was
+            // ever enrolled. Pre-auth endpoint: same generic message as a
+            // wrong code, so enrollment status cannot be enumerated.
             Ok(Json(MfaResponse {
                 success: false,
                 message: "Invalid verification code".to_string(),
@@ -262,18 +274,11 @@ pub async fn verify_mfa(
                     "verify_mfa: MFA disabled for account_id={} mfa_type={}",
                     payload.account_id, payload.mfa_type
                 );
-                // Same generic message and attempt increment as the
-                // not-enrolled path: a distinct "disabled" reply would let a
-                // caller enumerate which accounts have a (disabled) enrollment
-                // — the exact enumeration the not-enrolled branch guards
-                // against, undone one branch over.
-                crate::redis_helpers::increment_mfa_attempts(
-                    &redis_pool,
-                    &payload.account_id,
-                    &payload.mfa_type,
-                    crate::constants::LOCKOUT_DURATION_SECS,
-                )
-                .await;
+                // Same generic message (and, like it, no attempt counted) as
+                // the not-enrolled path: a distinct "disabled" reply would
+                // let a caller enumerate which accounts have a (disabled)
+                // enrollment — the exact enumeration the not-enrolled branch
+                // guards against, undone one branch over.
                 return Ok(Json(MfaResponse {
                     success: false,
                     message: "Invalid verification code".to_string(),
@@ -379,6 +384,7 @@ pub async fn verify_mfa(
                             &redis_pool,
                             &payload.account_id,
                             &payload.mfa_type,
+                            &source,
                         )
                         .await;
                         Ok(Json(MfaResponse {
@@ -398,11 +404,13 @@ pub async fn verify_mfa(
                                 KeyValue::new("outcome", "failed"),
                             ],
                         );
-                        // Track failed attempt for brute force protection
+                        // Track failed attempt for brute force protection —
+                        // a real guess against a live factor.
                         crate::redis_helpers::increment_mfa_attempts(
                             &redis_pool,
                             &payload.account_id,
                             &payload.mfa_type,
+                            &source,
                             crate::constants::LOCKOUT_DURATION_SECS,
                         )
                         .await;
@@ -442,6 +450,7 @@ pub async fn verify_mfa(
                                     &redis_pool,
                                     &payload.account_id,
                                     &payload.mfa_type,
+                                    &source,
                                 )
                                 .await;
                                 info!(
@@ -472,10 +481,13 @@ pub async fn verify_mfa(
                                         KeyValue::new("outcome", "failed"),
                                     ],
                                 );
+                                // A wrong code against an issued one: a
+                                // real guess.
                                 crate::redis_helpers::increment_mfa_attempts(
                                     &redis_pool,
                                     &payload.account_id,
                                     &payload.mfa_type,
+                                    &source,
                                     crate::constants::LOCKOUT_DURATION_SECS,
                                 )
                                 .await;
@@ -487,6 +499,8 @@ pub async fn verify_mfa(
                             }
                         }
                         None => {
+                            // No code outstanding: nothing to guess against,
+                            // so no attempt is counted (same generic reply).
                             warn!(
                                 "verify_mfa: invalid SMS code for account_id={}",
                                 payload.account_id
@@ -498,13 +512,6 @@ pub async fn verify_mfa(
                                     KeyValue::new("outcome", "failed"),
                                 ],
                             );
-                            crate::redis_helpers::increment_mfa_attempts(
-                                &redis_pool,
-                                &payload.account_id,
-                                &payload.mfa_type,
-                                crate::constants::LOCKOUT_DURATION_SECS,
-                            )
-                            .await;
                             Ok(Json(MfaResponse {
                                 success: false,
                                 message: "Invalid verification code".to_string(),

@@ -51,6 +51,23 @@ updates:
     open-pull-requests-limit: 5
     labels: [dependencies, android, demo]
 
+  # Go — the two CLIs (separate modules, no workspace)
+  - package-ecosystem: gomod
+    directory: /lumencli
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    labels: [dependencies, go, lumencli]
+
+  - package-ecosystem: gomod
+    directory: /impalactl
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    labels: [dependencies, go, impalactl]
+
   # npm — impala-ui (only if package.json lands as part of the test harness)
   - package-ecosystem: npm
     directory: /impala-ui

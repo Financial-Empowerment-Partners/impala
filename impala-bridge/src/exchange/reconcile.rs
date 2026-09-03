@@ -250,6 +250,44 @@ async fn tick(
     metrics: &AppMetrics,
     poll_secs: u64,
 ) -> Result<(), sqlx::Error> {
+    // One instance polls per tick. Every task used to run this loop against
+    // the same due set: N× the providers' request budgets (Changelly's is
+    // tight enough to 429 user-facing calls), backoff growing by N per
+    // round, and a hung provider stalling every instance at once. The lock
+    // is cancellation-safe (reserve_watch::AdvisoryLock) and is NOT held
+    // per row — provider calls never run under a row lock.
+    let lock = crate::exchange::reserve_watch::AdvisoryLock::new(
+        crate::constants::EXCHANGE_RECONCILE_LOCK_KEY,
+    );
+    let Some(guard) = lock.try_acquire(pool).await? else {
+        return Ok(());
+    };
+    let result = tick_locked(
+        pool,
+        owlpay,
+        changelly_crypto,
+        changelly_fiat,
+        metrics,
+        poll_secs,
+    )
+    .await;
+    if let Err(e) = guard.release_now().await {
+        error!(
+            "exchange_reconcile: advisory unlock failed ({}); guard drop releases it",
+            e
+        );
+    }
+    result
+}
+
+async fn tick_locked(
+    pool: &PgPool,
+    owlpay: Option<&Arc<OwlPayProvider>>,
+    changelly_crypto: Option<&Arc<ChangellyCrypto>>,
+    changelly_fiat: Option<&Arc<ChangellyFiat>>,
+    metrics: &AppMetrics,
+    poll_secs: u64,
+) -> Result<(), sqlx::Error> {
     let due: Vec<(Uuid, String, String, i32)> = sqlx::query_as(DUE_ORDERS_SQL)
         .bind(non_terminal_statuses())
         .bind(EXCHANGE_POLL_BATCH_LIMIT)

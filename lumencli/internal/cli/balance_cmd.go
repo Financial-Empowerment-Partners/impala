@@ -7,7 +7,6 @@ import (
 	"github.com/stellar/go-stellar-sdk/protocols/horizon/base"
 
 	"lumencli/internal/netcfg"
-	"lumencli/internal/stellar"
 )
 
 // runBalance shows every balance held by an account. The account address is a
@@ -30,7 +29,7 @@ func (a *App) runBalance(opts netcfg.Options, args []string) int {
 	}
 	a.announce(net)
 
-	acct, err := stellar.New(net).AccountInfo(address)
+	acct, err := a.horizon(net).AccountInfo(address)
 	if err != nil {
 		return a.fail("%v", err)
 	}

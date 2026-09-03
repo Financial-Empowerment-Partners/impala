@@ -194,6 +194,37 @@ just fmt
 
 `just build-cli` produces the `impalactl` binary.
 
+## 8. Where the bridge reads its configuration
+
+Three loaders, and they do not see the same file:
+
+- **The binary** (`cargo run`, a bare `impala-bridge`) loads a `.env` from
+  the working directory at startup — a development convenience; it never
+  overrides a variable that is already set in the environment, and real
+  deployments set the process environment (ECS task definitions) and ship no
+  `.env`. `impala-bridge/.env.example` is the template; `src/config.rs` is
+  the full surface.
+- **Your shell** does not read `.env` for you. For `impalactl`, `curl`, or a
+  `cargo run` with overrides, export it first:
+  ```
+  set -a; source impala-bridge/.env; set +a
+  ```
+- **Compose** substitutes `${VAR:-default}` from your shell and from a `.env`
+  next to the compose file (`--env-file` to point elsewhere), but a value
+  reaches the container **only if the bridge service's `environment:` map
+  names it**. That map is explicit and short: `RESERVE_ACCOUNT_ID`,
+  `RESERVE_USDC_ISSUER` and the other `RESERVE_*` knobs, `KEY_IMPORT_ENABLED`,
+  `ADMIN_ACCOUNT_IDS`, `CORS_ALLOWED_ORIGINS`, and `TRUSTED_PROXY_HOPS` are
+  **not** in it today. Exporting them or writing them to `.env` changes
+  nothing inside the container; add `RESERVE_ACCOUNT_ID: ${RESERVE_ACCOUNT_ID:-}`
+  (and so on) to the `impala-bridge` service in
+  `impala-bridge/docker-compose.yml` — and read the set-but-empty gotcha
+  below first: an empty default shadows the same key in `CONFIG_FILE`, so add
+  only the variables you are actually setting. `TRUSTED_PROXY_HOPS` deserves
+  a real value here: it defaults to `1` (the ALB in front of a real
+  deployment), and a bridge exposed directly — this stack — should run with
+  `0` so a client-supplied `X-Forwarded-For` is ignored.
+
 ## Gotchas
 
 - **The default `JWT_SECRET` is a literal placeholder** shipped in the compose

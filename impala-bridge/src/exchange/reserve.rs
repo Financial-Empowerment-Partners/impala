@@ -33,6 +33,7 @@ use crate::constants::{
     EXCHANGE_DIRECTION_CRYPTO_TO_CRYPTO, EXCHANGE_DIRECTION_CRYPTO_TO_FIAT,
     EXCHANGE_PROVIDER_CHANGELLY_CRYPTO, EXCHANGE_PROVIDER_OWLPAY, EXCHANGE_PROVIDER_RESERVE,
     EXCHANGE_STATUS_AWAITING_DEPOSIT, RESERVE_CURRENCY_USD, RESERVE_CURRENCY_USDC,
+    RESERVE_CURRENCY_USDT0, RESERVE_CURRENCY_XLM, RESERVE_DEFAULT_USDT0_CODE,
     RESERVE_DEPOSIT_TTL_MAX_SECS, RESERVE_DEPOSIT_TTL_MIN_SECS,
     RESERVE_MAX_OPEN_ORDERS_PER_ACCOUNT, RESERVE_QUOTE_TTL_MAX_SECS, RESERVE_QUOTE_TTL_MIN_SECS,
     RESERVE_SCALE_STELLAR, RESERVE_SCALE_USD, RESERVE_STELLAR_USDC_TICKERS, RESERVE_TICKER_XLM,
@@ -42,6 +43,7 @@ use crate::error::AppError;
 use crate::exchange::changelly::ChangellyCrypto;
 use crate::exchange::reconcile::json_decimal_string;
 use crate::models::{CreateExchangeOrderRequest, ExchangeOrderDetail, ExchangeOrderResponse};
+use crate::stellar::Asset;
 use crate::telemetry::AppMetrics;
 
 /// Reference notional (XLM) for pricing orders below the provider's own
@@ -192,12 +194,189 @@ pub struct ConversionReserve {
     /// Stellar asset the pool pays out and recognizes as USDC deposits.
     pub usdc_code: String,
     pub usdc_issuer: String,
+    /// Optional second Stellar stablecoin (USDT0): present iff
+    /// `RESERVE_USDT0_ISSUER` passed startup validation. Absent means the
+    /// USDT0 bucket is inert — nothing classifies to it, nothing pays out
+    /// of it, no order diverts to it.
+    pub usdt0: Option<ReserveAsset>,
+    /// Lowercased exchange-provider tickers meaning "USDT0 on Stellar";
+    /// operator-verified per provider, empty by default.
+    pub usdt0_tickers: Vec<String>,
     /// Deposit window == price-validity window (seconds).
     pub deposit_ttl_secs: u64,
     /// Watcher cadence (seconds).
     pub watch_secs: u64,
     /// Price-lock window for reserved quotes (seconds).
     pub quote_ttl_secs: u64,
+}
+
+/// A Stellar stablecoin the reserve tracks, pinned to ONE `(code, issuer)`.
+///
+/// The issuer is the entire trust anchor: asset codes are not unique on
+/// Stellar (anyone can issue a "USDC" or a "USDT0"), so every match in the
+/// reserve compares both fields and never the code alone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReserveAsset {
+    /// Bucket key (`conversion_reserve.currency`), e.g. `USDT0`.
+    pub currency: &'static str,
+    pub code: String,
+    pub issuer: String,
+}
+
+impl ConversionReserve {
+    /// The configured stablecoins as `(bucket, code, issuer)` — USDC always,
+    /// USDT0 when configured. Every asset-identity decision in the reserve
+    /// (deposit classification, payout/refund asset, balances, burn guards,
+    /// trustlines) goes through this one list.
+    pub fn stablecoins(&self) -> impl Iterator<Item = (&'static str, &str, &str)> + '_ {
+        std::iter::once((
+            RESERVE_CURRENCY_USDC,
+            self.usdc_code.as_str(),
+            self.usdc_issuer.as_str(),
+        ))
+        .chain(
+            self.usdt0
+                .iter()
+                .map(|a| (a.currency, a.code.as_str(), a.issuer.as_str())),
+        )
+    }
+
+    /// `(code, issuer)` behind a stablecoin bucket key; `None` for XLM/USD
+    /// or for a stablecoin that is not configured.
+    pub fn stablecoin(&self, currency: &str) -> Option<(&str, &str)> {
+        self.stablecoins()
+            .find(|(c, _, _)| *c == currency)
+            .map(|(_, code, issuer)| (code, issuer))
+    }
+
+    /// Map an on-chain asset to a reserve bucket. `None` = not money the
+    /// reserve tracks (a foreign token, a pool share, a same-code asset from
+    /// a different issuer). The `asset_type` tag is consulted only to
+    /// recognize native XLM — `credit_alphanum4` vs `credit_alphanum12`
+    /// (USDT0 is five characters) is irrelevant to identity.
+    pub fn bucket_for_asset(
+        &self,
+        asset_type: &str,
+        code: Option<&str>,
+        issuer: Option<&str>,
+    ) -> Option<&'static str> {
+        if asset_type == "native" {
+            return Some(RESERVE_CURRENCY_XLM);
+        }
+        let (code, issuer) = (code?, issuer?);
+        self.stablecoins()
+            .find(|(_, c, i)| *c == code && *i == issuer)
+            .map(|(bucket, _, _)| bucket)
+    }
+
+    /// Same mapping for stored rows that keep no `asset_type`
+    /// (`conversion_reserve_unmatched`): a NULL code is native XLM (031).
+    pub fn bucket_for_stored_asset(
+        &self,
+        code: Option<&str>,
+        issuer: Option<&str>,
+    ) -> Option<&'static str> {
+        match code {
+            None => Some(RESERVE_CURRENCY_XLM),
+            Some(c) => self.bucket_for_asset("credit", Some(c), issuer),
+        }
+    }
+
+    /// The asset to SEND for a bucket: native for XLM, the pinned credit
+    /// asset for a configured stablecoin. `None` for USD (a bank balance —
+    /// nothing to send on-chain) and for an unconfigured stablecoin, so a
+    /// caller can never fall back to sending the wrong asset.
+    pub fn asset_for_bucket(&self, currency: &str) -> Option<Asset> {
+        if currency == RESERVE_CURRENCY_XLM {
+            return Some(Asset::Native);
+        }
+        self.stablecoin(currency)
+            .map(|(code, issuer)| Asset::Credit {
+                code: code.to_string(),
+                issuer: issuer.to_string(),
+            })
+    }
+
+    /// Every configured issuer address — the addresses a payment must never
+    /// be sent to, because paying an issued asset to its issuer burns it.
+    pub fn issuer_addresses(&self) -> Vec<&str> {
+        self.stablecoins().map(|(_, _, i)| i).collect()
+    }
+
+    pub fn is_asset_issuer(&self, address: &str) -> bool {
+        self.stablecoins().any(|(_, _, i)| i == address)
+    }
+}
+
+/// Validate the optional USDT0 configuration into a pinned asset.
+///
+/// Pure (no I/O) so the rules are unit-tested: a strkey-checksummed issuer,
+/// a 1-12 alphanumeric code, an identity distinct from USDC's, and ticker
+/// hygiene — provider tickers for USDT0 may not collide with the tickers
+/// that already mean XLM or USDC (a collision would silently divert USDC
+/// orders to the USDT0 leg), and tickers without an issuer are refused
+/// rather than ignored (a half-configured money path fails closed).
+pub(crate) fn validate_usdt0_config(
+    issuer: Option<&str>,
+    code: &str,
+    tickers: &[String],
+    usdc_code: &str,
+    usdc_issuer: &str,
+) -> Result<Option<ReserveAsset>, String> {
+    let issuer = match issuer.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(i) => i,
+        None => {
+            if !tickers.is_empty() {
+                return Err(
+                    "RESERVE_USDT0_TICKERS is set but RESERVE_USDT0_ISSUER is not; orders \
+                     would match the USDT0 leg with no asset to pay"
+                        .to_string(),
+                );
+            }
+            return Ok(None);
+        }
+    };
+    crate::validate::validate_stellar_account_id_checksum(issuer).map_err(|e| {
+        format!(
+            "RESERVE_USDT0_ISSUER is not a valid Stellar account id: {}",
+            e
+        )
+    })?;
+    if code.is_empty() || code.len() > 12 || !code.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return Err("RESERVE_USDT0_CODE must be 1-12 alphanumeric characters".to_string());
+    }
+    // Stellar asset codes are byte-compared: `usdt0` and `USDT0` from one
+    // issuer are two different assets, and a trustline to the lowercase one
+    // succeeds on-chain while every real deposit bounces at the sender. A
+    // case variant of the canonical code is never intended — refuse it.
+    if code != RESERVE_DEFAULT_USDT0_CODE && code.eq_ignore_ascii_case(RESERVE_DEFAULT_USDT0_CODE) {
+        return Err(format!(
+            "RESERVE_USDT0_CODE '{}' is a case variant of {}; asset codes are case-sensitive",
+            code, RESERVE_DEFAULT_USDT0_CODE
+        ));
+    }
+    if code == usdc_code && issuer == usdc_issuer {
+        return Err(
+            "RESERVE_USDT0_CODE/RESERVE_USDT0_ISSUER are identical to the USDC asset".to_string(),
+        );
+    }
+    for t in tickers {
+        let t = t.to_ascii_lowercase();
+        if t == RESERVE_TICKER_XLM
+            || t == "usdc"
+            || RESERVE_STELLAR_USDC_TICKERS.iter().any(|u| t == *u)
+        {
+            return Err(format!(
+                "RESERVE_USDT0_TICKERS entry '{}' already means XLM or USDC",
+                t
+            ));
+        }
+    }
+    Ok(Some(ReserveAsset {
+        currency: RESERVE_CURRENCY_USDT0,
+        code: code.to_string(),
+        issuer: issuer.to_string(),
+    }))
 }
 
 /// The configured reserve account id, independent of whether the reserve
@@ -228,6 +407,13 @@ impl ReserveAccountGuard {
     pub fn matches(&self, payala_account_id: &str) -> bool {
         self.account_id.as_deref() == Some(payala_account_id)
     }
+
+    /// True when `RESERVE_ACCOUNT_ID` is set — the reserve is at least
+    /// *armed*, whether or not a live handle exists. Lets `/health` tell
+    /// "off" from "armed but inactive" without exposing the account id.
+    pub fn is_configured(&self) -> bool {
+        self.account_id.is_some()
+    }
 }
 
 /// Build the reserve handle from config. `Ok(None)` = feature off
@@ -248,11 +434,51 @@ pub async fn init_conversion_reserve(
         .filter(|s| !s.is_empty())
         .ok_or("RESERVE_ACCOUNT_ID is set but RESERVE_USDC_ISSUER is not")?
         .to_string();
-    crate::validate::validate_stellar_account_id(&issuer)
-        .map_err(|_| "RESERVE_USDC_ISSUER is not a valid Stellar account id".to_string())?;
+    // Checksummed, not merely well-formed: a mistyped issuer is the one
+    // configuration error that makes every real deposit look foreign and
+    // every payout fail at submit, while looking valid on inspection.
+    crate::validate::validate_stellar_account_id_checksum(&issuer).map_err(|e| {
+        format!(
+            "RESERVE_USDC_ISSUER is not a valid Stellar account id: {}",
+            e
+        )
+    })?;
     let code = config.reserve_usdc_code.clone();
     if code.is_empty() || code.len() > 12 || !code.chars().all(|c| c.is_ascii_alphanumeric()) {
         return Err("RESERVE_USDC_CODE must be 1-12 alphanumeric characters".to_string());
+    }
+    if code != "USDC" && code.eq_ignore_ascii_case("USDC") {
+        return Err(format!(
+            "RESERVE_USDC_CODE '{}' is a case variant of USDC; asset codes are case-sensitive",
+            code
+        ));
+    }
+    let usdt0 = validate_usdt0_config(
+        config.reserve_usdt0_issuer.as_deref(),
+        &config.reserve_usdt0_code,
+        &config.reserve_usdt0_tickers,
+        &code,
+        &issuer,
+    )?;
+    // The bucket row is the FK target of every USDT0 journal entry. Without
+    // it (036 not applied) the first USDT0 deposit would fail to book, and
+    // the watcher would replay that failure every tick — so refuse to start
+    // rather than run a configured asset with nowhere to account for it.
+    if usdt0.is_some() {
+        let seeded: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM conversion_reserve WHERE currency = $1)",
+        )
+        .bind(RESERVE_CURRENCY_USDT0)
+        .fetch_one(pool)
+        .await
+        .map_err(|e| format!("reserve init: USDT0 bucket lookup failed: {}", e))?;
+        if !seeded {
+            return Err(
+                "RESERVE_USDT0_ISSUER is set but the USDT0 bucket does not exist — apply \
+                 migration 036 (RUN_MODE=migrate) before enabling USDT0"
+                    .to_string(),
+            );
+        }
     }
 
     // The reserve must be a managed-seed account this bridge can sign for.
@@ -294,6 +520,16 @@ pub async fn init_conversion_reserve(
             ));
         }
     };
+    // The reserve must never be its own issuer: an asset it issued is
+    // minted, not held, and every burn guard keyed on the issuer address
+    // would refuse the reserve's own payouts.
+    if issuer == stellar_address || usdt0.as_ref().is_some_and(|a| a.issuer == stellar_address) {
+        return Err(format!(
+            "reserve account {} is configured as an asset issuer; the reserve cannot issue \
+             the assets it holds",
+            stellar_address
+        ));
+    }
 
     // Initialize the deposit-scan cursor BEFORE any order can be created:
     // the watcher's first tick runs up to watch_secs after startup, and a
@@ -308,13 +544,13 @@ pub async fn init_conversion_reserve(
             .await
             .map_err(|e| format!("reserve init: cursor read failed: {}", e))?
             .flatten();
+    let http = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(
+            config.http_client_timeout_secs,
+        ))
+        .build()
+        .map_err(|e| format!("reserve init: http client: {}", e))?;
     if cursor.is_none() {
-        let http = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(
-                config.http_client_timeout_secs,
-            ))
-            .build()
-            .map_err(|e| format!("reserve init: http client: {}", e))?;
         let latest = crate::stellar::horizon::fetch_latest_cursor(
             &http,
             &config.stellar_horizon_url,
@@ -363,17 +599,56 @@ pub async fn init_conversion_reserve(
     }
     let quote_ttl_secs = quote_ttl;
 
-    Ok(Some(Arc::new(ConversionReserve {
+    let reserve = ConversionReserve {
         reserve_account_id: account_id,
         stellar_address,
         usdc_code: code,
         usdc_issuer: issuer,
+        usdt0,
+        usdt0_tickers: config.reserve_usdt0_tickers.clone(),
         deposit_ttl_secs: config
             .reserve_deposit_ttl_secs
             .clamp(RESERVE_DEPOSIT_TTL_MIN_SECS, RESERVE_DEPOSIT_TTL_MAX_SECS),
         watch_secs: config.reserve_watch_secs.max(5),
         quote_ttl_secs,
-    })))
+    };
+
+    // Trustline audit for every configured stablecoin. Deliberately not
+    // fatal: a missing trustline cannot lose money (a payment to an account
+    // without one fails at the SENDER), but it makes the bucket silently
+    // unreachable — so it is shouted here, surfaced per bucket on
+    // GET /admin/exchange-reserve, and repaired by POST .../trustlines.
+    match crate::stellar::fetch_account_details(
+        &http,
+        &config.stellar_horizon_url,
+        &reserve.stellar_address,
+    )
+    .await
+    {
+        Ok(acct) if acct.exists => {
+            for (bucket, code, issuer) in reserve.stablecoins() {
+                let trusted = acct.balances.iter().any(|b| {
+                    b.asset_code.as_deref() == Some(code)
+                        && b.asset_issuer.as_deref() == Some(issuer)
+                });
+                if !trusted {
+                    error!(
+                        "RESERVE: account {} holds NO trustline for {} ({}:{}) — it can neither \
+                         receive nor pay that asset until an admin adds one with \
+                         POST /admin/exchange-reserve/trustlines",
+                        reserve.stellar_address, bucket, code, issuer
+                    );
+                }
+            }
+        }
+        Ok(_) => log::warn!(
+            "reserve init: account {} is not funded on-chain yet; trustlines unverified",
+            reserve.stellar_address
+        ),
+        Err(_) => log::warn!("reserve init: Horizon unreachable; stablecoin trustlines unverified"),
+    }
+
+    Ok(Some(Arc::new(reserve)))
 }
 
 // ── Money conversions (the ONE string<->minor-unit boundary) ───────────
@@ -497,12 +772,48 @@ fn is_stellar_usdc_ticker(t: &str) -> bool {
         .any(|u| t.eq_ignore_ascii_case(u))
 }
 
+/// Which stablecoin bucket a provider ticker denotes on Stellar, if any:
+/// the built-in USDC tickers, or the operator-configured USDT0 tickers when
+/// USDT0 is configured. Without a reserve handle only USDC is known — the
+/// USDT0 leg can never be selected by a ticker the operator did not verify.
+pub fn stablecoin_for_ticker(reserve: Option<&ConversionReserve>, t: &str) -> Option<&'static str> {
+    if is_stellar_usdc_ticker(t) {
+        return Some(RESERVE_CURRENCY_USDC);
+    }
+    let r = reserve?;
+    let usdt0 = r.usdt0.as_ref()?;
+    r.usdt0_tickers
+        .iter()
+        .any(|u| t.eq_ignore_ascii_case(u))
+        .then_some(usdt0.currency)
+}
+
+/// A divertable order: its shape plus the Stellar stablecoin leg — the
+/// payout asset of an auto-swap, the pay-in asset of a disburse.
+#[derive(Debug, PartialEq, Clone, Copy)]
+pub struct Divert {
+    pub shape: DivertShape,
+    pub stablecoin: &'static str,
+}
+
+/// Shape-only view of [`divert_with`] with the USDC-only ticker set (the
+/// pure gate the shape tests exercise; production always passes a reserve).
+#[cfg(test)]
+pub(crate) fn divert_shape(payload: &CreateExchangeOrderRequest) -> Option<DivertShape> {
+    divert_with(payload, None).map(|d| d.shape)
+}
+
 /// Pure shape gate. Deliberately strict: anything the reserve cannot serve
 /// end-to-end passes through untouched — bare "usdc" swap targets commonly
 /// mean non-Stellar USDC on Changelly, fixed-rate orders carry a provider
 /// contract the reserve would silently discard, and an owlpay order without
 /// beneficiary/payout_instrument leaves the admin queue nothing to pay.
-pub fn divert_shape(payload: &CreateExchangeOrderRequest) -> Option<DivertShape> {
+/// `reserve` widens the recognized stablecoin tickers to the configured
+/// USDT0 set; `None` recognizes USDC only.
+pub fn divert_with(
+    payload: &CreateExchangeOrderRequest,
+    reserve: Option<&ConversionReserve>,
+) -> Option<Divert> {
     match payload.provider.as_str() {
         EXCHANGE_PROVIDER_CHANGELLY_CRYPTO => {
             if payload.direction != EXCHANGE_DIRECTION_CRYPTO_TO_CRYPTO {
@@ -514,9 +825,7 @@ pub fn divert_shape(payload: &CreateExchangeOrderRequest) -> Option<DivertShape>
             {
                 return None;
             }
-            if !is_stellar_usdc_ticker(&payload.to_currency) {
-                return None;
-            }
+            let stablecoin = stablecoin_for_ticker(reserve, &payload.to_currency)?;
             if payload.rate_type.as_deref() == Some("fixed") || payload.rate_id.is_some() {
                 return None;
             }
@@ -532,17 +841,23 @@ pub fn divert_shape(payload: &CreateExchangeOrderRequest) -> Option<DivertShape>
             {
                 return None;
             }
-            Some(DivertShape::AutoSwap)
+            Some(Divert {
+                shape: DivertShape::AutoSwap,
+                stablecoin,
+            })
         }
         EXCHANGE_PROVIDER_OWLPAY => {
             if payload.direction != EXCHANGE_DIRECTION_CRYPTO_TO_FIAT {
                 return None;
             }
-            let from_ok = is_stellar_usdc_ticker(&payload.from_currency)
-                || payload.from_currency.eq_ignore_ascii_case("usdc");
-            if !from_ok {
-                return None;
-            }
+            // OwlPay names Stellar USDC by the bare "usdc" ticker (the chain
+            // rides separately), which is why it is accepted here and not
+            // on the Changelly swap side.
+            let stablecoin = match stablecoin_for_ticker(reserve, &payload.from_currency) {
+                Some(s) => s,
+                None if payload.from_currency.eq_ignore_ascii_case("usdc") => RESERVE_CURRENCY_USDC,
+                None => return None,
+            };
             if !RESERVE_USD_TICKERS
                 .iter()
                 .any(|u| payload.to_currency.eq_ignore_ascii_case(u))
@@ -552,7 +867,10 @@ pub fn divert_shape(payload: &CreateExchangeOrderRequest) -> Option<DivertShape>
             if payload.beneficiary.is_none() && payload.payout_instrument.is_none() {
                 return None;
             }
-            Some(DivertShape::Disburse)
+            Some(Divert {
+                shape: DivertShape::Disburse,
+                stablecoin,
+            })
         }
         _ => None,
     }
@@ -611,10 +929,10 @@ pub(crate) async fn price_auto_swap(
 }
 
 /// Best-effort payout destination check: the account must exist and hold a
-/// trustline for the reserve's USDC asset, or the payment is guaranteed to
-/// fail op_no_trust AFTER the user has deposited. Indeterminate (Horizon
-/// error) reads as "not verified" — pass through, the provider validates.
-pub(crate) async fn payout_has_usdc_trustline(
+/// trustline for the payout asset, or the payment is guaranteed to fail
+/// op_no_trust AFTER the user has deposited. Indeterminate (Horizon error)
+/// reads as "not verified" — pass through, the provider validates.
+pub(crate) async fn payout_has_trustline(
     http: &reqwest::Client,
     horizon_url: &str,
     address: &str,
@@ -670,10 +988,11 @@ pub(crate) async fn try_lock_quote(
         Err(_) => return Ok(None),
     };
 
-    let shape = match divert_shape(&synthetic) {
-        Some(s) => s,
+    let divert = match divert_with(&synthetic, Some(ctx.reserve)) {
+        Some(d) => d,
         None => return Ok(None),
     };
+    let shape = divert.shape;
 
     let policy: Option<(bool, i64)> = sqlx::query_as(
         "SELECT enabled, threshold_usd_cents FROM conversion_reserve_policy WHERE provider = $1",
@@ -723,18 +1042,14 @@ pub(crate) async fn try_lock_quote(
             if stellar_minor_to_usd_cents_ceil(amount_to_minor) > threshold_usd_cents {
                 return Ok(None);
             }
-            if !payout_has_usdc_trustline(
-                ctx.http,
-                ctx.horizon_url,
-                payout_address,
-                &ctx.reserve.usdc_code,
-                &ctx.reserve.usdc_issuer,
-            )
-            .await
+            let Some((code, issuer)) = ctx.reserve.stablecoin(divert.stablecoin) else {
+                return Ok(None);
+            };
+            if !payout_has_trustline(ctx.http, ctx.horizon_url, payout_address, code, issuer).await
             {
                 return Ok(None);
             }
-            (RESERVE_CURRENCY_USDC, amount_to_minor, pricing)
+            (divert.stablecoin, amount_to_minor, pricing)
         }
         DivertShape::Disburse => {
             let usd_cents = stellar_minor_to_usd_cents_ceil(amount_from_minor);
@@ -802,10 +1117,11 @@ pub async fn try_divert_order(
             .map(Some);
     }
 
-    let shape = match divert_shape(payload) {
-        Some(s) => s,
+    let divert = match divert_with(payload, Some(ctx.reserve)) {
+        Some(d) => d,
         None => return Ok(None),
     };
+    let shape = divert.shape;
 
     // Runtime policy (admin-editable): enabled + threshold for THIS provider.
     let policy: Option<(bool, i64)> = sqlx::query_as(
@@ -862,20 +1178,17 @@ pub async fn try_divert_order(
             if stellar_minor_to_usd_cents_ceil(amount_to_minor) > threshold_usd_cents {
                 return Ok(None); // ordinary big order — not a fallback
             }
-            if !payout_has_usdc_trustline(
-                ctx.http,
-                ctx.horizon_url,
-                payout_address,
-                &ctx.reserve.usdc_code,
-                &ctx.reserve.usdc_issuer,
-            )
-            .await
+            let Some((code, issuer)) = ctx.reserve.stablecoin(divert.stablecoin) else {
+                ctx.metrics.record_reserve_fallback("payout_untrusted");
+                return Ok(None);
+            };
+            if !payout_has_trustline(ctx.http, ctx.horizon_url, payout_address, code, issuer).await
             {
                 ctx.metrics.record_reserve_fallback("payout_untrusted");
                 return Ok(None);
             }
             (
-                RESERVE_CURRENCY_USDC,
+                divert.stablecoin,
                 amount_to_minor,
                 minor_to_decimal_string(amount_to_minor, RESERVE_SCALE_STELLAR),
                 pricing,
@@ -899,6 +1212,7 @@ pub async fn try_divert_order(
     // per account so the open-order cap cannot race itself.
     let order_id = Uuid::new_v4();
     let order_ref = base32_order_ref(&order_id);
+    let deposit_currency = deposit_currency_for(&divert);
     match run_creation_tx(
         ctx,
         payload,
@@ -909,6 +1223,7 @@ pub async fn try_divert_order(
         hold_minor,
         &amount_to_string,
         pricing,
+        deposit_currency,
     )
     .await?
     {
@@ -968,6 +1283,30 @@ enum CreationOutcome {
     Insufficient,
 }
 
+/// The bucket an auto-swap order pays out of, from the `hold_currency` its
+/// provider_payload recorded at creation. Only bucket keys the reserve
+/// defines are honored — an unknown value falls back to USDC rather than
+/// being trusted as a bucket name (pre-036 rows always carried
+/// `hold_currency`, so the fallback only covers a malformed payload).
+/// Shared by the watcher's payout driver and the admin resolve path so the
+/// two can never disagree about which bucket a payout settles from.
+pub fn payout_bucket_for_hold_currency(hold_currency: Option<&str>) -> &'static str {
+    match hold_currency {
+        Some(c) if c == RESERVE_CURRENCY_USDT0 => RESERVE_CURRENCY_USDT0,
+        _ => RESERVE_CURRENCY_USDC,
+    }
+}
+
+/// The bucket an order's pay-in must arrive in: native XLM for an auto-swap,
+/// the stablecoin leg for a disburse. Persisted on the order so the deposit
+/// watcher matches against what was agreed, not against current config.
+pub(crate) fn deposit_currency_for(divert: &Divert) -> &'static str {
+    match divert.shape {
+        DivertShape::AutoSwap => RESERVE_CURRENCY_XLM,
+        DivertShape::Disburse => divert.stablecoin,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_creation_tx(
     ctx: &DivertContext<'_>,
@@ -979,6 +1318,7 @@ async fn run_creation_tx(
     hold_minor: i64,
     amount_to_string: &str,
     pricing: &'static str,
+    deposit_currency: &'static str,
 ) -> Result<CreationOutcome, AppError> {
     let db_err = |context: &'static str| {
         move |e: sqlx::Error| {
@@ -1023,6 +1363,7 @@ async fn run_creation_tx(
         "pricing": pricing,
         "hold_currency": hold_currency,
         "hold_minor": hold_minor,
+        "deposit_currency": deposit_currency,
         "shape": match shape {
             DivertShape::AutoSwap => "auto_swap",
             DivertShape::Disburse => "disburse",
@@ -1394,5 +1735,292 @@ mod tests {
                 col
             );
         }
+    }
+
+    // ── USDT0: pinned second stablecoin ─────────────────────────────────
+
+    const USDT0_ISSUER: &str = "GATISXX6BZ6NC7IKQBY37CJD4SOZL3CYZJWXEDG6JVIY4WBS6KXJHN6Q";
+    const USDC_ISSUER: &str = "GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN7";
+
+    fn test_reserve(usdt0: bool) -> ConversionReserve {
+        ConversionReserve {
+            reserve_account_id: "svc-reserve".to_string(),
+            stellar_address: "GRESERVE".to_string(),
+            usdc_code: "USDC".to_string(),
+            usdc_issuer: USDC_ISSUER.to_string(),
+            usdt0: usdt0.then(|| ReserveAsset {
+                currency: RESERVE_CURRENCY_USDT0,
+                code: "USDT0".to_string(),
+                issuer: USDT0_ISSUER.to_string(),
+            }),
+            usdt0_tickers: if usdt0 {
+                vec!["usdt0xlm".to_string()]
+            } else {
+                vec![]
+            },
+            deposit_ttl_secs: 1800,
+            watch_secs: 30,
+            quote_ttl_secs: 300,
+        }
+    }
+
+    #[test]
+    fn usdt0_config_is_off_when_unset() {
+        assert_eq!(
+            validate_usdt0_config(None, "USDT0", &[], "USDC", USDC_ISSUER),
+            Ok(None)
+        );
+        // Whitespace-only counts as unset.
+        assert_eq!(
+            validate_usdt0_config(Some("  "), "USDT0", &[], "USDC", USDC_ISSUER),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    fn usdt0_config_pins_a_checksummed_issuer() {
+        let a = validate_usdt0_config(Some(USDT0_ISSUER), "USDT0", &[], "USDC", USDC_ISSUER)
+            .unwrap()
+            .unwrap();
+        assert_eq!(a.currency, RESERVE_CURRENCY_USDT0);
+        assert_eq!(a.code, "USDT0");
+        assert_eq!(a.issuer, USDT0_ISSUER);
+        // A single mistyped character is refused (structurally valid but not
+        // an address) — the failure that would otherwise make every real
+        // deposit look foreign.
+        let typo = format!("{}A", &USDT0_ISSUER[..55]);
+        assert!(validate_usdt0_config(Some(&typo), "USDT0", &[], "USDC", USDC_ISSUER).is_err());
+    }
+
+    #[test]
+    fn usdt0_config_rejects_bad_codes_and_usdc_collision() {
+        assert!(validate_usdt0_config(Some(USDT0_ISSUER), "", &[], "USDC", USDC_ISSUER).is_err());
+        assert!(validate_usdt0_config(
+            Some(USDT0_ISSUER),
+            "TOO-LONG-CODE!",
+            &[],
+            "USDC",
+            USDC_ISSUER
+        )
+        .is_err());
+        // Same (code, issuer) as USDC is a copy-paste error, not a second asset.
+        assert!(
+            validate_usdt0_config(Some(USDC_ISSUER), "USDC", &[], "USDC", USDC_ISSUER).is_err()
+        );
+        // Same issuer with a different code is legal Stellar and allowed.
+        assert!(
+            validate_usdt0_config(Some(USDC_ISSUER), "USDT0", &[], "USDC", USDC_ISSUER).is_ok()
+        );
+    }
+
+    #[test]
+    fn usdt0_tickers_cannot_shadow_xlm_or_usdc_and_need_an_issuer() {
+        for bad in ["xlm", "USDCXLM", "usdc"] {
+            assert!(validate_usdt0_config(
+                Some(USDT0_ISSUER),
+                "USDT0",
+                &[bad.to_string()],
+                "USDC",
+                USDC_ISSUER
+            )
+            .is_err());
+        }
+        assert!(validate_usdt0_config(
+            Some(USDT0_ISSUER),
+            "USDT0",
+            &["usdt0xlm".to_string()],
+            "USDC",
+            USDC_ISSUER
+        )
+        .is_ok());
+        // Tickers with no asset behind them fail closed.
+        assert!(validate_usdt0_config(
+            None,
+            "USDT0",
+            &["usdt0xlm".to_string()],
+            "USDC",
+            USDC_ISSUER
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn bucket_for_asset_pins_code_and_issuer() {
+        let r = test_reserve(true);
+        assert_eq!(
+            r.bucket_for_asset("native", None, None),
+            Some(RESERVE_CURRENCY_XLM)
+        );
+        assert_eq!(
+            r.bucket_for_asset("credit_alphanum4", Some("USDC"), Some(USDC_ISSUER)),
+            Some(RESERVE_CURRENCY_USDC)
+        );
+        assert_eq!(
+            r.bucket_for_asset("credit_alphanum12", Some("USDT0"), Some(USDT0_ISSUER)),
+            Some(RESERVE_CURRENCY_USDT0)
+        );
+        // The type tag never decides identity (alphanum4 vs alphanum12).
+        assert_eq!(
+            r.bucket_for_asset("credit_alphanum4", Some("USDT0"), Some(USDT0_ISSUER)),
+            Some(RESERVE_CURRENCY_USDT0)
+        );
+        // Right code, wrong issuer: foreign. Both directions.
+        assert_eq!(
+            r.bucket_for_asset("credit_alphanum12", Some("USDT0"), Some(USDC_ISSUER)),
+            None
+        );
+        assert_eq!(
+            r.bucket_for_asset("credit_alphanum4", Some("USDC"), Some(USDT0_ISSUER)),
+            None
+        );
+        // Missing identity on a non-native asset (e.g. a pool share): foreign.
+        assert_eq!(
+            r.bucket_for_asset("liquidity_pool_shares", None, None),
+            None
+        );
+        // Unconfigured USDT0 is foreign even from the real issuer.
+        let off = test_reserve(false);
+        assert_eq!(
+            off.bucket_for_asset("credit_alphanum12", Some("USDT0"), Some(USDT0_ISSUER)),
+            None
+        );
+        // Stored rows: NULL code is native.
+        assert_eq!(
+            r.bucket_for_stored_asset(None, None),
+            Some(RESERVE_CURRENCY_XLM)
+        );
+        assert_eq!(
+            r.bucket_for_stored_asset(Some("USDT0"), Some(USDT0_ISSUER)),
+            Some(RESERVE_CURRENCY_USDT0)
+        );
+        assert_eq!(r.bucket_for_stored_asset(Some("USDT0"), None), None);
+    }
+
+    #[test]
+    fn asset_for_bucket_never_substitutes_an_asset() {
+        let r = test_reserve(true);
+        assert_eq!(r.asset_for_bucket("XLM"), Some(Asset::Native));
+        assert!(matches!(
+            r.asset_for_bucket("USDT0"),
+            Some(Asset::Credit { ref code, ref issuer }) if code == "USDT0" && issuer == USDT0_ISSUER
+        ));
+        assert!(matches!(
+            r.asset_for_bucket("USDC"),
+            Some(Asset::Credit { ref code, ref issuer }) if code == "USDC" && issuer == USDC_ISSUER
+        ));
+        // USD is a bank balance; an unconfigured USDT0 has nothing to send.
+        assert!(r.asset_for_bucket("USD").is_none());
+        assert!(test_reserve(false).asset_for_bucket("USDT0").is_none());
+        assert!(r.asset_for_bucket("EURC").is_none());
+    }
+
+    #[test]
+    fn issuer_burn_guard_covers_every_configured_issuer() {
+        let r = test_reserve(true);
+        assert!(r.is_asset_issuer(USDC_ISSUER));
+        assert!(r.is_asset_issuer(USDT0_ISSUER));
+        assert!(!r.is_asset_issuer("GRESERVE"));
+        assert_eq!(r.issuer_addresses(), vec![USDC_ISSUER, USDT0_ISSUER]);
+        assert!(!test_reserve(false).is_asset_issuer(USDT0_ISSUER));
+    }
+
+    #[test]
+    fn stablecoin_tickers_are_operator_gated() {
+        let on = test_reserve(true);
+        let off = test_reserve(false);
+        assert_eq!(
+            stablecoin_for_ticker(None, "usdcxlm"),
+            Some(RESERVE_CURRENCY_USDC)
+        );
+        assert_eq!(
+            stablecoin_for_ticker(Some(&on), "USDCXLM"),
+            Some(RESERVE_CURRENCY_USDC)
+        );
+        // The USDT0 ticker is recognized only with a reserve that configured
+        // it — never bare, never when USDT0 is off.
+        assert_eq!(
+            stablecoin_for_ticker(Some(&on), "usdt0xlm"),
+            Some(RESERVE_CURRENCY_USDT0)
+        );
+        assert_eq!(
+            stablecoin_for_ticker(Some(&on), "USDT0XLM"),
+            Some(RESERVE_CURRENCY_USDT0)
+        );
+        assert_eq!(stablecoin_for_ticker(None, "usdt0xlm"), None);
+        assert_eq!(stablecoin_for_ticker(Some(&off), "usdt0xlm"), None);
+        assert_eq!(stablecoin_for_ticker(Some(&on), "usdt"), None);
+    }
+
+    #[test]
+    fn payout_bucket_follows_hold_currency_and_never_trusts_unknown_keys() {
+        assert_eq!(
+            payout_bucket_for_hold_currency(Some("USDT0")),
+            RESERVE_CURRENCY_USDT0
+        );
+        assert_eq!(
+            payout_bucket_for_hold_currency(Some("USDC")),
+            RESERVE_CURRENCY_USDC
+        );
+        assert_eq!(payout_bucket_for_hold_currency(None), RESERVE_CURRENCY_USDC);
+        assert_eq!(
+            payout_bucket_for_hold_currency(Some("EURC")),
+            RESERVE_CURRENCY_USDC
+        );
+        assert_eq!(
+            payout_bucket_for_hold_currency(Some("usdt0")),
+            RESERVE_CURRENCY_USDC
+        );
+    }
+
+    #[test]
+    fn auto_swap_diverts_to_the_usdt0_leg_only_when_configured() {
+        let mut p = order_request();
+        p.to_currency = "usdt0xlm".to_string();
+        // Shape-only gate (USDC tickers): not divertable.
+        assert_eq!(divert_shape(&p), None);
+        assert_eq!(divert_with(&p, Some(&test_reserve(false))), None);
+        let d = divert_with(&p, Some(&test_reserve(true))).unwrap();
+        assert_eq!(d.shape, DivertShape::AutoSwap);
+        assert_eq!(d.stablecoin, RESERVE_CURRENCY_USDT0);
+        assert_eq!(deposit_currency_for(&d), RESERVE_CURRENCY_XLM);
+        // USDC orders are untouched by USDT0 being on.
+        let usdc = divert_with(&order_request(), Some(&test_reserve(true))).unwrap();
+        assert_eq!(usdc.stablecoin, RESERVE_CURRENCY_USDC);
+    }
+
+    #[test]
+    fn disburse_records_the_stablecoin_it_expects() {
+        let mut p = order_request();
+        p.provider = "owlpay".to_string();
+        p.direction = "crypto_to_fiat".to_string();
+        p.from_currency = "usdt0xlm".to_string();
+        p.to_currency = "usd".to_string();
+        p.beneficiary = Some(json!({"name": "A"}));
+        assert_eq!(divert_shape(&p), None);
+        let d = divert_with(&p, Some(&test_reserve(true))).unwrap();
+        assert_eq!(d.shape, DivertShape::Disburse);
+        assert_eq!(d.stablecoin, RESERVE_CURRENCY_USDT0);
+        assert_eq!(deposit_currency_for(&d), RESERVE_CURRENCY_USDT0);
+        // Bare "usdc" still means Stellar USDC for owlpay, with USDT0 on.
+        p.from_currency = "usdc".to_string();
+        let d = divert_with(&p, Some(&test_reserve(true))).unwrap();
+        assert_eq!(d.stablecoin, RESERVE_CURRENCY_USDC);
+        assert_eq!(deposit_currency_for(&d), RESERVE_CURRENCY_USDC);
+    }
+
+    #[test]
+    fn usdt0_code_case_variants_are_refused() {
+        // A case variant of the canonical code is a typo, not an asset: the
+        // trustline would succeed on-chain while real deposits bounce.
+        for typo in ["usdt0", "Usdt0", "USDt0"] {
+            assert!(
+                validate_usdt0_config(Some(USDT0_ISSUER), typo, &[], "USDC", USDC_ISSUER).is_err(),
+                "{typo} must be refused"
+            );
+        }
+        // A genuinely different code (e.g. a testnet test asset) is fine.
+        assert!(
+            validate_usdt0_config(Some(USDT0_ISSUER), "TUSDT", &[], "USDC", USDC_ISSUER).is_ok()
+        );
     }
 }

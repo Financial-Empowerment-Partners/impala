@@ -4,8 +4,10 @@ use log::{debug, error, info, warn};
 use sqlx::PgPool;
 use std::sync::Arc;
 
+use crate::client_source::ClientSource;
 use crate::constants::{
-    LOCKOUT_DURATION_SECS, LOCKOUT_THRESHOLD, RATE_LIMIT_MAX_REQUESTS, RATE_LIMIT_WINDOW_SECS,
+    LOCKOUT_DURATION_SECS, LOCKOUT_THRESHOLD, PREAUTH_SOURCE_MAX_REQUESTS,
+    PREAUTH_SOURCE_WINDOW_SECS, RATE_LIMIT_MAX_REQUESTS, RATE_LIMIT_WINDOW_SECS,
     REFRESH_TOKEN_TTL_SECS, TOKEN_TYPE_REFRESH,
 };
 use crate::error::AppError;
@@ -13,20 +15,48 @@ use crate::jwt::JwtKeys;
 use crate::models::{TokenRequest, TokenResponse};
 use crate::telemetry::AppMetrics;
 
+/// Why a local credential check was refused.
+///
+/// Internal only: every variant produces the **same** wire response and the
+/// same argon2 cost, so nothing here is observable to a caller. The
+/// distinction exists for exactly one decision — whether the attempt counts
+/// toward the `(identity, source)` lockout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CredentialFailure {
+    /// No local password exists for this username: the account is unknown or
+    /// belongs to a federated provider. Nothing was guessed against, so this
+    /// must not count — counting it let anyone pre-lock an identity that had
+    /// not been provisioned yet (a not-yet-created SSO operator), or lock a
+    /// federated account's SSO path with passwords it does not have.
+    NoLocalCredential,
+    /// A stored local password was checked and did not match: a real guess.
+    WrongPassword,
+}
+
+impl CredentialFailure {
+    /// Only a real guess against a stored password spends the lockout budget.
+    pub(crate) fn counts_toward_lockout(self) -> bool {
+        matches!(self, CredentialFailure::WrongPassword)
+    }
+}
+
 /// Verify a local username/password credential pair against `impala_auth`.
 ///
 /// Shared by `POST /token` (flow 2) and `POST /session/login` so the two
 /// login paths cannot diverge. Outcomes:
-/// - `Ok(())` — credentials valid for a `local`-provider account
-/// - `Err(Unauthorized)` — unknown account or wrong password
-/// - `Err(BadRequest)` — account exists but belongs to a federated provider
-///   (the legacy derived-password path is one-way disabled, see SECURITY.md)
-/// - `Err(InternalError)` — infrastructure failure
+/// - `Ok(Ok(()))` — credentials valid for a `local`-provider account
+/// - `Ok(Err(CredentialFailure))` — refused; the reason is for the caller's
+///   lockout accounting only and must never change the response
+/// - `Err(InternalError | Retryable)` — infrastructure failure / load shed
+///
+/// A federated account is refused like an unknown one (the legacy
+/// derived-password path is one-way disabled, see SECURITY.md), at the same
+/// argon2 cost, so neither existence nor provider is observable.
 pub(crate) async fn verify_local_credentials(
     pool: &PgPool,
     username: &str,
     password: &str,
-) -> Result<(), AppError> {
+) -> Result<Result<(), CredentialFailure>, AppError> {
     let stored = sqlx::query_as::<_, (String, String)>(
         "SELECT password_hash, auth_provider FROM impala_auth WHERE account_id = $1",
     )
@@ -43,21 +73,25 @@ pub(crate) async fn verify_local_credentials(
         None => {
             // Equalize timing with the verification path below so a missing
             // account is indistinguishable from a wrong password.
-            crate::password::dummy_verify().await;
+            crate::password::dummy_verify().await?;
             warn!(
                 "verify_local_credentials: no credentials found for username={}",
                 username
             );
-            return Err(AppError::Unauthorized);
+            return Ok(Err(CredentialFailure::NoLocalCredential));
         }
     };
 
     if auth_provider != crate::constants::AUTH_PROVIDER_LOCAL {
+        // Same cost and same generic outcome as a wrong password: a distinct
+        // (and cheaper) reply here told a caller which usernames are
+        // federated accounts.
+        crate::password::dummy_verify().await?;
         warn!(
             "verify_local_credentials: external auth user {} attempted password login",
             username
         );
-        return Err(AppError::BadRequest("Invalid credentials".to_string()));
+        return Ok(Err(CredentialFailure::NoLocalCredential));
     }
 
     if !crate::password::verify_password_async(password.to_string(), stored_hash).await? {
@@ -65,10 +99,10 @@ pub(crate) async fn verify_local_credentials(
             "verify_local_credentials: invalid password for username={}",
             username
         );
-        return Err(AppError::Unauthorized);
+        return Ok(Err(CredentialFailure::WrongPassword));
     }
 
-    Ok(())
+    Ok(Ok(()))
 }
 
 /// Issue JWT tokens (`POST /token`).
@@ -83,6 +117,7 @@ pub async fn token(
     Extension(redis_pool): Extension<Arc<deadpool_redis::Pool>>,
     Extension(admin_ids): Extension<Arc<std::collections::HashSet<String>>>,
     Extension(metrics): Extension<Arc<AppMetrics>>,
+    ClientSource(source): ClientSource,
     Json(payload): Json<TokenRequest>,
 ) -> Result<Json<TokenResponse>, AppError> {
     debug!("POST /token: request received");
@@ -177,6 +212,18 @@ pub async fn token(
         }));
     }
 
+    // Per-source budget first (password flow only — refresh rotation above
+    // is bounded by the token it presents): bounds how many usernames one
+    // source can touch, before that source spends any per-identity budget.
+    crate::redis_helpers::check_rate_limit(
+        &redis_pool,
+        "preauth_src",
+        &source,
+        PREAUTH_SOURCE_MAX_REQUESTS,
+        PREAUTH_SOURCE_WINDOW_SECS,
+    )
+    .await?;
+
     // Rate limiting check
     crate::redis_helpers::check_rate_limit(
         &redis_pool,
@@ -191,18 +238,29 @@ pub async fn token(
     // `POST /session/login` enforce. Without it this password flow was an
     // unthrottled password-guessing oracle against the identical credential
     // store (the per-minute rate limit alone allows sustained guessing).
-    crate::redis_helpers::check_lockout(&redis_pool, username, LOCKOUT_THRESHOLD).await?;
+    // Keyed on (username, source): a guesser locks the name only for itself.
+    crate::redis_helpers::check_lockout(&redis_pool, username, &source, LOCKOUT_THRESHOLD).await?;
 
-    match verify_local_credentials(&pool, username, password).await {
+    match verify_local_credentials(&pool, username, password).await? {
         Ok(()) => {
-            crate::redis_helpers::clear_lockout(&redis_pool, username).await;
+            crate::redis_helpers::clear_lockout(&redis_pool, username, &source).await;
         }
         // Preserve the wire contract: invalid credentials are a 200 with
-        // success=false (matching the historical behavior of this endpoint),
-        // while the federated-account rejection stays a 400.
-        Err(AppError::Unauthorized) => {
-            crate::redis_helpers::increment_lockout(&redis_pool, username, LOCKOUT_DURATION_SECS)
+        // success=false (matching the historical behavior of this endpoint).
+        // A federated or unknown account gets the byte-identical reply — it
+        // used to be a 400, an enumeration oracle for SSO-provisioned
+        // usernames — but only a wrong password against a stored one counts
+        // toward lockout.
+        Err(failure) => {
+            if failure.counts_toward_lockout() {
+                crate::redis_helpers::increment_lockout(
+                    &redis_pool,
+                    username,
+                    &source,
+                    LOCKOUT_DURATION_SECS,
+                )
                 .await;
+            }
             return Ok(Json(TokenResponse {
                 success: false,
                 message: "Invalid credentials".to_string(),
@@ -210,7 +268,6 @@ pub async fn token(
                 temporal_token: None,
             }));
         }
-        Err(e) => return Err(e),
     }
 
     // Embed the account's server-side role in the token (defaults to
@@ -229,4 +286,41 @@ pub async fn token(
         refresh_token: Some(refresh_token),
         temporal_token: Some(temporal_token),
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The one decision the failure reason exists for: only a real guess
+    /// against a stored password spends the lockout budget. An unknown or
+    /// federated username must never count, or anyone can pre-lock an
+    /// identity that has not been provisioned yet.
+    #[test]
+    fn only_a_wrong_password_counts_toward_lockout() {
+        assert!(CredentialFailure::WrongPassword.counts_toward_lockout());
+        assert!(!CredentialFailure::NoLocalCredential.counts_toward_lockout());
+    }
+
+    /// Both login paths must keep reacting to the shared verifier's outcome
+    /// the same way; pin the source so a future edit that counts
+    /// `NoLocalCredential` (or stops gating on the reason) is caught.
+    #[test]
+    fn login_paths_gate_lockout_on_the_failure_reason() {
+        // Assembled at runtime so this test's own text does not match itself.
+        let bare_unauthorized_arm = ["Err(AppError::", "Unauthorized) =>"].concat();
+        for (name, src) in [
+            ("token.rs", include_str!("token.rs")),
+            ("session.rs", include_str!("session.rs")),
+        ] {
+            assert!(
+                src.contains("failure.counts_toward_lockout()"),
+                "{name} must increment the lockout only for a counted failure"
+            );
+            assert!(
+                !src.contains(&bare_unauthorized_arm),
+                "{name} must match the verifier's CredentialFailure, not a bare Unauthorized"
+            );
+        }
+    }
 }

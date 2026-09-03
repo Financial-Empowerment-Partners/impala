@@ -1,6 +1,8 @@
 # =============================================================================
 # CI for impala-ui (vanilla JS admin dashboard, served by Nginx).
-# Runs the Vitest unit suite over the pure JS modules. No build step.
+# Runs eslint over html/js and the Vitest unit suite over the pure JS
+# modules. No build step. (Replaces the legacy ci-ui.yml, which carried the
+# lint step but no permissions block and unpinned actions.)
 # =============================================================================
 name: impala-ui
 
@@ -45,6 +47,11 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+
+      # eslint covers html/js only (tests/ are ESM and deliberately unlinted —
+      # see CLAUDE.md); a lint failure blocks the PR like a test failure.
+      - name: Lint (eslint)
+        run: npm run lint
 
       - name: Run unit tests
         run: npm test

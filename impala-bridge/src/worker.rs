@@ -30,6 +30,9 @@ pub struct WorkerContext {
     pub horizon_url: String,
     pub ses_client: Option<aws_sdk_sesv2::Client>,
     pub fcm_project_id: Option<String>,
+    /// FCM service-account auth, resolved once at startup from
+    /// `FCM_SERVICE_ACCOUNT_KEY` (see `crate::fcm`).
+    pub fcm_auth: crate::fcm::FcmAuthState,
     pub metrics: Arc<AppMetrics>,
 }
 
@@ -69,6 +72,29 @@ impl std::fmt::Display for JobError {
     }
 }
 
+/// Runs its release closure exactly once, when dropped.
+///
+/// Holds the `jobs_active` decrement for a dispatched job so the gauge comes
+/// back down on every exit path — normal completion, a panic unwinding out
+/// of a job handler, or the visibility-timeout wrapper dropping the future
+/// mid-flight. Pairing the increment with an explicit decrement only on the
+/// success path leaked +1 forever on each of the others.
+struct ActiveJobGuard<F: FnOnce()>(Option<F>);
+
+impl<F: FnOnce()> ActiveJobGuard<F> {
+    fn new(release: F) -> Self {
+        Self(Some(release))
+    }
+}
+
+impl<F: FnOnce()> Drop for ActiveJobGuard<F> {
+    fn drop(&mut self) {
+        if let Some(release) = self.0.take() {
+            release();
+        }
+    }
+}
+
 /// Main worker entry point. Polls SQS in a loop with graceful shutdown.
 pub async fn run(
     pool: PgPool,
@@ -96,13 +122,23 @@ pub async fn run(
 
     let fcm_project_id = config.fcm_project_id.clone();
 
+    let http_client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(DEFAULT_HTTP_CLIENT_TIMEOUT_SECS))
+        .build()
+        .expect("Failed to create HTTP client");
+
+    // FCM service-account auth: loaded once. A missing or unreadable key is
+    // logged ONCE here and every push job then fails permanently with a
+    // clear message instead of retrying its way into the DLQ.
+    let fcm_auth = crate::fcm::FcmAuthState::load(
+        config.fcm_service_account_key.as_deref(),
+        http_client.clone(),
+    );
+
     let ctx = Arc::new(WorkerContext {
         pool,
         redis_pool,
-        http_client: reqwest::Client::builder()
-            .timeout(Duration::from_secs(DEFAULT_HTTP_CLIENT_TIMEOUT_SECS))
-            .build()
-            .expect("Failed to create HTTP client"),
+        http_client,
         webhook_client: crate::ssrf::guarded_client(DEFAULT_HTTP_CLIENT_TIMEOUT_SECS)
             .expect("Failed to create guarded webhook client"),
         config: config.clone(),
@@ -110,6 +146,7 @@ pub async fn run(
         horizon_url,
         ses_client,
         fcm_project_id,
+        fcm_auth,
         metrics,
     });
     let sqs_client = SqsClient::new(&aws_config);
@@ -257,6 +294,13 @@ async fn process_message(
     ctx.metrics
         .jobs_active
         .add(1, std::slice::from_ref(&job_type_attr));
+    // Decremented when this guard drops — on return, panic, or cancellation
+    // by the visibility-timeout wrapper — never by hand on one path.
+    let _active = ActiveJobGuard::new({
+        let metrics = ctx.metrics.clone();
+        let attr = job_type_attr.clone();
+        move || metrics.jobs_active.add(-1, &[attr])
+    });
     let start = std::time::Instant::now();
 
     let result = match job.job_type.as_str() {
@@ -268,15 +312,11 @@ async fn process_message(
                 "worker: unknown job_type '{}' in message {}",
                 unknown, message_id
             );
-            ctx.metrics.jobs_active.add(-1, &[job_type_attr]);
             return;
         }
     };
 
     let duration = start.elapsed().as_secs_f64();
-    ctx.metrics
-        .jobs_active
-        .add(-1, std::slice::from_ref(&job_type_attr));
     ctx.metrics
         .job_duration
         .record(duration, std::slice::from_ref(&job_type_attr));
@@ -333,6 +373,53 @@ async fn shutdown_signal() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicI64, Ordering};
+
+    /// The gauge must come back down when a job handler panics: the guard's
+    /// release runs during unwinding, exactly once.
+    #[test]
+    fn active_job_guard_releases_on_panic() {
+        let gauge = Arc::new(AtomicI64::new(1));
+        let g = gauge.clone();
+        let outcome = std::panic::catch_unwind(move || {
+            let _guard = ActiveJobGuard::new(move || {
+                g.fetch_sub(1, Ordering::SeqCst);
+            });
+            panic!("job handler panicked");
+        });
+        assert!(outcome.is_err());
+        assert_eq!(gauge.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn active_job_guard_releases_exactly_once_on_normal_drop() {
+        let gauge = Arc::new(AtomicI64::new(1));
+        let g = gauge.clone();
+        {
+            let _guard = ActiveJobGuard::new(move || {
+                g.fetch_sub(1, Ordering::SeqCst);
+            });
+        }
+        assert_eq!(gauge.load(Ordering::SeqCst), 0);
+    }
+
+    /// The visibility-timeout path: `tokio::time::timeout` drops the job
+    /// future mid-flight, and the gauge must still come back down.
+    #[tokio::test]
+    async fn active_job_guard_releases_when_the_future_is_dropped() {
+        let gauge = Arc::new(AtomicI64::new(1));
+        let g = gauge.clone();
+        let job = async move {
+            let _guard = ActiveJobGuard::new(move || {
+                g.fetch_sub(1, Ordering::SeqCst);
+            });
+            std::future::pending::<()>().await;
+        };
+        assert!(tokio::time::timeout(Duration::from_millis(10), job)
+            .await
+            .is_err());
+        assert_eq!(gauge.load(Ordering::SeqCst), 0);
+    }
 
     #[test]
     fn test_job_message_deserialize() {

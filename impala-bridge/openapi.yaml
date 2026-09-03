@@ -92,6 +92,23 @@ tags:
     description: >
       Outbound webhook registration (admin-only) and the admin event feed
       (readable with the ReadEvents capability: admin or auditor).
+
+
+      Delivery semantics are **at-least-once**. Every delivery is a signed
+      POST (`X-Impala-Signature` over `X-Impala-Timestamp` and the raw body);
+      a 2xx response marks it delivered, anything else is retried with
+      exponential backoff (2, 4, 8 … minutes, capped at an hour) until
+      `ADMIN_WEBHOOK_MAX_ATTEMPTS`. A receiver can be POSTed the same event
+      more than once — a response lost in transit, or a worker whose
+      delivery lease lapsed under a slow receiver — so receivers MUST
+      deduplicate on the `X-Impala-Event-Id` header (also `event_id` in the
+      body), which is stable across every retry of an event. Ordering is
+      best-effort: deliveries to one webhook are sequential and in event-id
+      order within a delivery pass, but a retried event can arrive after a
+      newer one. A receiver that answers 429 or 503 is left alone until the
+      next pass. Events older than 90 days and terminal delivery records
+      older than 30 days are pruned; `GET /admin/events` only ever serves
+      what is retained.
   - name: exchange
     description: >
       Fiat<->USDC on/off-ramp (OwlPay Harbor, Changelly Fiat) and crypto->USDC
@@ -175,7 +192,10 @@ paths:
         supplied password (Argon2 hashed). If credentials exist, verifies the
         password. Returns a generic "Invalid credentials" for both missing
         accounts and wrong passwords (account-enumeration defense). Rate
-        limited; lockout after 5 failed attempts.
+        limited per account id (10/60 s) and per client source (30/60 s,
+        shared across all pre-auth endpoints); lockout after 5 wrong
+        passwords per (account, client source) for 15 minutes — unknown
+        accounts never count toward it.
       security: []
       requestBody:
         required: true
@@ -201,7 +221,11 @@ paths:
         Two flows. If `refresh_token` is supplied, returns a new refresh +
         temporal pair and revokes the presented refresh token. Otherwise the
         request must include `username`+`password` and returns only a refresh
-        token.
+        token. The password flow is rate limited per username (10/60 s) and
+        per client source (30/60 s, shared across all pre-auth endpoints;
+        refresh rotation is exempt), with a lockout after 5 wrong passwords
+        per (username, client source) for 15 minutes — unknown or federated
+        usernames get the same reply but never count toward it.
       security: []
       requestBody:
         required: true
@@ -262,9 +286,11 @@ paths:
       summary: Establish a browser cookie session from local credentials.
       description: |
         Same credential check and rate-limit/lockout regime as `POST /token`
-        (password flow). On success sets an HttpOnly session cookie and returns
-        a CSRF synchronizer token to send as `X-CSRF-Token` on later
-        unsafe-method cookie requests.
+        (password flow): per username (10/60 s), per client source (30/60 s,
+        shared across all pre-auth endpoints), lockout after 5 wrong passwords
+        per (username, client source). On success sets an HttpOnly session
+        cookie and returns a CSRF synchronizer token to send as `X-CSRF-Token`
+        on later unsafe-method cookie requests.
       security: []
       requestBody:
         required: true
@@ -414,8 +440,11 @@ paths:
       description: |
         Returns a random 32-byte challenge (hex) the card signs. Issued
         unconditionally (no card lookup) so the response never reveals whether a
-        card is registered. Stored in Redis with a 60 s TTL, consumed by
-        `POST /auth/card`.
+        card is registered. Joins the card's set of outstanding challenges (up
+        to 5 live at once, each with a 60 s TTL, oldest evicted) so a stranger
+        who knows the public card UID cannot overwrite the holder's challenge;
+        consumed by `POST /auth/card`. Rate limited per card id (10/60 s) and
+        per client source (30/60 s, shared across all pre-auth endpoints).
       security: []
       requestBody:
         required: true
@@ -436,10 +465,15 @@ paths:
       tags: [auth]
       summary: Exchange a card signature for bridge tokens.
       description: |
-        Consumes the outstanding challenge (single-use) and verifies the
-        ECDSA-SHA256 signature against the registered card's EC public key. All
-        failure modes return a generic 401 and count toward a per-card lockout.
-        No auto-provisioning — a registered card implies an existing account.
+        Verifies the ECDSA-SHA256 signature against the registered card's EC
+        public key over each live outstanding challenge and consumes exactly the
+        one that verifies (single-use; a concurrent replay finds it gone). All
+        failure modes return a generic 401; only a bad signature over a live
+        challenge counts toward the (card, client source) lockout (5 → 15
+        minutes) — a missing challenge or unknown card does not. Rate limited
+        per card id (10/60 s) and per client source (30/60 s, shared across all
+        pre-auth endpoints). No auto-provisioning — a registered card implies
+        an existing account.
       security: []
       requestBody:
         required: true
@@ -507,8 +541,12 @@ paths:
         '200':
           description: >
             OIDC config for the UI — { enabled, provider, issuer, client_id,
-            audience, authorization_endpoint, token_endpoint, scopes }. Returns
-            { enabled: false } when the provider is not configured.
+            audience, authorization_endpoint, token_endpoint, scopes, pending }.
+            Returns { enabled: false, pending: false } when the provider is not
+            configured, and { enabled: false, pending: true, provider } while a
+            configured provider is still waiting on its identity provider's
+            discovery document / JWKS (its token exchange answers 503
+            meanwhile; both clear automatically once the IdP is reachable).
 
   /auth/providers:
     get:
@@ -719,6 +757,9 @@ paths:
         Registers a callback URL for the event feed. The URL is SSRF-validated
         at registration (and again on every delivery). A 256-bit HMAC-SHA256
         signing secret is generated and returned **once**. Rate limited per admin.
+
+        Deliveries are at-least-once; deduplicate on `X-Impala-Event-Id`
+        (see the `webhook` tag for the full delivery semantics).
       requestBody:
         required: true
         content:
@@ -1114,7 +1155,7 @@ paths:
   /admin/exchange-reserve/buckets/{currency}:
     put:
       tags: [reserve]
-      summary: Set a bucket's low-water alert mark (admin or treasurer).
+      summary: Set a bucket's low-water alert mark and automatic-refund caps (admin or treasurer).
       parameters:
         - in: path
           name: currency
@@ -1128,6 +1169,25 @@ paths:
               type: object
               properties:
                 low_water_minor: { type: integer, format: int64, minimum: 0 }
+                refund_max_minor:
+                  type: integer
+                  format: int64
+                  minimum: 0
+                  description: >-
+                    Per-refund ceiling for this bucket, in minor units. `0`
+                    disables automatic refunds for the bucket; omit the field
+                    to leave the stored value unchanged. Negative values are
+                    rejected (400). There is deliberately no way to express
+                    "unlimited".
+                refund_daily_max_minor:
+                  type: integer
+                  format: int64
+                  minimum: 0
+                  description: >-
+                    Rolling-24h refund ceiling for this bucket, in minor units.
+                    `0` disables automatic refunds for the bucket; omit the
+                    field to leave the stored value unchanged. Negative values
+                    are rejected (400).
               required: [low_water_minor]
       responses:
         '200': { description: Bucket updated. }
@@ -1283,7 +1343,18 @@ paths:
             schema:
               type: object
               properties:
-                action: { type: string, enum: [approve, cancel, sent, reverse] }
+                action:
+                  type: string
+                  enum: [approve, cancel, sent, reverse, retry]
+                  description: >-
+                    `retry` re-queues a `failed` refund (its debit was already
+                    reversed, so re-queueing is ledger-safe; attempts reset) —
+                    the exit for refunds stranded by a fee surge or a transient
+                    rejection. `sent` now VERIFIES the supplied
+                    `stellar_tx_hash` on Horizon (exactly 64 hex; a successful
+                    payment from the reserve to the refund destination for the
+                    refund amount in the bucket's asset) and fails closed when
+                    Horizon is unreachable.
                 stellar_tx_hash: { type: string }
                 note: { type: string }
               required: [action]
@@ -1296,6 +1367,49 @@ paths:
         '409': { description: Not resolvable yet, or the state changed. }
         '429': { $ref: '#/components/responses/RateLimited' }
 
+  /admin/exchange-reserve/trustlines:
+    post:
+      tags: [reserve]
+      summary: Add the reserve account's trustline for a stablecoin bucket (admin or treasurer; rate limited 5/60s).
+      description: |
+        Signs and submits a `ChangeTrust` (maximum limit) from the reserve's
+        own seed for the asset pinned behind `currency` — `USDC`, or `USDT0`
+        when `RESERVE_USDT0_ISSUER` is configured. The caller names a bucket,
+        never an arbitrary asset. This is the only supported way for a
+        generate-only reserve account to come to hold a stablecoin: its seed
+        exists nowhere outside the bridge and the account is quarantined from
+        `/managed-account/sign`. Moves no money; repeating it is an on-chain
+        no-op. The account needs ~0.5 XLM of free base reserve per trustline
+        (`op_low_reserve` is reported verbatim otherwise). Emits
+        `reserve.trustline_added`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                currency: { type: string, enum: [USDC, USDT0] }
+              required: [currency]
+      responses:
+        '200':
+          description: The trustline is in place.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+                  message: { type: string }
+                  currency: { type: string }
+                  asset_code: { type: string }
+                  asset_issuer: { type: string }
+                  stellar_tx_hash: { type: string, description: Hash of the submitted ChangeTrust transaction. }
+                required: [success, message, currency, asset_code, asset_issuer, stellar_tx_hash]
+        '400': { description: Reserve not configured, unknown/unconfigured bucket, or Horizon rejected the transaction (result codes included). }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '429': { description: Custodial-sign rate limit (5/60s). }
   /admin/exchange-reserve/settings:
     put:
       tags: [reserve]
@@ -1340,6 +1454,11 @@ paths:
         must cover the Stellar base reserve plus fees, or customer payouts
         begin failing. `min_price_minor` and `max_slippage_bps` are the
         guards that stop a mispriced quote dumping the float.
+
+        `usdc_to_usd` cannot be enabled (400): no treasury beneficiary
+        configuration exists yet, so every cycle of that kind would abort at
+        creation and churn a hold/release journal pair per cooldown. It can
+        still be updated with `enabled: false`.
       parameters:
         - in: path
           name: kind
@@ -1365,7 +1484,9 @@ paths:
         Takes the reserve watcher's advisory lock and returns 409 if the
         watcher is mid-tick — the reserve account signs from a single
         sequence number, so two concurrent submissions would collide. A 200
-        with no cycle id means a guard declined it.
+        with no cycle id means a guard declined it. `usdc_to_usd` is refused
+        (400) until a treasury beneficiary configuration exists — see the
+        policy endpoint.
       requestBody:
         required: true
         content:
@@ -1888,7 +2009,12 @@ paths:
     post:
       tags: [mfa]
       summary: Verify an MFA code (TOTP or SMS).
-      description: Constant-time comparison, lockout after 5 failures, rate limited.
+      description: |
+        Constant-time comparison. Rate limited per account+MFA type (10/60 s)
+        and per client source (30/60 s, shared across all pre-auth endpoints);
+        lockout after 5 wrong codes per (account, MFA type, client source) for
+        15 minutes — an absent enrollment or a never-issued SMS code gets the
+        same generic reply but never counts toward it.
       requestBody:
         required: true
         content:
@@ -2081,6 +2207,9 @@ paths:
     post:
       tags: [device]
       summary: Register a Firebase Cloud Messaging device token.
+      description: |
+        The token must be 1–4096 characters of printable ASCII with no
+        whitespace (FCM registration tokens are opaque URL-safe strings).
       requestBody:
         required: true
         content:
@@ -2092,6 +2221,7 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/DeviceTokenResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
     delete:
       tags: [device]
       summary: Remove a device token.
@@ -2776,11 +2906,19 @@ components:
           enum: [manual, payala_sync]
           description: Server-set provenance; payala_sync rows come from mirror-mode sync.
         created_at: { type: string, format: date-time }
-        flagged: { type: boolean }
+        flagged:
+          type: boolean
+          description: >-
+            Review state is PRIVILEGED: only callers holding ReadTransactions
+            (admin, auditor) receive it. The transaction's owner always sees
+            `false` here, `unreviewed` in `status`, and null `note` /
+            `reviewed_by` / `reviewed_at` — and the `flagged` / `status`
+            list filters are ignored on the owner path — so review
+            annotations and reviewer identities never reach the reviewed user.
         status: { type: string, enum: [unreviewed, cleared, flagged, escalated] }
-        note: { type: string, nullable: true }
-        reviewed_by: { type: string, nullable: true }
-        reviewed_at: { type: string, format: date-time, nullable: true }
+        note: { type: string, nullable: true, description: Privileged (see `flagged`); null for the owner. }
+        reviewed_by: { type: string, nullable: true, description: Privileged (see `flagged`); null for the owner. }
+        reviewed_at: { type: string, format: date-time, nullable: true, description: Privileged (see `flagged`); null for the owner. }
 
     PaginatedTransactionList:
       type: object
@@ -3072,6 +3210,33 @@ components:
             here rather than in /readyz: the orchestrator acts on readiness, and
             one unreadable credential row must degrade a provider rather than
             cycle every task in the fleet.
+        conversion_reserve:
+          type: string
+          enum: [off, armed_inactive, active]
+          description: >
+            Conversion-reserve state. `off`: RESERVE_ACCOUNT_ID unset.
+            `armed_inactive`: configured but no live reserve handle (e.g. the
+            seed has not been provisioned yet) — no order diverts to the
+            reserve and no payout can be signed, while the account stays
+            quarantined from /managed-account/*. `active`: reserve handle
+            present. Coarse by design (this endpoint is unauthenticated) and
+            never folded into `status`.
+        sso_providers:
+          type: object
+          additionalProperties:
+            type: string
+            enum: [ready, pending]
+          description: >
+            SSO provider readiness keyed by provider name. Registry providers
+            (SSO_PROVIDERS) appear under their configured name; the legacy
+            `/auth/okta` flow as `okta-legacy` and Google sign-in as `google`
+            (`google-signin` if a registry provider already owns `google`),
+            each only when configured. `pending` means the provider's discovery
+            document / JWKS have not loaded yet: its token exchange answers 503
+            and its `/config` reports `enabled: false, pending: true`. The
+            background task keeps retrying, so `pending` clears without a
+            restart once the identity provider is reachable. Never folded into
+            `status`.
 
     VersionResponse:
       type: object
@@ -3137,6 +3302,13 @@ components:
           type: array
           items: { type: string }
           nullable: true
+        pending:
+          type: boolean
+          description: >
+            True while Okta is configured but its discovery document / JWKS
+            have not loaded yet (`enabled` is false meanwhile, so clients that
+            only read `enabled` keep hiding the button). Clears automatically
+            once the identity provider is reachable.
 
     GoogleTokenExchangeRequest:
       type: object
@@ -3149,6 +3321,12 @@ components:
       properties:
         enabled: { type: boolean }
         client_id: { type: string, nullable: true }
+        pending:
+          type: boolean
+          description: >
+            True while Google sign-in is configured but its JWKS has not loaded
+            yet (`enabled` is false meanwhile). Clears automatically once
+            Google is reachable.
 
     GitHubTokenExchangeRequest:
       type: object
@@ -3557,7 +3735,19 @@ components:
     ReserveResolveRequest:
       type: object
       properties:
-        action: { type: string, enum: [complete, fail] }
+        action:
+          type: string
+          enum: [complete, fail, retry]
+          description: >-
+            `retry` re-arms a frozen auto-swap payout (`max_attempts`,
+            `submit_failed`, `stale_intent`) for the watcher, under exactly
+            the guards `fail` applies — a 600s quiet period since the last
+            state change and a Horizon proof that no matching payout settled —
+            because re-arming after a settled payout would pay twice. The hold
+            is untouched. `complete` with a supplied `stellar_tx_hash` now
+            VERIFIES it on Horizon (exactly 64 hex; a successful payment from
+            the reserve to the payout address for `amount_to` in the order's
+            asset) and fails closed when Horizon is unreachable.
         stellar_tx_hash: { type: string, description: "complete: payout tx hash if the server cannot find it by memo." }
         note: { type: string }
       required: [action]
@@ -3570,8 +3760,31 @@ components:
         available_minor: { type: integer, format: int64 }
         held_minor: { type: integer, format: int64 }
         low_water_minor: { type: integer, format: int64 }
+        refund_max_minor:
+          type: integer
+          format: int64
+          description: Per-refund ceiling in minor units; 0 means automatic refunds are disabled for this bucket.
+        refund_daily_max_minor:
+          type: integer
+          format: int64
+          description: Rolling-24h refund ceiling in minor units; 0 means automatic refunds are disabled for this bucket.
         onchain_balance: { type: string, nullable: true, description: Live Horizon balance (best-effort). }
-      required: [currency, minor_scale, available_minor, held_minor, low_water_minor]
+        asset:
+          type: string
+          nullable: true
+          description: >-
+            Pinned on-chain identity of a Stellar stablecoin bucket as
+            `CODE:ISSUER` (USDC always; USDT0 only when `RESERVE_USDT0_ISSUER`
+            is configured). Null for XLM/USD and for an inert stablecoin bucket.
+        trustline:
+          type: boolean
+          nullable: true
+          description: >-
+            Whether the reserve account holds a trustline for `asset`. `false`
+            means the bucket cannot receive or pay that asset until
+            `POST /admin/exchange-reserve/trustlines` adds one. Null when
+            unknown (no asset, or Horizon unreachable).
+      required: [currency, minor_scale, available_minor, held_minor, low_water_minor, refund_max_minor, refund_daily_max_minor]
 
     KeyListResponse:
       type: object

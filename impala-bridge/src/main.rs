@@ -1,10 +1,12 @@
 mod admin_webhook_delivery;
 mod auth;
+mod client_source;
 mod config;
 mod constants;
 mod error;
 mod events;
 mod exchange;
+mod fcm;
 mod google;
 mod handlers;
 mod jobs;
@@ -58,6 +60,12 @@ use handlers::{
 
 #[tokio::main]
 async fn main() {
+    // Development convenience: load `./.env` into the process environment.
+    // Never overrides variables already set, so an orchestrator's environment
+    // always wins; the runtime image carries no `.env`, so this is a no-op in
+    // production. Must run before anything reads the environment.
+    dotenvy::dotenv().ok();
+
     // Install the process-wide rustls CryptoProvider before anything can open
     // a TLS connection. Multiple provider backends can end up compiled in via
     // transitive features, in which case rustls refuses to auto-select one and
@@ -165,6 +173,21 @@ async fn main() {
         config.redis_pool_size
     );
 
+    // Prove the configured network passphrase is the one Horizon actually
+    // serves BEFORE anything can sign — server (reserve payouts, managed-seed
+    // signing) and worker (reconciliation) alike. STELLAR_NETWORK defaults
+    // to testnet while STELLAR_HORIZON_URL is independent, so a production
+    // deploy missing the network variable would otherwise sign every
+    // transaction for the wrong network (tx_bad_auth). Mismatch or
+    // unreachable-after-retries → exit; the check is never skipped.
+    if run_mode != "migrate" {
+        stellar::network_check::assert_horizon_network_or_exit(
+            &config.stellar_horizon_url,
+            &config.stellar_network_passphrase,
+        )
+        .await;
+    }
+
     match run_mode.as_str() {
         "migrate" => {
             info!("Running database migrations");
@@ -225,6 +248,7 @@ async fn run_server(
     // id set the password on any account that has no credentials yet.
     let auth_policy = Arc::new(auth::AuthPolicy {
         allow_open_registration: config.allow_open_registration,
+        trusted_proxy_hops: config.trusted_proxy_hops,
     });
     if auth_policy.allow_open_registration {
         warn!(
@@ -252,15 +276,32 @@ async fn run_server(
         info!("Soroban contract ID: {}", cid);
     }
 
-    // Initialize the OIDC SSO provider registry (Okta / Auth0 / Duo / …)
-    let sso_registry = Arc::new(oidc::init_registry(&config).await);
+    // SSO providers are constructed PENDING here — configuration only, no
+    // network — and brought to READY by the background tasks spawned further
+    // down (discovery + JWKS, first attempt immediate, retried with backoff).
+    // An IdP that is slow or down at boot therefore never delays the
+    // listener bind and never disables SSO for the life of the process.
+    // Genuinely invalid configuration is still fatal.
+    let sso_registry = match oidc::init_registry(&config) {
+        Ok(registry) => Arc::new(registry),
+        Err(msg) => {
+            error!("{}", msg);
+            std::process::exit(1);
+        }
+    };
 
-    // Initialize the legacy single-provider Okta flow (cookie-capable
-    // /auth/okta used by the web UI; bearer SSO rides the registry above).
-    let okta_provider = okta::init_okta_provider(&config).await;
+    // Legacy single-provider Okta flow (cookie-capable /auth/okta used by the
+    // web UI; bearer SSO rides the registry above).
+    let okta_provider = match okta::init_okta_provider(&config) {
+        Ok(provider) => provider,
+        Err(msg) => {
+            error!("{}", msg);
+            std::process::exit(1);
+        }
+    };
 
-    // Initialize Google provider (if configured)
-    let google_provider = google::init_google_provider(&config).await;
+    // Google provider (if configured)
+    let google_provider = google::init_google_provider(&config);
 
     // Initialize GitHub provider (if enabled)
     let github_provider = if config.github_auth_enabled {
@@ -413,8 +454,15 @@ async fn run_server(
         });
     if let Some(ref r) = conversion_reserve {
         info!(
-            "Conversion reserve enabled: account={} address={} usdc={}:{}",
-            r.reserve_account_id, r.stellar_address, r.usdc_code, r.usdc_issuer
+            "Conversion reserve enabled: account={} address={} usdc={}:{} usdt0={}",
+            r.reserve_account_id,
+            r.stellar_address,
+            r.usdc_code,
+            r.usdc_issuer,
+            r.usdt0
+                .as_ref()
+                .map(|a| format!("{}:{} tickers={:?}", a.code, a.issuer, r.usdt0_tickers))
+                .unwrap_or_else(|| "off".to_string())
         );
     }
 
@@ -485,6 +533,7 @@ async fn run_server(
                 protector: seed_protector.clone(),
                 metrics: metrics.clone(),
                 changelly_crypto: changelly_crypto.clone(),
+                cancel: cancel.clone(),
             });
 
     // Shared by the reconcile loop and the `?refresh=true` handler path so
@@ -651,6 +700,13 @@ async fn run_server(
             "/admin/exchange-reserve/unmatched",
             get(admin_reserve::list_unmatched),
         )
+        // Trustlines: the one on-chain operation the reserve signs that moves
+        // no money. The generate-only reserve seed exists nowhere else, so
+        // this is the only way its account can come to hold a stablecoin.
+        .route(
+            "/admin/exchange-reserve/trustlines",
+            post(admin_reserve::add_trustline),
+        )
         // Automated refunds: the queue, the master switch, a manual
         // obligation for inflows the driver deliberately refuses, and
         // resolution of anything frozen mid-flight.
@@ -789,7 +845,7 @@ async fn run_server(
             config.clone(),
         ))))
         .layer(Extension(http_client))
-        .layer(Extension(ldap_config))
+        .layer(Extension(ldap_config.clone()))
         .layer(Extension(metrics))
         .layer(Extension(reconcile_config.clone()))
         .layer(Extension(cancel.clone()));
@@ -801,39 +857,39 @@ async fn run_server(
         app
     };
 
-    // Add the legacy Okta provider extension and spawn its JWKS refresh task
-    // (if configured).
+    // Add the legacy Okta provider extension and spawn its provider task
+    // (initial discovery + JWKS with immediate retries, then periodic JWKS
+    // refresh) if configured. The provider answers 503 until READY.
     let app = if let Some(ref provider) = okta_provider {
-        let refresh_provider = provider.clone();
+        let task_provider = provider.clone();
         let refresh_secs = config.okta_jwks_refresh_secs;
-        let jwks_cancel = cancel.clone();
+        let task_cancel = cancel.clone();
         tokio::spawn(async move {
-            okta::jwks_refresh_task(refresh_provider, refresh_secs, jwks_cancel).await;
+            okta::provider_task(task_provider, refresh_secs, task_cancel).await;
         });
         app.layer(Extension(provider.clone()))
     } else {
         app
     };
 
-    // Register the SSO provider registry and spawn one JWKS refresh task per
+    // Register the SSO provider registry and spawn one provider task per
     // configured provider. The registry is always present (possibly empty).
     for provider in sso_registry.iter() {
-        let refresh_provider = provider.clone();
-        let refresh_secs = provider.jwks_refresh_secs;
-        let jwks_cancel = cancel.clone();
+        let task_provider = provider.clone();
+        let task_cancel = cancel.clone();
         tokio::spawn(async move {
-            oidc::jwks_refresh_task(refresh_provider, refresh_secs, jwks_cancel).await;
+            oidc::provider_task(task_provider, task_cancel).await;
         });
     }
     let app = app.layer(Extension(sso_registry.clone()));
 
-    // Add Google provider extension and spawn JWKS refresh task (if configured)
+    // Add Google provider extension and spawn its provider task (if configured)
     let app = if let Some(ref provider) = google_provider {
-        let refresh_provider = provider.clone();
+        let task_provider = provider.clone();
         let refresh_secs = config.google_jwks_refresh_secs;
-        let jwks_cancel = cancel.clone();
+        let task_cancel = cancel.clone();
         tokio::spawn(async move {
-            google::jwks_refresh_task(refresh_provider, refresh_secs, jwks_cancel).await;
+            google::provider_task(task_provider, refresh_secs, task_cancel).await;
         });
         app.layer(Extension(provider.clone()))
     } else {
@@ -872,18 +928,29 @@ async fn run_server(
         app
     };
 
-    // LDAP directory sync
-    ldap::directory_sync(&pool, &config).await;
+    // (The LDAP directory sweep is spawned AFTER the listener is bound — see
+    // below — so an unreachable directory can never stall the deploy.)
 
     // Spawn background cron_sync task with cancellation support
+    // The loops below keep their JoinHandles: after the HTTP side has drained
+    // on shutdown, `drain_background` AWAITS them (never aborts) so a tick in
+    // progress finishes and records its outcome. Dropping the runtime with a
+    // Horizon submit in flight — the previous behaviour — left a payout the
+    // chain had accepted recoverable only via the 600s stale sweep and a human.
+    let mut background: Vec<(&'static str, tokio::task::JoinHandle<()>)> = Vec::new();
+
     let cron_pool = pool.clone();
     let cron_cancel = cancel.clone();
-    tokio::spawn(async move {
-        streams::cron_sync_task(cron_pool, cron_cancel).await;
-    });
+    background.push((
+        "cron_sync",
+        tokio::spawn(async move {
+            streams::cron_sync_task(cron_pool, cron_cancel).await;
+        }),
+    ));
 
-    // Spawn the admin-webhook delivery worker (outbox fan-out + signed delivery,
-    // retry/backoff, auto-disable). In-process; no SNS/SQS dependency.
+    // Spawn the admin-webhook delivery worker (outbox fan-out + leased signed
+    // delivery, retry/backoff, auto-disable, hourly prune). In-process; no
+    // SNS/SQS dependency.
     let wh_pool = pool.clone();
     let wh_cancel = cancel.clone();
     let wh_cfg = admin_webhook_delivery::DeliveryConfig {
@@ -891,9 +958,12 @@ async fn run_server(
         max_attempts: config.admin_webhook_max_attempts,
         disable_threshold: config.admin_webhook_disable_threshold,
     };
-    tokio::spawn(async move {
-        admin_webhook_delivery::run(wh_pool, wh_cfg, wh_cancel).await;
-    });
+    background.push((
+        "admin_webhook_delivery",
+        tokio::spawn(async move {
+            admin_webhook_delivery::run(wh_pool, wh_cfg, wh_cancel).await;
+        }),
+    ));
 
     // Spawn the exchange-order reconcile loop when any exchange provider is
     // configured. Changelly's swap API has no webhooks, so non-terminal
@@ -906,18 +976,21 @@ async fn run_server(
         let ex_crypto = changelly_crypto.clone();
         let ex_fiat = changelly_fiat.clone();
         let ex_cfg = (*reconcile_config).clone();
-        tokio::spawn(async move {
-            exchange::reconcile::run(
-                ex_pool,
-                ex_owlpay,
-                ex_crypto,
-                ex_fiat,
-                exchange_metrics,
-                ex_cfg,
-                ex_cancel,
-            )
-            .await;
-        });
+        background.push((
+            "exchange_reconcile",
+            tokio::spawn(async move {
+                exchange::reconcile::run(
+                    ex_pool,
+                    ex_owlpay,
+                    ex_crypto,
+                    ex_fiat,
+                    exchange_metrics,
+                    ex_cfg,
+                    ex_cancel,
+                )
+                .await;
+            }),
+        ));
     }
 
     // Spawn the conversion-reserve watcher: deposit matching on the reserve
@@ -926,24 +999,80 @@ async fn run_server(
     // advisory lock inside each tick.
     if let Some(deps) = reserve_watch_deps {
         let rw_cancel = cancel.clone();
-        tokio::spawn(async move {
-            exchange::reserve_watch::run(deps, rw_cancel).await;
-        });
+        background.push((
+            "reserve_watch",
+            tokio::spawn(async move {
+                exchange::reserve_watch::run(deps, rw_cancel).await;
+            }),
+        ));
     }
+
+    // Cloned before the serve line moves the token into `shutdown_signal`:
+    // the post-serve drain cancels explicitly, so a serve ERROR (which never
+    // fires the signal handler) still stops the loops instead of waiting out
+    // the whole drain deadline on them.
+    let drain_cancel = cancel.clone();
 
     // Run server with graceful shutdown
     info!("Server listening on {}", config.service_address);
     let listener = tokio::net::TcpListener::bind(&config.service_address)
         .await
         .expect("Failed to bind SERVICE_ADDRESS");
-    if let Err(e) = axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal(cancel))
-        .await
+
+    // LDAP directory sweep: read-only, log-only reconciliation. Spawned only
+    // now that the listener is bound, so a black-holed directory can never
+    // hold the health check hostage (it used to be awaited before bind, and
+    // ldap3 has no default connect timeout — every LDAP op is now bounded).
+    let sync_pool = pool.clone();
+    let sync_ldap = ldap_config.clone();
+    tokio::spawn(async move {
+        ldap::directory_sync(sync_pool, sync_ldap).await;
+    });
+    // Record the TCP peer on every request (`ConnectInfo<SocketAddr>`), the
+    // fallback source for pre-auth throttling when TRUSTED_PROXY_HOPS is 0 or
+    // the forwarded chain is shorter than expected (see `client_source.rs`).
+    if let Err(e) = axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal(cancel))
+    .await
     {
         error!("Server error: {}", e);
     }
 
+    // The HTTP side has drained. Now wait for the background loops: each
+    // checks the token between units of work (the reserve drivers between
+    // orders), so what remains is at most one in-flight unit whose outcome
+    // gets recorded. Bounded by the drain deadline here and, ultimately, by
+    // the watchdog `shutdown_signal` armed.
+    drain_cancel.cancel();
+    drain_background(background).await;
+
     telemetry::shutdown_otel();
+}
+
+/// Await the background loops after the server has stopped accepting work.
+/// Never aborts them — an aborted reserve tick is exactly the torn-down
+/// submit this exists to prevent. One shared absolute deadline: the loops
+/// run concurrently regardless of the order they are awaited in, and a loop
+/// still running at the deadline is named in the log and left to the
+/// watchdog's force-exit.
+async fn drain_background(tasks: Vec<(&'static str, tokio::task::JoinHandle<()>)>) {
+    let deadline =
+        tokio::time::Instant::now() + Duration::from_secs(constants::SHUTDOWN_DRAIN_DEADLINE_SECS);
+    for (name, handle) in tasks {
+        match tokio::time::timeout_at(deadline, handle).await {
+            Ok(Ok(())) => info!("background loop {} stopped", name),
+            Ok(Err(e)) => error!("background loop {} panicked during shutdown: {}", name, e),
+            Err(_) => warn!(
+                "background loop {} still running at the {}s drain deadline; leaving it to the \
+                 shutdown watchdog",
+                name,
+                constants::SHUTDOWN_DRAIN_DEADLINE_SECS
+            ),
+        }
+    }
 }
 
 async fn shutdown_signal(cancel: CancellationToken) {
@@ -968,11 +1097,17 @@ async fn shutdown_signal(cancel: CancellationToken) {
     // Signal background tasks to stop
     cancel.cancel();
 
-    // Graceful-shutdown drain deadline. Axum waits for in-flight requests
-    // to complete after shutdown_signal() returns; if that stalls (e.g. a
-    // downstream hang), this watchdog bounds the wait so the orchestrator
-    // doesn't have to SIGKILL us. The deadline is tuned to fit inside
-    // typical ECS/Kubernetes stop timeouts (30s default).
+    // Graceful-shutdown drain deadline. After shutdown_signal() returns, axum
+    // waits for in-flight requests and then `run_server` awaits the
+    // background loops (`drain_background`); if either stalls (a downstream
+    // hang, a Horizon submit at its full 30s timeout), this watchdog bounds
+    // the wait so the orchestrator doesn't have to SIGKILL us. The deadline
+    // (SHUTDOWN_DRAIN_DEADLINE_SECS = 55) is deliberately LARGER than the
+    // 25s it used to be, so one in-flight reserve submit can be recorded —
+    // which means the orchestrator's stop timeout must be raised with it:
+    // ECS `stopTimeout` (default 30s, max 120s) / Kubernetes
+    // `terminationGracePeriodSeconds` should be at least 60s, or a SIGKILL
+    // arrives before this watchdog and the drain is cut short as before.
     tokio::spawn(async {
         tokio::time::sleep(Duration::from_secs(constants::SHUTDOWN_DRAIN_DEADLINE_SECS)).await;
         warn!(

@@ -55,6 +55,23 @@ fn ok(message: impl Into<String>) -> Json<ReplenishActionResponse> {
     })
 }
 
+/// Refuse to arm (`what` = "enabled" | "run") a kind this deployment cannot
+/// build a cycle for. `usdc_to_usd` has no treasury beneficiary
+/// configuration, so every cycle aborts at creation; an enabled policy
+/// would only churn a `replenish_hold`/`replenish_release` journal pair per
+/// cooldown. Same predicate the watcher uses (`kind_has_provider_leg`).
+fn refuse_unbuildable_kind(kind: &str, what: &str) -> Result<(), AppError> {
+    if crate::exchange::replenish::kind_has_provider_leg(kind) {
+        return Ok(());
+    }
+    Err(AppError::BadRequest(format!(
+        "'{}' cannot be {}: no treasury beneficiary configuration exists yet, so every cycle \
+         would abort at creation and churn a hold/release journal pair per cooldown. Leave it \
+         disabled until the fiat off-ramp leg is configured.",
+        kind, what
+    )))
+}
+
 fn cycle_columns() -> String {
     format!(
         "cycle_id, kind, state, trigger_source, spend_currency, spend_minor, \
@@ -139,6 +156,11 @@ pub async fn update_policy(
             return Err(AppError::BadRequest(format!("{} must be >= 0", name)));
         }
     }
+    // A kind with no buildable provider leg must not be enabled at all: it
+    // would not be a no-op but a hold/release churn every cooldown.
+    if p.enabled {
+        refuse_unbuildable_kind(&kind, "enabled")?;
+    }
     // Enabling with unset caps would be a no-op that LOOKS armed; say so
     // rather than letting an admin believe replenishment is running.
     if p.enabled && (p.max_spend_minor == 0 || p.daily_spend_cap_minor == 0) {
@@ -198,6 +220,7 @@ pub async fn run_now(
     Extension(stellar_config): Extension<Arc<crate::config::StellarConfig>>,
     Extension(signer): Extension<Arc<dyn crate::stellar::StellarSigner>>,
     Extension(protector): Extension<Arc<dyn crate::seed_protect::SeedProtector>>,
+    Extension(cancel): Extension<tokio_util::sync::CancellationToken>,
     reserve: Option<Extension<Arc<crate::exchange::reserve::ConversionReserve>>>,
     changelly_crypto: Option<Extension<Arc<crate::exchange::changelly::ChangellyCrypto>>>,
     Json(payload): Json<ReplenishRunRequest>,
@@ -217,20 +240,20 @@ pub async fn run_now(
             VALID_REPLENISH_KINDS.join(", ")
         )));
     }
+    refuse_unbuildable_kind(&payload.kind, "run")?;
     let Extension(reserve) = reserve
         .ok_or_else(|| AppError::BadRequest("conversion reserve is not configured".to_string()))?;
 
-    let mut lock_conn = pool.acquire().await.map_err(db_err("acquire"))?;
-    let got: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock($1)")
-        .bind(RESERVE_WATCHER_LOCK_KEY)
-        .fetch_one(&mut *lock_conn)
-        .await
-        .map_err(db_err("try lock"))?;
-    if !got {
+    // Cancellation-safe guard (see reserve_watch::AdvisoryLock): this
+    // handler awaits Horizon and two provider quotes while holding the
+    // watcher lock, and a request cut by the timeout layer used to return
+    // the pooled connection with the session lock still held.
+    let lock = crate::exchange::reserve_watch::AdvisoryLock::new(RESERVE_WATCHER_LOCK_KEY);
+    let Some(guard) = lock.try_acquire(&pool).await.map_err(db_err("try lock"))? else {
         return Err(AppError::Conflict(
             "The reserve watcher is mid-tick; retry in a moment".to_string(),
         ));
-    }
+    };
 
     let deps = crate::exchange::reserve_watch::ReserveWatchDeps {
         pool: pool.clone(),
@@ -241,6 +264,9 @@ pub async fn run_now(
         protector,
         metrics,
         changelly_crypto: changelly_crypto.map(|Extension(p)| p),
+        // The process token, so a manual cycle honours shutdown like the
+        // watcher's own.
+        cancel,
     };
     let started = crate::exchange::replenish::maybe_start_cycle(
         &deps,
@@ -250,13 +276,12 @@ pub async fn run_now(
     )
     .await;
 
-    let unlocked = sqlx::query_scalar::<_, bool>("SELECT pg_advisory_unlock($1)")
-        .bind(RESERVE_WATCHER_LOCK_KEY)
-        .fetch_one(&mut *lock_conn)
-        .await;
-    if unlocked.is_err() {
-        // Never return a connection that may still hold the session lock.
-        drop(lock_conn.detach());
+    if let Err(e) = guard.release_now().await {
+        // The guard's drop still queues the unlock on the connection.
+        log::warn!(
+            "run_now: advisory unlock failed ({}); guard drop releases it",
+            e
+        );
     }
 
     match started? {
@@ -476,4 +501,47 @@ pub async fn write_off(
         cycle_id, in_transit, user.account_id, note
     );
     Ok(ok("In-transit funds written off"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn usdc_to_usd_cannot_be_enabled_or_run_without_a_treasury_leg() {
+        // The buildable kind passes both gates.
+        assert!(refuse_unbuildable_kind("xlm_to_usdc", "enabled").is_ok());
+        assert!(refuse_unbuildable_kind("xlm_to_usdc", "run").is_ok());
+
+        // The fiat off-ramp has no treasury beneficiary configuration: an
+        // enabled policy would abort every cycle and churn hold/release
+        // journal pairs, so enabling and running are both a clear 400 that
+        // names the missing configuration.
+        for what in ["enabled", "run"] {
+            match refuse_unbuildable_kind("usdc_to_usd", what) {
+                Err(AppError::BadRequest(msg)) => {
+                    assert!(msg.contains("usdc_to_usd"), "{}", msg);
+                    assert!(
+                        msg.contains("no treasury beneficiary configuration"),
+                        "{}",
+                        msg
+                    );
+                    assert!(msg.contains(what), "{}", msg);
+                }
+                other => panic!("expected BadRequest, got {:?}", other),
+            }
+        }
+
+        // Every valid kind is classified one way or the other — a new kind
+        // must make a conscious choice in kind_has_provider_leg.
+        for kind in crate::constants::VALID_REPLENISH_KINDS {
+            let buildable = crate::exchange::replenish::kind_has_provider_leg(kind);
+            assert_eq!(
+                refuse_unbuildable_kind(kind, "enabled").is_ok(),
+                buildable,
+                "{}",
+                kind
+            );
+        }
+    }
 }

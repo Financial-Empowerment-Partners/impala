@@ -6,6 +6,7 @@ use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use std::sync::Arc;
 
+use crate::client_source::ClientSource;
 use crate::config::Config;
 use crate::constants::{
     AUTH_PROVIDER_GITHUB, LOCKOUT_THRESHOLD, RATE_LIMIT_MAX_REQUESTS, RATE_LIMIT_WINDOW_SECS,
@@ -80,6 +81,7 @@ fn github_token_rate_key(token: &str) -> String {
 /// a local refresh + temporal token pair. A pre-call rate limit keyed on the
 /// token hash guards the upstream API call; per-account rate limiting and
 /// lockout apply after identification.
+#[allow(clippy::too_many_arguments)] // axum handler: each arg is an extractor
 pub async fn github_token_exchange(
     Extension(pool): Extension<PgPool>,
     Extension(jwt_keys): Extension<Arc<crate::jwt::JwtKeys>>,
@@ -87,6 +89,7 @@ pub async fn github_token_exchange(
     Extension(admin_ids): Extension<Arc<std::collections::HashSet<String>>>,
     Extension(metrics): Extension<Arc<AppMetrics>>,
     github_provider: Option<Extension<Arc<GitHubProvider>>>,
+    ClientSource(source): ClientSource,
     Json(payload): Json<GitHubTokenExchangeRequest>,
 ) -> Result<Json<GitHubExchangeResponse>, AppError> {
     let result = github_token_exchange_inner(
@@ -95,6 +98,7 @@ pub async fn github_token_exchange(
         redis_pool,
         admin_ids,
         github_provider,
+        &source,
         payload,
     )
     .await;
@@ -108,6 +112,7 @@ async fn github_token_exchange_inner(
     redis_pool: Arc<deadpool_redis::Pool>,
     admin_ids: Arc<std::collections::HashSet<String>>,
     github_provider: Option<Extension<Arc<GitHubProvider>>>,
+    source: &str,
     payload: GitHubTokenExchangeRequest,
 ) -> Result<Json<GitHubExchangeResponse>, AppError> {
     debug!("POST /auth/github: token exchange request received");
@@ -151,7 +156,8 @@ async fn github_token_exchange_inner(
             // credentials the audience cannot be checked at all, so the legacy
             // shape is refused — use the code exchange.
             let user = verify_github_app_token(&provider, &token).await?;
-            return finish_github_login(user, &pool, &redis_pool, &jwt_keys, &admin_ids).await;
+            return finish_github_login(user, &pool, &redis_pool, &jwt_keys, &admin_ids, source)
+                .await;
         }
         (None, None) => {
             return Err(AppError::BadRequest(
@@ -163,7 +169,7 @@ async fn github_token_exchange_inner(
     // The code-exchange path yields a token freshly minted for this app, so
     // its audience is already ours; GET /user identifies the caller.
     let user = fetch_github_user(&provider, &token).await?;
-    finish_github_login(user, &pool, &redis_pool, &jwt_keys, &admin_ids).await
+    finish_github_login(user, &pool, &redis_pool, &jwt_keys, &admin_ids, source).await
 }
 
 /// Shared tail for both GitHub auth shapes: turn an app-verified GitHub user
@@ -177,6 +183,7 @@ async fn finish_github_login(
     redis_pool: &Arc<deadpool_redis::Pool>,
     jwt_keys: &Arc<crate::jwt::JwtKeys>,
     admin_ids: &Arc<std::collections::HashSet<String>>,
+    source: &str,
 ) -> Result<Json<GitHubExchangeResponse>, AppError> {
     let account_id = normalize_federated_account_id(&format!("github:{}", user.id), "github")?;
 
@@ -186,8 +193,9 @@ async fn finish_github_login(
         user.login.as_deref().unwrap_or("-")
     );
 
-    // Rate limiting and lockout checks (fail-closed on Redis errors)
-    crate::redis_helpers::check_lockout(redis_pool, &account_id, LOCKOUT_THRESHOLD).await?;
+    // Rate limiting and lockout checks (fail-closed on Redis errors; the
+    // lockout is the password paths' (account, source) counter).
+    crate::redis_helpers::check_lockout(redis_pool, &account_id, source, LOCKOUT_THRESHOLD).await?;
     crate::redis_helpers::check_rate_limit(
         redis_pool,
         "github",

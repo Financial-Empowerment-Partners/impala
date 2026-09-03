@@ -10,6 +10,21 @@
 #   - Manual dispatch: full control over architecture, deploy, and environment.
 #     `terraform apply` runs ONLY from a dispatch with terraform_action=apply.
 #
+# Supply-chain posture (keep when editing):
+#   - Every `uses:` is pinned to a full commit SHA; the trailing comment names
+#     the release it was resolved from and Dependabot's github-actions entry
+#     bumps the SHAs. Never reintroduce a mutable tag (@v4, @stable, ...).
+#   - Permissions are granted per JOB, not workflow-wide. Only the jobs that
+#     talk to AWS (build, manifest, deploy) get `id-token: write`; the
+#     PR-triggered test and terraform-check jobs get `contents: read` and
+#     nothing else, so code in a pull request can never mint an OIDC token
+#     for the deploy role.
+#   - Every checkout uses persist-credentials: false so GITHUB_TOKEN is not
+#     written into .git/config where a later step could read it.
+#   - The Rust toolchain is pinned to the version the Dockerfile builds on
+#     (rust:1.96-slim) and clippy/test run --locked, so CI fails instead of
+#     silently resolving a different dependency graph than Cargo.lock.
+#
 # Required GitHub Secrets:
 #   AWS_ACCOUNT_ID         - AWS account ID for ECR
 #   AWS_REGION             - Primary AWS region (e.g. us-east-1)
@@ -77,8 +92,10 @@ env:
   REGISTRY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com
   IMAGE_NAME: impala-bridge
 
+# Workflow-wide floor. Jobs that need more declare their own `permissions`
+# block (which REPLACES this one for that job). `id-token: write` must never
+# appear here: it would let the PR-triggered jobs mint OIDC tokens.
 permissions:
-  id-token: write
   contents: read
 
 jobs:
@@ -88,20 +105,29 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     defaults:
       run:
         working-directory: impala-bridge
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        # Pinned to the Dockerfile's rust:1.96 builder, not @stable: the image
+        # that ships is built on 1.96, so that is the compiler CI must gate on
+        # (and lint drift on new stables has broken sibling CI before). Bump
+        # together with the Dockerfile FROM line.
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
         with:
+          toolchain: '1.96.0'
           components: clippy, rustfmt
 
       - name: Cache cargo registry + build
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |
             ~/.cargo/registry
@@ -113,15 +139,19 @@ jobs:
       - name: Check formatting
         run: cargo fmt -- --check
 
+      # --locked: the Dockerfile builds with --locked, so CI must resolve the
+      # exact same Cargo.lock graph — an out-of-date lockfile fails here
+      # instead of being silently re-resolved.
       - name: Clippy
-        run: cargo clippy -- -D warnings
+        run: cargo clippy --locked -- -D warnings
 
       - name: Run tests
-        run: cargo test
+        run: cargo test --locked
 
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked
 
+      # `cargo audit` reads Cargo.lock as-is (it has no --locked flag).
       - name: Audit dependencies for vulnerabilities
         run: cargo audit
 
@@ -136,15 +166,19 @@ jobs:
     name: Terraform validate
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request'
+    permissions:
+      contents: read
     defaults:
       run:
         working-directory: terraform
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
 
       - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
+        uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
         with:
           # main.tf pins required_version = ">= 1.9, < 2.0"
           terraform_version: "~> 1.9"
@@ -166,6 +200,11 @@ jobs:
     needs: test
     runs-on: ${{ matrix.runner }}
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    # id-token: write is what lets configure-aws-credentials assume
+    # AWS_ROLE_ARN via OIDC. Scoped to this job (never workflow-wide).
+    permissions:
+      id-token: write
+      contents: read
 
     strategy:
       fail-fast: false
@@ -179,7 +218,9 @@ jobs:
             arch_tag: arm64
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
 
       - name: Check if architecture is requested
         id: check_arch
@@ -193,27 +234,31 @@ jobs:
 
       - name: Configure AWS credentials
         if: steps.check_arch.outputs.should_build == 'true'
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4.3.1
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: ${{ secrets.AWS_REGION }}
 
       - name: Login to Amazon ECR
         if: steps.check_arch.outputs.should_build == 'true'
-        uses: aws-actions/amazon-ecr-login@v2
+        uses: aws-actions/amazon-ecr-login@03f1aad4c6c7ffd436567f42f9384779290529bd # v2.1.7
 
       - name: Set up Docker Buildx
         if: steps.check_arch.outputs.should_build == 'true'
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
 
       # The ECR repo is IMMUTABLE (terraform/ecr.tf) — every pushed tag must be
       # unique per run, so only the per-commit :<sha>-<arch> tag is pushed.
       # There is deliberately no :latest / :latest-<arch> chain: reused tags
       # are rejected by the immutable repo, and terraform deploys pin
       # container_image_tag = <sha> anyway.
+      #
+      # provenance: false is deliberate — with mode=max attestations the
+      # per-arch push becomes an image index, which the plain
+      # `docker manifest create` in the manifest job cannot stitch.
       - name: Build and push (per-arch)
         if: steps.check_arch.outputs.should_build == 'true'
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: impala-bridge
           platforms: ${{ matrix.platform }}
@@ -231,6 +276,9 @@ jobs:
     name: Create multi-arch manifest
     needs: build
     runs-on: ubuntu-latest
+    # No checkout here, so no contents scope either — only the OIDC token.
+    permissions:
+      id-token: write
     # The :<sha> manifest is the canonical deploy reference (terraform pins
     # container_image_tag = <sha>, and the default task cpu_architecture is
     # ARM64). Publishing it from a single-arch build would put a partial
@@ -245,13 +293,13 @@ jobs:
 
     steps:
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4.3.1
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: ${{ secrets.AWS_REGION }}
 
       - name: Login to Amazon ECR
-        uses: aws-actions/amazon-ecr-login@v2
+        uses: aws-actions/amazon-ecr-login@03f1aad4c6c7ffd436567f42f9384779290529bd # v2.1.7
 
       - name: Create and push SHA manifest
         run: |
@@ -268,6 +316,9 @@ jobs:
     name: Terraform ${{ github.event.inputs.terraform_action || 'plan' }}
     needs: manifest
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
     # Push to main runs a PLAN ONLY, and non-blocking (continue-on-error):
     # it is informational drift/review output, never an apply. All stacks
     # share the single state key impala/terraform.tfstate and the stack
@@ -289,16 +340,18 @@ jobs:
         working-directory: terraform
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
 
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4.3.1
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: ${{ secrets.AWS_REGION }}
 
       - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
+        uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
         with:
           # main.tf pins required_version = ">= 1.9, < 2.0"
           terraform_version: "~> 1.9"

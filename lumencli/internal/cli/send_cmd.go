@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
@@ -65,8 +66,12 @@ func (a *App) runSend(opts netcfg.Options, args []string) int {
 	}
 	fmt.Fprintf(a.err, "Signing from: %s\n", source.Address())
 
-	hash, err := stellar.New(net).SendPayment(source, dest, amt, txMemo)
+	hash, err := a.horizon(net).SendPayment(source, dest, amt, txMemo)
 	if err != nil {
+		var ambiguous *stellar.AmbiguousSubmitError
+		if errors.As(err, &ambiguous) {
+			return a.failAmbiguous(net, "payment", ambiguous)
+		}
 		return a.fail("%v", err)
 	}
 	fmt.Fprintf(a.out, "Sent %s XLM to %s%s\nTransaction: %s\n", amt, dest, withMemo(txMemo), hash)

@@ -58,15 +58,76 @@ pub struct OktaAccessTokenClaims {
     pub preferred_username: Option<String>,
 }
 
-/// Shared Okta provider state.
-pub struct OktaProvider {
+/// Discovery + keys learned from Okta; absent while the provider is PENDING.
+#[derive(Debug, Clone)]
+pub struct OktaReady {
     pub discovery: OidcDiscovery,
-    pub jwks: Arc<RwLock<JwksResponse>>,
+    pub jwks: JwksResponse,
+}
+
+/// Shared Okta provider state (legacy single-provider `/auth/okta` flow).
+///
+/// Same boot semantics as the OIDC registry (`crate::oidc::OidcProvider`):
+/// constructed from config without network I/O, brought to READY by
+/// [`provider_task`] with immediate retries, 503 on token exchange and
+/// `enabled: false, pending: true` on `/config` until then.
+pub struct OktaProvider {
     pub client_id: String,
     pub issuer_url: String,
     pub http_client: reqwest::Client,
     /// Debounce for the unauthenticated on-demand JWKS refetch path.
     pub refresh_cooldown: crate::oidc::RefreshCooldown,
+    state: RwLock<Option<OktaReady>>,
+}
+
+impl OktaProvider {
+    pub async fn is_ready(&self) -> bool {
+        self.state.read().await.is_some()
+    }
+
+    /// Readiness as reported by `GET /health`.
+    pub async fn state_label(&self) -> &'static str {
+        if self.is_ready().await {
+            crate::oidc::PROVIDER_STATE_READY
+        } else {
+            crate::oidc::PROVIDER_STATE_PENDING
+        }
+    }
+
+    /// Discovery endpoints for `/config`; `None` while pending.
+    pub async fn discovery(&self) -> Option<OidcDiscovery> {
+        self.state
+            .read()
+            .await
+            .as_ref()
+            .map(|r| r.discovery.clone())
+    }
+
+    /// One attempt to (re)load IdP state: discovery + JWKS while pending,
+    /// JWKS refresh once ready.
+    pub async fn sync_from_idp(&self) -> Result<(), AppError> {
+        let jwks_uri = self
+            .state
+            .read()
+            .await
+            .as_ref()
+            .map(|r| r.discovery.jwks_uri.clone());
+        match jwks_uri {
+            Some(uri) => {
+                let jwks = fetch_jwks(&self.http_client, &uri).await?;
+                if let Some(ready) = self.state.write().await.as_mut() {
+                    ready.jwks = jwks;
+                }
+                Ok(())
+            }
+            None => {
+                let discovery = fetch_discovery(&self.http_client, &self.issuer_url).await?;
+                let jwks = fetch_jwks(&self.http_client, &discovery.jwks_uri).await?;
+                *self.state.write().await = Some(OktaReady { discovery, jwks });
+                Ok(())
+            }
+        }
+    }
 }
 
 /// Fetch the OIDC discovery document from the authorization server.
@@ -144,119 +205,51 @@ pub async fn fetch_jwks(
     Ok(jwks)
 }
 
-/// Initialize the Okta provider if configured. Returns `None` if
-/// `okta_issuer_url` is not set.
-pub async fn init_okta_provider(config: &Config) -> Option<Arc<OktaProvider>> {
-    let issuer_url = config.okta_issuer_url.as_ref()?;
-    let client_id = config.okta_client_id.clone().unwrap_or_default();
-
-    if issuer_url.is_empty() {
-        return None;
+/// Construct the legacy Okta provider (PENDING) if configured.
+///
+/// `Ok(None)` = `OKTA_ISSUER_URL` unset/empty. `Err` = the issuer is not
+/// HTTPS, which is fatal at startup like any other invalid configuration.
+/// No network I/O happens here; see [`provider_task`].
+pub fn init_okta_provider(config: &Config) -> Result<Option<Arc<OktaProvider>>, String> {
+    let Some(issuer_url) = config.okta_issuer_url.as_ref() else {
+        return Ok(None);
+    };
+    if issuer_url.trim().is_empty() {
+        return Ok(None);
     }
+    let client_id = config.okta_client_id.clone().unwrap_or_default();
 
     // Validate that issuer URL uses HTTPS
     if !issuer_url.starts_with("https://") {
-        error!("okta: issuer URL must use HTTPS: {}", issuer_url);
-        return None;
+        return Err(format!("okta: issuer URL must use HTTPS: {}", issuer_url));
     }
 
-    info!("okta: initializing provider for issuer {}", issuer_url);
+    info!(
+        "okta: provider configured for issuer {} (pending IdP discovery)",
+        issuer_url
+    );
 
-    let http_client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(
-            config.http_client_timeout_secs,
-        ))
-        .redirect(reqwest::redirect::Policy::limited(5))
-        .build()
-        .expect("Failed to create HTTP client");
-
-    let discovery = match fetch_discovery(&http_client, issuer_url).await {
-        Ok(d) => d,
-        Err(e) => {
-            error!("okta: failed to initialize provider: {}", e);
-            return None;
-        }
-    };
-
-    let jwks = match fetch_jwks(&http_client, &discovery.jwks_uri).await {
-        Ok(j) => j,
-        Err(e) => {
-            error!("okta: failed to fetch initial JWKS: {}", e);
-            return None;
-        }
-    };
-
-    let provider = OktaProvider {
-        discovery,
-        jwks: Arc::new(RwLock::new(jwks)),
+    Ok(Some(Arc::new(OktaProvider {
         client_id,
         issuer_url: issuer_url.clone(),
-        http_client,
+        http_client: crate::oidc::build_idp_client(config.http_client_timeout_secs),
         refresh_cooldown: crate::oidc::RefreshCooldown::new(),
-    };
-
-    Some(Arc::new(provider))
+        state: RwLock::new(None),
+    })))
 }
 
-/// Background task that periodically refreshes the JWKS key set.
-/// Uses exponential backoff on failure (capped at 5 minutes).
-/// Respects cancellation for graceful shutdown.
-pub async fn jwks_refresh_task(
+/// Background task: initial discovery + JWKS with immediate retries, then
+/// periodic JWKS refresh (see `crate::oidc::drive_provider`).
+pub async fn provider_task(
     provider: Arc<OktaProvider>,
     interval_secs: u64,
     cancel: tokio_util::sync::CancellationToken,
 ) {
-    use tokio::time::{Duration, Instant};
-
-    let mut consecutive_failures: u32 = 0;
-    let mut last_success = Instant::now();
-
-    // Skip the first immediate tick since we already fetched during init
-    tokio::select! {
-        _ = tokio::time::sleep(Duration::from_secs(interval_secs)) => {}
-        _ = cancel.cancelled() => {
-            info!("okta: jwks_refresh_task shutting down");
-            return;
-        }
-    }
-
-    loop {
-        debug!("okta: refreshing JWKS keys");
-        match fetch_jwks(&provider.http_client, &provider.discovery.jwks_uri).await {
-            Ok(new_jwks) => {
-                consecutive_failures = 0;
-                last_success = Instant::now();
-                let mut jwks = provider.jwks.write().await;
-                *jwks = new_jwks;
-                info!("okta: JWKS keys refreshed successfully");
-            }
-            Err(e) => {
-                consecutive_failures += 1;
-                let stale_secs = last_success.elapsed().as_secs();
-                if stale_secs > interval_secs * 2 {
-                    error!("okta: JWKS keys are {} seconds stale", stale_secs);
-                } else {
-                    warn!("okta: failed to refresh JWKS keys: {}", e);
-                }
-            }
-        }
-
-        let wait_secs = if consecutive_failures > 0 {
-            std::cmp::min(
-                interval_secs.saturating_mul(2u64.saturating_pow(consecutive_failures)),
-                300,
-            )
-        } else {
-            interval_secs
-        };
-        tokio::select! {
-            _ = tokio::time::sleep(Duration::from_secs(wait_secs)) => {}
-            _ = cancel.cancelled() => {
-                info!("okta: jwks_refresh_task shutting down");
-                return;
-            }
-        }
-    }
+    crate::oidc::drive_provider("okta".to_string(), interval_secs, cancel, move || {
+        let p = provider.clone();
+        Box::pin(async move { p.sync_from_idp().await })
+    })
+    .await;
 }
 
 /// Validate an Okta access token and return its claims.
@@ -276,10 +269,20 @@ pub async fn validate_okta_token(
 
     let kid = header.kid.as_deref().unwrap_or("");
 
-    // Try to find the key in the cached JWKS
-    let claims = {
-        let jwks = provider.jwks.read().await;
-        try_validate_with_jwks(&jwks, token, kid, provider)
+    // Try to find the key in the cached JWKS. PENDING (no keys yet) is a
+    // 503, not a 401: the token has not been judged at all.
+    let (claims, jwks_uri) = {
+        let state = provider.state.read().await;
+        let Some(ready) = state.as_ref() else {
+            warn!(
+                "okta: token exchange refused: provider still PENDING (discovery/JWKS not loaded)"
+            );
+            return Err(crate::oidc::pending_error("okta"));
+        };
+        (
+            try_validate_with_jwks(&ready.jwks, token, kid, provider),
+            ready.discovery.jwks_uri.clone(),
+        )
     };
 
     match claims {
@@ -298,12 +301,13 @@ pub async fn validate_okta_token(
                 return Err(AppError::Unauthorized);
             }
             debug!("okta: key kid={} not found in cache, refreshing JWKS", kid);
-            match fetch_jwks(&provider.http_client, &provider.discovery.jwks_uri).await {
+            match fetch_jwks(&provider.http_client, &jwks_uri).await {
                 Ok(new_jwks) => {
                     let result = try_validate_with_jwks(&new_jwks, token, kid, provider);
                     // Update the cache with the refreshed keys
-                    let mut cached = provider.jwks.write().await;
-                    *cached = new_jwks;
+                    if let Some(ready) = provider.state.write().await.as_mut() {
+                        ready.jwks = new_jwks;
+                    }
                     result
                 }
                 Err(_) => {
@@ -399,6 +403,32 @@ mod tests {
         assert_eq!(jwks.keys.len(), 1);
         assert_eq!(jwks.keys[0].kid.as_deref(), Some("test-key-id"));
         assert_eq!(jwks.keys[0].kty, "RSA");
+    }
+
+    #[tokio::test]
+    async fn configured_provider_starts_pending_and_refuses_with_503() {
+        let mut config = crate::config::test_config();
+        config.okta_issuer_url = Some("https://dev-12345.okta.com/oauth2/default".to_string());
+        config.okta_client_id = Some("0oa1234567890".to_string());
+        let provider = init_okta_provider(&config).unwrap().expect("configured");
+        assert!(!provider.is_ready().await);
+        assert!(provider.discovery().await.is_none());
+        let token = "eyJhbGciOiJSUzI1NiIsImtpZCI6ImsxIn0.e30.c2ln";
+        assert!(matches!(
+            validate_okta_token(&provider, token).await,
+            Err(AppError::Retryable(_))
+        ));
+    }
+
+    #[test]
+    fn unset_issuer_is_not_configured_and_plain_http_is_fatal() {
+        let mut config = crate::config::test_config();
+        config.okta_issuer_url = None;
+        assert!(init_okta_provider(&config).unwrap().is_none());
+        config.okta_issuer_url = Some("".to_string());
+        assert!(init_okta_provider(&config).unwrap().is_none());
+        config.okta_issuer_url = Some("http://dev-12345.okta.com".to_string());
+        assert!(init_okta_provider(&config).is_err());
     }
 
     #[test]

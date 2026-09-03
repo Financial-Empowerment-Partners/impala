@@ -8,29 +8,39 @@ on:
   schedule:
     - cron: '0 6 * * 1'  # weekly Monday sweep catches new advisories on untouched code
 
+# Every `uses:` is pinned to a full commit SHA (release in the trailing
+# comment; Dependabot bumps them) and checkouts never persist GITHUB_TOKEN.
+# security-events: write is granted only to the jobs that upload SARIF.
 permissions:
   contents: read
-  security-events: write
 
 jobs:
   gitleaks:
     name: gitleaks (secret scan)
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           fetch-depth: 0
-      - uses: gitleaks/gitleaks-action@v2
+          persist-credentials: false
+      - uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2.3.9
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   trivy-fs:
     name: trivy (filesystem scan)
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
       - name: Run Trivy FS scan
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@915b19bbe73b92a6cf82a1bc12b087c9a19a5fe2 # v0.28.0
         with:
           scan-type: fs
           scan-ref: .
@@ -40,7 +50,7 @@ jobs:
           output: trivy-fs.sarif
       - name: Upload SARIF
         if: always()
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@6f5948dfacef28e207b48d0905cf90c03365536d # v3.37.9
         with:
           sarif_file: trivy-fs.sarif
           category: trivy-fs
@@ -48,10 +58,15 @@ jobs:
   trivy-dockerfile:
     name: trivy (Dockerfile config)
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
       - name: Trivy config scan (bridge Dockerfile)
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@915b19bbe73b92a6cf82a1bc12b087c9a19a5fe2 # v0.28.0
         with:
           scan-type: config
           scan-ref: impala-bridge
@@ -60,7 +75,7 @@ jobs:
           output: trivy-dockerfile.sarif
       - name: Upload SARIF
         if: always()
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@6f5948dfacef28e207b48d0905cf90c03365536d # v3.37.9
         with:
           sarif_file: trivy-dockerfile.sarif
           category: trivy-dockerfile
@@ -70,10 +85,15 @@ jobs:
   trivy-terraform:
     name: trivy (terraform IaC)
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
       - name: Trivy config scan (terraform)
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@915b19bbe73b92a6cf82a1bc12b087c9a19a5fe2 # v0.28.0
         with:
           scan-type: config
           scan-ref: terraform
@@ -82,7 +102,7 @@ jobs:
           output: trivy-terraform.sarif
       - name: Upload SARIF
         if: always()
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@6f5948dfacef28e207b48d0905cf90c03365536d # v3.37.9
         with:
           sarif_file: trivy-terraform.sarif
           category: trivy-terraform
@@ -90,6 +110,8 @@ jobs:
   cargo-deny:
     name: cargo-deny (licenses + advisories + bans)
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -98,9 +120,15 @@ jobs:
           - impala-soroban/integration-test
           - impala-soroban/testnet-tests
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: EmbarkStudios/cargo-deny-action@v2
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      # Same pinned toolchain as ci.yml / impala-soroban.yml (the Dockerfile
+      # builds on rust:1.96); cargo-deny only needs `cargo metadata` from it.
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: '1.96.0'
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
         with:
           manifest-path: ${{ matrix.manifest }}/Cargo.toml
           command: check advisories bans sources licenses

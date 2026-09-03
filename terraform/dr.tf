@@ -296,12 +296,15 @@ resource "aws_lb_target_group" "dr_server" {
   vpc_id      = aws_vpc.dr[0].id
   target_type = "ip"
 
+  # Same readiness probe + thresholds as the primary target group — see the
+  # rationale on aws_lb_target_group.server in alb.tf (/readyz = DB + Redis
+  # reachable; /health is 200 even while degraded and is never a probe).
   health_check {
-    path                = "/health"
+    path                = "/readyz"
     port                = "traffic-port"
     protocol            = "HTTP"
     healthy_threshold   = 2
-    unhealthy_threshold = 3
+    unhealthy_threshold = 8
     interval            = 30
     timeout             = 5
     matcher             = "200"
@@ -675,6 +678,11 @@ resource "aws_ecs_task_definition" "dr_server" {
       image     = "${data.aws_caller_identity.current.account_id}.dkr.ecr.${var.dr_region}.amazonaws.com/${var.project_name}:${var.container_image_tag}"
       essential = true
 
+      # Same container hardening as the primary task definitions (ecs.tf):
+      # the bridge writes nothing to disk and runs as the image's uid 1000.
+      readonlyRootFilesystem = true
+      user                   = "1000:1000"
+
       portMappings = [
         {
           containerPort = 8080
@@ -682,17 +690,27 @@ resource "aws_ecs_task_definition" "dr_server" {
         }
       ]
 
-      environment = concat([
-        { name = "RUN_MODE", value = "server" },
-        { name = "SERVICE_ADDRESS", value = "0.0.0.0:8080" },
-        { name = "REDIS_URL", value = "rediss://${aws_elasticache_replication_group.dr[0].primary_endpoint_address}:6379" },
-        { name = "STELLAR_HORIZON_URL", value = var.stellar_horizon_url },
-        { name = "STELLAR_RPC_URL", value = var.stellar_rpc_url },
-        { name = "SNS_TOPIC_ARN", value = aws_sns_topic.dr_jobs[0].arn },
-        { name = "AWS_REGION", value = var.dr_region },
-        { name = "SES_FROM_ADDRESS", value = var.ses_from_address },
-        { name = "FCM_PROJECT_ID", value = var.fcm_project_id },
-      ], local.seed_protection_env_dr)
+      # Mirrors the primary server env in ecs.tf: STELLAR_NETWORK (+ the
+      # passphrase it implies) so a pubnet DR bridge signs for pubnet, the
+      # browser-facing CORS/PUBLIC_ENDPOINT slots, and the operator extras.
+      environment = concat(
+        [
+          { name = "RUN_MODE", value = "server" },
+          { name = "SERVICE_ADDRESS", value = "0.0.0.0:8080" },
+          { name = "REDIS_URL", value = "rediss://${aws_elasticache_replication_group.dr[0].primary_endpoint_address}:6379" },
+          { name = "STELLAR_NETWORK", value = var.stellar_network },
+          { name = "STELLAR_HORIZON_URL", value = var.stellar_horizon_url },
+          { name = "STELLAR_RPC_URL", value = var.stellar_rpc_url },
+          { name = "STELLAR_NETWORK_PASSPHRASE", value = local.stellar_network_passphrase },
+          { name = "SNS_TOPIC_ARN", value = aws_sns_topic.dr_jobs[0].arn },
+          { name = "AWS_REGION", value = var.dr_region },
+          { name = "SES_FROM_ADDRESS", value = var.ses_from_address },
+          { name = "FCM_PROJECT_ID", value = var.fcm_project_id },
+        ],
+        local.seed_protection_env_dr,
+        local.primary_web_env,
+        var.bridge_extra_environment,
+      )
 
       secrets = [
         {
@@ -741,16 +759,28 @@ resource "aws_ecs_task_definition" "dr_worker" {
       image     = "${data.aws_caller_identity.current.account_id}.dkr.ecr.${var.dr_region}.amazonaws.com/${var.project_name}:${var.container_image_tag}"
       essential = true
 
-      environment = concat([
-        { name = "RUN_MODE", value = "worker" },
-        { name = "SQS_QUEUE_URL", value = aws_sqs_queue.dr_worker[0].url },
-        { name = "REDIS_URL", value = "rediss://${aws_elasticache_replication_group.dr[0].primary_endpoint_address}:6379" },
-        { name = "STELLAR_HORIZON_URL", value = var.stellar_horizon_url },
-        { name = "STELLAR_RPC_URL", value = var.stellar_rpc_url },
-        { name = "AWS_REGION", value = var.dr_region },
-        { name = "SES_FROM_ADDRESS", value = var.ses_from_address },
-        { name = "FCM_PROJECT_ID", value = var.fcm_project_id },
-      ], local.seed_protection_env_dr)
+      # Same container hardening as the primary task definitions (ecs.tf).
+      readonlyRootFilesystem = true
+      user                   = "1000:1000"
+
+      # Mirrors the primary worker env in ecs.tf (the worker signs too, so it
+      # needs STELLAR_NETWORK; CORS/PUBLIC_ENDPOINT are server-only).
+      environment = concat(
+        [
+          { name = "RUN_MODE", value = "worker" },
+          { name = "SQS_QUEUE_URL", value = aws_sqs_queue.dr_worker[0].url },
+          { name = "REDIS_URL", value = "rediss://${aws_elasticache_replication_group.dr[0].primary_endpoint_address}:6379" },
+          { name = "STELLAR_NETWORK", value = var.stellar_network },
+          { name = "STELLAR_HORIZON_URL", value = var.stellar_horizon_url },
+          { name = "STELLAR_RPC_URL", value = var.stellar_rpc_url },
+          { name = "STELLAR_NETWORK_PASSPHRASE", value = local.stellar_network_passphrase },
+          { name = "AWS_REGION", value = var.dr_region },
+          { name = "SES_FROM_ADDRESS", value = var.ses_from_address },
+          { name = "FCM_PROJECT_ID", value = var.fcm_project_id },
+        ],
+        local.seed_protection_env_dr,
+        var.bridge_extra_environment,
+      )
 
       secrets = [
         {
@@ -797,6 +827,11 @@ resource "aws_ecs_service" "dr_server" {
     container_name   = "impala-bridge-server"
     container_port   = 8080
   }
+
+  # A fresh task gets 120 s to open its DB/Redis pools before ECS acts on
+  # ALB health (the /readyz check is a real dependency check). Only valid on
+  # services with a load_balancer block — never on the worker service.
+  health_check_grace_period_seconds = 120
 
   deployment_circuit_breaker {
     enable   = true

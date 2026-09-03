@@ -27,6 +27,26 @@ Edit `.env` with your database credentials:
 DATABASE_URL=postgresql://username:password@localhost:5432/impala
 ```
 
+The binary loads `./.env` from its working directory at startup, so
+`cargo run` picks these values up directly. Variables already present in the
+process environment are never overridden, and the runtime Docker image carries
+no `.env`: in production, configuration comes from the orchestrator.
+
+`docker compose up` is different: Compose forwards only the explicit
+`environment:` map in `docker-compose.yml` to the bridge container (using
+`.env` just to fill that map's `${VAR:-default}` placeholders). Anything not
+listed there — `RESERVE_*`, `KEY_IMPORT_ENABLED`, `ADMIN_ACCOUNT_IDS`,
+`CORS_ALLOWED_ORIGINS`, … — must be added to the map or passed through
+explicitly.
+
+#### Startup network check
+In server and worker modes the bridge fetches `GET {STELLAR_HORIZON_URL}/` and
+compares the `network_passphrase` Horizon reports with the configured one
+(`STELLAR_NETWORK` / `STELLAR_NETWORK_PASSPHRASE`). A mismatch exits
+immediately; an unreachable Horizon is retried a few times and then also
+exits. The check is never skipped — a deploy pointed at pubnet Horizon with the
+testnet default would otherwise sign every transaction for the wrong network.
+
 #### Vault / OpenBao Integration (Optional)
 Impala works with **HashiCorp Vault** or **OpenBao** (an OSS, API-compatible Vault
 fork). The same endpoints, `X-Vault-Token` header, and `vault:vN:` Transit ciphertext

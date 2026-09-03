@@ -92,7 +92,12 @@ single-bridge / local-dev setups.
 2. `POST /api/<network>/token` — obtain a 14-day refresh token (username + password)
 3. `POST /api/<network>/token` — obtain a 1-hour temporal token (refresh token)
 4. All subsequent requests use `Authorization: Bearer <temporal_token>`
-5. Automatic refresh on expiry or 401 → redirect to login
+5. Automatic refresh on expiry or 401. Only a refresh the bridge *rejects* (401) ends the
+   session and redirects to login; a refresh that cannot reach a healthy bridge (5xx, 429,
+   network failure) keeps the stored tokens and rejects with a retryable "bridge unavailable"
+   error. Tabs serialize refreshes through the Web Locks API so a rotated refresh token is
+   never replayed (the bridge revokes the whole family on replay); see
+   `API.classifyRefreshResponse` in `api.js`.
 
 ### Token Storage Trade-off
 

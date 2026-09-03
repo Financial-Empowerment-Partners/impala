@@ -31,6 +31,7 @@ mod tests {
             rpc_url: "https://soroban-testnet.stellar.org".to_string(),
             network_passphrase: "Test SDF Network ; September 2015".to_string(),
             contract_id: Some("CTEST123".to_string()),
+            max_fee_stroops: 10_000,
         });
         let result = network_info(Extension(config)).await;
         assert_eq!(result.0.stellar_network, "testnet");
@@ -53,6 +54,7 @@ mod tests {
             rpc_url: "https://soroban.stellar.org".to_string(),
             network_passphrase: "Public Global Stellar Network ; September 2015".to_string(),
             contract_id: None,
+            max_fee_stroops: 10_000,
         });
         let result = network_info(Extension(config)).await;
         assert_eq!(result.0.stellar_network, "pubnet");

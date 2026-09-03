@@ -60,6 +60,11 @@ rand = "0.8"
 base64 = "0.22"
 stellar-base = "0.7"
 async-trait = "0.1"
+# Development convenience only: loads `./.env` at startup without overriding
+# variables already present in the process environment. The runtime image
+# carries no `.env`, so production configuration still comes from the
+# orchestrator's environment.
+dotenvy = "0.15"
 
 [dev-dependencies]
 tokio = { version = "1.0", features = ["full", "test-util"] }

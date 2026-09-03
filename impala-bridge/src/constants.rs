@@ -36,11 +36,22 @@ pub const DEFAULT_REDIS_POOL_SIZE: usize = 16;
 /// Request timeout in seconds (applied globally via middleware).
 pub const REQUEST_TIMEOUT_SECS: u64 = 30;
 
-/// Maximum time (seconds) to wait for in-flight requests to drain after a
-/// SIGTERM / Ctrl-C. If exceeded the process force-exits so the container
-/// orchestrator doesn't have to SIGKILL us. Must fit inside the typical ECS
-/// / Kubernetes stop timeout (30s default), so keep this below 30.
-pub const SHUTDOWN_DRAIN_DEADLINE_SECS: u64 = 25;
+/// Maximum time (seconds) to wait, after a SIGTERM / Ctrl-C, for in-flight
+/// requests AND the background loops to drain. If exceeded the process
+/// force-exits so the container orchestrator doesn't have to SIGKILL us.
+///
+/// Raised from 25: the reserve watcher's in-flight unit of work is a Horizon
+/// submit (up to `DEFAULT_HTTP_CLIENT_TIMEOUT_SECS` = 30s) whose outcome must
+/// be RECORDED — a payout torn down after Horizon accepted the transaction
+/// otherwise recovers only through the 600s stale sweep and a human. 25s
+/// could not cover one such POST plus its bookkeeping. The orchestrator's
+/// stop timeout must exceed this value for the watchdog to matter: ECS
+/// `stopTimeout` defaults to 30s (max 120s) and Kubernetes
+/// `terminationGracePeriodSeconds` to 30s — set them to at least 60s, or a
+/// SIGKILL lands before this deadline and the drain is cut short exactly as
+/// it was before.
+pub const SHUTDOWN_DRAIN_DEADLINE_SECS: u64 = 55;
+const _: () = assert!(SHUTDOWN_DRAIN_DEADLINE_SECS > DEFAULT_HTTP_CLIENT_TIMEOUT_SECS);
 
 /// Rate limit: maximum requests per window.
 pub const RATE_LIMIT_MAX_REQUESTS: u64 = 10;
@@ -69,10 +80,42 @@ pub const SIGN_RATE_LIMIT_MAX_REQUESTS: u64 = 5;
 pub const SIGN_RATE_LIMIT_WINDOW_SECS: usize = 60;
 
 /// Account lockout: number of failed login attempts before lockout.
+///
+/// Counted per `(identity, client source)` — see `client_source.rs` — so a
+/// guesser locks the identity only for its own source, and only real guesses
+/// (a wrong password against a stored one, a bad signature over a live
+/// challenge, a wrong MFA code) count. Unknown identities never count: doing
+/// so let anyone pre-lock an identity that had not been provisioned yet.
 pub const LOCKOUT_THRESHOLD: u64 = 5;
 
 /// Account lockout: duration in seconds (15 minutes).
 pub const LOCKOUT_DURATION_SECS: usize = 15 * 60;
+
+/// Per-client-source budget shared by every pre-auth endpoint (`/token`
+/// password flow, `/session/login`, `/authenticate`, `/auth/card/challenge`,
+/// `/auth/card`, `/mfa/verify`): requests per `PREAUTH_SOURCE_WINDOW_SECS`.
+/// The per-identity limits above bound a distributed guesser; this bounds
+/// how many identities one source can touch, which the WAF's coarse
+/// per-IP rule (thousands per 5 minutes) does not.
+pub const PREAUTH_SOURCE_MAX_REQUESTS: u64 = 30;
+
+/// Window (seconds) for `PREAUTH_SOURCE_MAX_REQUESTS`.
+pub const PREAUTH_SOURCE_WINDOW_SECS: usize = 60;
+
+/// Default `TRUSTED_PROXY_HOPS`: one — the ALB, which appends the client
+/// address to `X-Forwarded-For`. Deployments that expose the bridge directly
+/// (local docker-compose included) must set 0 so the header is ignored.
+pub const DEFAULT_TRUSTED_PROXY_HOPS: u32 = 1;
+
+/// Maximum argon2 runs in flight at once, process-wide. Each run pins ~19 MiB
+/// (argon2 0.5 defaults, m=19456 KiB) for ~10 ms; 8 permits bound the
+/// pre-auth surface to ~150 MiB on the smallest (512 MiB) task while still
+/// clearing hundreds of logins per second. Beyond the bound, requests are
+/// shed with 503 after a short queue wait — the alternative is an
+/// unauthenticated caller OOMing the task by rotating usernames.
+pub const ARGON2_MAX_CONCURRENT: usize = 8;
+/// How long a request waits for an argon2 permit before being shed.
+pub const ARGON2_QUEUE_WAIT_SECS: u64 = 2;
 
 /// How long a consumed MFA code stays marked used, blocking replay. Covers a
 /// TOTP code's full acceptance window: the 30s step plus one step of skew on
@@ -188,6 +231,12 @@ pub const CARD_CHALLENGE_BYTES: usize = 32;
 
 /// Card-auth challenge time-to-live in seconds (also `expires_in` on the wire).
 pub const CARD_CHALLENGE_TTL_SECS: usize = 60;
+
+/// Outstanding challenges kept per card. Card UIDs are public (readable over
+/// NFC), so a single slot let anyone who knew a UID overwrite or consume the
+/// legitimate holder's challenge; a small set lets several be live at once,
+/// each with its own TTL. Issuance beyond the cap evicts the oldest.
+pub const CARD_CHALLENGE_MAX_OUTSTANDING: usize = 5;
 
 /// Maximum DER-encoded ECDSA P-256 signature length in bytes (144 hex chars).
 pub const CARD_SIGNATURE_MAX_BYTES: usize = 72;
@@ -364,6 +413,62 @@ pub const DEFAULT_ADMIN_WEBHOOK_DISABLE_THRESHOLD: i64 = 10;
 /// Admin webhook: delivery worker poll interval in seconds.
 pub const DEFAULT_ADMIN_WEBHOOK_POLL_SECS: u64 = 5;
 
+/// Admin webhook: lease (seconds) a worker takes on the pending deliveries it
+/// claims. Every server task runs the delivery loop, so the claim pushes
+/// `next_attempt_at` this far out under `FOR UPDATE ... SKIP LOCKED`; a
+/// second task cannot re-select a row while its holder is delivering it, and
+/// if the holder dies mid-flight the lease simply expires and the row is
+/// retried as if never claimed. No new status, no sweep.
+pub const ADMIN_WEBHOOK_DELIVERY_LEASE_SECS: i64 = 120;
+
+/// Admin webhook: per-POST deadline (seconds). Each delivery gets its own
+/// timeout so one black-holed receiver costs at most this much per attempt
+/// instead of the whole HTTP client timeout multiplied by the batch.
+pub const ADMIN_WEBHOOK_POST_TIMEOUT_SECS: u64 = 20;
+
+/// Admin webhook: most deliveries attempted per webhook per tick. Bounds the
+/// burst one receiver sees, and how fast a flood of events can march a
+/// receiver toward `ADMIN_WEBHOOK_DISABLE_THRESHOLD`. Deliveries within one
+/// webhook are sequential (id order); different webhooks run concurrently.
+pub const ADMIN_WEBHOOK_MAX_PER_WEBHOOK_PER_TICK: i64 = 5;
+
+/// Admin webhook: webhooks delivered to concurrently within one tick.
+pub const ADMIN_WEBHOOK_DELIVERY_CONCURRENCY: usize = 8;
+
+/// Admin webhook: most deliveries claimed per tick across all webhooks.
+pub const ADMIN_WEBHOOK_CLAIM_LIMIT: i64 = 200;
+
+// The lease must outlast the worst case a holder can spend on one webhook's
+// claimed rows (sequential POSTs, each bounded by its own timeout), or a
+// slow receiver reopens the duplicate-delivery window the lease closes. The
+// worker also refuses to START a POST that could outlast its lease.
+const _: () = assert!(
+    (ADMIN_WEBHOOK_MAX_PER_WEBHOOK_PER_TICK as u64) * ADMIN_WEBHOOK_POST_TIMEOUT_SECS
+        < ADMIN_WEBHOOK_DELIVERY_LEASE_SECS as u64
+);
+
+/// Retention (seconds; 90 days) for DISPATCHED `event_outbox` rows. The
+/// outbox is the pull/replay feed (`GET /admin/events`) and the source of
+/// webhook deliveries; an undispatched row, or one that still has a pending
+/// delivery, is never pruned whatever its age. Money tables are never pruned.
+pub const EVENT_OUTBOX_RETENTION_SECS: i64 = 90 * 86_400;
+
+/// Retention (seconds; 30 days) for TERMINAL (`delivered` / `failed`)
+/// `admin_webhook_delivery` rows. Pending rows are never pruned.
+pub const ADMIN_WEBHOOK_DELIVERY_RETENTION_SECS: i64 = 30 * 86_400;
+
+/// Rows deleted per prune statement, so a backlog never turns one tick into
+/// a table-wide delete under the 60s statement timeout.
+pub const EVENT_OUTBOX_PRUNE_BATCH: i64 = 1_000;
+
+/// How often (seconds) the delivery worker runs the age-based prune.
+pub const EVENT_OUTBOX_PRUNE_INTERVAL_SECS: u64 = 3_600;
+
+/// Most prune batches per table per run, so a backlog drains over a few
+/// hours rather than in one long-running statement.
+pub const EVENT_OUTBOX_PRUNE_MAX_ROUNDS: usize = 10;
+const _: () = assert!(ADMIN_WEBHOOK_DELIVERY_RETENTION_SECS <= EVENT_OUTBOX_RETENTION_SECS);
+
 /// Stellar testnet Horizon API URL.
 pub const STELLAR_TESTNET_HORIZON_URL: &str = "https://horizon-testnet.stellar.org";
 
@@ -503,6 +608,11 @@ pub const MAX_EXCHANGE_ADDRESS_LEN: usize = 128;
 /// Max length for a payout/refund extra id (destination tag / memo).
 pub const MAX_EXCHANGE_EXTRA_ID_LEN: usize = 64;
 
+/// Max length of a push device token. FCM registration tokens run ~160–200
+/// characters; the cap is generous but bounds what a client can make the
+/// worker store, send, and log.
+pub const MAX_DEVICE_TOKEN_LEN: usize = 4096;
+
 // ── Conversion reserve (bridge service reserve for small orders) ───────
 
 /// Internal exchange "provider" for orders fulfilled from the bridge's own
@@ -542,6 +652,18 @@ pub const RESERVE_CURRENCY_USDC: &str = "USDC";
 pub const RESERVE_CURRENCY_USD: &str = "USD";
 /// Accumulated pay-in inventory bucket (native XLM).
 pub const RESERVE_CURRENCY_XLM: &str = "XLM";
+/// Second Stellar stablecoin bucket: Tether's USDT0 (LayerZero OFT, issued
+/// natively on Stellar since 2026-09-02). Seeded by migration 036; ACTIVE only
+/// when `RESERVE_USDT0_ISSUER` is configured — the bucket key is fixed, the
+/// on-chain identity `(code, issuer)` is operator-supplied and pinned, never
+/// hardcoded (issuers differ per network and are the whole trust anchor: a
+/// "USDT0" from any other issuer is a foreign token, not money).
+pub const RESERVE_CURRENCY_USDT0: &str = "USDT0";
+/// Default asset code for the USDT0 bucket (`RESERVE_USDT0_CODE` overrides).
+/// Five characters, so on the wire it is a `credit_alphanum12` asset — every
+/// asset match in the reserve compares `(code, issuer)` and never the
+/// `credit_alphanum4`/`credit_alphanum12` type tag, which is why that is safe.
+pub const RESERVE_DEFAULT_USDT0_CODE: &str = "USDT0";
 
 /// Minor-unit scale for Stellar-native asset buckets (USDC/XLM, 7 dp).
 pub const RESERVE_SCALE_STELLAR: u8 = 7;
@@ -669,6 +791,15 @@ pub const RESERVE_ONCHAIN_SEARCH_MAX_PAGES: usize = 50;
 /// backward-search floor, absorbing bridge/ledger clock skew so the walk can
 /// never stop just short of the settling payment.
 pub const RESERVE_ONCHAIN_SEARCH_SKEW_SECS: i64 = 600;
+/// Maximum Horizon ingestion lag (seconds, from the root document's
+/// `history_latest_ledger_closed_at`) under which an on-chain ABSENCE is
+/// accepted as proven, and under which the deposit scan counts as "chain
+/// current". Horizon ingests ledgers in order, so a lagging head lacks the
+/// newest payout while older records still exist — a walk that only sees
+/// those would "prove" absence and release a hold for money that landed.
+/// Must stay well inside the 600s resolve wait minus the 300s transaction
+/// validity window; 90s leaves margin for a slow but honest Horizon.
+pub const HORIZON_MAX_LAG_SECS: i64 = 90;
 
 /// Max concurrently open (non-terminal) reserve orders per account — with
 /// the hold-fraction guard, bounds how much of the pool one actor can lock.
@@ -692,6 +823,22 @@ pub const RESERVE_DISBURSE_MAX_MULTIPLE: i64 = 2;
 /// Advisory-lock key serializing the reserve watcher tick across instances
 /// (pg_try_advisory_lock; losers skip the tick). Arbitrary but stable.
 pub const RESERVE_WATCHER_LOCK_KEY: i64 = 0x494d_5052_5352_5645;
+/// Advisory lock key for the exchange reconcile poller ("IMPRRCNC"): one
+/// instance polls providers per tick, so N tasks do not N× the provider
+/// budget and the poll backoff.
+pub const EXCHANGE_RECONCILE_LOCK_KEY: i64 = 0x494d_5052_5243_4e43;
+
+/// Default per-operation fee BID in stroops for every bridge-signed
+/// transaction (`STELLAR_MAX_FEE_STROOPS`). A Stellar fee bid is a maximum:
+/// the network charges the ledger's effective fee, so bidding 10,000 stroops
+/// (0.001 XLM) costs 100 in a quiet ledger and buys inclusion through the
+/// surge pricing that made a 100-stroop bid fail with tx_insufficient_fee
+/// for hours at a time — which froze payouts and terminally failed refunds.
+pub const DEFAULT_STELLAR_MAX_FEE_STROOPS: u32 = 10_000;
+/// Clamp for `STELLAR_MAX_FEE_STROOPS`: never below the network minimum,
+/// never above 0.1 XLM per operation.
+pub const STELLAR_MAX_FEE_STROOPS_MIN: u32 = 100;
+pub const STELLAR_MAX_FEE_STROOPS_MAX: u32 = 1_000_000;
 
 // ── Reserved price quotes (032) ────────────────────────────────────────
 
@@ -734,8 +881,23 @@ pub const RESERVE_QUOTE_EXPIRE_BATCH: i64 = 100;
 
 // ── Automated replenishment (032) ──────────────────────────────────────
 
+/// Replenishment kind: sell accumulated XLM for USDC (Changelly swap).
+pub const REPLENISH_KIND_XLM_TO_USDC: &str = "xlm_to_usdc";
+
+/// Replenishment kind: off-ramp USDC to the bridge's own bank (OwlPay).
+///
+/// NOT BUILDABLE YET: the fiat leg needs the bridge's own treasury
+/// beneficiary, and no such configuration exists, so
+/// `replenish::create_provider_leg` aborts every cycle of this kind at
+/// creation. `replenish::kind_has_provider_leg` is the one predicate for
+/// that, and the admin policy/run endpoints refuse to enable or run a kind
+/// it rejects — an enabled policy would otherwise churn a
+/// `replenish_hold`/`replenish_release` journal pair every cooldown.
+pub const REPLENISH_KIND_USDC_TO_USD: &str = "usdc_to_usd";
+
 /// Replenishment cycle kinds (mirrors `chk_crr_kind`).
-pub const VALID_REPLENISH_KINDS: &[&str] = &["xlm_to_usdc", "usdc_to_usd"];
+pub const VALID_REPLENISH_KINDS: &[&str] =
+    &[REPLENISH_KIND_XLM_TO_USDC, REPLENISH_KIND_USDC_TO_USD];
 
 /// Cycle states (mirrors `chk_crr_state`, in DDL order).
 /// Vocabulary-only: values are written as literals by the code that owns
@@ -817,9 +979,23 @@ pub const RESERVE_REFUND_COOLDOWN_SECS: i64 = 300;
 /// round-trips under the tick's advisory lock.
 pub const RESERVE_REFUND_MAX_PER_TICK: i64 = 5;
 
-/// Dust floor (0.1 unit at 7dp). Below it a refund is parked for review —
-/// never silently absorbed.
+/// Dust floor (0.1 unit at 7dp). Below it NO refund obligation is minted and
+/// no `reserve.refund_queued` event fires: the inflow is still recorded in
+/// the unmatched queue (with `refund_skip_reason = 'dust'`) and credited in
+/// the journal — dust is never silently absorbed — but a flood of 101-stroop
+/// payments carrying harvested order memos must not mint a review-queue row
+/// and a feed event apiece. An admin can still return dust by hand through
+/// `POST /admin/exchange-reserve/refunds`.
 pub const RESERVE_REFUND_MIN_MINOR: i64 = 1_000_000;
+
+/// `reserve.unmatched_deposit` events emitted per SENDER per watcher tick.
+/// Rows past the budget still land in the unmatched queue and the journal
+/// (money is never throttled — the per-payment paging_token there is the
+/// replay anchor); only their feed events fold into one
+/// `reserve.unmatched_deposit_summary` per currency at the end of the tick's
+/// deposit scan. Without this a dust flood mints one outbox row — and one
+/// webhook delivery per registered webhook — per payment.
+pub const RESERVE_UNMATCHED_EVENTS_PER_SENDER_PER_TICK: u32 = 3;
 
 /// Refund memo prefix.
 ///
@@ -893,3 +1069,40 @@ pub const CREDENTIAL_PART_MAX_LEN: usize = 16_384;
 /// tighter custodial-sign budget (`SIGN_RATE_LIMIT_*`) because each one can
 /// re-point a money path.
 pub const KEY_IMPORT_RATE_LIMIT_SCOPE: &str = "keyimport";
+
+// ── Startup / dependency resilience ────────────────────────────────────────
+
+/// LDAP TCP/TLS connect timeout. ldap3 defaults to *no* connect timeout, so a
+/// black-holed directory would otherwise hang whichever task dials it.
+pub const LDAP_CONNECT_TIMEOUT_SECS: u64 = 10;
+
+/// Per-operation LDAP timeout (bind, each search, unbind). ldap3 consumes the
+/// timeout on the next operation only, so it is re-armed before every call.
+pub const LDAP_OP_TIMEOUT_SECS: u64 = 10;
+
+/// Request timeout for the startup Horizon network-passphrase check.
+pub const HORIZON_NETWORK_CHECK_TIMEOUT_SECS: u64 = 10;
+
+/// Attempts made to reach Horizon for the passphrase check before the process
+/// fails closed. A mismatch never retries; only "unreachable" does.
+pub const HORIZON_NETWORK_CHECK_ATTEMPTS: u32 = 5;
+
+/// Delay between Horizon passphrase-check attempts.
+pub const HORIZON_NETWORK_CHECK_RETRY_SECS: u64 = 3;
+
+/// Longest wait between attempts while an SSO provider is still PENDING
+/// (discovery/JWKS not yet loaded). Each attempt logs at ERROR, so this also
+/// bounds how quiet a broken IdP can be in the logs.
+pub const SSO_PENDING_RETRY_MAX_SECS: u64 = 60;
+
+/// Google OAuth2 scope that authorizes FCM HTTP v1 sends.
+pub const FCM_OAUTH_SCOPE: &str = "https://www.googleapis.com/auth/firebase.messaging";
+
+/// Lifetime requested for the service-account assertion JWT (Google caps it
+/// at one hour).
+pub const FCM_ASSERTION_TTL_SECS: u64 = 3600;
+
+/// Safety margin subtracted from a Google access token's `expires_in` when
+/// caching it: a 3600s token is reused for ~55 minutes, never right up to
+/// its expiry.
+pub const FCM_TOKEN_REFRESH_MARGIN_SECS: u64 = 300;

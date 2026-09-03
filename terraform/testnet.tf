@@ -53,6 +53,15 @@ module "testnet" {
     debug_mode          = "true"
   }
 
+  # Optional on testnet (wildcard CORS is allowed there); null defaults keep
+  # the task definition byte-identical.
+  cors_allowed_origins = var.testnet_cors_allowed_origins
+  public_endpoint      = var.testnet_public_endpoint
+
+  # Non-secret operator extras (RESERVE_*, KEY_IMPORT_ENABLED,
+  # ADMIN_ACCOUNT_IDS, TRUSTED_PROXY_HOPS, ...), appended last.
+  extra_environment = var.bridge_extra_environment
+
   # --- C3 hardening (free tier — testnet stays lean otherwise) ---
 
   # Pre-existing topology bug, surfaced as a knob: the historical stack has

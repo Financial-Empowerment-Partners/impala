@@ -7,10 +7,13 @@
 //! card signs `"IMPALA-AUTH:" || accountId(16, RFC-4122 big-endian) ||
 //! challenge` with ECDSA-SHA256 (secp256r1, ASN.1 DER), and the bridge
 //! verifies against the registered card's 65-byte uncompressed SEC1 public
-//! key. Challenges are single-use (Redis GETDEL), expire after 60 seconds,
-//! and are issued unconditionally so the endpoint never reveals whether a
-//! card is registered. There is NO auto-provisioning: a registered card
-//! implies an existing account (migration 017 FK).
+//! key. Each card keeps a SMALL set of outstanding challenges (a card UID is
+//! public over NFC, so a single overwritable slot let anyone who knew one
+//! clobber or consume the holder's challenge); each expires after 60
+//! seconds, the matching one is consumed atomically (Redis `LREM`) exactly
+//! once, and challenges are issued unconditionally so the endpoint never
+//! reveals whether a card is registered. There is NO auto-provisioning: a
+//! registered card implies an existing account (migration 017 FK).
 
 use axum::extract::Extension;
 use axum::Json;
@@ -18,9 +21,11 @@ use log::{debug, error, info, warn};
 use sqlx::PgPool;
 use std::sync::Arc;
 
+use crate::client_source::ClientSource;
 use crate::constants::{
-    CARD_AUTH_DOMAIN_PREFIX, CARD_CHALLENGE_BYTES, CARD_CHALLENGE_TTL_SECS,
-    CARD_SIGNATURE_MAX_BYTES, LOCKOUT_DURATION_SECS, LOCKOUT_THRESHOLD, RATE_LIMIT_MAX_REQUESTS,
+    CARD_AUTH_DOMAIN_PREFIX, CARD_CHALLENGE_BYTES, CARD_CHALLENGE_MAX_OUTSTANDING,
+    CARD_CHALLENGE_TTL_SECS, CARD_SIGNATURE_MAX_BYTES, LOCKOUT_DURATION_SECS, LOCKOUT_THRESHOLD,
+    PREAUTH_SOURCE_MAX_REQUESTS, PREAUTH_SOURCE_WINDOW_SECS, RATE_LIMIT_MAX_REQUESTS,
     RATE_LIMIT_WINDOW_SECS,
 };
 use crate::error::AppError;
@@ -78,21 +83,69 @@ pub(crate) fn verify_card_signature(
     .is_ok()
 }
 
+/// Outstanding-challenge entry as stored in the card's Redis list:
+/// `{expires_at_unix}:{challenge_hex}`. Expiry rides on the entry because
+/// the list key holds several challenges with different issue times.
+pub(crate) fn encode_challenge_entry(expires_at: u64, challenge_hex: &str) -> String {
+    format!("{expires_at}:{challenge_hex}")
+}
+
+/// Parse an entry back into `(expires_at, challenge_hex)`. `None` for
+/// anything the bridge did not write (server-side corruption, never input).
+pub(crate) fn decode_challenge_entry(entry: &str) -> Option<(u64, &str)> {
+    let (expires_at, challenge_hex) = entry.split_once(':')?;
+    let expires_at = expires_at.parse::<u64>().ok()?;
+    Some((expires_at, challenge_hex))
+}
+
+/// The entries still live at `now`, newest first, each with its decoded
+/// challenge bytes. Expired or unparseable entries are skipped; they lapse
+/// with the list key's TTL.
+pub(crate) fn live_challenges(entries: &[String], now: u64) -> Vec<(&str, Vec<u8>)> {
+    entries
+        .iter()
+        .rev()
+        .filter_map(|entry| {
+            let (expires_at, challenge_hex) = decode_challenge_entry(entry)?;
+            if expires_at <= now {
+                return None;
+            }
+            let challenge = hex::decode(challenge_hex).ok()?;
+            Some((entry.as_str(), challenge))
+        })
+        .collect()
+}
+
+fn unix_now() -> u64 {
+    chrono::Utc::now().timestamp().max(0) as u64
+}
+
 /// `POST /auth/card/challenge` — Issue a single-use signing challenge.
 ///
 /// Issued **unconditionally** (no card lookup) so the response never reveals
-/// whether a card is registered. The challenge is stored fail-closed in Redis
-/// under `impala:card_challenge:{card_id}` with a 60s TTL and consumed
-/// atomically (GETDEL) by `POST /auth/card`.
+/// whether a card is registered. The challenge joins the card's bounded
+/// outstanding set in Redis (`impala:card_challenges:{card_id}`, at most
+/// `CARD_CHALLENGE_MAX_OUTSTANDING`, oldest evicted, 60s TTL each), stored
+/// fail-closed, and is consumed atomically by `POST /auth/card`.
 pub async fn card_challenge(
     Extension(redis_pool): Extension<Arc<deadpool_redis::Pool>>,
+    ClientSource(source): ClientSource,
     Json(payload): Json<CardChallengeRequest>,
 ) -> Result<Json<CardChallengeResponse>, AppError> {
     debug!("POST /auth/card/challenge: challenge requested");
 
     crate::validate::validate_card_id(&payload.card_id)?;
 
-    // Rate-limit issuance per card id (fail-closed)
+    // Per-source budget before any per-card budget is spent, then
+    // rate-limit issuance per card id (both fail-closed).
+    crate::redis_helpers::check_rate_limit(
+        &redis_pool,
+        "preauth_src",
+        &source,
+        PREAUTH_SOURCE_MAX_REQUESTS,
+        PREAUTH_SOURCE_WINDOW_SECS,
+    )
+    .await?;
     crate::redis_helpers::check_rate_limit(
         &redis_pool,
         "card_challenge",
@@ -109,10 +162,12 @@ pub async fn card_challenge(
     })?;
     let challenge_hex = hex::encode(challenge);
 
-    crate::redis_helpers::store_card_challenge(
+    let entry = encode_challenge_entry(unix_now() + CARD_CHALLENGE_TTL_SECS as u64, &challenge_hex);
+    crate::redis_helpers::push_card_challenge(
         &redis_pool,
         &payload.card_id,
-        &challenge_hex,
+        &entry,
+        CARD_CHALLENGE_MAX_OUTSTANDING,
         CARD_CHALLENGE_TTL_SECS,
     )
     .await?;
@@ -126,20 +181,25 @@ pub async fn card_challenge(
 
 /// `POST /auth/card` — Exchange a card signature for local JWT tokens.
 ///
-/// Looks up the active registered card, reconstructs the pinned message from
-/// the consumed challenge, and verifies the DER signature against the card's
-/// EC public key. All failure modes (unknown card, missing/expired/replayed
-/// challenge, bad signature) return the same generic 401 and count toward the
-/// per-card lockout.
+/// Looks up the active registered card, reconstructs the pinned message for
+/// each live outstanding challenge, and verifies the DER signature against
+/// the card's EC public key; the challenge that verifies is consumed
+/// atomically (exactly once). Every failure mode (unknown card, no live
+/// challenge, bad signature, replay) returns the same generic 401, but only
+/// a bad signature over a live challenge — a real guess — counts toward the
+/// `(card, source)` lockout. An empty submission against a card whose UID
+/// anyone can read must not be able to spend the holder's budget.
 pub async fn card_token_exchange(
     Extension(pool): Extension<PgPool>,
     Extension(jwt_keys): Extension<Arc<crate::jwt::JwtKeys>>,
     Extension(redis_pool): Extension<Arc<deadpool_redis::Pool>>,
     Extension(admin_ids): Extension<Arc<std::collections::HashSet<String>>>,
     Extension(metrics): Extension<Arc<AppMetrics>>,
+    ClientSource(source): ClientSource,
     Json(payload): Json<CardTokenExchangeRequest>,
 ) -> Result<Json<TokenResponse>, AppError> {
-    let result = card_token_exchange_inner(pool, jwt_keys, redis_pool, admin_ids, payload).await;
+    let result =
+        card_token_exchange_inner(pool, jwt_keys, redis_pool, admin_ids, &source, payload).await;
     metrics.record_token_exchange("card", token_exchange_outcome(&result));
     result
 }
@@ -149,6 +209,7 @@ async fn card_token_exchange_inner(
     jwt_keys: Arc<crate::jwt::JwtKeys>,
     redis_pool: Arc<deadpool_redis::Pool>,
     admin_ids: Arc<std::collections::HashSet<String>>,
+    source: &str,
     payload: CardTokenExchangeRequest,
 ) -> Result<Json<TokenResponse>, AppError> {
     debug!("POST /auth/card: token exchange request received");
@@ -159,8 +220,18 @@ async fn card_token_exchange_inner(
     let card_id = payload.card_id;
     let lockout_id = format!("card:{card_id}");
 
-    // Lockout + rate limit (fail-closed on Redis errors)
-    crate::redis_helpers::check_lockout(&redis_pool, &lockout_id, LOCKOUT_THRESHOLD).await?;
+    // Per-source budget, (card, source) lockout, per-card rate limit — all
+    // fail-closed on Redis errors.
+    crate::redis_helpers::check_rate_limit(
+        &redis_pool,
+        "preauth_src",
+        source,
+        PREAUTH_SOURCE_MAX_REQUESTS,
+        PREAUTH_SOURCE_WINDOW_SECS,
+    )
+    .await?;
+    crate::redis_helpers::check_lockout(&redis_pool, &lockout_id, source, LOCKOUT_THRESHOLD)
+        .await?;
     crate::redis_helpers::check_rate_limit(
         &redis_pool,
         "card",
@@ -170,32 +241,21 @@ async fn card_token_exchange_inner(
     )
     .await?;
 
-    // Consume the outstanding challenge FIRST (GETDEL — single use), so even
-    // a valid signature can only ever be presented once per challenge.
-    let challenge_hex = match crate::redis_helpers::consume_card_challenge(&redis_pool, &card_id)
-        .await?
-    {
-        Some(c) => c,
-        None => {
-            warn!(
-                "card_auth: no outstanding challenge for card_id={} (expired, replayed, or never issued)",
-                card_id
-            );
-            crate::redis_helpers::increment_lockout(
-                &redis_pool,
-                &lockout_id,
-                LOCKOUT_DURATION_SECS,
-            )
-            .await;
-            return Err(AppError::Unauthorized);
-        }
-    };
-
-    let challenge = hex::decode(&challenge_hex).map_err(|e| {
-        // The bridge wrote this value itself; failure here is server-side corruption.
-        error!("card_auth: stored challenge is not valid hex: {}", e);
-        AppError::Unauthorized
-    })?;
+    // Read the outstanding set WITHOUT consuming anything: nothing is
+    // removed until a signature has verified against it, so a stranger's
+    // submission can no longer burn the holder's challenge.
+    let entries = crate::redis_helpers::list_card_challenges(&redis_pool, &card_id).await?;
+    let candidates = live_challenges(&entries, unix_now());
+    if candidates.is_empty() {
+        // Not a guess — there was nothing to sign against — so no lockout
+        // increment: counting this let anyone who knew a card UID lock the
+        // holder out with empty submissions.
+        warn!(
+            "card_auth: no live challenge for card_id={} (expired, consumed, or never issued)",
+            card_id
+        );
+        return Err(AppError::Unauthorized);
+    }
 
     // Look up the active registered card (unique per migration 021)
     let card_row = sqlx::query_as::<_, (String, String)>(
@@ -212,13 +272,9 @@ async fn card_token_exchange_inner(
     let (account_id, ec_pubkey_hex) = match card_row {
         Some(row) => row,
         None => {
+            // Unknown identity: no key to guess against, not counted (same
+            // rule as an unknown username on the password paths).
             warn!("card_auth: unknown or deleted card_id={}", card_id);
-            crate::redis_helpers::increment_lockout(
-                &redis_pool,
-                &lockout_id,
-                LOCKOUT_DURATION_SECS,
-            )
-            .await;
             return Err(AppError::Unauthorized);
         }
     };
@@ -245,18 +301,46 @@ async fn card_token_exchange_inner(
     let signature = hex::decode(&payload.signature)
         .map_err(|_| AppError::BadRequest("Invalid signature encoding".to_string()))?;
 
-    if !verify_card_signature(&ec_pubkey, &account_uuid, &challenge, &signature) {
+    // The card signed exactly one of the live challenges (newest first — the
+    // one it was most likely just handed). One signature can verify against
+    // at most one 32-byte random challenge, so the match is unambiguous.
+    let matched = candidates
+        .iter()
+        .find(|(_, challenge)| {
+            verify_card_signature(&ec_pubkey, &account_uuid, challenge, &signature)
+        })
+        .map(|(entry, _)| *entry);
+
+    let Some(entry) = matched else {
+        // A real guess: a signature that verifies against no live challenge.
+        // This is the ONLY card-path failure that counts toward lockout.
         warn!(
             "card_auth: signature verification failed for card_id={}",
             card_id
         );
-        crate::redis_helpers::increment_lockout(&redis_pool, &lockout_id, LOCKOUT_DURATION_SECS)
-            .await;
+        crate::redis_helpers::increment_lockout(
+            &redis_pool,
+            &lockout_id,
+            source,
+            LOCKOUT_DURATION_SECS,
+        )
+        .await;
+        return Err(AppError::Unauthorized);
+    };
+
+    // Consume exactly the challenge that verified, atomically: of two
+    // concurrent presentations of the same valid signature, exactly one
+    // removes the entry; the other finds it gone and is a replay.
+    if !crate::redis_helpers::consume_card_challenge(&redis_pool, &card_id, entry).await? {
+        warn!(
+            "card_auth: challenge for card_id={} was already consumed (replay)",
+            card_id
+        );
         return Err(AppError::Unauthorized);
     }
 
-    // Success — reset the failure counter
-    crate::redis_helpers::clear_lockout(&redis_pool, &lockout_id).await;
+    // Success — reset the failure counter for this source
+    crate::redis_helpers::clear_lockout(&redis_pool, &lockout_id, source).await;
 
     info!(
         "card_auth: signature verified for card_id={} account_id={}",
@@ -404,6 +488,71 @@ mod tests {
         compressed.extend_from_slice(&pubkey[1..33]);
 
         assert!(!verify_card_signature(&compressed, &uuid, &challenge, &sig));
+    }
+
+    // ── Outstanding-challenge set ──────────────────────────────────────
+
+    #[test]
+    fn challenge_entry_round_trips() {
+        let hex = hex::encode([0xA5u8; 32]);
+        let entry = encode_challenge_entry(1_700_000_060, &hex);
+        assert_eq!(entry, format!("1700000060:{hex}"));
+        assert_eq!(
+            decode_challenge_entry(&entry),
+            Some((1_700_000_060, hex.as_str()))
+        );
+    }
+
+    #[test]
+    fn decode_rejects_anything_the_bridge_did_not_write() {
+        assert!(decode_challenge_entry("").is_none());
+        assert!(decode_challenge_entry("deadbeef").is_none());
+        assert!(decode_challenge_entry("soon:deadbeef").is_none());
+        assert!(decode_challenge_entry("-5:deadbeef").is_none());
+    }
+
+    /// Expired entries are invisible, live ones come newest-first, and an
+    /// entry that will not parse is skipped rather than failing the lot.
+    #[test]
+    fn live_challenges_filters_expired_and_orders_newest_first() {
+        let old = hex::encode([0x01u8; 32]);
+        let mid = hex::encode([0x02u8; 32]);
+        let new = hex::encode([0x03u8; 32]);
+        let entries = vec![
+            encode_challenge_entry(100, &old), // expired at now=100 (<=)
+            encode_challenge_entry(150, &mid),
+            "garbage".to_string(),
+            encode_challenge_entry(160, &new),
+        ];
+        let live = live_challenges(&entries, 100);
+        let order: Vec<&str> = live.iter().map(|(e, _)| *e).collect();
+        assert_eq!(order, vec![entries[3].as_str(), entries[1].as_str()]);
+        assert_eq!(live[0].1, vec![0x03u8; 32]);
+        assert!(live_challenges(&entries, 160).is_empty());
+    }
+
+    /// With several challenges outstanding, the signature verifies against
+    /// exactly the one the card signed — never a neighbour — so the handler
+    /// consumes the right entry and leaves the rest for their holders.
+    #[test]
+    fn signature_matches_exactly_one_live_challenge() {
+        let (key_pair, pubkey) = keypair();
+        let uuid = test_uuid();
+        let challenges: Vec<[u8; 32]> = (1u8..=5).map(|i| [i; 32]).collect();
+        let entries: Vec<String> = challenges
+            .iter()
+            .enumerate()
+            .map(|(i, c)| encode_challenge_entry(1_000 + i as u64, &hex::encode(c)))
+            .collect();
+        let sig = sign(&key_pair, &build_card_auth_message(&uuid, &challenges[2]));
+
+        let live = live_challenges(&entries, 0);
+        let matched: Vec<&str> = live
+            .iter()
+            .filter(|(_, c)| verify_card_signature(&pubkey, &uuid, c, &sig))
+            .map(|(e, _)| *e)
+            .collect();
+        assert_eq!(matched, vec![entries[2].as_str()]);
     }
 
     #[test]

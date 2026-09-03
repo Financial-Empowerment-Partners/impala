@@ -327,12 +327,20 @@ resource "aws_lb_target_group" "server" {
   vpc_id      = aws_vpc.this[0].id
   target_type = "ip"
 
+  # Readiness, not liveness. /readyz answers 200 only when Postgres AND Redis
+  # both answer (impala-bridge/src/handlers/health.rs, empty body); /health
+  # answers 200 with a JSON body even while degraded (impalactl + openapi
+  # depend on that shape) and must never be a probe target. 8 x 30 s = 4 min
+  # of sustained dependency failure before a target is pulled — longer than
+  # a Multi-AZ RDS / ElastiCache failover, so a failover does not cascade
+  # into ECS replacing every task. Full rationale on
+  # aws_lb_target_group.server in ../../alb.tf.
   health_check {
-    path                = "/health"
+    path                = "/readyz"
     port                = "traffic-port"
     protocol            = "HTTP"
     healthy_threshold   = 2
-    unhealthy_threshold = 3
+    unhealthy_threshold = 8
     interval            = 30
     timeout             = 5
     matcher             = "200"
@@ -976,9 +984,18 @@ resource "aws_ecs_task_definition" "server" {
           { name = "SES_FROM_ADDRESS", value = var.ses_from_address },
           { name = "FCM_PROJECT_ID", value = var.fcm_project_id },
         ],
-        # Appended last so the historical element order above stays intact
-        # ([] default = zero churn).
+        # Appended after the historical list so the element order above stays
+        # intact ([] default = zero churn).
         var.seed_protection_environment,
+        # CORS_ALLOWED_ORIGINS / PUBLIC_ENDPOINT only when the caller sets
+        # them (null default = omitted, so the testnet task definition stays
+        # byte-identical). The bridge exits on wildcard CORS with
+        # STELLAR_NETWORK=pubnet, which is why variables.tf requires
+        # cors_allowed_origins for pubnet stacks.
+        var.cors_allowed_origins != null ? [{ name = "CORS_ALLOWED_ORIGINS", value = var.cors_allowed_origins }] : [],
+        var.public_endpoint != null ? [{ name = "PUBLIC_ENDPOINT", value = var.public_endpoint }] : [],
+        # Operator-supplied non-secret extras, always last ([] default).
+        var.extra_environment,
       )
 
       secrets = concat(
@@ -1059,9 +1076,11 @@ resource "aws_ecs_task_definition" "worker" {
           { name = "SES_FROM_ADDRESS", value = var.ses_from_address },
           { name = "FCM_PROJECT_ID", value = var.fcm_project_id },
         ],
-        # Appended last so the historical element order above stays intact
-        # ([] default = zero churn).
+        # Appended after the historical list so the element order above stays
+        # intact ([] default = zero churn). CORS/PUBLIC_ENDPOINT are
+        # server-only; the operator extras are always last.
         var.seed_protection_environment,
+        var.extra_environment,
       )
 
       secrets = concat(
@@ -1116,6 +1135,11 @@ resource "aws_ecs_service" "server" {
     container_name   = "impala-bridge-server"
     container_port   = 8080
   }
+
+  # A fresh task gets 120 s to open its DB/Redis pools before ECS acts on
+  # ALB health (the /readyz check above is a real dependency check). Only
+  # valid on services with a load_balancer block — never on the worker.
+  health_check_grace_period_seconds = 120
 
   deployment_circuit_breaker {
     enable   = true

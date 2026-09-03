@@ -5,6 +5,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::config::{Config, ProviderConfig, TokenKind};
+use crate::constants::SSO_PENDING_RETRY_MAX_SECS;
 use crate::error::AppError;
 
 /// OIDC discovery document from the authorization server.
@@ -94,13 +95,37 @@ impl RefreshCooldown {
     }
 }
 
+/// Everything learned from the IdP. Absent until BOTH discovery and the first
+/// JWKS fetch have succeeded — the provider is PENDING meanwhile.
+#[derive(Debug, Clone)]
+pub struct ProviderReady {
+    pub discovery: OidcDiscovery,
+    /// URL used for ALL server-side JWKS fetches (background refresh,
+    /// on-kid-miss). Equals `discovery.jwks_uri` unless an internal issuer is
+    /// configured, in which case the public issuer prefix is rewritten so the
+    /// bridge can reach the IdP on its internal address (split-horizon dev
+    /// setups, e.g. the docker-compose OpenBao test IdP).
+    pub jwks_fetch_uri: String,
+    pub jwks: JwksResponse,
+}
+
+/// Coarse readiness string for `GET /health` (`sso_providers` map).
+pub const PROVIDER_STATE_READY: &str = "ready";
+pub const PROVIDER_STATE_PENDING: &str = "pending";
+
 /// Shared per-provider OIDC state (one per configured IdP).
+///
+/// Constructed synchronously from configuration — nothing here touches the
+/// network — and brought to READY by [`provider_task`], which fetches
+/// discovery and JWKS immediately and keeps retrying with backoff. Until then
+/// the token-exchange handler answers 503 (`AppError::Retryable`) and
+/// `/config` reports `enabled: false, pending: true`. A transient IdP blip at
+/// boot therefore delays SSO instead of disabling it for the life of the
+/// process, and a rolling deploy cannot leave instances inconsistent.
 pub struct OidcProvider {
     /// Provider name (`okta` | `auth0` | `duo` | …). Drives `profile_source`,
     /// `auth_provider`, the rate-limit scope, and log context.
     pub name: String,
-    pub discovery: OidcDiscovery,
-    pub jwks: Arc<RwLock<JwksResponse>>,
     pub client_id: String,
     /// The value validated as the JWT `aud`. Defaults to `client_id`.
     pub audience: String,
@@ -111,14 +136,96 @@ pub struct OidcProvider {
     pub token_kind: TokenKind,
     pub jwks_refresh_secs: u64,
     pub http_client: reqwest::Client,
-    /// URL used for ALL server-side JWKS fetches (initial, background refresh,
-    /// on-kid-miss). Equals `discovery.jwks_uri` unless an internal issuer is
-    /// configured, in which case the public issuer prefix is rewritten so the
-    /// bridge can reach the IdP on its internal address (split-horizon dev
-    /// setups, e.g. the docker-compose OpenBao test IdP).
-    pub jwks_fetch_uri: String,
     /// Debounce for the unauthenticated on-demand JWKS refetch path.
     pub refresh_cooldown: RefreshCooldown,
+    /// Base URL discovery is fetched from: the internal issuer when configured
+    /// (the public one may only be reachable by browsers). The document
+    /// itself still carries the public endpoints handed to clients.
+    discovery_base: String,
+    internal_issuer_url: Option<String>,
+    state: RwLock<Option<ProviderReady>>,
+}
+
+impl OidcProvider {
+    /// True once discovery and JWKS are loaded.
+    pub async fn is_ready(&self) -> bool {
+        self.state.read().await.is_some()
+    }
+
+    /// Readiness as reported by `GET /health`.
+    pub async fn state_label(&self) -> &'static str {
+        if self.is_ready().await {
+            PROVIDER_STATE_READY
+        } else {
+            PROVIDER_STATE_PENDING
+        }
+    }
+
+    /// Discovery endpoints for `/config`; `None` while pending.
+    pub async fn discovery(&self) -> Option<OidcDiscovery> {
+        self.state
+            .read()
+            .await
+            .as_ref()
+            .map(|r| r.discovery.clone())
+    }
+
+    /// One attempt to (re)load IdP state. While pending: discovery, then JWKS,
+    /// then READY. Once ready: a JWKS refresh only. Discovery is re-fetched on
+    /// every pending attempt rather than cached across a JWKS failure — it is
+    /// one cheap GET and keeps the state machine two-valued.
+    pub async fn sync_from_idp(&self) -> Result<(), AppError> {
+        let jwks_uri = self
+            .state
+            .read()
+            .await
+            .as_ref()
+            .map(|r| r.jwks_fetch_uri.clone());
+        match jwks_uri {
+            Some(uri) => {
+                let jwks = fetch_jwks(&self.http_client, &self.name, &uri).await?;
+                if let Some(ready) = self.state.write().await.as_mut() {
+                    ready.jwks = jwks;
+                }
+                Ok(())
+            }
+            None => {
+                let discovery =
+                    fetch_discovery(&self.http_client, &self.name, &self.discovery_base).await?;
+                let jwks_fetch_uri = match &self.internal_issuer_url {
+                    Some(internal) => {
+                        let rewritten =
+                            rewrite_url_base(&discovery.jwks_uri, &self.issuer_url, internal);
+                        if rewritten == discovery.jwks_uri {
+                            warn!(
+                                "oidc[{}]: jwks_uri {} is not under the public issuer {}; fetching it verbatim",
+                                self.name, discovery.jwks_uri, self.issuer_url
+                            );
+                        }
+                        rewritten
+                    }
+                    None => discovery.jwks_uri.clone(),
+                };
+                let jwks = fetch_jwks(&self.http_client, &self.name, &jwks_fetch_uri).await?;
+                *self.state.write().await = Some(ProviderReady {
+                    discovery,
+                    jwks_fetch_uri,
+                    jwks,
+                });
+                Ok(())
+            }
+        }
+    }
+}
+
+/// The 503 a token exchange gets while its provider is pending. Retryable by
+/// contract: nothing was validated, provisioned, or issued.
+pub fn pending_error(provider_name: &str) -> AppError {
+    AppError::Retryable(format!(
+        "SSO provider '{}' is still initializing: the identity provider could not be reached \
+         yet; retry shortly",
+        provider_name
+    ))
 }
 
 /// Registry of all configured OIDC providers, shared as a single Axum extension.
@@ -268,32 +375,36 @@ fn rewrite_url_base(url: &str, public_base: &str, internal_base: &str) -> String
     }
 }
 
-/// Initialize a single OIDC provider from its config. Returns `None`
-/// (logging the reason) if the issuer scheme is not allowed or
-/// discovery/JWKS fails.
-pub async fn init_provider(
+/// Build the shared HTTP client used for discovery/JWKS fetches.
+pub fn build_idp_client(http_client_timeout_secs: u64) -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(http_client_timeout_secs))
+        .redirect(reqwest::redirect::Policy::limited(5))
+        .build()
+        .expect("Failed to create HTTP client")
+}
+
+/// Construct a single OIDC provider from its config in the PENDING state.
+///
+/// No network I/O happens here. Genuinely invalid configuration — an empty
+/// issuer, a non-HTTPS issuer without the dev opt-in — is an `Err` and
+/// fatal at startup: it is a mistake a human is watching for, unlike an IdP
+/// that happens to be unreachable at the moment the process boots.
+pub fn init_provider(
     cfg: &ProviderConfig,
     http_client_timeout_secs: u64,
-) -> Option<Arc<OidcProvider>> {
+) -> Result<Arc<OidcProvider>, String> {
     if cfg.issuer_url.trim().is_empty() {
-        return None;
+        return Err("issuer URL is empty".to_string());
     }
 
     // Issuers must use HTTPS unless the dev-only escape hatch is set.
     if !issuer_scheme_allowed(&cfg.issuer_url, cfg.allow_http) {
-        error!(
-            "oidc[{}]: issuer URL must use HTTPS: {}",
-            cfg.name, cfg.issuer_url
-        );
-        return None;
+        return Err(format!("issuer URL must use HTTPS: {}", cfg.issuer_url));
     }
     if let Some(internal) = &cfg.internal_issuer_url {
         if !issuer_scheme_allowed(internal, cfg.allow_http) {
-            error!(
-                "oidc[{}]: internal issuer URL must use HTTPS: {}",
-                cfg.name, internal
-            );
-            return None;
+            return Err(format!("internal issuer URL must use HTTPS: {}", internal));
         }
     }
     if cfg.allow_http
@@ -310,162 +421,156 @@ pub async fn init_provider(
     }
 
     info!(
-        "oidc[{}]: initializing provider for issuer {}",
+        "oidc[{}]: provider configured for issuer {} (pending IdP discovery)",
         cfg.name, cfg.issuer_url
     );
-
-    let http_client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(http_client_timeout_secs))
-        .redirect(reqwest::redirect::Policy::limited(5))
-        .build()
-        .expect("Failed to create HTTP client");
 
     // Discovery is fetched from the internal issuer when configured (the
     // public issuer may only be reachable by browsers); the document itself
     // still carries the public endpoints, which is what we hand to clients.
-    let fetch_base = cfg
+    let discovery_base = cfg
         .internal_issuer_url
-        .as_deref()
-        .unwrap_or(&cfg.issuer_url);
-    let discovery = match fetch_discovery(&http_client, &cfg.name, fetch_base).await {
-        Ok(d) => d,
-        Err(e) => {
-            error!("oidc[{}]: failed to initialize provider: {}", cfg.name, e);
-            return None;
-        }
-    };
+        .clone()
+        .unwrap_or_else(|| cfg.issuer_url.clone());
 
-    let jwks_fetch_uri = match &cfg.internal_issuer_url {
-        Some(internal) => {
-            let rewritten = rewrite_url_base(&discovery.jwks_uri, &cfg.issuer_url, internal);
-            if rewritten == discovery.jwks_uri {
-                warn!(
-                    "oidc[{}]: jwks_uri {} is not under the public issuer {}; fetching it verbatim",
-                    cfg.name, discovery.jwks_uri, cfg.issuer_url
-                );
-            }
-            rewritten
-        }
-        None => discovery.jwks_uri.clone(),
-    };
-
-    let jwks = match fetch_jwks(&http_client, &cfg.name, &jwks_fetch_uri).await {
-        Ok(j) => j,
-        Err(e) => {
-            error!("oidc[{}]: failed to fetch initial JWKS: {}", cfg.name, e);
-            return None;
-        }
-    };
-
-    Some(Arc::new(OidcProvider {
+    Ok(Arc::new(OidcProvider {
         name: cfg.name.clone(),
-        discovery,
-        jwks: Arc::new(RwLock::new(jwks)),
         client_id: cfg.client_id.clone(),
         audience: cfg.audience.clone(),
         issuer_url: cfg.issuer_url.clone(),
         token_kind: cfg.token_kind,
         jwks_refresh_secs: cfg.jwks_refresh_secs,
-        http_client,
-        jwks_fetch_uri,
+        http_client: build_idp_client(http_client_timeout_secs),
         refresh_cooldown: RefreshCooldown::new(),
+        discovery_base,
+        internal_issuer_url: cfg.internal_issuer_url.clone(),
+        state: RwLock::new(None),
     }))
 }
 
-/// Build the provider registry from config. Providers that fail to initialize
-/// are logged and skipped so one bad IdP doesn't take down the others.
-pub async fn init_registry(config: &Config) -> ProviderRegistry {
+/// Build the provider registry from config (all providers PENDING; no
+/// network). `Err` = invalid configuration, which the caller treats as fatal.
+pub fn init_registry(config: &Config) -> Result<ProviderRegistry, String> {
     let mut providers: HashMap<String, Arc<OidcProvider>> = HashMap::new();
     for cfg in &config.sso_providers {
-        match init_provider(cfg, config.http_client_timeout_secs).await {
-            Some(provider) => {
-                providers.insert(cfg.name.clone(), provider);
-            }
-            None => {
-                error!(
-                    "oidc[{}]: provider failed to initialize; skipping",
-                    cfg.name
-                );
-            }
-        }
+        let provider = init_provider(cfg, config.http_client_timeout_secs)
+            .map_err(|e| format!("oidc[{}]: invalid configuration: {}", cfg.name, e))?;
+        providers.insert(cfg.name.clone(), provider);
     }
     if !providers.is_empty() {
-        info!("oidc: {} provider(s) initialized", providers.len());
+        info!(
+            "oidc: {} provider(s) configured; discovery and JWKS load in the background",
+            providers.len()
+        );
     }
-    ProviderRegistry { providers }
+    Ok(ProviderRegistry { providers })
 }
 
-/// Background task that periodically refreshes a provider's JWKS key set.
-/// Uses exponential backoff on failure (capped at 5 minutes).
-/// Respects cancellation for graceful shutdown.
-pub async fn jwks_refresh_task(
-    provider: Arc<OidcProvider>,
+/// One fetch attempt handed to [`drive_provider`].
+pub type AttemptFuture =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), AppError>> + Send>>;
+
+/// Wait policy for [`drive_provider`] (pure, tested).
+///
+/// While PENDING the first attempt has already run immediately; failures back
+/// off 1s, 2s, 4s, … up to `SSO_PENDING_RETRY_MAX_SECS`. Once READY the
+/// refresh cadence is `interval_secs`, with exponential backoff capped at
+/// five minutes on failure — the pre-existing refresh behaviour.
+pub fn next_wait_secs(ready: bool, consecutive_failures: u32, interval_secs: u64) -> u64 {
+    if !ready {
+        let exp = consecutive_failures.saturating_sub(1).min(30);
+        std::cmp::min(2u64.saturating_pow(exp), SSO_PENDING_RETRY_MAX_SECS)
+    } else if consecutive_failures > 0 {
+        std::cmp::min(
+            interval_secs.saturating_mul(2u64.saturating_pow(consecutive_failures)),
+            300,
+        )
+    } else {
+        interval_secs
+    }
+}
+
+/// Drive a provider from PENDING to READY, then keep its JWKS fresh.
+///
+/// `attempt` is one fetch: while pending it must load everything the provider
+/// needs (discovery + JWKS); once ready it refreshes JWKS. The first attempt
+/// runs IMMEDIATELY — never after `interval_secs`. Every pending failure logs
+/// at ERROR so a provider that never comes up is loud rather than silently
+/// absent; once ready, refresh failures warn and escalate to ERROR past two
+/// intervals of staleness. Respects cancellation for graceful shutdown.
+///
+/// Shared by the OIDC registry, the legacy Okta provider and the Google
+/// provider so all three have identical boot semantics.
+pub async fn drive_provider<F>(
+    label: String,
     interval_secs: u64,
     cancel: tokio_util::sync::CancellationToken,
-) {
+    mut attempt: F,
+) where
+    F: FnMut() -> AttemptFuture,
+{
     use tokio::time::{Duration, Instant};
 
+    let mut ready = false;
     let mut consecutive_failures: u32 = 0;
     let mut last_success = Instant::now();
 
-    // Skip the first immediate tick since we already fetched during init
-    tokio::select! {
-        _ = tokio::time::sleep(Duration::from_secs(interval_secs)) => {}
-        _ = cancel.cancelled() => {
-            info!("oidc[{}]: jwks_refresh_task shutting down", provider.name);
-            return;
-        }
-    }
-
     loop {
-        debug!("oidc[{}]: refreshing JWKS keys", provider.name);
-        match fetch_jwks(
-            &provider.http_client,
-            &provider.name,
-            &provider.jwks_fetch_uri,
-        )
-        .await
-        {
-            Ok(new_jwks) => {
+        debug!("{}: fetching IdP state", label);
+        match attempt().await {
+            Ok(()) => {
                 consecutive_failures = 0;
                 last_success = Instant::now();
-                let mut jwks = provider.jwks.write().await;
-                *jwks = new_jwks;
-                info!("oidc[{}]: JWKS keys refreshed successfully", provider.name);
+                if ready {
+                    info!("{}: JWKS keys refreshed successfully", label);
+                } else {
+                    ready = true;
+                    info!("{}: provider READY (discovery and JWKS loaded)", label);
+                }
             }
             Err(e) => {
                 consecutive_failures += 1;
-                let stale_secs = last_success.elapsed().as_secs();
-                if stale_secs > interval_secs * 2 {
+                if !ready {
                     error!(
-                        "oidc[{}]: JWKS keys are {} seconds stale",
-                        provider.name, stale_secs
+                        "{}: provider PENDING — {} (attempt {}); token exchanges through this \
+                         provider answer 503 until the identity provider is reachable",
+                        label, e, consecutive_failures
                     );
                 } else {
-                    warn!(
-                        "oidc[{}]: failed to refresh JWKS keys: {}",
-                        provider.name, e
-                    );
+                    let stale_secs = last_success.elapsed().as_secs();
+                    if stale_secs > interval_secs * 2 {
+                        error!("{}: JWKS keys are {} seconds stale", label, stale_secs);
+                    } else {
+                        warn!("{}: failed to refresh JWKS keys: {}", label, e);
+                    }
                 }
             }
         }
 
-        let wait_secs = if consecutive_failures > 0 {
-            std::cmp::min(
-                interval_secs.saturating_mul(2u64.saturating_pow(consecutive_failures)),
-                300,
-            )
-        } else {
-            interval_secs
-        };
+        let wait_secs = next_wait_secs(ready, consecutive_failures, interval_secs);
         tokio::select! {
             _ = tokio::time::sleep(Duration::from_secs(wait_secs)) => {}
             _ = cancel.cancelled() => {
-                info!("oidc[{}]: jwks_refresh_task shutting down", provider.name);
+                info!("{}: provider task shutting down", label);
                 return;
             }
         }
     }
+}
+
+/// Background task for one registry provider: initial discovery + JWKS with
+/// immediate retries, then periodic JWKS refresh.
+pub async fn provider_task(
+    provider: Arc<OidcProvider>,
+    cancel: tokio_util::sync::CancellationToken,
+) {
+    let label = format!("oidc[{}]", provider.name);
+    let interval = provider.jwks_refresh_secs;
+    drive_provider(label, interval, cancel, move || {
+        let p = provider.clone();
+        Box::pin(async move { p.sync_from_idp().await })
+    })
+    .await;
 }
 
 /// Validate an OIDC token (access or id) and return its claims.
@@ -488,10 +593,22 @@ pub async fn validate_token(
 
     let kid = header.kid.as_deref().unwrap_or("");
 
-    // Try to find the key in the cached JWKS
-    let claims = {
-        let jwks = provider.jwks.read().await;
-        try_validate_with_jwks(&jwks, token, kid, provider)
+    // Try to find the key in the cached JWKS. A provider still PENDING has
+    // no keys at all: refuse with 503 rather than 401, because nothing about
+    // the token has been judged — the bridge simply cannot judge it yet.
+    let (claims, jwks_fetch_uri) = {
+        let state = provider.state.read().await;
+        let Some(ready) = state.as_ref() else {
+            warn!(
+                "oidc[{}]: token exchange refused: provider still PENDING (discovery/JWKS not loaded)",
+                provider.name
+            );
+            return Err(pending_error(&provider.name));
+        };
+        (
+            try_validate_with_jwks(&ready.jwks, token, kid, provider),
+            ready.jwks_fetch_uri.clone(),
+        )
     };
 
     match claims {
@@ -517,18 +634,13 @@ pub async fn validate_token(
                 "oidc[{}]: key kid={} not found in cache, refreshing JWKS",
                 provider.name, kid
             );
-            match fetch_jwks(
-                &provider.http_client,
-                &provider.name,
-                &provider.jwks_fetch_uri,
-            )
-            .await
-            {
+            match fetch_jwks(&provider.http_client, &provider.name, &jwks_fetch_uri).await {
                 Ok(new_jwks) => {
                     let result = try_validate_with_jwks(&new_jwks, token, kid, provider);
                     // Update the cache with the refreshed keys
-                    let mut cached = provider.jwks.write().await;
-                    *cached = new_jwks;
+                    if let Some(ready) = provider.state.write().await.as_mut() {
+                        ready.jwks = new_jwks;
+                    }
                     result
                 }
                 Err(_) => {
@@ -762,6 +874,109 @@ mod tests {
                 && k.use_.as_deref().is_none_or(|u| u == "sig")
         });
         assert!(found.is_none());
+    }
+
+    fn test_provider_cfg(issuer: &str, internal: Option<&str>, allow_http: bool) -> ProviderConfig {
+        ProviderConfig {
+            name: "okta".to_string(),
+            issuer_url: issuer.to_string(),
+            client_id: "client".to_string(),
+            audience: "client".to_string(),
+            jwks_refresh_secs: 3600,
+            token_kind: TokenKind::Access,
+            internal_issuer_url: internal.map(str::to_string),
+            allow_http,
+        }
+    }
+
+    /// Construction is synchronous and network-free: a freshly built provider
+    /// is PENDING, refuses token validation with a 503, and reports no
+    /// discovery for `/config`.
+    #[tokio::test]
+    async fn new_provider_is_pending_and_refuses_with_503() {
+        let provider = init_provider(
+            &test_provider_cfg("https://idp.example.com", None, false),
+            5,
+        )
+        .unwrap();
+        assert!(!provider.is_ready().await);
+        assert_eq!(provider.state_label().await, PROVIDER_STATE_PENDING);
+        assert!(provider.discovery().await.is_none());
+
+        // Any token shape: the pending check comes before key lookup.
+        let header = "eyJhbGciOiJSUzI1NiIsImtpZCI6ImsxIn0";
+        let token = format!("{}.e30.c2ln", header);
+        match validate_token(&provider, &token).await {
+            Err(AppError::Retryable(msg)) => assert!(msg.contains("okta")),
+            other => panic!("expected Retryable (503), got {:?}", other.map(|_| ())),
+        }
+    }
+
+    /// Bad configuration is fatal at startup (an `Err`), unlike an
+    /// unreachable IdP, which only delays readiness.
+    #[test]
+    fn invalid_configuration_is_an_error_not_a_skip() {
+        assert!(init_provider(&test_provider_cfg("", None, false), 5).is_err());
+        assert!(init_provider(&test_provider_cfg("   ", None, false), 5).is_err());
+        assert!(
+            init_provider(&test_provider_cfg("http://idp.example.com", None, false), 5).is_err()
+        );
+        assert!(init_provider(
+            &test_provider_cfg(
+                "https://idp.example.com",
+                Some("http://internal:8200"),
+                false
+            ),
+            5
+        )
+        .is_err());
+        // The dev opt-in keeps plain HTTP valid.
+        assert!(init_provider(
+            &test_provider_cfg("http://openbao:8200", Some("http://internal:8200"), true),
+            5
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn init_registry_fails_closed_on_one_bad_provider() {
+        let mut config = crate::config::test_config();
+        config.sso_providers = vec![
+            test_provider_cfg("https://idp.example.com", None, false),
+            ProviderConfig {
+                name: "duo".to_string(),
+                ..test_provider_cfg("http://duo.example.com", None, false)
+            },
+        ];
+        let err = init_registry(&config)
+            .err()
+            .expect("a plain-HTTP issuer without ALLOW_HTTP must be rejected");
+        assert!(err.contains("oidc[duo]"), "{}", err);
+
+        config.sso_providers.pop();
+        let registry = init_registry(&config).unwrap();
+        assert_eq!(registry.names(), vec!["okta".to_string()]);
+    }
+
+    /// The first fetch runs immediately; while pending, retries are short and
+    /// capped; once ready the old refresh cadence applies.
+    #[test]
+    fn pending_backoff_is_short_and_capped_then_refresh_cadence_resumes() {
+        // Pending: 1, 2, 4, 8, 16, 32, then capped.
+        assert_eq!(next_wait_secs(false, 1, 3600), 1);
+        assert_eq!(next_wait_secs(false, 2, 3600), 2);
+        assert_eq!(next_wait_secs(false, 3, 3600), 4);
+        assert_eq!(next_wait_secs(false, 6, 3600), 32);
+        assert_eq!(next_wait_secs(false, 7, 3600), SSO_PENDING_RETRY_MAX_SECS);
+        assert_eq!(next_wait_secs(false, 40, 3600), SSO_PENDING_RETRY_MAX_SECS);
+        assert!(
+            next_wait_secs(false, 1, 3600) < 3600,
+            "a pending provider must never wait a full refresh interval"
+        );
+        // Ready: interval on success, capped exponential backoff on failure.
+        assert_eq!(next_wait_secs(true, 0, 3600), 3600);
+        assert_eq!(next_wait_secs(true, 1, 100), 200);
+        assert_eq!(next_wait_secs(true, 3, 3600), 300);
     }
 
     #[test]

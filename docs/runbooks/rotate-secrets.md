@@ -86,7 +86,12 @@ rotation at the latest).
 `JWT_SECRET_PREVIOUS` invalidates every refresh and temporal token at once
 and logs every user, admin session, and API client out. That is the correct
 move for a suspected secret compromise (see "Emergency rotation" below) —
-not for scheduled rotation.
+not for scheduled rotation. It is also **mandatory after any Redis data
+loss** (DR failover onto the empty DR group, a flush, a restore from
+snapshot): Redis is the sole store of token revocations, refresh rotations
+and auth epochs, so losing it silently resurrects every token they had
+killed, and this rotation is the only global kill. See "Redis lost its data"
+in `incident-response.md`.
 
 This matches the rotation runbook in `impala-bridge/SECURITY.md`
 ("Authentication" section) and the notes in

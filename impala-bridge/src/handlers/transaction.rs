@@ -204,15 +204,21 @@ fn build_tx_filters(
     let mut binds: Vec<FilterBind> = Vec::new();
     let mut n = 1;
 
-    if let Some(flagged) = p.flagged {
-        clauses.push(format!("COALESCE(r.flagged, FALSE) = ${}", n));
-        n += 1;
-        binds.push(FilterBind::Bool(flagged));
-    }
-    if let Some(ref s) = p.status {
-        clauses.push(format!("COALESCE(r.status, 'unreviewed') = ${}", n));
-        n += 1;
-        binds.push(FilterBind::Str(s.clone()));
+    // Review state is a privileged annotation: owners never see it (see
+    // `mask_review_for_owner`), so the review filters must not apply on the
+    // owner path either — `?flagged=true` returning a row would otherwise
+    // be an oracle for the very fields that are hidden.
+    if is_admin {
+        if let Some(flagged) = p.flagged {
+            clauses.push(format!("COALESCE(r.flagged, FALSE) = ${}", n));
+            n += 1;
+            binds.push(FilterBind::Bool(flagged));
+        }
+        if let Some(ref s) = p.status {
+            clauses.push(format!("COALESCE(r.status, 'unreviewed') = ${}", n));
+            n += 1;
+            binds.push(FilterBind::Str(s.clone()));
+        }
     }
     if let Some(ref sa) = p.source_account {
         clauses.push(format!("t.source_account = ${}", n));
@@ -253,6 +259,25 @@ fn build_tx_filters(
         format!(" AND {}", clauses.join(" AND "))
     };
     (where_sql, binds)
+}
+
+/// Review state (compliance/triage note, the reviewer's identity, flag and
+/// status) is a privileged annotation: `ReadTransactions` holders see it,
+/// the transaction's OWNER does not. Owners get the unreviewed defaults and
+/// nulls rather than a different row shape, so existing clients keep
+/// parsing. Applied in Rust after the fetch so the SQL keeps one shape.
+fn mask_review_for_owner(
+    flagged: &mut bool,
+    status: &mut String,
+    note: &mut Option<String>,
+    reviewed_by: &mut Option<String>,
+    reviewed_at: &mut Option<String>,
+) {
+    *flagged = false;
+    *status = "unreviewed".to_string();
+    *note = None;
+    *reviewed_by = None;
+    *reviewed_at = None;
 }
 
 /// Derive the stored review status when not explicitly provided.
@@ -347,7 +372,7 @@ pub async fn list_transactions(
             FilterBind::Bool(v) => sq.bind(*v),
         };
     }
-    let rows = sq
+    let mut rows = sq
         .bind(per_page)
         .bind(offset)
         .fetch_all(&pool)
@@ -356,6 +381,17 @@ pub async fn list_transactions(
             error!("list_transactions: query error: {}", e);
             AppError::InternalError("Database error".to_string())
         })?;
+    if !cross_account {
+        for row in &mut rows {
+            mask_review_for_owner(
+                &mut row.flagged,
+                &mut row.status,
+                &mut row.note,
+                &mut row.reviewed_by,
+                &mut row.reviewed_at,
+            );
+        }
+    }
 
     Ok(Json(PaginatedResponse {
         data: rows,
@@ -404,7 +440,18 @@ pub async fn get_transaction(
             error!("get_transaction: db error: {}", e);
             AppError::InternalError("Database error".to_string())
         })?
-        .map(Json)
+        .map(|mut d| {
+            if !cross_account {
+                mask_review_for_owner(
+                    &mut d.flagged,
+                    &mut d.status,
+                    &mut d.note,
+                    &mut d.reviewed_by,
+                    &mut d.reviewed_at,
+                );
+            }
+            Json(d)
+        })
         .ok_or_else(|| AppError::NotFound("Transaction not found".to_string()))
 }
 
@@ -516,6 +563,21 @@ mod tests {
     }
 
     #[test]
+    fn mask_review_for_owner_resets_every_review_field() {
+        let (mut f, mut s, mut n, mut by, mut at) = (
+            true,
+            "flagged".to_string(),
+            Some("suspicious".to_string()),
+            Some("admin-1".to_string()),
+            Some("2026-01-01T00:00:00Z".to_string()),
+        );
+        mask_review_for_owner(&mut f, &mut s, &mut n, &mut by, &mut at);
+        assert!(!f);
+        assert_eq!(s, "unreviewed");
+        assert!(n.is_none() && by.is_none() && at.is_none());
+    }
+
+    #[test]
     fn test_build_tx_filters_owner_appends_ownership_subquery() {
         let (where_sql, binds) = build_tx_filters(&empty_query(), false, "alice");
         assert!(where_sql.contains("payala_account_id = $1"));
@@ -528,22 +590,49 @@ mod tests {
     }
 
     #[test]
-    fn test_build_tx_filters_numbering_and_owner_last() {
+    fn test_build_tx_filters_numbering_admin_path() {
+        // ReadTransactions holders may filter on review state; no owner clause.
+        let mut q = empty_query();
+        q.flagged = Some(true);
+        q.status = Some("escalated".to_string());
+        q.q = Some("abc".to_string());
+        let (where_sql, binds) = build_tx_filters(&q, true, "bob");
+        // flagged=$1, status=$2, q=$3 (reused 5x)
+        assert!(where_sql.contains("COALESCE(r.flagged, FALSE) = $1"));
+        assert!(where_sql.contains("COALESCE(r.status, 'unreviewed') = $2"));
+        assert!(where_sql.contains("t.memo ILIKE $3"));
+        assert!(!where_sql.contains("payala_account_id"));
+        assert_eq!(binds.len(), 3);
+        // the q bind is wrapped with % wildcards
+        match &binds[2] {
+            FilterBind::Str(s) => assert_eq!(s, "%abc%"),
+            _ => panic!("expected the q bind"),
+        }
+    }
+
+    #[test]
+    fn test_build_tx_filters_owner_ignores_review_filters_and_appends_owner_last() {
+        // Owners never see review state, so ?flagged / ?status must not
+        // narrow their listing either (a filter on hidden fields is an
+        // oracle for them). Numbering restarts without those clauses and
+        // the ownership subquery stays last.
         let mut q = empty_query();
         q.flagged = Some(true);
         q.status = Some("escalated".to_string());
         q.q = Some("abc".to_string());
         let (where_sql, binds) = build_tx_filters(&q, false, "bob");
-        // flagged=$1, status=$2, q=$3 (reused 5x), owner=$4
-        assert!(where_sql.contains("COALESCE(r.flagged, FALSE) = $1"));
-        assert!(where_sql.contains("COALESCE(r.status, 'unreviewed') = $2"));
-        assert!(where_sql.contains("t.memo ILIKE $3"));
-        assert!(where_sql.contains("payala_account_id = $4"));
-        assert_eq!(binds.len(), 4);
-        // the q bind is wrapped with % wildcards
-        match &binds[2] {
+        assert!(!where_sql.contains("r.flagged"), "{where_sql}");
+        assert!(!where_sql.contains("r.status"), "{where_sql}");
+        assert!(where_sql.contains("t.memo ILIKE $1"));
+        assert!(where_sql.contains("payala_account_id = $2"));
+        assert_eq!(binds.len(), 2);
+        match &binds[0] {
             FilterBind::Str(s) => assert_eq!(s, "%abc%"),
             _ => panic!("expected the q bind"),
+        }
+        match &binds[1] {
+            FilterBind::Str(s) => assert_eq!(s, "bob"),
+            _ => panic!("expected the owner bind"),
         }
     }
 

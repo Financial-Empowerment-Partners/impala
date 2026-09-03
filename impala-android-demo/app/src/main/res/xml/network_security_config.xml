@@ -1,20 +1,19 @@
 <?xml version="1.0" encoding="utf-8"?>
-<network-security-config>
-    <!-- Allow cleartext for local development (emulator loopback to host) -->
-    <domain-config cleartextTrafficPermitted="true">
-        <domain includeSubdomains="false">10.0.2.2</domain>
-        <domain includeSubdomains="false">localhost</domain>
-    </domain-config>
+<!-- Fallback network security config (main source set).
 
-    <!-- Certificate pinning for production -->
-    <!-- TODO: Replace placeholder pins with actual SHA-256 certificate hashes.
-         Generate with: openssl s_client -connect your-api.example.com:443 | openssl x509 -pubkey -noout | openssl pkey -pubin -outform der | openssl dgst -sha256 -binary | openssl enc -base64 -->
-    <domain-config>
-        <domain includeSubdomains="true">api.payala.com</domain>
-        <pin-set expiration="2027-01-01">
-            <pin digest="SHA-256">AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=</pin>
-            <!-- Backup pin (use a different CA or intermediate cert) -->
-            <pin digest="SHA-256">BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=</pin>
-        </pin-set>
-    </domain-config>
+     Every built flavor overrides this file from its own source set —
+       app/src/tnet/res/xml/network_security_config.xml (cleartext to the
+         emulator host alias 10.0.2.2 only)
+       app/src/live/res/xml/network_security_config.xml (HTTPS only, with a
+         commented-out certificate-pinning template)
+     — so this copy is never packaged today. It exists so that a flavor added
+     WITHOUT its own override inherits an HTTPS-only, pin-free baseline,
+     never a cleartext exception and never placeholder pins (an active
+     pin-set with placeholder digests breaks every TLS connection).
+
+     Certificate pins are added per flavor, never here: see README.md,
+     "Certificate pinning", for the procedure (leaf pin plus a backup pin,
+     real host, expiration) and the rotation discipline. -->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false" />
 </network-security-config>

@@ -8,8 +8,11 @@ environment = "staging"
 # the bridge refuses to start)
 jwt_secret = "CHANGE_ME_to_a_long_random_string_of_32+_chars"
 
-# Container image tag pushed by CI
-# container_image_tag    = "latest"
+# Container image tag to deploy (REQUIRED, no default). The ECR repository is
+# IMMUTABLE and CI pushes only the per-commit :<git-sha> manifest — nothing
+# ever pushes "latest", so it is refused. The stand-up runbooks tag releases
+# prod-<short-sha> / staging-<short-sha>.
+container_image_tag = "CHANGE_ME_git_sha_or_prod-<short-sha>"
 # container_architecture = "ARM64"   # ARM64 (Graviton, default) or X86_64
 
 # Primary stack sizing (defaults shown)
@@ -47,9 +50,37 @@ jwt_secret = "CHANGE_ME_to_a_long_random_string_of_32+_chars"
 # ses_from_address = "noreply@example.com"
 # fcm_project_id   = "my-firebase-project"
 
-# Stellar endpoints (primary bridge)
+# Stellar network + endpoints (primary bridge; the DR pair inherits them).
+# stellar_network becomes STELLAR_NETWORK, which selects the passphrase the
+# bridge SIGNS with — pointing the URLs at pubnet without it produced a bridge
+# signing with the testnet passphrase against pubnet Horizon. The URLs must
+# match the network (validated). pubnet also requires certificate_arn and
+# cors_allowed_origins (the bridge exits on wildcard CORS on pubnet).
+# stellar_network     = "testnet"   # testnet (default) | pubnet
 # stellar_horizon_url = "https://horizon-testnet.stellar.org"
 # stellar_rpc_url     = "https://soroban-testnet.stellar.org"
+# Production (pubnet) example:
+# stellar_network      = "pubnet"
+# stellar_horizon_url  = "https://horizon.stellar.org"
+# stellar_rpc_url      = "https://soroban-rpc.stellar.org"
+# certificate_arn      = "arn:aws:acm:us-east-1:123456789:certificate/abc-123"
+# cors_allowed_origins = "https://admin.example.com"   # explicit origins, never "*"
+# public_endpoint      = "https://api.example.com"     # https:// on pubnet
+
+# Extra NON-SECRET bridge environment, appended to EVERY bridge task
+# definition (primary server + worker, DR, testnet and live stacks). This is
+# the plumbing for settings without a dedicated variable — see
+# impala-bridge/src/config.rs. Values are plaintext in the task definition and
+# in state, so secret-looking names (_SECRET/_TOKEN/_PASSWORD/_SEED/...) and
+# names Terraform already manages are refused at plan time; credentials go
+# through Secrets Manager (or the bridge's /admin/keys import), never here.
+# bridge_extra_environment = [
+#   { name = "RESERVE_ACCOUNT_ID",   value = "GA...RESERVE_PUBLIC_KEY" },     # conversion reserve account
+#   { name = "RESERVE_USDC_ISSUER",  value = "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN" },
+#   { name = "RESERVE_USDT0_ISSUER", value = "G...USDT0_ISSUER" },            # enables the USDT0 bucket
+#   { name = "KEY_IMPORT_ENABLED",   value = "true" },                        # /admin/keys* + impalactl keys import
+#   { name = "TRUSTED_PROXY_HOPS",   value = "1" },                           # exactly one proxy (the ALB) in front
+# ]
 
 # Disaster Recovery (cross-region ECR replication + standby cluster)
 # dr_enabled              = true
@@ -86,6 +117,8 @@ jwt_secret = "CHANGE_ME_to_a_long_random_string_of_32+_chars"
 # testnet_redis_node_type      = "cache.t3.micro"
 # testnet_certificate_arn      = ""
 # testnet_vpc_cidr             = "10.2.0.0/16"
+# testnet_cors_allowed_origins = "https://admin.testnet.example.com"  # optional on testnet
+# testnet_public_endpoint      = "https://api.testnet.example.com"    # optional
 
 # =============================================================================
 # Live stack (Stellar pubnet / mainnet)
@@ -98,6 +131,10 @@ jwt_secret = "CHANGE_ME_to_a_long_random_string_of_32+_chars"
 # live_redis_node_type      = "cache.t3.small"
 # live_certificate_arn      = "arn:aws:acm:us-east-1:123456789:certificate/abc-123"
 # live_vpc_cidr             = "10.3.0.0/16"
+# REQUIRED with live_enabled: live is pubnet and the bridge refuses to start
+# with wildcard/unset CORS_ALLOWED_ORIGINS there (explicit origins only).
+# live_cors_allowed_origins = "https://admin.example.com"
+# live_public_endpoint      = "https://api.example.com"   # https:// only
 
 # =============================================================================
 # Impala cluster (impala-api / impala-admin)

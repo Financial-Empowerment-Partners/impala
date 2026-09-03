@@ -28,31 +28,82 @@ journaled in `conversion_reserve_entry`.
 
 ## Enabling
 
-1. Create a dedicated custodial account and generate (never import) its seed:
-   `POST /managed-account/generate` with a fresh `payala_account_id` (e.g.
-   `svc-conversion-reserve`). Note the returned Stellar address.
-2. Fund the address on-chain: enough XLM for fees + base reserves, a USDC
-   trustline, and the USDC float you intend to serve. **Pool sizing:** the
-   hold guard refuses new orders once holds reach half the pool, so the USDC
-   bucket must hold at least 2× your largest threshold to serve anything.
-3. Apply migration 031 (`RUN_MODE=migrate`).
-4. Set env and restart:
-   - `RESERVE_ACCOUNT_ID=<payala id>` — the bridge now refuses this account
-     on all user-facing `/managed-account/*` endpoints and on account
-     deletion (its seed signs pool payouts).
+The order below is the one the code can execute: the reserve seed can only be
+created through the admin key surface, the trustline endpoint needs a live
+reserve handle (which exists only after the restart), and the deposit watcher
+starts scanning at enablement and never reads history.
+
+1. **Generate (never import) the reserve seed** through the key-custody
+   surface — `KEY_IMPORT_ENABLED=true` must be on for the instance you call:
+   `POST /admin/stellar-seeds/generate {"payala_account_id":
+   "svc-conversion-reserve", "label": "Reserve"}` (admin or key-custodian),
+   or `impalactl stellar-seed generate --account svc-conversion-reserve
+   --label Reserve`. The response carries the new Stellar address, which is
+   all that ever leaves the bridge. Do **not** use
+   `POST /managed-account/generate`: it is a user-facing endpoint that only
+   accepts the caller's own account — there is no admin bypass, an admin token
+   gets 403 — and it refuses the configured reserve account outright. Seed
+   *import* is refused for the reserve account (see `import-keys.md`).
+2. **Fund the address with XLM only**: base reserve + ~0.5 XLM per trustline
+   you will add (USDC, and USDT0 if configured) + fees. Nothing else yet: the
+   account has no trustlines, so a stablecoin sent now fails at the sender,
+   and the watcher is not running, so it would not be booked anyway.
+   **Pool sizing:** the hold guard refuses new orders once holds reach half
+   the pool, so the USDC bucket must end up holding at least 2× your largest
+   threshold to serve anything.
+3. **Apply migrations through 036** (`RUN_MODE=migrate`): 031 creates the
+   `conversion_reserve*` tables, 032 adds quotes/refunds/replenishment, and
+   036 seeds the `USDT0` bucket — required before `RESERVE_USDT0_ISSUER` is
+   set (the bridge refuses to start otherwise; it changes nothing on its own).
+4. **Set the env and restart:**
+   - `RESERVE_ACCOUNT_ID=<payala id from step 1>` — the bridge now refuses
+     this account on all user-facing `/managed-account/*` endpoints and on
+     account deletion (its seed signs pool payouts).
    - `RESERVE_USDC_ISSUER=<G...>` (+ `RESERVE_USDC_CODE` if not `USDC`).
-   Startup fails closed if the account has no managed seed.
-5. Record the initial funding in the ledger so it matches the chain:
-   `POST /admin/exchange-reserve/entries` with `kind: topup` per currency
-   (note the funding tx hash). Manual entries are correct HERE because the
-   deposit scan starts at enablement and never reads history — funding done
-   before this restart is invisible to the watcher. (Funding sent while the
-   watcher is live auto-credits instead — see Day-2.) The admin UI (Reserve
-   page) shows ledger-vs-on-chain side by side — they should agree now.
-6. Enable routing: `PUT /admin/exchange-reserve/policies/changelly_crypto`
+     The issuer is strkey-checksummed at startup: a mistyped one refuses to
+     start rather than silently classifying every real deposit as foreign.
+   - Optionally `RESERVE_USDT0_ISSUER=<G...>` (+ `RESERVE_USDT0_CODE`,
+     `RESERVE_USDT0_TICKERS`) — see [USDT0](#usdt0-second-stablecoin) below.
+
+   On ECS these are non-secret values and go in the Terraform input
+   `bridge_extra_environment` (a list of `{name, value}` objects), then
+   `terraform apply` and let the services roll:
+   `bridge_extra_environment = [{ name = "RESERVE_ACCOUNT_ID", value = "svc-conversion-reserve" }, { name = "RESERVE_USDC_ISSUER", value = "G..." }]`
+
+   On this first start the bridge pins the deposit-scan cursor to *now* and
+   logs an **ERROR per configured stablecoin the account holds no trustline
+   for** — expected at this point. (If the seed is missing: with
+   `KEY_IMPORT_ENABLED=true` the bridge starts *armed but inactive* and the
+   log points you back to step 1; with the flag off it refuses to start.)
+5. **Add the trustlines from inside the bridge:**
+   `POST /admin/exchange-reserve/trustlines {"currency": "USDC"}` (and
+   `"USDT0"` if configured) — admin or treasurer; the Reserve page shows a
+   *no trustline* badge and an **Add trustline** button on any configured
+   stablecoin bucket the account cannot hold yet. This endpoint answers 400
+   `conversion reserve is not configured` until the restart in step 4 has
+   produced a live reserve handle, which is why it cannot come earlier. It is
+   also the only way: the generated seed exists nowhere outside the bridge,
+   so no wallet can sign the `ChangeTrust`.
+6. **Send the stablecoin float** (and any further XLM) to the address with
+   no memo. The live watcher books each inflow itself: an `unmatched_deposit`
+   credit to the bucket plus a row in the unmatched queue (reason `no_match`,
+   with a `refund_skip_reason` — unmemoed inflows are never auto-refunded,
+   they are how ops tops the pool up). Do **not** also record a manual
+   `topup` for it: that books the same money twice.
+7. **Record what the watcher cannot see** with
+   `POST /admin/exchange-reserve/entries` `kind: topup`: the XLM from step 2
+   (it landed before the cursor existed — the scan never reads history) and
+   the USD fiat float (never on-chain). Note the funding tx hash or bank
+   reference. The Reserve page shows ledger vs on-chain side by side — they
+   should agree now.
+8. **Enable routing:** `PUT /admin/exchange-reserve/policies/changelly_crypto`
    (and/or `owlpay`) with `{"enabled": true, "threshold_usd_cents": ...}`
    (2000–20000). `changelly_fiat` cannot be enabled — its orders carry no
    payout coordinates the bridge could serve.
+
+`import-keys.md` ("Bootstrapping the reserve") walks the same procedure from
+the key-custody side, starting from a bridge that already has
+`RESERVE_ACCOUNT_ID` set and is running armed-but-inactive.
 
 ## What diverts
 
@@ -84,8 +135,11 @@ against the pool.
   queue, reason `no_match`) — do **not** also record a manual `topup` for
   on-chain funding, that would book the same money twice. Manual `topup`
   entries are only for value the watcher cannot see: the USD fiat float,
-  and corrections. Annotate the auto-credited row's decision in the
-  unmatched queue instead.
+  and corrections. The auto-credited row stays in the unmatched queue as the
+  record of the inflow (its `refund_skip_reason` says why it was not
+  returned); there is nothing to do to it — the queue has no annotate or
+  dismiss action, and queuing a refund from it is the wrong action for a
+  top-up. Keep the tx hash in your own ops log.
 - **Replenishment**: automated since 032 — see "Automated replenishment"
   below. With it disabled (the default), rebalance by hand: convert
   accumulated XLM through the normal exchange flow and record the resulting
@@ -98,15 +152,54 @@ against the pool.
 
 An order freezes (`reserve.payout_pending` event, reason in `last_error`)
 when a payout submit had an **ambiguous** outcome (timeout/5xx — the signed
-tx stays valid ~300 s), when retries exhausted, when the destination
-rejected (`op_no_trust`), or when a crash left an intent unresolved
-(`stale_intent`). The funds stay held; nothing auto-retries.
+tx stays valid ~300 s), when bounded retries ran out after definitive
+rejections (`max_attempts`, five attempts with backoff — a fee bid below the
+ledger's surge price is the classic cause), when the payout could not be
+built at all (`submit_failed`: missing or malformed `amount_to` /
+`payout_address`, or the payout bucket's asset is no longer configured),
+when the destination can never receive the asset (`payout_rejected`:
+`op_no_trust`, `op_no_destination`, `op_line_full`, `op_not_authorized`), or
+when a crash left an intent unresolved (`stale_intent`). The funds stay
+held; nothing auto-retries.
 
-Resolve from the Reserve page:
+**Fee bids.** Every bridge-signed transaction bids `STELLAR_MAX_FEE_STROOPS`
+per operation (default 10 000 stroops = 0.001 XLM, clamped to
+[100, 1 000 000]). A bid is a ceiling: the network charges the ledger's
+effective fee, so a quiet ledger still costs 100 stroops, and the bid only
+matters when surge pricing is on — which is exactly when a 100-stroop bid
+used to fail every submission with `tx_insufficient_fee` for hours,
+freezing payouts as `max_attempts` and failing refunds. If a surge outlasts
+the default, raise the variable, restart, then `retry` the frozen rows;
+nothing re-submits on its own.
+
+Resolve from the Reserve page
+(`POST /admin/exchange-reserve/orders/{order_id}/resolve`):
 - **complete** — the payout actually landed. The bridge searches the reserve
-  account's recent payments for the order's memo and records the found hash
-  (or accepts one you paste), writes the `fulfillment` entry + `transaction`
-  row, and completes the order.
+  account's recent payments for the order's memo, records the found hash,
+  writes the `fulfillment` entry + `transaction` row, and completes the
+  order. You may paste a `stellar_tx_hash` instead, but it is **verified,
+  never trusted** — it releases the hold and marks the customer paid:
+  exactly 64 hex characters, and Horizon must show it as a *successful*
+  payment from the reserve to the order's payout address for exactly
+  `amount_to` in the bucket's asset (a failed transaction still lists its
+  operations with their intended amounts, so success is required). A hash
+  Horizon does not know is a 400, one that does not match is a 409, and if
+  Horizon is unreachable the request fails with a 5xx — retry later, nothing
+  was recorded.
+- **retry** — re-arm the payout for the watcher. This is the right move,
+  instead of `fail` + refund, when the reason was transient: a fee surge
+  (`max_attempts`), a transient Horizon rejection, a deconfigured payout
+  asset that has since been configured again (`submit_failed`), or a crash
+  (`stale_intent`) — the customer still gets what was quoted. It applies
+  **exactly the guards `fail` applies** (next bullet), because a payout may
+  already have landed and re-arming after a settled one would pay twice: it
+  is refused inside the 600 s quiet period, when a matching payout is found,
+  and when Horizon cannot be checked. The hold is untouched (a freeze never
+  released it), the attempt counter resets, and the watcher re-signs on its
+  next tick — through the same bounded retry, so an unfixed cause freezes
+  the order again. Do not use it for `payout_rejected` (`op_no_trust` and
+  friends) unless the recipient has fixed their account: `fail` and let the
+  refund path return the deposit.
 - **fail** — the payout did not land. The bridge refuses this while the
   order changed state less than 600 s ago (each retry re-signs with a fresh
   ~300 s validity window, so only "frozen long enough" proves nothing can
@@ -120,11 +213,12 @@ Resolve from the Reserve page:
 `resolve {action: fail}` also cancels a **disbursement order** stuck in the
 fiat queue (unusable beneficiary data, disbursement impossible): the USD
 hold releases, the order fails, and the deposited USDC is queued for refund
-on the same path.
+on the same path. `retry` and `complete` are refused for disbursement
+orders — their only exit is the disburse endpoint.
 
-Never resolve-fail from memory or a block explorer screenshot alone; the
-server-side check exists because an in-flight transaction is invisible until
-it lands.
+Never resolve-fail (or retry) from memory or a block explorer screenshot
+alone; the server-side check exists because an in-flight transaction is
+invisible until it lands.
 
 ## Unmatched deposits
 
@@ -159,8 +253,11 @@ or resolve-fail the queues until the status endpoint shows zero pending.
 Unsetting the account with orders in flight stops the watcher: nothing
 expires, deposits go unseen on-chain, and holds stay locked. Recovery
 without reconfiguring is limited: `resolve {action: complete}` still works
-with an explicit `stellar_tx_hash`, but resolve-fail on payout-attempted
-orders refuses (the chain cannot be checked) until the reserve is re-set.
+with an explicit `stellar_tx_hash` (still verified on Horizon against the
+order's recorded pay-in address, amount and destination — only the asset
+check is skipped, since nothing can name it), but resolve-fail and retry on
+payout-attempted orders refuse (the chain cannot be checked) until the
+reserve is re-set.
 
 ## Reserved price quotes
 
@@ -223,15 +320,33 @@ over the inferred sender precisely because it is a stated intent.
 cancel a wrong refund before value moves); `underpaid` waits out the whole
 deposit window first, so a refund cannot race a user topping the order up.
 
-**Resolving a frozen refund** (`GET /admin/exchange-reserve/refunds?status=frozen`):
-a refund freezes when the submit outcome was ambiguous — the payment MAY
-have landed, so the debit stands and nothing is retried.
+**Resolving a frozen or failed refund**
+(`GET /admin/exchange-reserve/refunds?status=frozen`, `?status=failed`;
+`POST /admin/exchange-reserve/refunds/{refund_id}/resolve`): a refund
+freezes when the submit outcome was ambiguous — the payment MAY have landed,
+so the debit stands and nothing is retried. It ends `failed` only once its
+debit has been **reversed**: three definitive rejections in a row (a fee
+surge, typically), a permanent rejection (the destination cannot hold the
+asset), or an admin `reverse` that proved nothing landed.
 
-- `sent` (with `stellar_tx_hash`) records a refund that did land.
+- `sent` (with `stellar_tx_hash`) records a frozen or in-flight refund that
+  did land. The hash is **verified on Horizon before it is recorded** —
+  exactly 64 hex characters, a *successful* payment from the reserve to the
+  refund destination for exactly the refund amount in the bucket's asset.
+  Unknown hash → 400; mismatch → 409; Horizon unreachable → 5xx, retry
+  later. It fails closed because the hash becomes settlement evidence and
+  the debit stands on the strength of it; it is never trusted as a string.
 - `reverse` restores the ledger for one that did not. It is refused until
   600s after the claim AND only after the bridge verifies on-chain that no
   matching refund exists. Reversing one that actually landed would credit
   `available` for money that left the chain.
+- `retry` re-queues a `failed` refund with its attempt counter reset; the
+  driver picks it up on its next pass. This is ledger-safe because a refund
+  reaches `failed` only after its debit was reversed — the driver debits
+  again when it claims the row. Until this action existed there was **no
+  signing path out of `failed`**: a fee surge stranded customer refunds
+  permanently. Use it once the cause is gone (fee bid raised, destination
+  fixed); a rejection that is still permanent just fails it again.
 - `approve` / `cancel` handle rows parked for review; neither has moved
   value yet.
 
@@ -243,9 +358,12 @@ obligation with an explicit destination and goes through the same audited
 path. Deposits recorded before 032 have no captured sender and are manual
 only — this is deliberate: they may already have been refunded by hand.
 
-Refunds are sent **gross**; the reserve absorbs the ~100-stroop network fee
-(netting across assets would be nonsense — a USDC refund's fee is XLM). That
-fee accumulates as chain-below-ledger drift, exactly as payouts already do.
+Refunds are sent **gross**; the reserve absorbs the network fee (netting
+across assets would be nonsense — a USDC refund's fee is XLM). The bridge
+bids `STELLAR_MAX_FEE_STROOPS` per operation (default 10 000 stroops =
+0.001 XLM) but is charged only the ledger's effective fee — 100 stroops
+when the network is quiet — see "Fee bids" under Frozen payouts. That fee
+accumulates as chain-below-ledger drift, exactly as payouts already do.
 Book it off periodically with an `adjustment` entry.
 
 ## Automated replenishment
@@ -257,9 +375,14 @@ single in-flight slot:
 
 - `xlm_to_usdc` — sells XLM through Changelly, USDC returns to the reserve
   address. Fully automatic.
-- `usdc_to_usd` — off-ramps USDC through OwlPay to the bridge's own bank.
-  **Requires treasury beneficiary configuration** (`OWLPAY_TREASURY_JSON`);
-  without it a cycle freezes rather than guessing a destination.
+- `usdc_to_usd` — would off-ramp USDC through OwlPay to the bridge's own
+  bank, but **the bridge has no treasury-beneficiary configuration today**,
+  so the kind cannot run: enabling its policy is refused (400). Should a
+  cycle of that kind ever reach the driver, it is aborted, not frozen — the
+  row ends `state = failed`, `last_error = no_treasury_config`, its USDC hold
+  is released with a `replenish_release` entry, and nothing lands in the
+  frozen queue (nothing was sent, so there is no ambiguous on-chain state to
+  guard).
 
 **Enabling** (`PUT /admin/exchange-reserve/replenishment/policies/{kind}`):
 set `max_spend_minor` and `daily_spend_cap_minor` FIRST — the API refuses to
@@ -298,6 +421,81 @@ and the kind stays blocked.
 one cycle immediately. It takes the watcher's own advisory lock and returns
 409 if the watcher is mid-tick — the reserve account signs from a single
 sequence number, so two concurrent submissions would collide.
+
+## USDT0 (second stablecoin)
+
+Tether's USDT0 — the LayerZero OFT form of USDT, backed 1:1 by USDT and
+operated by Everdawn Labs under license — is issued natively on Stellar as a
+classic asset since 2026-09-02. The reserve treats it as a second
+**issuer-pinned** stablecoin next to USDC: one bucket (`USDT0`, 7 dp, seeded
+by migration 036), one `(code, issuer)` identity from configuration, and
+every asset decision in the engine (deposit classification, payout and
+refund asset, on-chain balances, issuer burn-guards, trustlines) flows
+through the same list that USDC does. There is nothing USDT0-specific in
+the money paths — that is the point.
+
+**What the issuer means.** Asset codes are not unique on Stellar; anyone can
+issue a "USDT0". The bridge recognizes money by `(code, issuer)` only, and it
+never ships an issuer — you set it, and it becomes the trust anchor for the
+bucket. Verify it against the official deployments table
+(<https://docs.usdt0.to> → Technical documentation → Contract Deployments)
+and stellar.expert before setting it. At launch the pubnet issuer is
+`GATISXX6BZ6NC7IKQBY37CJD4SOZL3CYZJWXEDG6JVIY4WBS6KXJHN6Q` (asset code
+`USDT0`; no testnet deployment is published — on testnet, issue your own test
+asset). The bridge checks the strkey checksum and refuses to start on a typo.
+
+**Enabling.**
+
+Same shape as the main [Enabling](#enabling) sequence — migrate, configure
+and restart, trustline, then fund while the watcher is live:
+
+1. Apply migration 036 (`RUN_MODE=migrate`) — seeds the bucket, changes no
+   behavior. It must precede step 2: with `RESERVE_USDT0_ISSUER` set and no
+   bucket row the bridge refuses to start.
+2. Set `RESERVE_USDT0_ISSUER=<G...>` (and `RESERVE_USDT0_CODE` if not
+   `USDT0`) — on ECS via `bridge_extra_environment`, like the USDC variables
+   — and restart. Startup validation: checksummed issuer, 1–12 alphanumeric
+   code, an identity distinct from the USDC asset, and the reserve not being
+   its own issuer. Expect an ERROR line about the missing trustline.
+3. Add the reserve account's trustline:
+   `POST /admin/exchange-reserve/trustlines {"currency": "USDT0"}` (admin or
+   treasurer). The account needs ~0.5 XLM of free base reserve;
+   `op_low_reserve` is reported verbatim. Until this is done the bucket is
+   flagged *no trustline* on the Reserve page and the bridge logs an ERROR at
+   every startup — a payment to an account without a trustline fails at the
+   **sender**, so nothing is lost, but nothing arrives either.
+4. Send the USDT0 float to the reserve address with no memo, **after** the
+   trustline exists and while the watcher is live. It is booked
+   automatically as an `unmatched_deposit` credit (reason `no_match`) — no
+   manual `topup` entry, that would double-book, exactly as for USDC
+   (Enabling, steps 6–7).
+
+**What works with only the issuer set** (no provider tickers): USDT0
+deposits are recognized and booked (matched to orders expecting USDT0, or
+queued as unmatched/wrong-asset like any other tracked asset), refunds and
+manual refunds pay out in USDT0, admin sends refuse the USDT0 issuer as a
+destination (it would burn the asset), and the Reserve page shows the
+on-chain USDT0 balance and trustline state per bucket.
+
+**Provider diversion needs tickers.** Whether an exchange order diverts to
+the USDT0 leg is decided by ticker strings (`to_currency` of a Changelly
+auto-swap, `from_currency` of an OwlPay disburse), and those strings are
+provider-specific. The bridge ships none for USDT0: set
+`RESERVE_USDT0_TICKERS=<comma-separated>` with the exact values from each
+provider's currency list. They may not collide with the tickers that already
+mean XLM or USDC (`xlm`, `usdcxlm`, `usdc`) — startup refuses that, because a
+collision would silently route USDC orders to the USDT0 leg. Setting tickers
+without an issuer is likewise refused. An order records the stablecoin leg
+it was created with (`provider_payload.deposit_currency` for the pay-in,
+`hold_currency` for the payout), so later ticker or issuer changes never
+re-interpret an existing order: a pay-in in the other stablecoin is a
+`wrong_asset` inflow for the unmatched queue, and a payout whose asset was
+deconfigured freezes `on_hold` for an admin instead of guessing.
+
+**Not covered yet.** Automated replenishment (`xlm_to_usdc`, `usdc_to_usd`)
+stays USDC-only; a USDT0 bucket that drains is topped up by ops through the
+unmatched-deposit credit path, exactly as USDC was before 032. The Soroban
+wrapper is USDC-specific and unrelated to the reserve.
 
 ## Multi-instance notes
 

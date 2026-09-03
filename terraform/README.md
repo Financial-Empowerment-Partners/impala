@@ -33,8 +33,9 @@ terraform fmt -check -recursive
 terraform init -backend=false && terraform validate
 ```
 
-CI (`.github/workflows/ci.yml`) runs init/validate/fmt plus plan (and apply on
-`main`); `security.yml` and the pre-commit hook scan the config with **trivy**
+CI (`.github/workflows/ci.yml`) runs init/validate/fmt on every pull request and
+a plan-only pass on pushes to `main`; `apply` runs only from an explicit
+`workflow_dispatch`. `security.yml` and the pre-commit hook scan the config with **trivy**
 (the deprecated tfsec parser rejects the Terraform 1.5+ `check` syntax).
 Accepted findings live in `.trivyignore` with a one-line justification next to
 the resource; new findings must be fixed or get the same treatment.
@@ -72,9 +73,33 @@ the resource; new findings must be fixed or get the same treatment.
 |---|---|
 | `aws_region` | Primary region (e.g. `us-east-1`) |
 | `jwt_secret` | 32+ byte random string; becomes `JWT_SECRET` in the bridge env |
-| `container_image_tag` | ECR tag to deploy (e.g. `v1.2.3` or commit SHA) |
+| `container_image_tag` | ECR tag to deploy: a commit SHA, or the stand-up runbooks' `prod-<short-sha>` / `staging-<short-sha>`. **No default, and `latest` is refused** — the repository is immutable and CI pushes only per-commit `:<sha>` manifests, so nothing ever pushes `latest`. |
 
 Everything else has defaults; see `variables.tf`.
+
+## Bridge network + runtime environment
+
+The task definitions inject the bridge's environment; three groups of
+variables control it (all validated at plan time):
+
+| Variable(s) | Stack | What it injects |
+|---|---|---|
+| `stellar_network` (`testnet` default / `pubnet`) + `stellar_horizon_url` / `stellar_rpc_url` | primary + DR | `STELLAR_NETWORK` (+ the passphrase it implies) on **server and worker**. This is what selects the passphrase the bridge *signs* with — pointing the URLs at pubnet without it produced a bridge signing with the testnet passphrase against pubnet Horizon. The URLs must match the network; `pubnet` also requires `certificate_arn` and `cors_allowed_origins`. The testnet/live stacks pin their network in `testnet.tf` / `live.tf`. |
+| `cors_allowed_origins` / `public_endpoint` (primary + DR), `live_*`, `testnet_*` | server task only | `CORS_ALLOWED_ORIGINS` / `PUBLIC_ENDPOINT`. Omitted when `null`. The bridge **exits at startup** on wildcard/unset CORS with `STELLAR_NETWORK=pubnet`, so `live_cors_allowed_origins` is required with `live_enabled` and `cors_allowed_origins` with `stellar_network = "pubnet"` (the ecs-stack module refuses the combination too, like `certificate_arn`). `*` is never accepted. |
+| `bridge_extra_environment` (`list(object({name, value}))`, default `[]`) | **every** bridge task definition (primary server + worker, DR pair, testnet, live), appended last | Non-secret settings with no dedicated variable — the conversion-reserve wiring (`RESERVE_ACCOUNT_ID`, `RESERVE_USDC_ISSUER`, `RESERVE_USDT0_ISSUER`, `RESERVE_USDT0_TICKERS`), `KEY_IMPORT_ENABLED`, `ADMIN_ACCOUNT_IDS`, `TRUSTED_PROXY_HOPS` (`1` behind the ALB), and the rest of `impala-bridge/src/config.rs`. Values are **plaintext** in the task definition, plan and state, so names that look like secrets (`*_SECRET`, `*_TOKEN`, `*_PASSWORD`, `*_SEED`, `*_PRIVATE_KEY`, ...) and names Terraform already manages are refused. Credentials go through Secrets Manager + the task-definition `secrets` block, or the bridge's `/admin/keys` import — never here. |
+
+```hcl
+bridge_extra_environment = [
+  { name = "RESERVE_ACCOUNT_ID",   value = "GA...RESERVE_PUBLIC_KEY" },
+  { name = "RESERVE_USDC_ISSUER",  value = "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN" },
+  { name = "RESERVE_USDT0_ISSUER", value = "G...USDT0_ISSUER" },
+  { name = "KEY_IMPORT_ENABLED",   value = "true" },
+  { name = "TRUSTED_PROXY_HOPS",   value = "1" },
+]
+```
+
+The list is the same for every stack; keep per-stack differences in the
+per-stack variables (or separate workspaces) rather than branching here.
 
 ## Recommended workflow
 
@@ -115,6 +140,7 @@ server/worker services (they will restart naturally on the next deploy).
 |---|---|---|
 | `JWT_SECRET` | `var.jwt_secret` -> Secrets Manager | ECS task definition `secrets` block |
 | `DATABASE_URL` | Auto-generated RDS URL -> Secrets Manager | ECS task definition `secrets` block |
+| `SIGNOZ_ACCESS_TOKEN` (OTEL sidecar) | `var.signoz_access_token` -> Secrets Manager (`otel.tf`) | Sidecar container `secrets` block; execution role gets `GetSecretValue`. Like `jwt_secret`, the value is still in Terraform state via the secret *version* — set it out-of-band to keep it out. |
 | `TWILIO_TOKEN`, `FCM_SERVICE_ACCOUNT_KEY`, `DUO_2FA_CLIENT_SECRET` | Optional — **not wired in Terraform today.** `ecs.tf` injects only `database_url` + `jwt_secret`; there is no `additional_secrets` variable. To add one, extend the task-definition `secrets` block plus a Secrets Manager entry and the execution-role policy. | ECS task definition `secrets` block |
 
 Secrets never appear in task-definition plaintext env vars — only in the
@@ -152,6 +178,7 @@ See `dr.tf` for the full list.
 - **First `terraform apply` fails on the ECS service** until you push an image. Push the image, then re-apply.
 - **`certificate_arn`** (for HTTPS at the ALB) must be in the same region as the ALB.
 - **SigNoz sidecar** only activates when `signoz_endpoint` is set — otherwise it is omitted from task definitions.
+- **Health checks probe `/readyz`, not `/health`.** Every target group (primary, DR, testnet, live) and the image `HEALTHCHECK` key on `/readyz`, which is 200 only when Postgres *and* Redis answer. `/health` stays 200 with a JSON body while degraded (impalactl and `openapi.yaml` rely on that shape) and must never be a probe. Thresholds are 8 × 30 s (4 min) before a target is pulled — longer than a Multi-AZ failover — and the LB-attached server services carry `health_check_grace_period_seconds = 120`. Honest target health also lets the Route 53 alias records (`evaluate_target_health`) fail DNS over to DR during a long primary dependency outage; that is deliberate.
 
 ## Outputs
 

@@ -2,6 +2,8 @@ package cli
 
 import (
 	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -851,5 +853,179 @@ func TestCleartextEndpointAllowedWithOptIn(t *testing.T) {
 	}
 	if rec.calls != 1 {
 		t.Errorf("calls = %d, want 1", rec.calls)
+	}
+}
+
+// ── transfer send: ambiguous outcomes ──────────────────────────────────
+
+// transferMuxWith serves /network (testnet, so no confirmation prompt) plus
+// a scripted /managed-account/sign.
+func transferMuxWith(sign http.HandlerFunc) http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /network", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]string{
+			"stellar_network": "testnet", "stellar_horizon_url": "https://horizon.example.com",
+			"stellar_rpc_url": "https://rpc.example.com", "network_passphrase": "passphrase",
+		})
+	})
+	mux.HandleFunc("POST /managed-account/sign", sign)
+	return mux
+}
+
+// envelope answers with the bridge's error envelope.
+func envelope(status int, code, message string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		fmt.Fprintf(w, `{"error":{"code":%q,"message":%q}}`, code, message)
+	}
+}
+
+// ambiguityWording is what the notice must say — and what a definitive
+// failure must never say.
+var ambiguityWording = []string{"outcome of this payment is UNKNOWN", "MAY HAVE BEEN SUBMITTED", "DO NOT re-run"}
+
+// TestTransferSendAmbiguousOutcomesExitThree is the double-spend guard: a
+// timeout, a dropped connection, or a 5xx from the sign endpoint must not
+// read as "not sent". The notice names the payment and the checks to make,
+// and the exit code is distinct so a script cannot retry on it.
+func TestTransferSendAmbiguousOutcomesExitThree(t *testing.T) {
+	cases := []struct {
+		name    string
+		sign    http.HandlerFunc
+		args    []string
+		errText string // what the leading error line must contain
+	}{
+		{"bridge 504 with envelope", envelope(http.StatusGatewayTimeout, "gateway_timeout", "upstream timed out"), nil, "[504 gateway_timeout]"},
+		{"bridge 500 internal_error (its ambiguous Horizon submit)", envelope(http.StatusInternalServerError, "internal_error", "transaction signing failed"), nil, "[500 internal_error]"},
+		{"bridge 408 from its request deadline, empty body", func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusRequestTimeout)
+		}, nil, "[408 http_error] Request Timeout"},
+		{"proxy 502 html", func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusBadGateway)
+			io.WriteString(w, "<html>502 Bad Gateway</html>")
+		}, nil, "[502 http_error]"},
+		{"hang past the client timeout", func(w http.ResponseWriter, r *http.Request) {
+			io.Copy(io.Discard, r.Body) // the server watches for the client leaving only once the body is read
+			<-r.Context().Done()
+		}, []string{"--timeout", "200ms"}, "/managed-account/sign"},
+		{"connection dropped mid-response", func(w http.ResponseWriter, r *http.Request) {
+			conn, _, err := w.(http.Hijacker).Hijack()
+			if err != nil {
+				t.Fatalf("hijack: %v", err)
+			}
+			conn.Close()
+		}, nil, "/managed-account/sign"},
+		{"2xx that is not the expected JSON", func(w http.ResponseWriter, r *http.Request) {
+			io.WriteString(w, "<html>ok?</html>")
+		}, nil, "decode response"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := authed(t, "", transferMuxWith(tc.sign))
+			args := append([]string{"transfer", "send", "--to", testStellarID, "--amount", "10.5", "--memo", "rent"}, tc.args...)
+
+			start := time.Now()
+			code := h.run(args...)
+			if time.Since(start) > 10*time.Second {
+				t.Fatalf("command took %s", time.Since(start))
+			}
+			if code != exitAmbiguous {
+				t.Fatalf("exit = %d, want %d\nstderr:\n%s", code, exitAmbiguous, h.stderr())
+			}
+			if h.stdout() != "" {
+				t.Errorf("stdout = %q, want it empty on an unknown outcome", h.stdout())
+			}
+			es := h.stderr()
+			if !strings.Contains(es, "error: ") || !strings.Contains(es, tc.errText) {
+				t.Errorf("stderr does not lead with the underlying error %q:\n%s", tc.errText, es)
+			}
+			for _, want := range append(ambiguityWording,
+				"From:    alice", "To:      "+testStellarID, "Amount:  10.5 XLM",
+				"impalactl activity list", "impalactl activity show <btxid>", "impalactl account onchain",
+				"300 seconds", "300-second window",
+			) {
+				if !strings.Contains(es, want) {
+					t.Errorf("stderr missing %q:\n%s", want, es)
+				}
+			}
+		})
+	}
+}
+
+// TestTransferSendDefinitiveFailuresExitOne: verdicts that prove nothing
+// happened stay plain exit-1 failures with none of the ambiguity wording —
+// a script must be able to retry a 503 or fix a 400 without a manual check.
+func TestTransferSendDefinitiveFailuresExitOne(t *testing.T) {
+	cases := []struct {
+		name    string
+		sign    http.HandlerFunc
+		errText string
+	}{
+		{"503 service_unavailable: the bridge's pre-submit Retryable", envelope(http.StatusServiceUnavailable, "service_unavailable", "transaction preparation failed before submission"), "[503 service_unavailable]"},
+		{"400 bad_request", envelope(http.StatusBadRequest, "bad_request", "invalid destination address"), "[400 bad_request]"},
+		{"403 forbidden", envelope(http.StatusForbidden, "forbidden", "Access denied"), "[403 forbidden]"},
+		{"429 rate_limited", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Retry-After", "12")
+			envelope(http.StatusTooManyRequests, "rate_limited", "Too many requests, please try again later")(w, r)
+		}, "[429 rate_limited]"},
+		{"200 success:false", func(w http.ResponseWriter, r *http.Request) {
+			io.WriteString(w, `{"success":false,"message":"Stellar transaction rejected: {\"transaction\":\"tx_bad_seq\"}"}`)
+		}, "tx_bad_seq"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := authed(t, "", transferMuxWith(tc.sign))
+			if code := h.run("transfer", "send", "--to", testStellarID, "--amount", "1"); code != 1 {
+				t.Fatalf("exit = %d, want 1\nstderr:\n%s", code, h.stderr())
+			}
+			es := h.stderr()
+			if !strings.Contains(es, tc.errText) {
+				t.Errorf("stderr missing %q:\n%s", tc.errText, es)
+			}
+			for _, absent := range ambiguityWording {
+				if strings.Contains(es, absent) {
+					t.Errorf("a definitive failure carries the ambiguity wording %q:\n%s", absent, es)
+				}
+			}
+		})
+	}
+}
+
+// TestTransferSendConnectionRefusedIsPlain: when no connection could be
+// made, nothing was sent, and the failure is an ordinary one.
+func TestTransferSendConnectionRefusedIsPlain(t *testing.T) {
+	h := authed(t, "", transferMuxWith(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("the request reached a server that was supposed to be closed")
+	}))
+	h.srv.Close() // nothing listens on the port any more; the stored credentials still name it
+
+	// /network is unreachable too, so the CLI treats the network as live and
+	// needs --yes; that path must still classify the sign failure correctly.
+	if code := h.run("transfer", "send", "--to", testStellarID, "--amount", "1", "--yes"); code != 1 {
+		t.Fatalf("exit = %d, want 1\nstderr:\n%s", code, h.stderr())
+	}
+	es := h.stderr()
+	if !strings.Contains(es, "connection refused") {
+		t.Errorf("stderr does not report the dial failure:\n%s", es)
+	}
+	for _, absent := range ambiguityWording {
+		if strings.Contains(es, absent) {
+			t.Errorf("a never-connected failure carries the ambiguity wording %q:\n%s", absent, es)
+		}
+	}
+}
+
+// TestDefaultTimeoutExceedsBridgeDeadline pins the relationship the timeout
+// comment promises: the client must outlast the bridge's own deadline by a
+// margin, or it cuts the bridge off just as the verdict is being written.
+func TestDefaultTimeoutExceedsBridgeDeadline(t *testing.T) {
+	if defaultTimeout < bridgeRequestDeadline+10*time.Second {
+		t.Errorf("defaultTimeout %s does not clear the bridge's %s deadline by 10s", defaultTimeout, bridgeRequestDeadline)
+	}
+	h := newHarness(t, "", nil)
+	h.run("help")
+	if !strings.Contains(h.stdout(), "(default "+defaultTimeout.String()+")") {
+		t.Errorf("help does not state the default timeout %s:\n%s", defaultTimeout, h.stdout())
 	}
 }

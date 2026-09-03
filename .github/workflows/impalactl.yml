@@ -1,0 +1,97 @@
+# =============================================================================
+# CI for impalactl (operator CLI)
+#
+# Mirrors lumencli.yml: fmt-check, vet, the race-enabled test suite and a
+# build on Linux, plus govulncheck against the whole module.
+#
+# Triggers:
+#   - Push to main / pull request: path-filtered to impalactl/** and this file
+#   - Manual dispatch
+#   - Weekly schedule: a path-filtered workflow never re-checks untouched
+#     code, so the weekly run catches NEW vulnerability advisories published
+#     after the last code change.
+#
+# Every `uses:` is pinned to a full commit SHA (release in the trailing
+# comment; Dependabot bumps them) and checkouts never persist GITHUB_TOKEN.
+# =============================================================================
+
+name: impalactl
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'impalactl/**'
+      - '.github/workflows/impalactl.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'impalactl/**'
+      - '.github/workflows/impalactl.yml'
+  workflow_dispatch:
+  schedule:
+    # Weekly (Monday 06:23 UTC), offset from the lumencli sweep.
+    - cron: '23 6 * * 1'
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: impalactl
+
+jobs:
+  # ===========================================================================
+  # Test — fmt-check, vet, race-enabled tests, build (Linux)
+  # ===========================================================================
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: impalactl/go.mod
+          cache-dependency-path: impalactl/go.sum
+
+      - name: Check formatting
+        run: |
+          if ! test -z "$(gofmt -l .)"; then
+            echo "unformatted files:"
+            gofmt -l .
+            gofmt -d .
+            exit 1
+          fi
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test (race)
+        run: go test -race ./...
+
+      - name: Build
+        run: go build ./...
+
+  # ===========================================================================
+  # Vulncheck — pinned govulncheck against the whole module. impalactl has no
+  # accept list yet (lumencli's lives in scripts/vulncheck.sh); any reachable
+  # finding fails the job.
+  # ===========================================================================
+  vulncheck:
+    name: Vulncheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: impalactl/go.mod
+          cache-dependency-path: impalactl/go.sum
+
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...

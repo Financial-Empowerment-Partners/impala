@@ -2,12 +2,18 @@
  * API client module for the Impala bridge REST API.
  *
  * Handles JWT token storage, automatic token refresh, and authenticated
- * HTTP requests. All methods return Promises. On 401 responses, tokens
- * are cleared and the user is redirected to the login page.
+ * HTTP requests. All methods return Promises. A session ends (tokens
+ * cleared, redirect to login) only when the bridge judges the TOKEN: a 401
+ * on the refresh, or a second 401 after a refresh. A refresh that cannot
+ * reach a healthy bridge (5xx, 429, network) keeps the stored tokens and
+ * rejects with a `retryable` error — see classifyRefreshResponse.
  *
  * Token strategy:
  *  - refresh_token (14-day): obtained via username+password
  *  - temporal_token (1-hour): obtained from refresh_token, used for API calls
+ *  - refreshes are serialized across tabs with the Web Locks API (tokens are
+ *    shared through localStorage, and the bridge revokes the whole family
+ *    when a rotated refresh token is replayed)
  *
  * Features:
  *  - X-Request-Nonce header on all requests (per-request id for tracing; NOT
@@ -255,14 +261,145 @@ var API = (function () {
         return sanitizeErrorMessage(status, rawBody);
     }
 
-    /** Cached in-flight refresh Promise to prevent concurrent refresh requests. */
+    /** Cached in-flight refresh Promise: one refresh per tab at a time. */
     var refreshPromise = null;
 
     /**
+     * Cross-tab lock name. Tokens are shared through localStorage, so two
+     * tabs that both see an expired temporal token must take turns: the
+     * bridge burns a refresh token on first use and treats a second
+     * presentation as theft, revoking the whole family (every tab).
+     */
+    var REFRESH_LOCK = 'impala-refresh';
+
+    function sessionExpiredError() {
+        return new Error('Session expired');
+    }
+
+    /**
+     * Error for a refresh attempt that said nothing about the token (an
+     * outage, a rate limit, a network failure). `retryable: true` tells the
+     * request path to keep the stored tokens and surface it, not bounce to
+     * login.
+     * @param {number} status - HTTP status, 0 when fetch itself failed.
+     * @returns {Error}
+     */
+    function bridgeUnavailableError(status) {
+        var err = new Error('Bridge unavailable, please retry');
+        err.retryable = true;
+        err.status = status;
+        return err;
+    }
+
+    /**
+     * Verdict on a `POST /token` refresh response. Only the bridge's
+     * judgement of the TOKEN may end a session:
+     *  - 'ok'        a 2xx carrying a temporal token: use it.
+     *  - 'fatal'     401 (invalid, expired, revoked, or replayed refresh
+     *                token), or a 2xx without a temporal token (malformed
+     *                success). Clear both tokens and re-authenticate.
+     *  - 'retryable' anything else. The bridge answers 500 on a Redis outage
+     *                precisely so clients keep their tokens; 502/503 is Nginx
+     *                during a bridge roll; 429 is rate limiting; status 0 is a
+     *                network failure. None of them says the 14-day refresh
+     *                token is bad, so wiping it would log the operator out
+     *                mid-task over an outage.
+     * @param {number} status - HTTP status (0 when fetch itself failed).
+     * @param {Object|null} body - Parsed JSON body, or null when there is none.
+     * @returns {string} 'ok' | 'fatal' | 'retryable'
+     */
+    function classifyRefreshResponse(status, body) {
+        if (status === 401) return 'fatal';
+        if (status >= 200 && status < 300) {
+            return (body && typeof body.temporal_token === 'string' && body.temporal_token)
+                ? 'ok' : 'fatal';
+        }
+        return 'retryable';
+    }
+
+    /**
+     * Run `fn` under the cross-tab refresh lock when the Web Locks API is
+     * available (secure contexts), else immediately. The per-tab single
+     * flight (refreshPromise) applies either way.
+     * @param {function(): Promise} fn
+     * @returns {Promise}
+     */
+    function withRefreshLock(fn) {
+        if (typeof navigator !== 'undefined' && navigator.locks &&
+            typeof navigator.locks.request === 'function') {
+            return navigator.locks.request(REFRESH_LOCK, fn);
+        }
+        return new Promise(function (resolve) { resolve(fn()); });
+    }
+
+    /**
+     * One refresh with `presented`, the refresh token read before the lock
+     * was taken. Inside the lock, storage is re-read: a sibling tab may have
+     * rotated the family while this one waited. Its token is adopted ONLY
+     * when it DIFFERS from `presented` — that is the evidence a rotation
+     * happened. "Still unexpired" is not enough: a revoked token stays
+     * within its lifetime, and adopting it would refresh, fail, and loop.
+     * @param {string} presented
+     * @returns {Promise<string>} Resolves with a usable temporal token.
+     */
+    function performRefresh(presented) {
+        var current = getRefreshToken();
+        if (!current) {
+            // A sibling tab logged out (cleared storage) while we waited.
+            return Promise.reject(sessionExpiredError());
+        }
+        if (current !== presented) {
+            var temporal = getTemporalToken();
+            if (temporal && !isTokenExpired(temporal)) {
+                return Promise.resolve(temporal);
+            }
+            // The sibling's rotated refresh token is the live one; ours was
+            // burned by that rotation and must not be replayed.
+            presented = current;
+        }
+
+        return fetch(base() + '/token', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-Request-Nonce': generateNonce()
+            },
+            body: JSON.stringify({ refresh_token: presented })
+        }).then(function (res) {
+            // A proxy error page is not JSON; that is a retryable body, not
+            // a reason to end the session.
+            return res.json().then(function (body) { return body; }, function () { return null; })
+                .then(function (body) {
+                    var verdict = classifyRefreshResponse(res.status, body);
+                    if (verdict === 'ok') {
+                        // Persist the ROTATED refresh token too: the bridge
+                        // rotates the refresh family on every refresh and
+                        // treats a re-use of the old token as theft (killing
+                        // the family). Discarding it here meant the next
+                        // refresh replayed the burned token and the session
+                        // died on its second refresh — store both.
+                        setTokens(body.temporal_token, body.refresh_token || null);
+                        return body.temporal_token;
+                    }
+                    if (verdict === 'fatal') {
+                        clearTokens();
+                        throw sessionExpiredError();
+                    }
+                    throw bridgeUnavailableError(res.status);
+                });
+        }, function () {
+            throw bridgeUnavailableError(0);
+        });
+    }
+
+    /**
      * Use the stored refresh token to obtain a new temporal token.
-     * Clears all tokens and rejects if the refresh token is missing or expired.
-     * Concurrent callers share a single in-flight request.
-     * @returns {Promise<string>} Resolves with the new temporal token.
+     * Rejects with 'Session expired' (tokens cleared) when the refresh token
+     * is missing, expired, or rejected by the bridge; rejects with a
+     * `retryable` error (tokens kept) when the bridge could not be reached.
+     * Concurrent callers in this tab share one in-flight request, and tabs
+     * take turns through the Web Locks API where available.
+     * @returns {Promise<string>} Resolves with a usable temporal token.
      */
     function refreshTemporalToken() {
         if (refreshPromise) {
@@ -272,40 +409,28 @@ var API = (function () {
         var refresh = getRefreshToken();
         if (!refresh || isTokenExpired(refresh)) {
             clearTokens();
-            return Promise.reject(new Error('Session expired'));
+            return Promise.reject(sessionExpiredError());
         }
 
-        refreshPromise = fetch(base() + '/token', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'X-Request-Nonce': generateNonce()
-            },
-            body: JSON.stringify({ refresh_token: refresh })
-        }).then(function (res) {
-            if (!res.ok) {
-                clearTokens();
-                throw new Error('Token refresh failed');
-            }
-            return res.json();
-        }).then(function (data) {
+        refreshPromise = withRefreshLock(function () {
+            return performRefresh(refresh);
+        }).then(function (token) {
             refreshPromise = null;
-            if (data.temporal_token) {
-                // Persist the ROTATED refresh token too: the bridge rotates
-                // the refresh family on every refresh and treats a re-use of
-                // the old token as theft (killing the family). Discarding it
-                // here meant the next refresh replayed the burned token and
-                // the session died on its second refresh — store both.
-                setTokens(data.temporal_token, data.refresh_token || null);
-                return data.temporal_token;
-            }
-            throw new Error('No temporal token in response');
-        }).catch(function (err) {
+            return token;
+        }, function (err) {
             refreshPromise = null;
             throw err;
         });
 
         return refreshPromise;
+    }
+
+    /** End the session: drop both tokens and send the user to sign in. */
+    function bounceToLogin() {
+        clearTokens();
+        // ?reason=expired lets the login page explain the bounce — a silent
+        // redirect reads as a crash.
+        window.location.href = 'index.html?reason=expired';
     }
 
     /**
@@ -386,19 +511,18 @@ var API = (function () {
                     if (res.status === 401) {
                         // Stale temporal token (revoked, or rotated by another
                         // tab): refresh once and retry; a second 401 means the
-                        // session is over.
+                        // session is over. Only a refresh the bridge REJECTED
+                        // ends the session — one that could not reach the
+                        // bridge keeps the tokens and surfaces as retryable.
                         if (!authHealed) {
                             authHealed = true;
-                            return refreshTemporalToken().then(doFetch).catch(function () {
-                                clearTokens();
-                                // ?reason=expired lets the login page explain the
-                                // bounce — a silent redirect reads as a crash.
-                                window.location.href = 'index.html?reason=expired';
+                            return refreshTemporalToken().then(doFetch, function (err) {
+                                if (err && err.retryable) throw err;
+                                bounceToLogin();
                                 return Promise.reject(new Error('Unauthorized'));
                             });
                         }
-                        clearTokens();
-                        window.location.href = 'index.html?reason=expired';
+                        bounceToLogin();
                         return Promise.reject(new Error('Unauthorized'));
                     }
 
@@ -412,8 +536,11 @@ var API = (function () {
 
                     return res;
                 }).catch(function (err) {
-                    // Network error (fetch itself failed)
-                    if (err.message === 'Unauthorized') throw err;
+                    // Network error (fetch itself failed). A failed self-heal
+                    // refresh also lands here: a retryable one must NOT be
+                    // treated as a request network error, or the GET retry
+                    // would replay the stale token, hit 401 again, and bounce.
+                    if (err.message === 'Unauthorized' || err.retryable) throw err;
 
                     if (attempt < MAX_RETRIES && shouldRetry(method, err, null)) {
                         attempt++;
@@ -428,7 +555,8 @@ var API = (function () {
 
             return doFetch(token);
         }).catch(function (err) {
-            // No refresh token / refresh failed: bounce to login.
+            // No refresh token, or the bridge rejected it: bounce to login.
+            // A retryable refresh failure passes through with tokens intact.
             if (err && err.message === 'Session expired') {
                 window.location.href = 'index.html?reason=expired';
             }
@@ -500,6 +628,8 @@ var API = (function () {
         clearTokens: clearTokens,
         parseJwt: parseJwt,
         isTokenExpired: isTokenExpired,
+        classifyRefreshResponse: classifyRefreshResponse,
+        refreshTemporalToken: refreshTemporalToken,
         sanitizeErrorMessage: sanitizeErrorMessage,
         extractErrorMessage: extractErrorMessage,
         setButtonLoading: setButtonLoading,

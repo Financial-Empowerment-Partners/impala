@@ -6,6 +6,7 @@
 
 pub mod account;
 pub mod horizon;
+pub mod network_check;
 mod signer;
 
 pub use account::{fetch_account_details, OnchainAccount};

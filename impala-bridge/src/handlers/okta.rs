@@ -5,6 +5,7 @@ use log::{debug, error, info, warn};
 use sqlx::PgPool;
 use std::sync::Arc;
 
+use crate::client_source::ClientSource;
 use crate::constants::{
     AUTH_PROVIDER_OKTA, LOCKOUT_THRESHOLD, MAX_EMAIL_LENGTH, RATE_LIMIT_MAX_REQUESTS,
     RATE_LIMIT_WINDOW_SECS,
@@ -129,6 +130,7 @@ pub async fn okta_token_exchange(
     Extension(session_config): Extension<Arc<crate::session::SessionConfig>>,
     Extension(metrics): Extension<Arc<AppMetrics>>,
     okta_provider: Option<Extension<Arc<OktaProvider>>>,
+    ClientSource(source): ClientSource,
     Json(payload): Json<OktaTokenExchangeRequest>,
 ) -> Result<axum::response::Response, AppError> {
     let result = okta_token_exchange_inner(
@@ -139,6 +141,7 @@ pub async fn okta_token_exchange(
         session_config,
         &metrics,
         okta_provider,
+        &source,
         payload,
     )
     .await;
@@ -155,6 +158,7 @@ async fn okta_token_exchange_inner(
     session_config: Arc<crate::session::SessionConfig>,
     metrics: &AppMetrics,
     okta_provider: Option<Extension<Arc<OktaProvider>>>,
+    source: &str,
     payload: OktaTokenExchangeRequest,
 ) -> Result<axum::response::Response, AppError> {
     debug!("POST /auth/okta: token exchange request received");
@@ -176,8 +180,10 @@ async fn okta_token_exchange_inner(
 
     info!("okta: token exchange for account_id={}", account_id);
 
-    // Rate limiting and lockout checks
-    crate::redis_helpers::check_lockout(&redis_pool, &account_id, LOCKOUT_THRESHOLD).await?;
+    // Rate limiting and lockout checks (the lockout is the password paths'
+    // (account, source) counter — see `handlers::google`).
+    crate::redis_helpers::check_lockout(&redis_pool, &account_id, source, LOCKOUT_THRESHOLD)
+        .await?;
     crate::redis_helpers::check_rate_limit(
         &redis_pool,
         "okta",
@@ -242,24 +248,39 @@ async fn okta_token_exchange_inner(
 
 /// `GET /auth/okta/config` — Return Okta client configuration.
 ///
-/// No auth required. Returns `{ enabled: false }` if Okta is not configured.
+/// No auth required. Returns `{ enabled: false }` if Okta is not configured,
+/// and `{ enabled: false, pending: true }` while the configured provider is
+/// still waiting on Okta's discovery document / JWKS.
 pub async fn okta_config(
     okta_provider: Option<Extension<Arc<OktaProvider>>>,
 ) -> Json<OktaConfigResponse> {
-    match okta_provider {
-        Some(Extension(provider)) => {
+    let Some(Extension(provider)) = okta_provider else {
+        debug!("GET /auth/okta/config: Okta not configured");
+        return Json(OktaConfigResponse {
+            enabled: false,
+            issuer: None,
+            client_id: None,
+            authorization_endpoint: None,
+            token_endpoint: None,
+            scopes: None,
+            pending: false,
+        });
+    };
+    match provider.discovery().await {
+        Some(discovery) => {
             debug!("GET /auth/okta/config: returning Okta configuration");
             Json(OktaConfigResponse {
                 enabled: true,
                 issuer: Some(provider.issuer_url.clone()),
                 client_id: Some(provider.client_id.clone()),
-                authorization_endpoint: Some(provider.discovery.authorization_endpoint.clone()),
-                token_endpoint: Some(provider.discovery.token_endpoint.clone()),
-                scopes: Some(provider.discovery.scopes_supported.clone()),
+                authorization_endpoint: Some(discovery.authorization_endpoint),
+                token_endpoint: Some(discovery.token_endpoint),
+                scopes: Some(discovery.scopes_supported),
+                pending: false,
             })
         }
         None => {
-            debug!("GET /auth/okta/config: Okta not configured");
+            debug!("GET /auth/okta/config: Okta configured but PENDING");
             Json(OktaConfigResponse {
                 enabled: false,
                 issuer: None,
@@ -267,6 +288,7 @@ pub async fn okta_config(
                 authorization_endpoint: None,
                 token_endpoint: None,
                 scopes: None,
+                pending: true,
             })
         }
     }

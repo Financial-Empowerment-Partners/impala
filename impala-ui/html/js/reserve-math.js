@@ -3,11 +3,15 @@
  * conversion-reserve admin page.
  *
  * DOM-free by design (loadable under Node for vitest): reserve.js does the
- * fetching and rendering; everything numeric or geometric lives here. All
- * money values are integer minor units (USDC/XLM 7 dp, USD cents) exactly as
- * the bridge's /admin/exchange-reserve API returns them — this module never
- * parses user-typed amounts into floats for arithmetic, only for validation
- * bounds mirrored from the server ($20-$200 in whole cents).
+ * fetching and rendering; everything numeric or geometric lives here, plus
+ * the load-ordering rule that keeps money columns from rendering before the
+ * scale map they need (sequenceLoads). All money values are integer minor
+ * units (USDC/XLM 7 dp, USD cents) exactly as the bridge's
+ * /admin/exchange-reserve API returns them — this module never parses
+ * user-typed amounts into floats for arithmetic, only for validation bounds
+ * mirrored from the server ($20-$200 in whole cents). A currency whose scale
+ * is not in the bucket map renders as labelled raw minor units, never at a
+ * guessed scale (scaleFor / rawMinor).
  *
  * @module ReserveMath
  */
@@ -76,6 +80,135 @@ var ReserveMath = (function () {
         if (minor === 0) return '0';
         var body = display(Math.abs(minor), scale);
         return (minor > 0 ? '+' : '−') + body;
+    }
+
+    /**
+     * Resolve a currency's minor-unit scale from the bucket map the status
+     * endpoint returns (`currency -> minor_scale`).
+     *
+     * Never guesses. The ledger, refund, and replenishment endpoints return
+     * minor integers without a scale, and the buckets span two scales (USD
+     * cents vs 7-dp stablecoins/XLM). Defaulting an unknown currency to 7
+     * rendered a $2,500.00 fiat confirmation as "+0.025" whenever the ledger
+     * landed before the status call, and a treasurer booked a corrective
+     * adjustment against it. `known: false` tells the caller to show raw
+     * minor units instead (see rawMinor).
+     * @param {Object<string, number>} scales
+     * @param {string} currency
+     * @returns {{scale: (number|null), known: boolean}}
+     */
+    function scaleFor(scales, currency) {
+        if (scales && typeof currency === 'string' &&
+            Object.prototype.hasOwnProperty.call(scales, currency)) {
+            var s = scales[currency];
+            if (typeof s === 'number' && isFinite(s) && s >= 0 && Math.floor(s) === s) {
+                return { scale: s, known: true };
+            }
+        }
+        return { scale: null, known: false };
+    }
+
+    /**
+     * Raw minor-unit rendering for a value whose scale cannot be resolved:
+     * the exact integer the bridge returned plus an explicit reason, so the
+     * reader sees "250000 minor units (scale unknown)" rather than a decimal
+     * that quietly asserts a scale nobody verified.
+     * @param {number} minor
+     * @param {string} reason - e.g. 'scale unknown'
+     * @returns {string}
+     */
+    function rawMinor(minor, reason) {
+        return String(minor) + ' minor units (' + reason + ')';
+    }
+
+    /**
+     * Display minor units in `currency`, scaled by the bucket map when the
+     * currency is known and as labelled raw minor units otherwise.
+     * @param {number} minor
+     * @param {Object<string, number>} scales
+     * @param {string} currency
+     * @returns {string}
+     */
+    function displayFor(minor, scales, currency) {
+        var info = scaleFor(scales, currency);
+        return info.known ? display(minor, info.scale) : rawMinor(minor, 'scale unknown');
+    }
+
+    /**
+     * Signed delta in `currency` (see displayFor for the unknown-scale rule).
+     * @param {number} minor
+     * @param {Object<string, number>} scales
+     * @param {string} currency
+     * @returns {string}
+     */
+    function fmtDeltaFor(minor, scales, currency) {
+        var info = scaleFor(scales, currency);
+        if (info.known) return fmtDelta(minor, info.scale);
+        if (minor === 0) return '0';
+        return (minor > 0 ? '+' : '−') + rawMinor(Math.abs(minor), 'scale unknown');
+    }
+
+    /**
+     * The two legs of a replenishment kind. Mirrors replenish.rs: the policy
+     * caps (`max_spend_minor`, `daily_spend_cap_minor`, `min_float_minor`)
+     * are all denominated in the SPEND asset. An unknown kind resolves to
+     * null so callers fall back to raw minor units rather than a guess —
+     * the bridge's own catch-all maps unknown kinds to USDC→USD, but
+     * mirroring a catch-all here would be exactly the guessing this module
+     * exists to avoid.
+     * @param {string} kind
+     * @returns {({spend: string, recv: string}|null)}
+     */
+    function replenishLegs(kind) {
+        if (kind === 'xlm_to_usdc') return { spend: 'XLM', recv: 'USDC' };
+        if (kind === 'usdc_to_usd') return { spend: 'USDC', recv: 'USD' };
+        return null;
+    }
+
+    /**
+     * Which currency a replenishment cycle's `actual_recv_minor` is in.
+     *
+     * A refunded cycle's arrival is the SPEND asset coming back (replenish.rs
+     * classify_cycle_arrival → Refund books `actual_recv_minor` in
+     * spend_currency); every other state received the recv asset. Scaling a
+     * refunded XLM→USDC cycle by recv_currency would show XLM at USDC's
+     * scale — both 7 dp today, but a refunded USDC→USD cycle holds USDC (7)
+     * where recv is USD (2).
+     * @param {{state: string, spend_currency: string, recv_currency: string}} cycle
+     * @returns {string}
+     */
+    function cycleArrivalCurrency(cycle) {
+        return cycle.state === 'refunded' ? cycle.spend_currency : cycle.recv_currency;
+    }
+
+    /**
+     * Run page loaders in dependency order. `first` (the status fetch, which
+     * carries the bucket scale map) settles before any of `dependents`
+     * starts, so the money columns they render never paint against an
+     * empty scale map; `independents` start immediately. Dependents run
+     * after `first` settles either way — with the scale map absent they
+     * render raw minor units, which beats an empty section, and their own
+     * requests surface their own errors.
+     *
+     * Pure orchestration: every loader is a thunk returning a promise, every
+     * failure goes to `onError` exactly once, and the returned promise
+     * resolves once all loaders have settled (never rejects).
+     * @param {function(): Promise} first
+     * @param {Array<function(): Promise>} dependents
+     * @param {Array<function(): Promise>} independents
+     * @param {function(Error)} onError
+     * @returns {Promise<void>}
+     */
+    function sequenceLoads(first, dependents, independents, onError) {
+        function run(fn) {
+            return new Promise(function (resolve) { resolve(fn()); })
+                .then(function () {}, function (err) { onError(err); });
+        }
+        var chain = run(first).then(function () {
+            return Promise.all(dependents.map(run));
+        });
+        var side = Promise.all(independents.map(run));
+        return Promise.all([chain, side]).then(function () {});
     }
 
     /**
@@ -215,6 +348,13 @@ var ReserveMath = (function () {
         display: display,
         centsToUsd: centsToUsd,
         fmtDelta: fmtDelta,
+        scaleFor: scaleFor,
+        rawMinor: rawMinor,
+        displayFor: displayFor,
+        fmtDeltaFor: fmtDeltaFor,
+        replenishLegs: replenishLegs,
+        cycleArrivalCurrency: cycleArrivalCurrency,
+        sequenceLoads: sequenceLoads,
         validateThresholdDollars: validateThresholdDollars,
         validateAmount: validateAmount,
         depletionBadge: depletionBadge,

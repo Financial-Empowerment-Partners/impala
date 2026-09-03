@@ -51,6 +51,10 @@ pub struct HorizonPayment {
     /// malformed it (never on a real payment) — a missing bound just makes the
     /// walk continue, never stop short.
     pub created_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Horizon's per-operation `transaction_successful` flag. A failed
+    /// transaction's operations still appear in the feed with their intended
+    /// amounts, so settlement proofs must require `Some(true)`.
+    pub transaction_successful: Option<bool>,
 }
 
 /// One fetched page, with RAW feed accounting kept separate from the parsed
@@ -128,6 +132,7 @@ fn parse_payment_record(r: &Value) -> Option<HorizonPayment> {
         asset_issuer,
         amount,
         memo_text,
+        transaction_successful: r["transaction_successful"].as_bool(),
         created_at: r["created_at"]
             .as_str()
             .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
@@ -196,6 +201,60 @@ pub enum FeedSearch {
     Inconclusive,
 }
 
+/// Horizon's ingestion head: the close time of the latest ledger this
+/// Horizon has ingested (`history_latest_ledger_closed_at` on the root
+/// document — the `Latest-Ledger` header is NOT sent on the payments feed).
+/// Compared against wall-clock time it says how far behind the network this
+/// Horizon is, which every absence proof and the deposit scan must know.
+pub async fn fetch_head_closed_at(
+    http: &reqwest::Client,
+    horizon_url: &str,
+) -> Result<chrono::DateTime<chrono::Utc>, AppError> {
+    let url = format!("{}/", horizon_url.trim_end_matches('/'));
+    let body = horizon_get(http, &url, "fetch_head_closed_at")
+        .await?
+        .ok_or_else(|| AppError::InternalError("Horizon root not found".to_string()))?;
+    parse_head_closed_at(&body).ok_or_else(|| {
+        AppError::InternalError("Horizon root lacks a ledger close time".to_string())
+    })
+}
+
+/// Pure parse of the root document's head close time.
+pub fn parse_head_closed_at(root: &Value) -> Option<chrono::DateTime<chrono::Utc>> {
+    root["history_latest_ledger_closed_at"]
+        .as_str()
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .map(|dt| dt.with_timezone(&chrono::Utc))
+}
+
+/// Whether a head close time is fresh enough to reason from: within
+/// `max_lag_secs` of `now`. Pure, so the boundary is unit-tested.
+pub fn head_is_fresh(
+    head_closed_at: chrono::DateTime<chrono::Utc>,
+    now: chrono::DateTime<chrono::Utc>,
+    max_lag_secs: i64,
+) -> bool {
+    now.signed_duration_since(head_closed_at).num_seconds() <= max_lag_secs
+}
+
+/// The payment operations of ONE transaction, by hash — the settlement
+/// evidence check for an admin-supplied hash. `None` = Horizon has no such
+/// transaction (404). A single bounded fetch, never `Inconclusive`.
+pub async fn fetch_transaction_payments(
+    http: &reqwest::Client,
+    horizon_url: &str,
+    tx_hash: &str,
+) -> Result<Option<Vec<HorizonPayment>>, AppError> {
+    let url = format!(
+        "{}/transactions/{}/payments?limit=200&join=transactions",
+        horizon_url.trim_end_matches('/'),
+        tx_hash
+    );
+    Ok(horizon_get(http, &url, "fetch_transaction_payments")
+        .await?
+        .map(|body| parse_payments_page(&body).records))
+}
+
 /// Per-page decision of the descending walk, factored out so the money-safe
 /// stop logic is unit-testable without network I/O.
 #[derive(Debug, PartialEq)]
@@ -241,7 +300,59 @@ where
 /// payout/refund that has scrolled past the newest page is still found (or,
 /// if genuinely absent, absence is *proven* over the window rather than
 /// assumed). Any Horizon error propagates and the caller fails closed.
+#[allow(clippy::too_many_arguments)] // a bounded feed walk: every arg is a distinct bound
 pub async fn search_payments_desc<F>(
+    http: &reqwest::Client,
+    horizon_url: &str,
+    account_id: &str,
+    not_before: chrono::DateTime<chrono::Utc>,
+    max_pages: usize,
+    limit: u32,
+    max_lag_secs: i64,
+    matches: F,
+) -> Result<FeedSearch, AppError>
+where
+    F: FnMut(&HorizonPayment) -> bool,
+{
+    // Freshness brackets the walk. A lagging Horizon has ingested the OLDER
+    // records (below the floor) but not the newest ones, so the walk alone
+    // would cross the floor and "prove" an absence that is merely lag. The
+    // head is read before and after: a lag that begins mid-walk is caught by
+    // the second read. Lag never turns into a proof — only into Inconclusive,
+    // which the money-path callers fail closed on.
+    let head = fetch_head_closed_at(http, horizon_url).await?;
+    if !head_is_fresh(head, chrono::Utc::now(), max_lag_secs) {
+        error!(
+            "search_payments_desc: Horizon head {} is more than {}s behind; absence cannot be proven",
+            head, max_lag_secs
+        );
+        return Ok(FeedSearch::Inconclusive);
+    }
+    let result = walk_payments_desc(
+        http,
+        horizon_url,
+        account_id,
+        not_before,
+        max_pages,
+        limit,
+        matches,
+    )
+    .await?;
+    if matches!(result, FeedSearch::VerifiedAbsent) {
+        let head = fetch_head_closed_at(http, horizon_url).await?;
+        if !head_is_fresh(head, chrono::Utc::now(), max_lag_secs) {
+            error!(
+                "search_payments_desc: Horizon head {} fell behind during the walk; absence not proven",
+                head
+            );
+            return Ok(FeedSearch::Inconclusive);
+        }
+    }
+    Ok(result)
+}
+
+/// The bounded newest-first walk itself (no freshness check).
+async fn walk_payments_desc<F>(
     http: &reqwest::Client,
     horizon_url: &str,
     account_id: &str,
@@ -478,6 +589,56 @@ mod tests {
     }
 
     #[test]
+    fn head_freshness_boundary() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-01-15T12:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let at = |s: &str| {
+            chrono::DateTime::parse_from_rfc3339(s)
+                .unwrap()
+                .with_timezone(&chrono::Utc)
+        };
+        assert!(head_is_fresh(at("2026-01-15T11:59:55Z"), now, 90));
+        assert!(head_is_fresh(at("2026-01-15T11:58:30Z"), now, 90)); // exactly 90s
+        assert!(!head_is_fresh(at("2026-01-15T11:58:29Z"), now, 90));
+        // A head in the future (clock skew) is fresh, never "lagging".
+        assert!(head_is_fresh(at("2026-01-15T12:00:30Z"), now, 90));
+    }
+
+    #[test]
+    fn parses_horizon_root_head() {
+        let root = json!({
+            "history_latest_ledger": 4485995,
+            "history_latest_ledger_closed_at": "2026-09-03T16:39:22Z",
+            "core_latest_ledger": 4486025
+        });
+        assert_eq!(
+            parse_head_closed_at(&root).unwrap().to_rfc3339(),
+            "2026-09-03T16:39:22+00:00"
+        );
+        assert!(parse_head_closed_at(&json!({})).is_none());
+    }
+
+    #[test]
+    fn parses_transaction_successful_flag() {
+        let body = page(json!([
+            { "type": "payment", "paging_token": "1", "transaction_hash": "h1",
+              "to": "G", "asset_type": "native", "amount": "1.0000000",
+              "transaction_successful": true, "transaction": { "memo_type": "none" } },
+            { "type": "payment", "paging_token": "2", "transaction_hash": "h2",
+              "to": "G", "asset_type": "native", "amount": "1.0000000",
+              "transaction_successful": false, "transaction": { "memo_type": "none" } },
+            { "type": "payment", "paging_token": "3", "transaction_hash": "h3",
+              "to": "G", "asset_type": "native", "amount": "1.0000000",
+              "transaction": { "memo_type": "none" } }
+        ]));
+        let p = parse_payments_page(&body).records;
+        assert_eq!(p[0].transaction_successful, Some(true));
+        assert_eq!(p[1].transaction_successful, Some(false));
+        assert_eq!(p[2].transaction_successful, None);
+    }
+
+    #[test]
     fn parses_created_at() {
         let body = page(json!([{
             "type": "payment", "paging_token": "9", "transaction_hash": "h9",
@@ -514,6 +675,7 @@ mod tests {
                     .unwrap()
                     .with_timezone(&chrono::Utc)
             }),
+            transaction_successful: Some(true),
         }
     }
 

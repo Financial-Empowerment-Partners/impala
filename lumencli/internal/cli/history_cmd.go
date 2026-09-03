@@ -197,7 +197,7 @@ func (a *App) runHistoryListing(net netcfg.Network, address string, f *historyFl
 
 	shown, truncated := 0, false
 	newestToken := ""
-	walkErr := stellar.New(net).EachOperation(address, stellar.HistoryOpts{IncludeFailed: f.includeFailed, AllOps: f.allOps},
+	walkErr := a.horizon(net).EachOperation(address, stellar.HistoryOpts{IncludeFailed: f.includeFailed, AllOps: f.allOps},
 		func(op operations.Operation) bool {
 			if newestToken == "" {
 				newestToken = op.PagingToken()
@@ -262,7 +262,7 @@ func (a *App) runHistoryListing(net netcfg.Network, address string, f *historyFl
 func (a *App) runHistorySummary(net netcfg.Network, address string, f *historyFlags, filter *historyFilter) int {
 	acc := newSummaryAccum()
 	var accErr error
-	walkErr := stellar.New(net).EachOperation(address, stellar.HistoryOpts{IncludeFailed: f.includeFailed},
+	walkErr := a.horizon(net).EachOperation(address, stellar.HistoryOpts{IncludeFailed: f.includeFailed},
 		func(op operations.Operation) bool {
 			e := entryFromOp(address, op)
 			if filter.beforeSince(e) {

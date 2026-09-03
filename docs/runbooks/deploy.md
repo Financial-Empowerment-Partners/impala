@@ -17,19 +17,18 @@ existing bridge stack):
 
 ## Deploy checklist (normal change)
 
-1. **Merge to `main`** with CI green. CI publishes two single-arch images to ECR and stitches them into a multi-arch manifest tagged with the commit SHA and `latest`.
+1. **Merge to `main`** with CI green. CI builds one image per architecture, pushes them as `:<sha>-amd64` / `:<sha>-arm64`, and stitches them into a multi-arch manifest tagged `:<sha>` — the commit SHA **only**. The ECR repository is immutable: there is no `:latest`, no tag is ever re-pushed, and every deploy pins an explicit SHA.
 2. **Verify the image exists.** `aws ecr describe-images --repository-name impala-bridge --image-ids imageTag=<sha> --region <aws_region>` should return the manifest.
-3. **Run terraform plan.** From `terraform/`:
+3. **Roll the migration task definition first (if the release carries migrations).** Migrations are compiled into the binary (`sqlx::migrate!("./migrations")`), so the migrate task runs whichever migration set is in the image its task definition points at — and that pointer only moves on `terraform apply`. Running the task against the previous revision applies the previous release's migrations: a no-op that looks like success. Update just that resource, from `terraform/`:
     ```
     terraform init
-    terraform plan \
+    terraform apply \
+      -target=aws_ecs_task_definition.migrate \
       -var "container_image_tag=<sha>" \
-      -var "jwt_secret=${JWT_SECRET}" \
-      -out plan.tfplan
+      -var "jwt_secret=${JWT_SECRET}"
     ```
-    Review the diff. The only expected changes for a code-only deploy are the ECS task definitions and services (new image reference).
-4. **Apply.** `terraform apply plan.tfplan`. ECS rolls the server + worker services one task at a time with the health check as the gate.
-5. **Run database migrations (if any).** See [Database migrations](#database-migrations) below.
+    The plan Terraform shows before applying must contain a new revision of the migrate task definition and nothing else you did not expect. (Terraform warns that `-target` is for exceptional use; this is one — the server and worker must not move yet.)
+4. **Run the migrations and wait for exit 0.** See [Database migrations](#database-migrations) below. Do **not** continue on a non-zero exit.
    - **Server-side roles (migrations 023–025; extended to seven roles by
      035):** these add the account `role` column, a first-account-admin
      bootstrap trigger + backfill, `profile_source`, and the
@@ -43,18 +42,34 @@ existing bridge stack):
      account to `admin`; confirm at least one admin exists
      (`SELECT count(*) FROM impala_account WHERE role='admin'`) before relying on
      the admin console.
-6. **Smoke-test production.**
+   - **036 (USDT0 reserve bucket):** seeds the `USDT0` row in
+     `conversion_reserve` and changes no behavior on its own. It is required
+     before `RESERVE_USDT0_ISSUER` is set — the bridge refuses to start
+     otherwise. There is nothing to roll back.
+5. **Run terraform plan for the full release.** From `terraform/`:
+    ```
+    terraform plan \
+      -var "container_image_tag=<sha>" \
+      -var "jwt_secret=${JWT_SECRET}" \
+      -out plan.tfplan
+    ```
+    Review the diff. The only expected changes for a code-only deploy are the server and worker ECS task definitions and services (new image reference); the migrate task definition already moved in step 3.
+6. **Apply.** `terraform apply plan.tfplan`. ECS rolls the server + worker services one task at a time with the health check as the gate — onto a schema that already exists.
+7. **Smoke-test production.**
     - `curl -f https://<alb-dns>/healthz` → 200
     - `curl -sf https://<alb-dns>/readyz` → 200
     - `curl -sf https://<alb-dns>/version | jq` — confirm `build_date` and `version` match the deploy.
-7. **Watch dashboards** for ~10 min post-rollout:
+8. **Watch dashboards** for ~10 min post-rollout:
     - CloudWatch dashboard `impala-bridge-ops` (CPU, memory, 5xx, p99 latency, SQS backlog + DLQ depth).
     - SigNoz service `impala-bridge` if `signoz_endpoint` is configured.
 
 ## Database migrations
 
 Migrations run as a one-off ECS task with `RUN_MODE=migrate`. Always run them
-*before* shifting traffic to a version that requires the new schema.
+*before* shifting traffic to a version that requires the new schema — which
+means the migrate task definition must already point at the new image (step 3
+of the checklist: `terraform apply -target=aws_ecs_task_definition.migrate`).
+The `migrate_task_definition` output names the latest applied revision.
 
 ```
 aws ecs run-task \
@@ -107,7 +122,33 @@ If the primary region is unavailable and `dr_enabled = true`:
    DR ECS services at desired_count = 0 to save money. Scale the server and
    worker services to their production counts via `terraform apply -var
    'dr_server_desired_count=4' ...`.
-5. **Notify downstream consumers** that the bridge DNS has failed over.
+5. **Invalidate every bearer token and session — mandatory.** The DR
+   ElastiCache group (`dr.tf`) starts **empty**: nothing replicates the
+   primary's Redis into it. Redis is the *only* store for token revocation
+   (`impala:revoked:*`), refresh-token rotation and family revocation
+   (`impala:rotated:*`, `impala:revoked_family:*`), the per-account auth
+   epochs that logout-everywhere, role changes and account deletion rely on
+   (`impala:auth_epoch:*`), and the `__Host-` sessions (`impala:session:*`).
+   Failing over onto an empty Redis silently resurrects every bearer token
+   that was revoked, rotated away, or minted before a demotion, for the rest
+   of its lifetime: a rotated refresh token mints again, and reuse detection
+   only trips once a second presentation of the *same* token collides.
+   Nothing logs this. Before serving traffic from DR:
+   1. Rotate `JWT_SECRET` **without** `JWT_SECRET_PREVIOUS` — the
+      emergency procedure in
+      [`rotate-secrets.md`](./rotate-secrets.md#emergency-rotation-suspected-compromise).
+      Every refresh and temporal token dies at once; API clients and admins
+      re-authenticate.
+   2. Force cookie re-login. An empty Redis has already done this (sessions
+      live only there). A *stale* Redis — one restored from a snapshot — has
+      not: delete `impala:session:*` (SCAN + DEL; never `KEYS` on a live
+      node).
+
+   The same two steps are mandatory after **any** Redis data loss in the
+   primary — a flush, a node replacement without replication, a restore
+   from snapshot. See "Redis lost its data" in
+   [`incident-response.md`](./incident-response.md).
+6. **Notify downstream consumers** that the bridge DNS has failed over.
 
 Planned failover drills should happen at least quarterly; see the bridge
 on-call rotation doc for cadence.

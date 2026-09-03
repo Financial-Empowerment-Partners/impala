@@ -61,6 +61,10 @@ pub(crate) enum SkipReason {
     Slippage,
     /// No usable quote came back.
     NoQuote,
+    /// This deployment cannot build a provider leg for the kind
+    /// (`usdc_to_usd` has no treasury beneficiary configuration), so a cycle
+    /// would only be aborted at creation — see `kind_has_provider_leg`.
+    NoProviderLeg,
 }
 
 impl SkipReason {
@@ -79,6 +83,7 @@ impl SkipReason {
             SkipReason::PriceFloor => "price_floor",
             SkipReason::Slippage => "slippage",
             SkipReason::NoQuote => "no_quote",
+            SkipReason::NoProviderLeg => "no_provider_leg",
         }
     }
 }
@@ -502,6 +507,19 @@ pub(crate) async fn freeze_stale_cycles(deps: &ReserveWatchDeps) {
     }
 }
 
+/// Whether this deployment can build a provider leg for `kind`.
+///
+/// `usdc_to_usd` needs the bridge's own OwlPay treasury beneficiary, and no
+/// such configuration exists yet, so `create_provider_leg` aborts every
+/// cycle of that kind at creation. This is THE predicate for that: the
+/// watcher consults it before planning, and the admin policy/run endpoints
+/// refuse to enable or run a kind it rejects — an enabled policy would
+/// otherwise churn a `replenish_hold`/`replenish_release` journal pair every
+/// cooldown for nothing.
+pub(crate) fn kind_has_provider_leg(kind: &str) -> bool {
+    kind == crate::constants::REPLENISH_KIND_XLM_TO_USDC
+}
+
 /// Evaluate the guards and, if they all pass, plan and claim a cycle.
 ///
 /// Returns the new cycle id, or `None` with the skip already recorded.
@@ -525,6 +543,15 @@ pub(crate) async fn maybe_start_cycle(
         Some(p) => p,
         None => return Ok(None),
     };
+
+    // A kind this deployment cannot build a leg for plans nothing: its hold
+    // would only be released again at creation, a journal pair per cooldown
+    // for no cycle. The admin endpoints refuse to enable such a kind; this
+    // covers a policy row that was enabled before they did.
+    if !kind_has_provider_leg(kind) {
+        record_skip(&deps.metrics, kind, &SkipReason::NoProviderLeg);
+        return Ok(None);
+    }
 
     let (spend_currency, recv_currency, provider) = match kind {
         "xlm_to_usdc" => (
@@ -831,7 +858,7 @@ async fn create_provider_leg(deps: &ReserveWatchDeps, c: &DueCycleRow) -> Result
         return Ok(());
     }
 
-    if c.kind != "xlm_to_usdc" {
+    if !kind_has_provider_leg(&c.kind) {
         // The fiat leg needs the bridge's own OwlPay beneficiary, which is
         // deployment configuration rather than per-cycle data. ABORT rather
         // than freeze: nothing has been sent, so the funds provably never
