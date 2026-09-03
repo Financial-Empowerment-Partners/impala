@@ -56,7 +56,7 @@ aws-sdk-kms = { version = "1", default-features = false, features = ["default-ht
 # Custodial Stellar seed support: envelope encryption + classic tx signing.
 aes-gcm = "0.10"
 zeroize = { version = "1", features = ["derive"] }
-rand = "0.8"
+rand = "0.9"
 base64 = "0.22"
 stellar-base = "0.7"
 async-trait = "0.1"
