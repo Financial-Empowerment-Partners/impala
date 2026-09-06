@@ -57,7 +57,7 @@ kotlin {
 }
 
 dependencies {
-    implementation("androidx.appcompat:appcompat:1.7.1")
+    implementation("androidx.appcompat:appcompat:1.8.0")
     implementation("androidx.core:core-ktx:1.19.0")
     // Resolved via composite build (settings.gradle.kts includes ../impala-card).
     // Dependency substitution maps this coordinate to the :sdk project.
