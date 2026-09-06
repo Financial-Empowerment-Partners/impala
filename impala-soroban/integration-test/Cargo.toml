@@ -22,10 +22,10 @@ doctest = false
 # see README "Dependencies". The CI artifact gate
 # (test_wasm_artifact_loads_in_pinned_host) is the acceptance check for the
 # current pin.
-soroban-sdk = { version = "23.5.3" }
+soroban-sdk = { version = "27.0.6" }
 
 [dev-dependencies]
-soroban-sdk = { version = "23.5.3", features = ["testutils"] }
+soroban-sdk = { version = "27.0.6", features = ["testutils"] }
 # std only: drops rusty-fork/tempfile/wait-timeout from the audited tree.
 proptest = { version = "1.10", default-features = false, features = ["std"] }
 
