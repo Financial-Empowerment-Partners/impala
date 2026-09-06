@@ -5,7 +5,7 @@ plugins {
     // AGP 9 has built-in Kotlin: the kotlin-android plugin must NOT be applied.
     // It stays on the classpath (apply false) so built-in Kotlin resolves KGP
     // 2.4.0 instead of the 2.2.x AGP bundles as its floor.
-    id("org.jetbrains.kotlin.android") version "2.4.0" apply false
+    id("org.jetbrains.kotlin.android") version "2.4.10" apply false
 }
 
 android {
