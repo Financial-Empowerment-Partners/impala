@@ -339,6 +339,11 @@ pub async fn set_sync_mode(
     }))
 }
 
+/// Non-terminal custodial intents block deletion (037). Pinned by
+/// `delete_guard_covers_every_non_terminal_intent_status`.
+pub(crate) const DELETE_GUARD_INTENTS_SQL: &str = "SELECT COUNT(*) FROM custodial_payment_intent \
+     WHERE payala_account_id = $1 AND status IN ('prepared', 'submitted', 'ambiguous')";
+
 /// `DELETE /admin/accounts/:account_id` — delete an account (admin only).
 ///
 /// Cascades to `impala_auth` / `impala_mfa` / `card` via FKs; the remaining
@@ -368,6 +373,24 @@ pub async fn delete_account(
                     .to_string(),
             ));
         }
+    }
+
+    // An unresolved custodial payment intent is money whose fate is not yet
+    // recorded; the intent row deliberately has no FK (it outlives the
+    // account as the audit trail), so the guard is explicit here.
+    let open_intents: i64 = sqlx::query_scalar(DELETE_GUARD_INTENTS_SQL)
+        .bind(&account_id)
+        .fetch_one(&pool)
+        .await
+        .map_err(|e| {
+            error!("delete_account: custodial intent count error: {}", e);
+            AppError::InternalError("Database error".to_string())
+        })?;
+    if open_intents > 0 {
+        return Err(AppError::Conflict(format!(
+            "Account has {} unresolved custodial payment(s); wait for the sweep or resolve them first",
+            open_intents
+        )));
     }
 
     // In-flight reserve orders hold pool funds keyed to their order rows;
@@ -632,5 +655,15 @@ mod tests {
         assert!(would_remove_last_admin(1, true, "auditor"));
         assert!(!would_remove_last_admin(2, true, "key-custodian"));
         assert!(!would_remove_last_admin(1, false, "treasurer"));
+    }
+
+    #[test]
+    fn delete_guard_covers_every_non_terminal_intent_status() {
+        for open in crate::constants::CUSTODIAL_INTENT_OPEN_STATUSES {
+            assert!(super::DELETE_GUARD_INTENTS_SQL.contains(&format!("'{}'", open)));
+        }
+        assert_eq!(super::DELETE_GUARD_INTENTS_SQL.matches('\'').count(), 6);
+        assert!(!super::DELETE_GUARD_INTENTS_SQL.contains("'settled'"));
+        assert!(!super::DELETE_GUARD_INTENTS_SQL.contains("'rejected'"));
     }
 }

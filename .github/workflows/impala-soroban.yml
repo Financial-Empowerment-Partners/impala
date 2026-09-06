@@ -4,12 +4,29 @@
 # Two independent crates: integration-test/ (the contract, compiles to WASM with
 # in-process unit tests) and testnet-tests/ (end-to-end against Stellar testnet —
 # needs network + stellar-cli + funded accounts, so it's manual-dispatch only).
+#
+# Release discipline: every contract build prints the WASM sha256 (== the
+# on-chain ContractCode hash) and a build-info.json; a tag push
+# `impala-soroban-v*` additionally publishes a GitHub Release with the artifact,
+# its hash and SHA256SUMS. Deployed instances are recorded in
+# impala-soroban/deployments/ (validated here, verified on-chain by
+# impala-soroban/scripts/verify-deployment.sh).
+#
+# Secrets: no signing key of the contract ever lives in CI. The only optional
+# secret is STELLAR_TESTNET_KEEPER_SECRET (keep-alive job): a throwaway testnet
+# key that holds XLM for fees, is never a contract signer or deployer, and only
+# calls the permissionless bump_ttl / bump_entry_ttl plus read-only
+# verification — it cannot move wrapper funds. Until the owner creates it the
+# keep-alive job stays workflow_dispatch-only.
 # =============================================================================
 name: impala-soroban
 
 on:
   push:
     branches: [main]
+    # Path filters are not evaluated for tag pushes, so a release tag always
+    # runs the contract job (and the release job).
+    tags: ['impala-soroban-v*']
     paths:
       - 'impala-soroban/**'
       - '.github/workflows/impala-soroban.yml'
@@ -19,6 +36,20 @@ on:
       - 'impala-soroban/**'
       - '.github/workflows/impala-soroban.yml'
   workflow_dispatch:
+    inputs:
+      run:
+        description: 'Manual job to run'
+        type: choice
+        default: testnet-tests
+        options:
+          - testnet-tests
+          - keepalive-verify
+
+env:
+  # Pinned stellar-cli (newest 23.x on crates.io at implementation time). The
+  # first successful manual constructor deploy confirms or bumps it; the same
+  # value is recorded in the deployment manifest (deploy.stellar_cli_version).
+  STELLAR_CLI_VERSION: '23.4.1'
 
 concurrency:
   group: impala-soroban-${{ github.ref }}
@@ -65,33 +96,78 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
 
-      - name: Unit tests (in-process, no network)
-        run: cargo test
+      - name: Unit tests (in-process, no network; includes the 64-case property test)
+        run: cargo test --locked
 
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked
 
-      # Audits the contract crate's Cargo.lock. testnet-tests has no lockfile
-      # committed, so it has nothing reproducible to audit.
-      - name: Audit dependencies for vulnerabilities
+      # Both crates commit their Cargo.lock, so both are audited.
+      - name: Audit dependencies for vulnerabilities (contract)
+        run: cargo audit
+
+      - name: Audit dependencies for vulnerabilities (testnet-tests)
+        working-directory: impala-soroban/testnet-tests
         run: cargo audit
 
       - name: Build contract WASM
-        run: cargo build --release --target wasm32-unknown-unknown
+        run: cargo build --release --locked --target wasm32-unknown-unknown
+
+      - name: WASM sha256 (== on-chain ContractCode hash) + build info
+        env:
+          W: target/wasm32-unknown-unknown/release/soroban_impala_integration_test.wasm
+        run: |
+          set -euo pipefail
+          sha256sum "$W" | tee "$W.sha256"
+          SDK=$(cargo metadata --format-version 1 --locked | jq -r '.packages[]|select(.name=="soroban-sdk")|.version' | sort -u | paste -sd,)
+          HOST=$(cargo metadata --format-version 1 --locked | jq -r '.packages[]|select(.name=="soroban-env-host")|.version' | sort -u | paste -sd,)
+          jq -n --arg sha "$(cut -d' ' -f1 "$W.sha256")" --arg size "$(stat -c%s "$W")" \
+                --arg git "$GITHUB_SHA" --arg ref "$GITHUB_REF_NAME" --arg rustc "$(rustc -V)" \
+                --arg sdk "$SDK" --arg host "$HOST" --arg lock "$(sha256sum Cargo.lock | cut -d' ' -f1)" \
+                --arg run "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+                '{schema_version:1, artifact:"soroban_impala_integration_test.wasm", wasm_sha256:$sha,
+                  wasm_size_bytes:($size|tonumber), git_sha:$git, git_ref:$ref, rustc:$rustc,
+                  soroban_sdk:$sdk, soroban_env_host:$host, target:"wasm32-unknown-unknown",
+                  cargo_lock_sha256:$lock, ci_run:$run}' | tee build-info.json
+          { echo '### soroban_impala_integration_test.wasm'; echo '```'; cat "$W.sha256"; cat build-info.json; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+      # Proves the release artifact parses in the pinned host and that the
+      # constructor-argument encoding works end-to-end (guards the rustc >= 1.82
+      # wasm32-unknown-unknown post-MVP feature hazard).
+      - name: Artifact gate (release WASM in the pinned host)
+        run: IMPALA_WASM=$PWD/target/wasm32-unknown-unknown/release/soroban_impala_integration_test.wasm cargo test --locked test_wasm_artifact_loads_in_pinned_host -- --ignored
+
+      - name: Property tests (deep)
+        run: PROPTEST_CASES=512 cargo test --locked invariants
+
+      - name: Snapshot orphan check
+        run: ../scripts/check-snapshots.sh
+
+      # Also compares the terraform contract id (fed from the same secret
+      # ci.yml hands to terraform) against the active testnet manifest; the
+      # check is skipped with a notice when the secret is empty.
+      - name: Validate deployment manifests
+        env:
+          TF_VAR_testnet_soroban_contract_id: ${{ secrets.TF_VAR_testnet_soroban_contract_id }}
+        run: ../scripts/check-manifests.sh
 
       - name: Upload WASM artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: soroban-impala-integration-test-wasm-${{ github.sha }}
-          path: impala-soroban/integration-test/target/wasm32-unknown-unknown/release/*.wasm
+          path: |
+            impala-soroban/integration-test/target/wasm32-unknown-unknown/release/*.wasm
+            impala-soroban/integration-test/target/wasm32-unknown-unknown/release/*.wasm.sha256
+            impala-soroban/integration-test/build-info.json
           if-no-files-found: error
-          retention-days: 30
+          retention-days: ${{ startsWith(github.ref, 'refs/tags/') && 90 || 30 }}
 
   # End-to-end against Stellar testnet. Manual only: slow (ledger latency +
-  # timelock waits) and needs network + the stellar CLI.
+  # timelock waits) and needs network + the pinned stellar CLI. Deploys fresh
+  # instances through the constructor on every run.
   testnet-tests:
     name: Testnet e2e (manual)
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' && (inputs.run == 'testnet-tests' || inputs.run == '')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
@@ -105,13 +181,175 @@ jobs:
           toolchain: '1.96.0'
           targets: wasm32-unknown-unknown
 
-      - name: Install stellar-cli
-        run: cargo install --locked stellar-cli
+      - name: Install stellar-cli (pinned)
+        run: |
+          set -euo pipefail
+          cargo install --locked stellar-cli --version "$STELLAR_CLI_VERSION"
+          stellar --version | tee /dev/stderr | grep -F "$STELLAR_CLI_VERSION"
 
       - name: Build contract WASM
         working-directory: impala-soroban/integration-test
-        run: cargo build --release --target wasm32-unknown-unknown
+        run: cargo build --release --locked --target wasm32-unknown-unknown
 
       - name: Run testnet tests
         working-directory: impala-soroban/testnet-tests
-        run: cargo test
+        run: cargo test --locked
+
+  # ===========================================================================
+  # GitHub Release — tag-push only (impala-soroban-v*). Mirrors the
+  # impala-card.yml release job. The published hash is sha256(wasm), which is
+  # Soroban's on-chain wasm hash, so it is directly comparable with
+  # `stellar contract fetch` / `stellar contract upload`.
+  # ===========================================================================
+  release:
+    name: GitHub Release
+    needs: contract
+    if: startsWith(github.ref, 'refs/tags/impala-soroban-v')
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+    defaults:
+      run:
+        working-directory: impala-soroban/integration-test
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: '1.96.0'
+          targets: wasm32-unknown-unknown
+
+      - name: Build contract WASM
+        run: cargo build --release --locked --target wasm32-unknown-unknown
+
+      # Action paths are workspace-rooted (working-directory covers only
+      # `run:` steps), so download into the crate dir where the staging step
+      # runs.
+      - name: Download the contract job's artifact (hash + build-info)
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: soroban-impala-integration-test-wasm-${{ github.sha }}
+          path: impala-soroban/integration-test/ci-artifact/
+
+      - name: Stage release assets (rebuild must match the contract job's hash)
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#impala-soroban-v}"
+          W=target/wasm32-unknown-unknown/release/soroban_impala_integration_test.wasm
+          CI_SHA=$(cut -d' ' -f1 ci-artifact/*.wasm.sha256)
+          HERE_SHA=$(sha256sum "$W" | cut -d' ' -f1)
+          if [ "$CI_SHA" != "$HERE_SHA" ]; then
+            echo "::error::release rebuild hash $HERE_SHA != contract job hash $CI_SHA"
+            exit 1
+          fi
+          mkdir -p dist
+          cp "$W" "dist/soroban_impala_integration_test-${VERSION}.wasm"
+          cp ci-artifact/build-info.json dist/build-info.json
+          (cd dist && sha256sum "soroban_impala_integration_test-${VERSION}.wasm" | tee "soroban_impala_integration_test-${VERSION}.wasm.sha256" > SHA256SUMS && sha256sum build-info.json >> SHA256SUMS)
+          ls -la dist
+          cat dist/SHA256SUMS
+
+      # Non-gating until it has passed on a tag; then drop continue-on-error.
+      - name: Reproducibility (Docker double build, non-gating)
+        continue-on-error: true
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          docker run --rm --platform linux/amd64 -e CARGO_TARGET_DIR=/tmp/target \
+            -v "$PWD":/src -w /src/impala-soroban/integration-test rust:1.96.0-bookworm \
+            sh -c 'rustup target add wasm32-unknown-unknown && cargo build --release --locked --target wasm32-unknown-unknown && sha256sum /tmp/target/wasm32-unknown-unknown/release/soroban_impala_integration_test.wasm' \
+            | tee docker.sha256
+          diff <(tail -n1 docker.sha256 | cut -d" " -f1) <(cut -d" " -f1 impala-soroban/integration-test/dist/*.wasm.sha256)
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3.0.0
+        with:
+          name: impala-soroban ${{ github.ref_name }}
+          tag_name: ${{ github.ref_name }}
+          files: |
+            impala-soroban/integration-test/dist/soroban_impala_integration_test-*.wasm
+            impala-soroban/integration-test/dist/*.wasm.sha256
+            impala-soroban/integration-test/dist/build-info.json
+            impala-soroban/integration-test/dist/SHA256SUMS
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+
+  # ===========================================================================
+  # Keep-alive + on-chain verification of the active testnet instance.
+  # workflow_dispatch only until a funded keeper identity exists in CI secrets
+  # (STELLAR_TESTNET_KEEPER_SECRET, see the header). To make it periodic once
+  # the secret exists, add under `on:`:
+  #
+  #   schedule:
+  #     - cron: '17 6 * * 1'   # weekly; persistent entries archive after ~160 days untouched
+  #
+  # and gate this job on `github.event_name == 'schedule'` as well.
+  # ===========================================================================
+  keepalive-verify:
+    name: Testnet keep-alive + verify (manual)
+    if: github.event_name == 'workflow_dispatch' && inputs.run == 'keepalive-verify'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: impala-soroban
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - name: Require the keeper secret
+        env:
+          KEEPER: ${{ secrets.STELLAR_TESTNET_KEEPER_SECRET }}
+        run: |
+          if [ -z "$KEEPER" ]; then
+            echo "::error::STELLAR_TESTNET_KEEPER_SECRET is not set. Create a throwaway testnet key that only holds XLM for fees (never a contract signer or deployer) and add it as a repository secret."
+            exit 1
+          fi
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: '1.96.0'
+
+      - name: Install stellar-cli (pinned)
+        run: |
+          set -euo pipefail
+          cargo install --locked stellar-cli --version "$STELLAR_CLI_VERSION"
+          stellar --version | tee /dev/stderr | grep -F "$STELLAR_CLI_VERSION"
+
+      - name: Resolve the active testnet manifest
+        run: |
+          set -euo pipefail
+          scripts/check-manifests.sh --require-active
+          MANIFEST=""
+          for f in deployments/testnet/*.json; do
+            if jq -e '.status == "active"' "$f" >/dev/null; then MANIFEST="$f"; fi
+          done
+          [ -n "$MANIFEST" ] || { echo "::error::no active testnet manifest"; exit 1; }
+          {
+            echo "MANIFEST=$MANIFEST"
+            echo "CID=$(jq -r .contract_id "$MANIFEST")"
+            echo "EVALUATORS=$(jq -c .evaluator_accounts "$MANIFEST")"
+          } >> "$GITHUB_ENV"
+
+      # The secret reaches the CLI through stdin, never argv. The exact
+      # `stellar keys add` input syntax is confirmed on the first run.
+      - name: Configure the keeper identity
+        env:
+          KEEPER: ${{ secrets.STELLAR_TESTNET_KEEPER_SECRET }}
+        run: printf '%s\n' "$KEEPER" | stellar keys add keeper --secret-key
+
+      - name: bump_ttl (instance)
+        run: stellar contract invoke --id "$CID" --source keeper --network testnet -- bump_ttl
+
+      - name: bump_entry_ttl (evaluator holders)
+        run: stellar contract invoke --id "$CID" --source keeper --network testnet -- bump_entry_ttl --addresses "$EVALUATORS" --timelock_ids '[]'
+
+      - name: Verify the deployment against the chain
+        run: scripts/verify-deployment.sh "$MANIFEST" --source keeper

@@ -8,10 +8,16 @@ import com.impala.sdk.apdu4j.CommandAPDU
 import com.impala.sdk.apdu4j.CommandAPDU.Companion.decodeHexString_imp
 import com.impala.sdk.apdu4j.CommandAPDU.Companion.encodeHexString_imp
 import com.impala.sdk.apdu4j.ResponseAPDU
+import com.impala.sdk.models.CardPersonalization
+import com.impala.sdk.models.ImpalaCardDataException
 import com.impala.sdk.models.ImpalaCardUser
 import com.impala.sdk.models.ImpalaException
 import com.impala.sdk.models.ImpalaUser
 import com.impala.sdk.models.ImpalaVersion
+import com.impala.sdk.models.PersonalizationProtocol
+import com.impala.sdk.models.ReceiveState
+import com.impala.sdk.models.TransferEnvelope
+import com.impala.sdk.models.TransferProtocol
 import com.impala.sdk.models.toUuid
 import com.impala.sdk.scp03.SCP03Channel
 import com.impala.sdk.scp03.SCP03Constants
@@ -135,6 +141,7 @@ class ImpalaSDK(
      * @return ByteString with RSA modulus
      * @throws ImpalaException
      */
+    @Deprecated("not dispatched by the applet (0x6D00)")
     fun getRSAPubKey(): ByteString {
         val resp: ResponseAPDU = tx(CommandAPDU(Constants.INS_GET_RSA_PUB_KEY))
         return resp.data.toByteString()
@@ -146,6 +153,7 @@ class ImpalaSDK(
      * @returns int containing nonce
      * @throws ImpalaException
      */
+    @Deprecated("not dispatched by the applet (0x6D00)")
     fun getNonce(): Int {
         val resp: ResponseAPDU = tx(CommandAPDU(Constants.INS_GET_CARD_NONCE))
         // Int32 from 4B long bArr
@@ -236,6 +244,7 @@ class ImpalaSDK(
      * @return Triple of (signature, pubKey, pubKeySig) as ByteStrings
      * @throws ImpalaException
      */
+    @Deprecated("retired INS 0x06/0x14 — applet 0.2 answers 0x6D00; use signTransferV2/verifyTransferV2")
     @Throws(ImpalaException::class)
     fun signTransfer(userPin: String, signableData: ByteArray): Triple<ByteString, ByteString, ByteString> {
         require(signableData.size == Constants.SIGNABLE_LENGTH.toInt()) {
@@ -271,6 +280,7 @@ class ImpalaSDK(
      * @param pubKeySig DER-encoded ECDSA signature of the public key
      * @throws ImpalaException
      */
+    @Deprecated("retired INS 0x06/0x14 — applet 0.2 answers 0x6D00; use signTransferV2/verifyTransferV2")
     @Throws(ImpalaException::class)
     fun verifyTransfer(signableData: ByteArray, signature: ByteArray, pubKey: ByteArray, pubKeySig: ByteArray) {
         // Phase 1: send signable data
@@ -288,6 +298,7 @@ class ImpalaSDK(
      * @param data the data to store on the card
      * @throws ImpalaException
      */
+    @Deprecated("not dispatched by the applet (0x6D00)")
     @Throws(ImpalaException::class)
     fun setCardData(data: ByteArray) {
         tx(CommandAPDU(Constants.INS_SET_CARD_DATA, data))
@@ -299,12 +310,194 @@ class ImpalaSDK(
      * @param newPin the new 8-digit master PIN
      * @throws ImpalaException
      */
+    @Deprecated("not dispatched by the applet (0x6D00)")
     @Throws(ImpalaException::class)
     fun updateMasterPin(newPin: String) {
         require(newPin.length == 8 && newPin.all { it.isDigit() }) { "Master PIN must be exactly 8 digits" }
         val pinBytes = mapDigitsToByteArray(newPin)
         val cmd = CommandAPDU(0x00, Constants.INS_UPDATE_MASTER_PIN.toInt(), 0x00, 0x00, pinBytes)
         tx(cmd)
+    }
+
+    // --- Transfer protocol v1 (applet 0.2) ---
+
+    /**
+     * Verifies the card runs the certified transfer protocol (applet >= 0.2)
+     * before any V2 flow is driven, so a 0.1 card fails with a clear message
+     * rather than 0x6D00 mid-ceremony.
+     *
+     * @throws ImpalaException when the applet predates 0.2
+     */
+    @Throws(ImpalaException::class)
+    fun requireCertifiedProtocol(): ImpalaVersion {
+        val v = getImpalaAppletVersion()
+        if (!(v.major > 0 || v.minor >= 2)) {
+            throw ImpalaException("applet ${v.major}.${v.minor} predates the certified transfer protocol (needs 0.2+)")
+        }
+        return v
+    }
+
+    /**
+     * The key diversification data (`cardId[0..10)`) reported by the last
+     * INITIALIZE UPDATE, or null when no channel has been opened.
+     */
+    val keyDiversification: ByteArray? get() = scp03Channel?.keyDiversification
+
+    /**
+     * Runs the PERSONALIZE ceremony over an open SCP03 channel (CLA 0x84, INS 0x72):
+     * part A identity, optional part B issuer key, part C certificate.
+     *
+     * @param accountId 16-byte account UUID
+     * @param currency 4-byte currency tag
+     * @param programId 16-byte issuer program id
+     * @param certificateDer the issuer's DER ECDSA signature over the CERT message (8..72 bytes)
+     * @param issuerPubKey the 65-byte issuer public key; null when the card was program-bound at install
+     * @param initialReceiveCounter the replacement/issuance floor for the receive counter
+     * @throws ImpalaException on a closed channel or any card-side refusal
+     */
+    @Throws(ImpalaException::class)
+    fun personalize(
+        accountId: ByteArray,
+        currency: ByteArray,
+        programId: ByteArray,
+        certificateDer: ByteArray,
+        issuerPubKey: ByteArray? = null,
+        initialReceiveCounter: Int = 0
+    ) {
+        require(accountId.size == 16) { "accountId must be 16 bytes" }
+        require(currency.size == 4) { "currency must be 4 bytes" }
+        require(programId.size == 16) { "programId must be 16 bytes" }
+        TransferProtocol.trimDer(certificateDer) // validates DER shape (8..72, 0x30 LL)
+        issuerPubKey?.let { require(it.size == 65 && it[0] == 0x04.toByte()) { "issuerPubKey must be a 65-byte uncompressed point" } }
+
+        val identity = PersonalizationProtocol.identityPart(accountId, currency, programId, initialReceiveCounter)
+        secureTx(personalizeCmd(Constants.P1_PERSONALIZE_IDENTITY.toInt(), identity))
+        if (issuerPubKey != null) {
+            secureTx(personalizeCmd(Constants.P1_PERSONALIZE_ISSUER_KEY.toInt(), issuerPubKey))
+        }
+        secureTx(personalizeCmd(Constants.P1_PERSONALIZE_CERTIFICATE.toInt(), certificateDer))
+    }
+
+    private fun personalizeCmd(p1: Int, data: ByteArray): CommandAPDU = CommandAPDU(
+        SCP03Constants.CLA_GP.toInt(), SCP03Constants.INS_PERSONALIZE.toInt(), p1, 0x00, data
+    )
+
+    /**
+     * Terminates the card irreversibly over an open SCP03 channel (CLA 0x84, INS 0x73).
+     * The card checks the payload equals its accountId.
+     *
+     * @throws ImpalaException on a closed channel or any card-side refusal
+     */
+    @Throws(ImpalaException::class)
+    fun terminate(accountId: ByteArray) {
+        require(accountId.size == 16) { "accountId must be 16 bytes" }
+        secureTx(CommandAPDU(SCP03Constants.CLA_GP.toInt(), SCP03Constants.INS_TERMINATE.toInt(), 0x00, 0x00, accountId))
+    }
+
+    /**
+     * Rotates the static SCP03 ENC/MAC/DEK keys (APPLET_UPDATE seq 0x0001) over
+     * an open channel. The GP default key value is refused by the card (0x6684).
+     */
+    @Throws(ImpalaException::class)
+    fun rotateScp03Keys(enc: ByteArray, mac: ByteArray, dek: ByteArray) {
+        require(enc.size == 16 && mac.size == 16 && dek.size == 16) { "each SCP03 key must be 16 bytes" }
+        sendAppletUpdate(0x0001, enc + mac + dek)
+    }
+
+    /**
+     * Reads GET_PERSONALIZATION (INS 0x34, 159 bytes) and parses it.
+     *
+     * @throws ImpalaException on an unexpected length or a card error
+     */
+    @Throws(ImpalaException::class)
+    fun getPersonalization(): CardPersonalization {
+        val resp = tx(CommandAPDU(Constants.INS_GET_PERSONALIZATION))
+        if (resp.data.size != Constants.PERSONALIZATION_LENGTH.toInt()) {
+            throw ImpalaException("Expected ${Constants.PERSONALIZATION_LENGTH} bytes for GET_PERSONALIZATION, got ${resp.data.size}")
+        }
+        return PersonalizationProtocol.parsePersonalization(resp.data)
+    }
+
+    /**
+     * Reads GET_RECEIVE_STATE (INS 0x35, 36 bytes): the last accepted receive
+     * counter (MSB must be clear) and the digest of the transfer it belongs to.
+     */
+    @Throws(ImpalaException::class)
+    fun getReceiveState(): ReceiveState {
+        val resp = tx(CommandAPDU(Constants.INS_GET_RECEIVE_STATE))
+        val data = resp.data
+        if (data.size != Constants.RECEIVE_STATE_LENGTH.toInt()) {
+            throw ImpalaException("Expected ${Constants.RECEIVE_STATE_LENGTH} bytes for GET_RECEIVE_STATE, got ${data.size}")
+        }
+        if (data[0].toInt() and 0x80 != 0) {
+            throw ImpalaException("receive counter has its sign bit set")
+        }
+        var counter = 0
+        for (i in 0..3) counter = (counter shl 8) or (data[i].toInt() and 0xFF)
+        return ReceiveState(counter, data.copyOfRange(4, 36).toByteString())
+    }
+
+    /**
+     * Reads GET_LAST_TRANSFER (INS 0x36, 132 bytes) as `(signable60, trimmedDer)`,
+     * or null when the card has never signed a transfer (answers 0x6A83).
+     */
+    @Throws(ImpalaException::class)
+    fun getLastTransfer(): Pair<ByteArray, ByteArray>? {
+        val resp = try {
+            tx(CommandAPDU(Constants.INS_GET_LAST_TRANSFER))
+        } catch (e: ImpalaCardDataException) {
+            if (e.message?.contains("6A83") == true) return null
+            throw e
+        }
+        val data = resp.data
+        if (data.size != Constants.LAST_TRANSFER_LENGTH.toInt()) {
+            throw ImpalaException("Expected ${Constants.LAST_TRANSFER_LENGTH} bytes for GET_LAST_TRANSFER, got ${data.size}")
+        }
+        return Pair(data.copyOfRange(0, 60), TransferProtocol.trimDer(data.copyOfRange(60, 132)))
+    }
+
+    /**
+     * Signs an outgoing transfer (SIGN_TRANSFER_V2, INS 0x30). The card signs the
+     * tagged 89-byte XFER message over the 60-byte signable and returns the
+     * 209-byte envelope tail; both DER slots are trimmed into the returned
+     * [TransferEnvelope].
+     *
+     * @param userPin the 4-digit user PIN (or "0000" for a PIN-less transfer)
+     * @param signable the 60-byte signable transaction data
+     */
+    @Throws(ImpalaException::class)
+    fun signTransferV2(userPin: String, signable: ByteArray): TransferEnvelope {
+        require(signable.size == Constants.SIGNABLE_LENGTH.toInt()) { "Signable data must be ${Constants.SIGNABLE_LENGTH} bytes" }
+        val payload = mapDigitsToByteArray(userPin) + signable
+        val resp = tx(CommandAPDU(Constants.INS_SIGN_TRANSFER_V2, payload))
+        val data = resp.data
+        if (data.size != Constants.TRANSFER_RESPONSE_LENGTH.toInt()) {
+            throw ImpalaException("Expected ${Constants.TRANSFER_RESPONSE_LENGTH} bytes for SIGN_TRANSFER_V2, got ${data.size}")
+        }
+        val sig = TransferProtocol.trimDer(data.copyOfRange(0, 72))
+        val pubKey = data.copyOfRange(72, 137)
+        val cert = TransferProtocol.trimDer(data.copyOfRange(137, 209))
+        return TransferEnvelope(signable, sig, pubKey, cert)
+    }
+
+    /**
+     * Verifies and accepts an incoming transfer (VERIFY_TRANSFER_V2, INS 0x31) in
+     * two phases: P1=0x00 stages the 60-byte signable, P1=0x01 sends the 209-byte
+     * tail (`pad72(sig) ‖ pubKey ‖ pad72(cert)`) which the card verifies and credits.
+     */
+    @Throws(ImpalaException::class)
+    fun verifyTransferV2(env: TransferEnvelope) {
+        verifyTransferV2(env.signable, env.signature, env.pubKey, env.certificate)
+    }
+
+    /** @see verifyTransferV2 */
+    @Throws(ImpalaException::class)
+    fun verifyTransferV2(signable: ByteArray, signature: ByteArray, pubKey: ByteArray, certificate: ByteArray) {
+        require(signable.size == Constants.SIGNABLE_LENGTH.toInt()) { "Signable data must be ${Constants.SIGNABLE_LENGTH} bytes" }
+        require(pubKey.size == Constants.PUB_KEY_LENGTH.toInt()) { "pubKey must be ${Constants.PUB_KEY_LENGTH} bytes" }
+        tx(CommandAPDU(0x00, Constants.INS_VERIFY_TRANSFER_V2.toInt(), 0x00, 0x00, signable))
+        val tail = TransferProtocol.padSlot72(signature) + pubKey + TransferProtocol.padSlot72(certificate)
+        tx(CommandAPDU(0x00, Constants.INS_VERIFY_TRANSFER_V2.toInt(), 0x01, 0x00, tail))
     }
 
     /**

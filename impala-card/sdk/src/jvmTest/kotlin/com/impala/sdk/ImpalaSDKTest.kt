@@ -397,4 +397,92 @@ class ImpalaSDKTest {
             sdk.getBalance()
         }
     }
+
+    // --- Transfer protocol v1 (applet 0.2) APDU construction ---
+
+    /** A 72-byte DER slot carrying a minimal 8-byte DER SEQUENCE, zero-padded. */
+    private fun derSlot72(): ByteArray = byteArrayOf(0x30, 0x06, 0x02, 0x01, 0x01, 0x02, 0x01, 0x01) + ByteArray(64)
+
+    @Test
+    fun `signTransferV2 sends INS 30 with Nc 64 and parses 209`() {
+        val mock = MockBIBO()
+        // 209-byte response: sig slot (72) ‖ pubkey (65) ‖ cert slot (72), both slots valid DER
+        mock.respondWith(derSlot72() + (byteArrayOf(0x04) + ByteArray(64)) + derSlot72())
+        val sdk = ImpalaSDK(mock)
+        val env = sdk.signTransferV2("1234", ByteArray(60))
+
+        val cmd = mock.lastCommand()
+        assertEquals(Constants.INS_SIGN_TRANSFER_V2.toInt() and 0xFF, cmd.iNS)
+        assertEquals(64, cmd.nc) // 4-byte PIN + 60-byte signable
+        assertEquals(8, env.signature.size)
+        assertEquals(65, env.pubKey.size)
+        assertEquals(8, env.certificate.size)
+    }
+
+    @Test
+    fun `verifyTransferV2 sends INS 31 P1 0 then 1 with Nc 60 and 209`() {
+        val mock = MockBIBO()
+        val sdk = ImpalaSDK(mock)
+        sdk.verifyTransferV2(ByteArray(60), ByteArray(8) { 0x30 }, ByteArray(65), ByteArray(8) { 0x30 })
+
+        assertEquals(2, mock.sentCommands.size)
+        assertEquals(Constants.INS_VERIFY_TRANSFER_V2.toInt() and 0xFF, mock.sentCommands[0].iNS)
+        assertEquals(0x00, mock.sentCommands[0].p1)
+        assertEquals(60, mock.sentCommands[0].nc)
+        assertEquals(0x01, mock.sentCommands[1].p1)
+        assertEquals(209, mock.sentCommands[1].nc)
+    }
+
+    @Test
+    fun `getPersonalization rejects sizes other than 159`() {
+        val mock = MockBIBO()
+        val sdk = ImpalaSDK(mock)
+        mock.respondWith(ByteArray(158))
+        assertFailsWith<ImpalaException> { sdk.getPersonalization() }
+        mock.respondWith(ByteArray(160))
+        assertFailsWith<ImpalaException> { sdk.getPersonalization() }
+    }
+
+    @Test
+    fun `getReceiveState parses 36`() {
+        val mock = MockBIBO()
+        mock.respondWith(ByteArray(36))
+        val sdk = ImpalaSDK(mock)
+        val rs = sdk.getReceiveState()
+        assertEquals(0, rs.counter)
+        assertEquals(32, rs.lastDigest.size)
+        assertEquals(Constants.INS_GET_RECEIVE_STATE.toInt() and 0xFF, mock.lastCommand().iNS)
+    }
+
+    @Test
+    fun `getLastTransfer maps 6A83 to null`() {
+        val mock = MockBIBO()
+        mock.respondWithSW(0x6A83)
+        val sdk = ImpalaSDK(mock)
+        assertEquals(null, sdk.getLastTransfer())
+    }
+
+    @Test
+    fun `requireCertifiedProtocol rejects 0_1 and accepts 0_2 and 1_0`() {
+        fun versionBytes(major: Int, minor: Int) =
+            byteArrayOf(0, major.toByte(), 0, minor.toByte(), 0, 0, 0, 0, 0, 0)
+        val mock = MockBIBO()
+        val sdk = ImpalaSDK(mock)
+
+        mock.respondWith(versionBytes(0, 1))
+        assertFailsWith<ImpalaException> { sdk.requireCertifiedProtocol() }
+        mock.respondWith(versionBytes(0, 2))
+        assertEquals(2, sdk.requireCertifiedProtocol().minor.toInt())
+        mock.respondWith(versionBytes(1, 0))
+        assertEquals(1, sdk.requireCertifiedProtocol().major.toInt())
+    }
+
+    @Test
+    fun `personalize throws without an open channel`() {
+        val mock = MockBIBO()
+        val sdk = ImpalaSDK(mock)
+        assertFailsWith<ImpalaException> {
+            sdk.personalize(ByteArray(16) { 1 }, "USDC".encodeToByteArray(), ByteArray(16) { 2 }, byteArrayOf(0x30, 0x06, 0x02, 0x01, 0x01, 0x02, 0x01, 0x01))
+        }
+    }
 }

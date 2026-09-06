@@ -15,6 +15,7 @@ use crate::constants::{
     TX_ORIGIN_PAYALA_SYNC,
 };
 use crate::error::AppError;
+use crate::events::{emit_event, AccountEvent};
 use crate::handlers::transaction::TS_FMT;
 use crate::models::{
     PayalaSyncItemInput, PayalaSyncRequest, PayalaSyncResponse, ReserveBalance,
@@ -538,6 +539,23 @@ pub async fn sync_payala(
     .execute(&mut *tx)
     .await
     .map_err(sync_db_error("batch update"))?;
+
+    // Transactional outbox: the batch's audit row commits with the batch.
+    // Counts only — the mirror is unverified, so the event carries no
+    // amounts, ids or digests (pinned by `sync_batch_payload_carries_counts_only`).
+    emit_event(
+        &mut tx,
+        &AccountEvent::PayalaSyncBatchApplied {
+            account_id: payload.account_id.clone(),
+            batch_id: batch_id.to_string(),
+            sync_mode: sync_mode.clone(),
+            item_count: received as i64,
+            applied_count: applied as i64,
+            duplicate_count: duplicates as i64,
+            conflicting_count: conflicting as i64,
+        },
+    )
+    .await?;
 
     tx.commit().await.map_err(sync_db_error("commit"))?;
 

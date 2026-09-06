@@ -3,6 +3,7 @@ mod auth;
 mod client_source;
 mod config;
 mod constants;
+mod custody;
 mod error;
 mod events;
 mod exchange;
@@ -19,6 +20,7 @@ mod notifications;
 mod oidc;
 mod okta;
 mod password;
+mod reconciliation;
 mod redis_helpers;
 mod seed_protect;
 mod session;
@@ -51,9 +53,10 @@ use tower_http::trace::TraceLayer;
 
 use config::load_config;
 use handlers::{
-    account, admin, admin_keys, admin_replenish, admin_reserve, admin_webhook, authenticate, card,
-    card_auth, device_token, exchange as exchange_handler, exchange_webhook,
-    github as github_handler, google as google_handler, health, logout, managed_seed, mfa, network,
+    account, admin, admin_custody, admin_keys, admin_reconciliation, admin_replenish,
+    admin_reserve, admin_webhook, authenticate, card, card_auth, device_token,
+    exchange as exchange_handler, exchange_webhook, github as github_handler,
+    google as google_handler, health, logout, managed_seed, mfa, network,
     notification_subscription, notify, okta as okta_handler, session as session_handler,
     sso as sso_handler, subscribe, sync, token, transaction,
 };
@@ -515,6 +518,13 @@ async fn run_server(
     // POST /subscribe participate in graceful shutdown.
     let cancel = CancellationToken::new();
 
+    // Tracker for the submit+record phase of custodial payments. The 30s
+    // TimeoutLayer drops a slow handler's future; a submit spawned here keeps
+    // running (dropping a JoinHandle detaches, never aborts) and is drained
+    // after the HTTP side stops. Correctness never depends on this — the
+    // custodial sweep resolves any row by hash — it only shortens the window.
+    let submit_tracker = Arc::new(tokio_util::task::TaskTracker::new());
+
     // Keep a handle for the exchange reconcile loop; `metrics` itself is
     // moved into the router's Extension layer below.
     let exchange_metrics = metrics.clone();
@@ -540,6 +550,28 @@ async fn run_server(
     // both schedule the next poll on the same configured cadence.
     let reconcile_config = Arc::new(exchange::reconcile::ReconcileConfig {
         poll_secs: config.exchange_poll_secs,
+    });
+
+    // Everything the custodial intent sweep needs, captured before the
+    // Extension layers below take ownership of the shared handles.
+    let sweep_deps = custody::sweep::SweepDeps {
+        pool: pool.clone(),
+        http: http_client.clone(),
+        horizon_url: config.stellar_horizon_url.clone(),
+        metrics: metrics.clone(),
+    };
+
+    // Everything the positions report needs, shared by the admin endpoint
+    // and the daily snapshot job. Always present: with no reserve the
+    // report says so (`reserve.configured = false`).
+    let reconciliation_deps = Arc::new(reconciliation::ReconcileDeps {
+        pool: pool.clone(),
+        http: http_client.clone(),
+        horizon_url: config.stellar_horizon_url.clone(),
+        reserve: conversion_reserve.clone(),
+        metrics: metrics.clone(),
+        max_accounts: config.reconciliation_max_accounts,
+        deadline_secs: config.reconciliation_deadline_secs,
     });
 
     // Build router with routes
@@ -593,6 +625,13 @@ async fn run_server(
             post(managed_seed::import_managed_account),
         )
         .route("/managed-account/sign", post(managed_seed::sign_and_submit))
+        // Owner-scoped reads of custodial payment intents (037): the replay
+        // handle for a lost response and the poll target for a 202.
+        .route("/managed-account/intents", get(managed_seed::list_intents))
+        .route(
+            "/managed-account/intents/{intent_id}",
+            get(managed_seed::get_intent),
+        )
         .route("/card", post(card::create_card).delete(card::delete_card))
         .route("/mfa", post(mfa::enroll_mfa).get(mfa::get_mfa))
         .route("/mfa/verify", post(mfa::verify_mfa))
@@ -757,6 +796,45 @@ async fn run_server(
             "/admin/exchange-reserve/orders/{order_id}/resolve",
             post(admin_reserve::resolve_order),
         )
+        // Custody controls (037): the money brake, spend caps, per-account
+        // limits and intent resolution. Reads on Privileged<ReadCustody>
+        // (admin, treasurer, auditor), mutations on Privileged<ManageCustody>
+        // (admin, treasurer); `resume` alone is AdminUser — money-ops may
+        // pull the brake and never releases it alone.
+        .route(
+            "/admin/custody/policy",
+            get(admin_custody::get_policy).put(admin_custody::update_policy),
+        )
+        .route("/admin/custody/pause", post(admin_custody::pause))
+        .route("/admin/custody/resume", post(admin_custody::resume))
+        .route("/admin/custody/accounts", get(admin_custody::list_accounts))
+        .route(
+            "/admin/custody/accounts/{account_id}/limit",
+            put(admin_custody::set_account_limit),
+        )
+        .route("/admin/custody/intents", get(admin_custody::list_intents))
+        .route(
+            "/admin/custody/intents/{intent_id}",
+            get(admin_custody::get_intent),
+        )
+        .route(
+            "/admin/custody/intents/{intent_id}/resolve",
+            post(admin_custody::resolve_intent),
+        )
+        // Reconciliation (037 part C): the positions report and its durable
+        // daily/manual snapshots.
+        .route(
+            "/admin/reconciliation/positions",
+            get(admin_reconciliation::get_positions),
+        )
+        .route(
+            "/admin/reconciliation/snapshots",
+            get(admin_reconciliation::list_snapshots).post(admin_reconciliation::create_snapshot),
+        )
+        .route(
+            "/admin/reconciliation/snapshots/{snapshot_id}",
+            get(admin_reconciliation::get_snapshot),
+        )
         // Exchange: fiat<->USDC on/off-ramp (OwlPay Harbor, Changelly Fiat)
         // and crypto->USDC swaps (Changelly). The /webhooks/* callbacks are
         // deliberately unauthenticated — each verifies its provider's own
@@ -848,6 +926,8 @@ async fn run_server(
         .layer(Extension(ldap_config.clone()))
         .layer(Extension(metrics))
         .layer(Extension(reconcile_config.clone()))
+        .layer(Extension(submit_tracker.clone()))
+        .layer(Extension(reconciliation_deps.clone()))
         .layer(Extension(cancel.clone()));
 
     // Add optional SNS client extension
@@ -965,6 +1045,30 @@ async fn run_server(
         }),
     ));
 
+    // Custodial intent sweep (037): abandons unarmed rows and resolves armed
+    // ones by hash. Independent of the reserve — intents exist wherever the
+    // bridge signs — so it is never folded into the reserve tick.
+    let sweep_cancel = cancel.clone();
+    background.push((
+        "custodial_sweep",
+        tokio::spawn(async move {
+            custody::sweep::run(sweep_deps, sweep_cancel).await;
+        }),
+    ));
+
+    // Daily reconciliation snapshot (037 part C): durable, attributable
+    // evidence once per UTC day, anchored by a partial unique index so two
+    // instances never record the same day twice.
+    let job_deps = reconciliation_deps.clone();
+    let job_cancel = cancel.clone();
+    let job_hour = config.reconciliation_snapshot_utc_hour;
+    background.push((
+        "reconciliation_snapshot",
+        tokio::spawn(async move {
+            reconciliation::job::run(job_deps, job_hour, job_cancel).await;
+        }),
+    ));
+
     // Spawn the exchange-order reconcile loop when any exchange provider is
     // configured. Changelly's swap API has no webhooks, so non-terminal
     // orders must be polled; for OwlPay/Changelly-Fiat the poll is a
@@ -1048,6 +1152,23 @@ async fn run_server(
     // the watchdog `shutdown_signal` armed.
     drain_cancel.cancel();
     drain_background(background).await;
+
+    // Custodial submits detached from timed-out requests: let each finish
+    // its submit+record (bounded by the same drain deadline; the sweep
+    // covers whatever is cut short).
+    submit_tracker.close();
+    match tokio::time::timeout(
+        Duration::from_secs(constants::SHUTDOWN_DRAIN_DEADLINE_SECS),
+        submit_tracker.wait(),
+    )
+    .await
+    {
+        Ok(()) => info!("custodial submit tasks drained"),
+        Err(_) => warn!(
+            "custodial submit tasks still running at the {}s drain deadline; the sweep              resolves their intents by hash",
+            constants::SHUTDOWN_DRAIN_DEADLINE_SECS
+        ),
+    }
 
     telemetry::shutdown_otel();
 }

@@ -1,5 +1,5 @@
 use log::info;
-use opentelemetry::metrics::{Counter, Histogram, Meter, UpDownCounter};
+use opentelemetry::metrics::{Counter, Gauge, Histogram, Meter, UpDownCounter};
 use opentelemetry::trace::TracerProvider as _;
 use opentelemetry::KeyValue;
 use opentelemetry_otlp::WithExportConfig;
@@ -86,6 +86,23 @@ pub struct AppMetrics {
     pub reserve_quote_expiries: Counter<u64>,
     pub reserve_replenish_cycles: Counter<u64>,
     pub reserve_replenish_skips: Counter<u64>,
+
+    // Custodial payment intents (037)
+    /// Custodial sign outcomes by `outcome` (settled|settled_unrecorded|
+    /// ambiguous|rejected|refused|replayed).
+    pub custodial_payments: Counter<u64>,
+    /// Intents the sweep moved, by `outcome` (abandoned|settled|failed|
+    /// expired|left). A sustained `left` count means an admin is needed.
+    pub custodial_intents_swept: Counter<u64>,
+    /// Open intents by `status` (prepared|submitted|ambiguous). Alert on
+    /// any sustained `ambiguous` — that is money with an unknown fate.
+    pub custodial_intents_open: Gauge<u64>,
+
+    // Reconciliation (037 part C)
+    /// Latest per-bucket drift (`onchain - ledger`) by `currency`.
+    pub reconciliation_drift_minor: Gauge<i64>,
+    /// Snapshots recorded, by `kind`, `complete` and `invariants_ok`.
+    pub reconciliation_snapshots: Counter<u64>,
 }
 
 impl AppMetrics {
@@ -275,6 +292,30 @@ impl AppMetrics {
                 .u64_counter("reserve.replenish_skips")
                 .with_description("Replenishment cycles not started, by reason")
                 .build(),
+
+            custodial_payments: meter
+                .u64_counter("custodial.payments")
+                .with_description("Custodial sign requests by outcome")
+                .build(),
+            custodial_intents_swept: meter
+                .u64_counter("custodial.intents_swept")
+                .with_description("Custodial intents resolved by the sweep, by outcome")
+                .build(),
+            custodial_intents_open: meter
+                .u64_gauge("custodial.intents_open")
+                .with_description("Open custodial intents by status")
+                .build(),
+
+            reconciliation_drift_minor: meter
+                .i64_gauge("reconciliation.drift_minor")
+                .with_description("Latest reserve drift (onchain - ledger) per bucket, minor units")
+                .build(),
+            reconciliation_snapshots: meter
+                .u64_counter("reconciliation.snapshots")
+                .with_description(
+                    "Reconciliation snapshots recorded, by kind/complete/invariants_ok",
+                )
+                .build(),
         }
     }
 }
@@ -378,6 +419,32 @@ impl AppMetrics {
     pub fn record_reserve_manual_entry(&self, kind: &str) {
         self.reserve_manual_entries
             .add(1, &[KeyValue::new("kind", kind.to_string())]);
+    }
+
+    /// Record a custodial sign outcome on `custodial.payments`.
+    pub fn record_custodial_payment(&self, outcome: &'static str) {
+        self.custodial_payments
+            .add(1, &[KeyValue::new("outcome", outcome)]);
+    }
+
+    /// Record a reconciliation snapshot on `reconciliation.snapshots`.
+    pub fn record_reconciliation_snapshot(&self, kind: &str, complete: bool, invariants_ok: bool) {
+        self.reconciliation_snapshots.add(
+            1,
+            &[
+                KeyValue::new("kind", kind.to_string()),
+                KeyValue::new("complete", complete),
+                KeyValue::new("invariants_ok", invariants_ok),
+            ],
+        );
+    }
+
+    /// Record the latest drift for one bucket on `reconciliation.drift_minor`.
+    pub fn record_reconciliation_drift(&self, currency: &str, drift_minor: i64) {
+        self.reconciliation_drift_minor.record(
+            drift_minor,
+            &[KeyValue::new("currency", currency.to_string())],
+        );
     }
 }
 

@@ -52,6 +52,10 @@ kotlin {
 
     jvm {
         testRuns["test"].executionTask.configure {
+            // Doc-drift guards read these: ApduDocTest parses docs/apdu.md, and
+            // ApduDocDriftTest also walks the applet sources under impala-card/.
+            systemProperty("impala.apdu.doc", project.rootDir.resolve("docs/apdu.md").absolutePath)
+            systemProperty("impala.card.root", rootProject.projectDir.absolutePath)
             testLogging {
                 showExceptions = true
                 showStandardStreams = true

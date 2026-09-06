@@ -255,6 +255,44 @@ pub async fn fetch_transaction_payments(
         .map(|body| parse_payments_page(&body).records))
 }
 
+/// Whether a feed payment carries `asset` (native, or the pinned credit).
+/// Compares `(code, issuer)` for credit assets — never the
+/// `credit_alphanum4/12` type tag, which is irrelevant to identity.
+pub(crate) fn asset_matches(p: &HorizonPayment, asset: &crate::stellar::Asset) -> bool {
+    match asset {
+        crate::stellar::Asset::Native => p.asset_type == "native",
+        crate::stellar::Asset::Credit { code, issuer } => {
+            p.asset_code.as_deref() == Some(code.as_str())
+                && p.asset_issuer.as_deref() == Some(issuer.as_str())
+        }
+    }
+}
+
+/// The settlement predicate shared by every hash resolver (reserve payouts
+/// and refunds, custodial intents): a SUCCESSFUL `payment` operation from
+/// `from` to `to` of exactly `amount_minor` (7 dp) in `asset` (checked when
+/// the caller can name it). A failed transaction still lists its operations
+/// with their intended amounts, so `transaction_successful` is required —
+/// and Horizon sends `"0.0000000"` placeholders rather than omitting
+/// amounts, which is why the outcome flag, not field presence, decides.
+pub(crate) fn settles(
+    p: &HorizonPayment,
+    from: &str,
+    to: &str,
+    amount_minor: i64,
+    asset: Option<&crate::stellar::Asset>,
+) -> bool {
+    p.transaction_successful == Some(true)
+        && p.op_type == "payment"
+        && p.from.as_deref() == Some(from)
+        && p.to == to
+        && crate::exchange::reserve::parse_decimal_to_minor(
+            &p.amount,
+            crate::constants::RESERVE_SCALE_STELLAR,
+        ) == Some(amount_minor)
+        && asset.is_none_or(|a| asset_matches(p, a))
+}
+
 /// Per-page decision of the descending walk, factored out so the money-safe
 /// stop logic is unit-testable without network I/O.
 #[derive(Debug, PartialEq)]
@@ -683,6 +721,70 @@ mod tests {
         chrono::DateTime::parse_from_rfc3339(s)
             .unwrap()
             .with_timezone(&chrono::Utc)
+    }
+
+    fn payment(from: &str, to: &str, amount: &str, ok: Option<bool>) -> HorizonPayment {
+        let mut p = rec("h", to, None);
+        p.from = Some(from.to_string());
+        p.amount = amount.to_string();
+        p.transaction_successful = ok;
+        p
+    }
+
+    #[test]
+    fn settles_requires_successful_matching_payment() {
+        let p = payment("GSRC", "GDEST", "12.5000000", Some(true));
+        assert!(settles(&p, "GSRC", "GDEST", 125_000_000, None));
+        assert!(settles(
+            &p,
+            "GSRC",
+            "GDEST",
+            125_000_000,
+            Some(&crate::stellar::Asset::Native)
+        ));
+        // Wrong party, amount, or asset: not this settlement.
+        assert!(!settles(&p, "GOTHER", "GDEST", 125_000_000, None));
+        assert!(!settles(&p, "GSRC", "GOTHER", 125_000_000, None));
+        assert!(!settles(&p, "GSRC", "GDEST", 125_000_001, None));
+        let usdc = crate::stellar::Asset::Credit {
+            code: "USDC".into(),
+            issuer: "GISSUER".into(),
+        };
+        assert!(!settles(&p, "GSRC", "GDEST", 125_000_000, Some(&usdc)));
+        // A non-payment op with matching fields is not a settlement.
+        let mut merge = payment("GSRC", "GDEST", "12.5000000", Some(true));
+        merge.op_type = "create_account".into();
+        assert!(!settles(&merge, "GSRC", "GDEST", 125_000_000, None));
+    }
+
+    #[test]
+    fn failed_tx_is_rejected_not_settled() {
+        // Horizon lists a failed transaction's operations with their intended
+        // amounts and `"0.0000000"` placeholders elsewhere: only the outcome
+        // flag may decide, and an absent flag is not success.
+        for flag in [Some(false), None] {
+            let p = payment("GSRC", "GDEST", "12.5000000", flag);
+            assert!(!settles(&p, "GSRC", "GDEST", 125_000_000, None));
+        }
+    }
+
+    #[test]
+    fn asset_matches_compares_code_and_issuer_never_the_type_tag() {
+        let mut p = payment("GSRC", "GDEST", "1.0000000", Some(true));
+        p.asset_type = "credit_alphanum12".into();
+        p.asset_code = Some("USDT0".into());
+        p.asset_issuer = Some("GISSUER".into());
+        let usdt0 = crate::stellar::Asset::Credit {
+            code: "USDT0".into(),
+            issuer: "GISSUER".into(),
+        };
+        assert!(asset_matches(&p, &usdt0));
+        let foreign = crate::stellar::Asset::Credit {
+            code: "USDT0".into(),
+            issuer: "GOTHER".into(),
+        };
+        assert!(!asset_matches(&p, &foreign));
+        assert!(!asset_matches(&p, &crate::stellar::Asset::Native));
     }
 
     #[test]

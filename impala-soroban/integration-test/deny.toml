@@ -1,0 +1,59 @@
+# cargo-deny configuration for the MultisigUsdcWrapper contract crate.
+# Run with: `cargo deny check advisories bans sources licenses`
+# (CI: .github/workflows/security.yml, cargo-deny job matrix).
+# Mirrors impala-bridge/deny.toml minus its `ring` license clarification
+# (ring is not in this dependency tree). Never add advisory ignores here.
+
+[graph]
+all-features = false
+no-default-features = false
+
+[advisories]
+version = 2
+ignore = []
+# Block the build on any vulnerability advisory unless explicitly ignored
+# above (nothing is, and nothing should be).
+#
+# Unmaintained-crate notices are scoped to this crate's *direct* dependencies.
+# The pinned soroban-env-host 23.0.1 pulls `paste` and `derivative` through its
+# `ark-*` BLS12-381 stack (RUSTSEC unmaintained notices, not vulnerabilities);
+# they are not reachable from this contract and go away with the coordinated
+# soroban-sdk 26 / wasm32v1-none migration (README "Dependencies"). This is a
+# scope setting, not a per-advisory ignore: a vulnerability in either crate
+# would still fail the check.
+unmaintained = "workspace"
+
+[licenses]
+version = 2
+# Allow common permissive licenses. Reject GPL/AGPL etc. by omission.
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-DFS-2016",
+    "Unicode-3.0",
+    "Zlib",
+    "CC0-1.0",
+    "MPL-2.0",
+    "OpenSSL",
+]
+confidence-threshold = 0.8
+exceptions = []
+
+[bans]
+multiple-versions = "warn"
+wildcards = "warn"
+deny = [
+    # Explicitly banned crates go here (e.g. known-abandoned duplicates).
+]
+skip = []
+skip-tree = []
+
+[sources]
+unknown-registry = "warn"
+unknown-git = "warn"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

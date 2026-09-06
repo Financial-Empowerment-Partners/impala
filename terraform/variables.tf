@@ -235,6 +235,10 @@ variable "testnet_jwt_secret" {
   default     = ""
 }
 
+# Must equal the `active` entry in impala-soroban/deployments/testnet/
+# (record of the constructor arguments the instance was deployed with;
+# CI-checked by impala-soroban/scripts/check-manifests.sh). Informational for
+# the bridge: it is only echoed by GET /network, never invoked.
 variable "testnet_soroban_contract_id" {
   description = "Soroban contract ID deployed on Stellar testnet"
   type        = string

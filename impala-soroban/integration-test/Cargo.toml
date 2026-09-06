@@ -1,7 +1,10 @@
 [package]
 name = "soroban-impala-integration-test"
-version = "0.0.1"
+# The release tag impala-soroban-v<version> matches this field.
+version = "0.2.0"
 edition = "2021"
+# Matches the repository LICENSE-2.0.txt (checked by cargo-deny).
+license = "Apache-2.0"
 publish = false
 rust-version = "1.91"
 
@@ -15,10 +18,16 @@ doctest = false
 # which CI, docs, and testnet-tests all standardize against. cargo test passed
 # on 26.1.0 and env.events().publish still exists (deprecated), so retrying
 # only needs the coordinated wasm32v1-none target migration. (2026-06-09)
+# The migration is a separate PR and must land before any mainnet deployment;
+# see README "Dependencies". The CI artifact gate
+# (test_wasm_artifact_loads_in_pinned_host) is the acceptance check for the
+# current pin.
 soroban-sdk = { version = "23.5.3" }
 
 [dev-dependencies]
 soroban-sdk = { version = "23.5.3", features = ["testutils"] }
+# std only: drops rusty-fork/tempfile/wait-timeout from the audited tree.
+proptest = { version = "1.10", default-features = false, features = ["std"] }
 
 [profile.release]
 debug = 0

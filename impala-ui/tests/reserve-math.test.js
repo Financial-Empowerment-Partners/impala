@@ -316,3 +316,25 @@ describe('sequenceLoads', () => {
         expect(settled).toBe(true);
     });
 });
+
+describe('driftBadge', () => {
+    it('is three-valued: ok, drift, or unverified — never a guess', () => {
+        expect(ReserveMath.driftBadge({ chain_leg: true, drift_ok: true, drift_minor: 0 }))
+            .toEqual({ label: 'no drift', cls: 'ok' });
+        expect(ReserveMath.driftBadge({ chain_leg: true, drift_ok: true, drift_minor: 3 }))
+            .toEqual({ label: 'in tolerance', cls: 'ok' });
+        expect(ReserveMath.driftBadge({ chain_leg: true, drift_ok: false, drift_minor: -9 }))
+            .toEqual({ label: 'drift', cls: 'error' });
+        // A null verdict (Horizon lagging or unreachable) is unverified.
+        expect(ReserveMath.driftBadge({ chain_leg: true, drift_ok: null, drift_minor: null }))
+            .toEqual({ label: 'unverified', cls: 'pending' });
+        expect(ReserveMath.driftBadge({ chain_leg: true }))
+            .toEqual({ label: 'unverified', cls: 'pending' });
+    });
+
+    it('USD and unconfigured stablecoin buckets have no chain leg', () => {
+        expect(ReserveMath.driftBadge({ chain_leg: false, drift_ok: true }))
+            .toEqual({ label: 'no chain leg', cls: 'neutral' });
+        expect(ReserveMath.driftBadge(null)).toEqual({ label: 'no chain leg', cls: 'neutral' });
+    });
+});

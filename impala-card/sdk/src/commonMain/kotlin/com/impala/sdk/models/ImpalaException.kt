@@ -43,6 +43,9 @@ open class ImpalaException : BIBOException {
     companion object {
         /**
          * Maps a 2-byte status word to the appropriate ImpalaException subclass.
+         * Every row of the status-word table in `docs/apdu.md` has an arm here
+         * (pinned by `ExceptionMappingTest`); the message always carries the hex
+         * status word so callers can match on it.
          *
          * @param sw the status word from the card response (e.g. 0x9000, 0x69C3)
          * @return an ImpalaException subclass matching the error condition
@@ -63,12 +66,14 @@ open class ImpalaException : BIBOException {
                 0x6985 -> ImpalaSecurityException("Conditions not satisfied (0x6985)")
                 0x6690 -> ImpalaSecurityException("PIN required (0x6690)")
                 0x6691 -> ImpalaSecurityException("PIN rejected (0x6691)")
+                0x6236 -> ImpalaSecurityException("Default SCP03 keys in use (0x6236)")
 
                 // Wrong length
                 0x6700 -> ImpalaWrongLengthException("Wrong length (0x6700)")
 
-                // INS not supported
+                // INS / CLA not supported
                 0x6D00 -> ImpalaInstructionNotSupportedException("Instruction not supported (0x6D00)")
+                0x6E00 -> ImpalaInstructionNotSupportedException("CLA not supported for this instruction (0x6E00)")
 
                 // Insufficient funds
                 0x6224 -> ImpalaInsufficientFundsException("Insufficient funds (0x6224)")
@@ -86,6 +91,16 @@ open class ImpalaException : BIBOException {
                 0x6232 -> ImpalaTransferException("Wrong recipient (0x6232)")
                 0x6226 -> ImpalaTransferException("Error parsing recipient (0x6226)")
                 0x6229 -> ImpalaTransferException("Wrong currency (0x6229)")
+                0x6233 -> ImpalaTransferException("Transfer counter invalid (0x6233)")
+                0x6238 -> ImpalaTransferException("Send sequence invalid (0x6238)")
+                0x6239 -> ImpalaTransferException("Zero amount (0x6239)")
+                0x623A -> ImpalaTransferException("Transfer counter jump too large (0x623A)")
+
+                // Personalization lifecycle
+                0x6234 -> ImpalaPersonalizationException("Card not personalized (0x6234)")
+                0x6235 -> ImpalaPersonalizationException("Card already personalized (0x6235)")
+                0x6237 -> ImpalaPersonalizationException("Personalization part out of sequence (0x6237)")
+                0x623B -> ImpalaPersonalizationException("Program already bound (0x623B)")
 
                 // Card data errors
                 0x6677 -> ImpalaCardDataException("Card data signature invalid (0x6677)")
@@ -93,6 +108,9 @@ open class ImpalaException : BIBOException {
                 0x6679 -> ImpalaCardDataException("Wrong card ID (0x6679)")
                 0x6688 -> ImpalaCardDataException("Null pointer exception on card (0x6688)")
                 0x6689 -> ImpalaCardDataException("Array index out of bounds on card (0x6689)")
+                0x6A80 -> ImpalaCardDataException("Wrong data (0x6A80)")
+                0x6984 -> ImpalaCardDataException("Data invalid (0x6984)")
+                0x6A83 -> ImpalaCardDataException("Record not found (0x6A83)")
 
                 // Set failures
                 0x6C01 -> ImpalaCardDataException("Set account ID failed (0x6C01)")
@@ -146,13 +164,13 @@ class ImpalaCardTerminatedException(message: String) : ImpalaException(message)
 /** The APDU data length did not match what the card expected. */
 class ImpalaWrongLengthException(message: String) : ImpalaException(message)
 
-/** The instruction byte (INS) is not recognized by the card applet. */
+/** The instruction byte (INS) is not recognized by the card applet (or not at this CLA). */
 class ImpalaInstructionNotSupportedException(message: String) : ImpalaException(message)
 
 /** A cryptographic operation on the card failed. */
 class ImpalaCryptoException(message: String) : ImpalaException(message)
 
-/** A transfer operation failed due to invalid sender, recipient, or currency. */
+/** A transfer operation failed due to invalid sender, recipient, currency, amount, counter or sequence. */
 class ImpalaTransferException(message: String) : ImpalaException(message)
 
 /** Card data is corrupt or could not be read/written correctly. */
@@ -160,3 +178,10 @@ class ImpalaCardDataException(message: String) : ImpalaException(message)
 
 /** Communication with the card was lost (NFC tag removed). */
 class ImpalaTagLostException(message: String) : ImpalaException(message)
+
+/**
+ * The card's personalization lifecycle refused the operation: the card is not
+ * (or already) personalized, a PERSONALIZE part arrived out of sequence, or the
+ * program is already bound (applet 0.2, status words 0x6234/0x6235/0x6237/0x623B).
+ */
+class ImpalaPersonalizationException(message: String) : ImpalaException(message)

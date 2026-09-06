@@ -1,6 +1,8 @@
 pub mod account;
 pub mod admin;
+pub mod admin_custody;
 pub mod admin_keys;
+pub mod admin_reconciliation;
 pub mod admin_replenish;
 pub mod admin_reserve;
 pub mod admin_webhook;

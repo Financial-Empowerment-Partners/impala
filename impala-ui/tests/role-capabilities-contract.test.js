@@ -38,7 +38,7 @@ describe('manage implies view (page-guard invariant)', () => {
     // requirePermission checks one permission, so any role holding manage_X
     // without view_X could mutate a surface it cannot open — a broken page,
     // caught here rather than in production.
-    const SURFACES = ['reserve', 'keys'];
+    const SURFACES = ['reserve', 'keys', 'custody'];
     it.each(SURFACES)('every role with manage_%s also holds view_%s', (surface) => {
         for (const role of Object.keys(Roles.DEFINITIONS)) {
             if (Roles.roleHasPermission(role, 'manage_' + surface)) {
@@ -67,7 +67,9 @@ describe('capability parity with the UI permission table', () => {
         ['ReadReserve', 'view_reserve'],
         ['ManageKeys', 'manage_keys'],
         ['ReadKeys', 'view_keys'],
-        ['ReadAccounts', 'view_accounts_list']
+        ['ReadAccounts', 'view_accounts_list'],
+        ['ManageCustody', 'manage_custody'],
+        ['ReadCustody', 'view_custody']
     ];
 
     it.each(PARITY)('%s holders equal the roles with %s', (capability, permission) => {

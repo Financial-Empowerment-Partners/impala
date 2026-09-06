@@ -12,9 +12,12 @@ object SCP03Constants {
     const val INS_INITIALIZE_UPDATE: Byte = 0x50
     const val INS_EXTERNAL_AUTHENTICATE: Byte = 0x82.toByte()
 
-    // Applet-specific SCP03 instructions
+    // Applet-specific SCP03 instructions (CLA 0x84 only; mirror INS_SCP03_* in
+    // the applet's Constants.java)
     const val INS_PROVISION_PIN: Byte = 0x70
     const val INS_APPLET_UPDATE: Byte = 0x71
+    const val INS_PERSONALIZE: Byte = 0x72   // three parts (P1 = 1/2/3), C-DEC required
+    const val INS_TERMINATE: Byte = 0x73     // C-DEC required, irreversible
 
     // Expected SCP03 key version in the INITIALIZE UPDATE key information field.
     // 0x02 = counter-ICV wire format; must match KEY_INFO[0] in the applet's

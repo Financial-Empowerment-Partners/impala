@@ -7,30 +7,44 @@
 //!   materialise inside a zeroizing [`SecretBytes`] for the duration of one call.
 //! - All protector/signer failures fail closed (`AppError::InternalError`); seed
 //!   material is never logged or returned.
-//! - Signing/submission is synchronous and server-only (never the SQS worker), so
-//!   an at-least-once retry cannot double-submit a payment.
+//! - Signing/submission is server-only (never the SQS worker) and idempotent
+//!   through a write-ahead intent row (`custody::intent`): a retry replays the
+//!   recorded outcome, and a second live payment per account is refused by a
+//!   partial unique index, so an at-least-once retry cannot double-submit.
 
-use axum::extract::Extension;
+use axum::extract::{Extension, Path, Query};
+use axum::http::StatusCode;
 use axum::Json;
 use log::{error, info};
 use sqlx::PgPool;
 use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 use uuid::Uuid;
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::auth::AuthenticatedUser;
 use crate::constants::{
-    MAX_NAME_LENGTH, RATE_LIMIT_MAX_REQUESTS, RATE_LIMIT_WINDOW_SECS, SEED_FORMAT_BOUND,
-    SIGN_RATE_LIMIT_MAX_REQUESTS, SIGN_RATE_LIMIT_WINDOW_SECS,
+    CUSTODIAL_KEY_SOURCE_CLIENT, CUSTODIAL_KEY_SOURCE_SERVER, MAX_NAME_LENGTH, MEMO_TEXT_MAX_BYTES,
+    RATE_LIMIT_MAX_REQUESTS, RATE_LIMIT_WINDOW_SECS, RESERVE_SCALE_STELLAR, SEED_FORMAT_BOUND,
+    SIGN_RATE_LIMIT_MAX_REQUESTS, SIGN_RATE_LIMIT_WINDOW_SECS, VALID_CUSTODIAL_INTENT_STATUSES,
+};
+use crate::custody::fingerprint::intent_fingerprint;
+use crate::custody::intent::{
+    claim_user_payment, finish_view, intent_view_columns, outcome_response, replay_response,
+    submit_intent, validate_idempotency_key, ClaimOutcome, SubmitDeps, SubmitParams, SubmitResult,
+    UserPaymentClaim,
 };
 use crate::error::AppError;
+use crate::exchange::reserve::{minor_to_decimal_string, parse_decimal_to_minor};
 use crate::models::{
-    GenerateManagedAccountRequest, ImportManagedAccountRequest, ManagedAccountResponse,
+    CustodialIntentListQuery, CustodialIntentView, GenerateManagedAccountRequest,
+    ImportManagedAccountRequest, ManagedAccountResponse, PaginatedResponse, PaginationParams,
     SignSubmitRequest, SignSubmitResponse,
 };
 use crate::notifications::{self, NotificationEvent};
 use crate::seed_protect::{ProtectedSeed, ProtectorBackend, SeedProtector};
-use crate::stellar::{Asset, PaymentParams, StellarSigner};
+use crate::stellar::StellarSigner;
 use crate::telemetry::AppMetrics;
 
 /// The configured conversion-reserve account is quarantined from user-facing
@@ -380,8 +394,8 @@ pub(crate) async fn load_protected_seed(
     // conversion reserve's ciphertext into an ordinary account's row and sign
     // payments FROM the reserve through /managed-account/sign, because the
     // quarantine there keys off the account id the transplanted row no longer
-    // matches, and `sign_and_submit_payment` derives the source account from
-    // the SEED rather than from the row.
+    // matches, and `prepare_payment` derives the source account from the
+    // SEED rather than from the row.
     //
     // Asserting the decrypted seed derives the address the row claims closes
     // that for every row, including legacy ones written before the bound
@@ -502,7 +516,15 @@ async fn upgrade_seed_binding(
 }
 
 /// Sign and submit a payment from a custodial account (`POST /managed-account/sign`).
-/// Synchronous and server-only so a retry cannot double-submit.
+///
+/// Idempotent and write-ahead (037): the request is claimed as a
+/// `custodial_payment_intent` row under the pause switch and the spend caps
+/// BEFORE the seed is opened; the signed envelope's hash is persisted BEFORE
+/// it is submitted; the ledger row and the intent's terminal status commit
+/// together. A replayed `idempotency_key` returns the recorded outcome and
+/// never signs again. The submit phase runs on the shutdown task tracker so
+/// a client timeout cannot tear it down between submit and record — and
+/// even then the sweep (`custody::sweep`) resolves the row by hash.
 #[allow(clippy::too_many_arguments)]
 pub async fn sign_and_submit(
     user: AuthenticatedUser,
@@ -511,11 +533,13 @@ pub async fn sign_and_submit(
     Extension(metrics): Extension<Arc<AppMetrics>>,
     Extension(protector): Extension<Arc<dyn SeedProtector>>,
     Extension(signer): Extension<Arc<dyn StellarSigner>>,
+    Extension(tracker): Extension<Arc<TaskTracker>>,
+    Extension(cancel): Extension<CancellationToken>,
     sns_client: Option<Extension<Arc<aws_sdk_sns::Client>>>,
     sns_topic_arn: Option<Extension<Arc<String>>>,
     Extension(reserve_guard): Extension<Arc<crate::exchange::reserve::ReserveAccountGuard>>,
     Json(payload): Json<SignSubmitRequest>,
-) -> Result<Json<SignSubmitResponse>, AppError> {
+) -> Result<(StatusCode, Json<SignSubmitResponse>), AppError> {
     crate::auth::require_owner(&user, &payload.payala_account_id)?;
     require_not_reserve_account(&reserve_guard, &payload.payala_account_id)?;
     crate::redis_helpers::check_rate_limit(
@@ -527,90 +551,242 @@ pub async fn sign_and_submit(
     )
     .await?;
 
+    // ── Validate + canonicalize (nothing touches the database yet) ──────
     crate::validate::validate_stellar_account_id(&payload.destination)?;
-    if payload.amount.trim().is_empty() {
-        return Err(AppError::BadRequest("amount must not be empty".to_string()));
+    let amount_minor = parse_decimal_to_minor(payload.amount.trim(), RESERVE_SCALE_STELLAR)
+        .filter(|m| *m > 0)
+        .ok_or_else(|| {
+            AppError::BadRequest(
+                "amount must be a positive decimal with at most 7 fraction digits".to_string(),
+            )
+        })?;
+    if let Some(memo) = payload.memo.as_deref() {
+        if memo.len() > MEMO_TEXT_MAX_BYTES {
+            return Err(AppError::BadRequest(format!(
+                "memo must be at most {} bytes",
+                MEMO_TEXT_MAX_BYTES
+            )));
+        }
     }
+    if payload.fee == Some(0) {
+        return Err(AppError::BadRequest("fee must be positive".to_string()));
+    }
+    let (idempotency_key, key_source) = match payload.idempotency_key.as_deref() {
+        Some(key) => {
+            validate_idempotency_key(key)?;
+            (key.to_string(), CUSTODIAL_KEY_SOURCE_CLIENT)
+        }
+        None => (Uuid::new_v4().to_string(), CUSTODIAL_KEY_SOURCE_SERVER),
+    };
+    let fingerprint = intent_fingerprint(
+        &payload.destination,
+        "XLM",
+        None,
+        amount_minor,
+        payload.memo.as_deref(),
+        payload.fee,
+    );
 
-    info!("POST /managed-account/sign: account={}", user.account_id);
+    info!(
+        "POST /managed-account/sign: account={} key_source={}",
+        user.account_id, key_source
+    );
 
-    // Load and decrypt the protected seed for this owner's account.
-    let seed = load_protected_seed(&pool, &protector, &signer, &payload.payala_account_id).await?;
-    let params = PaymentParams {
+    // ── Claim: replay lookup + policy + write-ahead row, one transaction ──
+    let claim = UserPaymentClaim {
+        payala_account_id: &payload.payala_account_id,
+        idempotency_key: &idempotency_key,
+        key_source,
+        fingerprint: &fingerprint,
+        destination: &payload.destination,
+        amount_minor,
+        memo: payload.memo.as_deref(),
+        fee: payload.fee,
+    };
+    let (intent_id, source_account) = match claim_user_payment(&pool, &claim).await {
+        Ok(ClaimOutcome::Claimed {
+            intent_id,
+            source_account,
+        }) => (intent_id, source_account),
+        Ok(ClaimOutcome::Replay(snapshot)) => {
+            metrics.record_custodial_payment("replayed");
+            let (status, body) = replay_response(&snapshot, &idempotency_key)?;
+            return Ok((status, Json(body)));
+        }
+        Err(e) => {
+            metrics.record_custodial_payment("refused");
+            return Err(e);
+        }
+    };
+
+    // ── Submit on the tracker: a dropped request future detaches the task
+    // (a JoinHandle never aborts on drop) and shutdown drains it. ──────────
+    let deps = SubmitDeps {
+        pool: pool.clone(),
+        protector: protector.clone(),
+        signer: signer.clone(),
+        cancel: cancel.clone(),
+    };
+    let params = SubmitParams {
+        intent_id,
+        payala_account_id: payload.payala_account_id.clone(),
+        source_account,
         destination: payload.destination.clone(),
-        amount: payload.amount.clone(),
-        asset: Asset::Native,
+        amount_minor,
         memo: payload.memo.clone(),
         fee: payload.fee,
     };
-    let submitted = signer
-        .sign_and_submit_payment(seed.as_slice(), &params)
-        .await?;
-    // `seed` zeroizes on drop here.
-
-    // Record the on-ledger transaction (reusing the existing transaction table).
-    //
-    // PAST THIS POINT THE PAYMENT HAS SETTLED ON-CHAIN AND CANNOT BE UNDONE.
-    // A failure here is a bookkeeping miss, not a failed payment, so it must
-    // NOT be reported as an error: a 500 tells the caller the transfer did not
-    // happen, and the natural response — retry — submits a second real
-    // payment. (`fetch_sequence` re-reads the account's advanced sequence on
-    // every call, so a sequential retry builds a *distinct*, network-valid
-    // transaction; Stellar's tx_bad_seq only stops concurrent duplicates.)
-    // Surface success with the on-chain hash, and shout about the missing row.
-    let btxid = match sqlx::query_scalar::<_, Uuid>(
-        r#"
-        INSERT INTO transaction (stellar_tx_id, stellar_hash, source_account, memo)
-        VALUES ($1, $2, $3, $4)
-        RETURNING btxid
-        "#,
-    )
-    .bind(&submitted.stellar_tx_id)
-    .bind(&submitted.stellar_hash)
-    .bind(&submitted.source_account)
-    .bind(&payload.memo)
-    .fetch_one(&pool)
-    .await
-    {
-        Ok(id) => {
-            metrics.transactions_created.add(1, &[]);
-            Some(id)
-        }
+    let outcome = match tracker.spawn(submit_intent(deps, params)).await {
+        Ok(result) => result?,
         Err(e) => {
             error!(
-                "sign_and_submit: SETTLED PAYMENT NOT RECORDED — account={} hash={} to={} amount={}: {}. \
-                 Reconcile this transaction into the ledger manually.",
-                user.account_id, submitted.stellar_hash, payload.destination, payload.amount, e
+                "sign_and_submit: submit task for intent {} failed to join: {} — the sweep \
+                 resolves the row",
+                intent_id, e
             );
-            metrics.unrecorded_settled_payments.add(1, &[]);
-            None
+            return Err(AppError::InternalError("submit task failed".to_string()));
         }
     };
 
-    let sns_c = sns_client.as_ref().map(|e| &e.0);
-    let sns_a = sns_topic_arn.as_ref().map(|e| &e.0);
-    notifications::dispatch_event(
-        &pool,
-        sns_c,
-        sns_a,
-        NotificationEvent::TransferOutgoing {
-            account_id: user.account_id.clone(),
-            amount: payload.amount.clone(),
-            to: payload.destination.clone(),
-        },
-        Some(&metrics),
-    )
-    .await;
+    let settled = matches!(outcome, SubmitResult::Settled { .. });
+    if matches!(outcome, SubmitResult::SettledUnrecorded { .. }) {
+        // Landed on-chain, ledger row pending: the sweep records it by hash,
+        // and this counter says how often that safety net had to catch it.
+        metrics.unrecorded_settled_payments.add(1, &[]);
+    }
+    metrics.record_custodial_payment(match &outcome {
+        SubmitResult::Settled { .. } => "settled",
+        SubmitResult::SettledUnrecorded { .. } => "settled_unrecorded",
+        SubmitResult::Ambiguous { .. } => "ambiguous",
+        SubmitResult::Rejected { .. } => "rejected",
+    });
+    let (status, body) = outcome_response(intent_id, &idempotency_key, amount_minor, outcome)?;
+
+    // Bookkeeping side effects fire only once the settle transaction has
+    // committed: a notification for a payment the ledger does not carry
+    // was the old behaviour and is gone.
+    if settled {
+        metrics.transactions_created.add(1, &[]);
+        let sns_c = sns_client.as_ref().map(|e| &e.0);
+        let sns_a = sns_topic_arn.as_ref().map(|e| &e.0);
+        notifications::dispatch_event(
+            &pool,
+            sns_c,
+            sns_a,
+            NotificationEvent::TransferOutgoing {
+                account_id: user.account_id.clone(),
+                amount: minor_to_decimal_string(amount_minor, RESERVE_SCALE_STELLAR),
+                to: payload.destination.clone(),
+            },
+            Some(&metrics),
+        )
+        .await;
+    }
 
     info!(
-        "sign_and_submit: submitted tx hash={} btxid={:?}",
-        submitted.stellar_hash, btxid
+        "sign_and_submit: intent={} status={:?} hash={:?} btxid={:?}",
+        intent_id, body.status, body.stellar_hash, body.btxid
     );
-    Ok(Json(SignSubmitResponse {
-        success: true,
-        message: "Payment signed and submitted".to_string(),
-        stellar_hash: Some(submitted.stellar_hash),
-        btxid,
+    Ok((status, Json(body)))
+}
+
+/// `GET /managed-account/intents/{intent_id}` — one intent, owner-scoped.
+/// A non-owner and a missing row are the same 404: ids are not enumerable.
+pub async fn get_intent(
+    user: AuthenticatedUser,
+    Extension(pool): Extension<PgPool>,
+    Extension(reserve_guard): Extension<Arc<crate::exchange::reserve::ReserveAccountGuard>>,
+    Path(intent_id): Path<Uuid>,
+) -> Result<Json<CustodialIntentView>, AppError> {
+    require_not_reserve_account(&reserve_guard, &user.account_id)?;
+    let sql = format!(
+        "SELECT {} FROM custodial_payment_intent WHERE intent_id = $1",
+        intent_view_columns()
+    );
+    let row: Option<CustodialIntentView> = sqlx::query_as(&sql)
+        .bind(intent_id)
+        .fetch_optional(&pool)
+        .await
+        .map_err(|e| {
+            error!("get_intent: lookup failed: {}", e);
+            AppError::InternalError("Database error".to_string())
+        })?;
+    match row {
+        Some(v) if crate::auth::require_owner(&user, &v.payala_account_id).is_ok() => {
+            Ok(Json(finish_view(v)))
+        }
+        _ => Err(AppError::NotFound("No such intent".to_string())),
+    }
+}
+
+/// `GET /managed-account/intents?payala_account_id=&idempotency_key=&status=`
+/// — the owner's intents, newest first. `idempotency_key` lets a client that
+/// lost the response of a server-minted-key request find its intent.
+pub async fn list_intents(
+    user: AuthenticatedUser,
+    Extension(pool): Extension<PgPool>,
+    Extension(reserve_guard): Extension<Arc<crate::exchange::reserve::ReserveAccountGuard>>,
+    Query(q): Query<CustodialIntentListQuery>,
+) -> Result<Json<PaginatedResponse<CustodialIntentView>>, AppError> {
+    crate::auth::require_owner(&user, &q.payala_account_id)?;
+    require_not_reserve_account(&reserve_guard, &q.payala_account_id)?;
+    if let Some(st) = &q.status {
+        if !VALID_CUSTODIAL_INTENT_STATUSES.contains(&st.as_str()) {
+            return Err(AppError::BadRequest(format!(
+                "Invalid status '{}'. Must be one of: {}",
+                st,
+                VALID_CUSTODIAL_INTENT_STATUSES.join(", ")
+            )));
+        }
+    }
+    if let Some(key) = &q.idempotency_key {
+        validate_idempotency_key(key)?;
+    }
+    let (per_page, offset) = PaginationParams {
+        page: q.page,
+        per_page: q.per_page,
+    }
+    .clamped();
+    // Optional filters bind as NULL-able params so one statement serves
+    // every combination (no string-built WHERE clauses).
+    let filter = "WHERE payala_account_id = $1 \
+         AND ($2::text IS NULL OR idempotency_key = $2) \
+         AND ($3::text IS NULL OR status = $3)";
+    let total: i64 = sqlx::query_scalar(&format!(
+        "SELECT COUNT(*) FROM custodial_payment_intent {}",
+        filter
+    ))
+    .bind(&q.payala_account_id)
+    .bind(&q.idempotency_key)
+    .bind(&q.status)
+    .fetch_one(&pool)
+    .await
+    .map_err(|e| {
+        error!("list_intents: count failed: {}", e);
+        AppError::InternalError("Database error".to_string())
+    })?;
+    let rows: Vec<CustodialIntentView> = sqlx::query_as(&format!(
+        "SELECT {} FROM custodial_payment_intent {} \
+         ORDER BY created_at DESC, intent_id DESC LIMIT $4 OFFSET $5",
+        intent_view_columns(),
+        filter
+    ))
+    .bind(&q.payala_account_id)
+    .bind(&q.idempotency_key)
+    .bind(&q.status)
+    .bind(per_page)
+    .bind(offset)
+    .fetch_all(&pool)
+    .await
+    .map_err(|e| {
+        error!("list_intents: list failed: {}", e);
+        AppError::InternalError("Database error".to_string())
+    })?;
+    Ok(Json(PaginatedResponse {
+        data: rows.into_iter().map(finish_view).collect(),
+        page: ((offset / per_page) + 1) as u64,
+        per_page: per_page as u64,
+        total: total.max(0) as u64,
     }))
 }
 
@@ -646,7 +822,7 @@ mod tests {
     // is byte-portable between rows. Without the bound header, an adversary
     // with database write access (but no KMS/Vault access) could copy the
     // conversion reserve's ciphertext into an ordinary account's row and sign
-    // payments FROM the reserve: `sign_and_submit_payment` derives the source
+    // payments FROM the reserve: `prepare_payment` derives the source
     // account from the SEED, and the reserve quarantine keys off the account
     // id the transplanted row no longer matches.
 

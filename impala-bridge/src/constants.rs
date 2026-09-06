@@ -358,6 +358,33 @@ pub const TX_ORIGIN_MANUAL: &str = "manual";
 /// Server-set only — never accepted from a request body.
 pub const TX_ORIGIN_PAYALA_SYNC: &str = "payala_sync";
 
+/// `transaction.origin` for conversion-reserve payout settlements (031).
+/// Written as a literal by the reserve watcher; documents the vocabulary.
+#[allow(dead_code)]
+pub const TX_ORIGIN_CONVERSION_RESERVE: &str = "conversion_reserve";
+
+/// `transaction.origin` for settlements of `POST /managed-account/sign`
+/// custodial payments recorded through a write-ahead intent (037).
+pub const TX_ORIGIN_CUSTODIAL_SIGN: &str = "custodial_sign";
+
+/// `transaction.origin` for offline-redemption payouts (038). Pre-declared
+/// in 037's CHECK so 038 needs no second CHECK cycle; nothing writes it
+/// before the redemption driver exists.
+#[allow(dead_code)]
+pub const TX_ORIGIN_OFFLINE_REDEMPTION: &str = "offline_redemption";
+
+/// Every `transaction.origin` value (mirrors `chk_transaction_origin` after
+/// 037, in DDL order). A models.rs drift test pins it.
+/// Vocabulary-only: pinned against the 037 DDL by a models.rs drift test.
+#[allow(dead_code)]
+pub const VALID_TX_ORIGINS: &[&str] = &[
+    TX_ORIGIN_MANUAL,
+    TX_ORIGIN_PAYALA_SYNC,
+    TX_ORIGIN_CONVERSION_RESERVE,
+    TX_ORIGIN_CUSTODIAL_SIGN,
+    TX_ORIGIN_OFFLINE_REDEMPTION,
+];
+
 /// Minimum length for JWT_SECRET (256 bits).
 pub const JWT_SECRET_MIN_LENGTH: usize = 32;
 
@@ -827,6 +854,25 @@ pub const RESERVE_WATCHER_LOCK_KEY: i64 = 0x494d_5052_5352_5645;
 /// instance polls providers per tick, so N tasks do not N× the provider
 /// budget and the poll backoff.
 pub const EXCHANGE_RECONCILE_LOCK_KEY: i64 = 0x494d_5052_5243_4e43;
+/// Advisory lock key for the custodial-intent sweep ("IMPCUSTY"). Work dedup
+/// only: every sweep write is a compare-and-swap, so correctness never
+/// depends on the lock.
+pub const CUSTODIAL_SWEEP_LOCK_KEY: i64 = 0x494d_5043_5553_5459;
+/// Advisory lock key for the daily reconciliation snapshot job ("IMPRECON").
+/// The partial unique index on `(snapshot_date) WHERE kind = 'daily'` is the
+/// idempotency anchor; the lock only stops two instances computing the same
+/// report at once.
+pub const RECONCILIATION_LOCK_KEY: i64 = 0x494d_5052_4543_4f4e;
+/// Every cross-instance advisory lock key. A test asserts they are pairwise
+/// distinct: two loops sharing a key would silently serialize against each
+/// other (or worse, one would skip its pass forever while the other runs).
+#[allow(dead_code)] // consumed by the distinctness test
+pub const ADVISORY_LOCK_KEYS: &[i64] = &[
+    RESERVE_WATCHER_LOCK_KEY,
+    EXCHANGE_RECONCILE_LOCK_KEY,
+    CUSTODIAL_SWEEP_LOCK_KEY,
+    RECONCILIATION_LOCK_KEY,
+];
 
 /// Default per-operation fee BID in stroops for every bridge-signed
 /// transaction (`STELLAR_MAX_FEE_STROOPS`). A Stellar fee bid is a maximum:
@@ -1006,6 +1052,123 @@ pub const RESERVE_UNMATCHED_EVENTS_PER_SENDER_PER_TICK: u32 = 3;
 pub const RESERVE_REFUND_MEMO_PREFIX: &str = "RF";
 const _: () = assert!(RESERVE_REFUND_MEMO_PREFIX.len() + 8 <= 28);
 
+// ── Custodial conservation controls (037) ──────────────────────────────
+
+/// `custodial_payment_intent.origin`: a `POST /managed-account/sign` payment
+/// from the owner's custodial seed.
+pub const CUSTODIAL_INTENT_ORIGIN_SIGN: &str = "sign";
+/// `custodial_payment_intent.origin`: an offline-redemption payout from the
+/// reserve seed, driven by the reserve watcher (038).
+#[allow(dead_code)]
+pub const CUSTODIAL_INTENT_ORIGIN_REDEMPTION: &str = "redemption";
+/// Intent origins (mirrors `chk_cpi_origin`, in DDL order).
+pub const VALID_CUSTODIAL_INTENT_ORIGINS: &[&str] = &[
+    CUSTODIAL_INTENT_ORIGIN_SIGN,
+    CUSTODIAL_INTENT_ORIGIN_REDEMPTION,
+];
+/// Intent statuses (mirrors `chk_cpi_status`, in DDL order). `prepared` =
+/// claimed, nothing signed; `submitted` = hash persisted, submit may have
+/// happened; `settled` / `rejected` are terminal; `ambiguous` = submit
+/// outcome unknown, resolved by hash (sweep or admin), never resubmitted.
+pub const VALID_CUSTODIAL_INTENT_STATUSES: &[&str] =
+    &["prepared", "submitted", "settled", "rejected", "ambiguous"];
+/// Non-terminal intent statuses — the ones a sweep, a delete guard, or a
+/// resume check has to care about.
+pub const CUSTODIAL_INTENT_OPEN_STATUSES: &[&str] = &["prepared", "submitted", "ambiguous"];
+/// Where an intent's idempotency key came from (mirrors `chk_cpi_key_source`).
+pub const CUSTODIAL_KEY_SOURCE_CLIENT: &str = "client";
+pub const CUSTODIAL_KEY_SOURCE_SERVER: &str = "server";
+/// Vocabulary-only: pinned against the DDL by a models.rs drift test.
+#[allow(dead_code)]
+pub const VALID_CUSTODIAL_KEY_SOURCES: &[&str] =
+    &[CUSTODIAL_KEY_SOURCE_CLIENT, CUSTODIAL_KEY_SOURCE_SERVER];
+/// How an intent reached its terminal status (mirrors `chk_cpi_resolution`,
+/// in DDL order).
+#[allow(dead_code)] // vocabulary pinned against the DDL by a models.rs drift test
+pub const VALID_CUSTODIAL_INTENT_RESOLUTIONS: &[&str] = &[
+    "submit_ok",
+    "submit_rejected",
+    "prepare_rejected",
+    "arm_failed",
+    "sweep_settled",
+    "sweep_failed",
+    "sweep_expired",
+    "sweep_abandoned",
+    "admin_complete",
+    "admin_fail",
+];
+/// Client idempotency key bounds; charset `[A-Za-z0-9._:-]`.
+pub const CUSTODIAL_IDEMPOTENCY_KEY_MIN_LEN: usize = 1;
+pub const CUSTODIAL_IDEMPOTENCY_KEY_MAX_LEN: usize = 64;
+/// Stellar MEMO_TEXT ceiling in bytes.
+pub const MEMO_TEXT_MAX_BYTES: usize = 28;
+/// Domain separator for custodial request fingerprints. Versioned, never
+/// edited: changing it makes every stored fingerprint mismatch its replay.
+pub const CUSTODIAL_INTENT_FP_DOMAIN: &str = "impala-custodial-intent-v1";
+/// Age (from `armed_at`) after which an unresolved submitted/ambiguous intent
+/// is resolved by hash. Must exceed the signed transaction's validity window
+/// (signer TX_TIMEOUT_SECS = 300) so "still in flight" is never mistaken for
+/// "did not land".
+pub const CUSTODIAL_STALE_INTENT_SECS: i64 = 600;
+const _: () = assert!(CUSTODIAL_STALE_INTENT_SECS >= 2 * 300);
+/// Age (from `created_at`) after which a `prepared` row with no hash is
+/// rejected as abandoned. Liveness only: the arm CAS makes a late arm fail
+/// regardless of timing (no hash ⇒ no submit ever happened).
+pub const CUSTODIAL_INTENT_ABANDON_SECS: i64 = 120;
+const _: () = assert!(
+    CUSTODIAL_INTENT_ABANDON_SECS as u64 > REQUEST_TIMEOUT_SECS + DEFAULT_HTTP_CLIENT_TIMEOUT_SECS
+);
+/// Custodial sweep cadence (seconds) and rows resolved per pass.
+pub const CUSTODIAL_SWEEP_INTERVAL_SECS: u64 = 60;
+pub const CUSTODIAL_SWEEP_BATCH: i64 = 25;
+/// Rolling window for the per-account daily custodial spend cap.
+pub const CUSTODIAL_DAILY_WINDOW_SECS: i64 = 86_400;
+/// Rate-limit scope for the mutating custody-admin endpoints (5/60s via
+/// `SIGN_RATE_LIMIT_*` — each one can pull or release the money brake).
+pub const CUSTODY_ADMIN_RATE_LIMIT_SCOPE: &str = "custody_admin";
+/// Refusal codes on the custodial paths (openapi and impalactl pin this
+/// list; clients branch on `error.code`, never on message text).
+#[allow(dead_code)] // pinned by custody::policy tests and the API contract
+pub const CUSTODIAL_REFUSAL_CODES: &[&str] = &[
+    "custodial_paused",
+    "custodial_unconfigured",
+    "custodial_tx_limit",
+    "custodial_daily_limit",
+    "custodial_account_frozen",
+    "idempotency_conflict",
+    "idempotency_key_required",
+    "payment_in_flight",
+    "payment_rejected",
+];
+
+// ── Reconciliation positions + daily snapshot (037 part C) ─────────────
+
+/// `PositionsResponse.schema_version` — append-only contract.
+pub const RECONCILIATION_SCHEMA_VERSION: i32 = 1;
+/// Snapshot kinds (mirrors `chk_reconciliation_snapshot_kind`).
+pub const RECONCILIATION_SNAPSHOT_DAILY: &str = "daily";
+pub const RECONCILIATION_SNAPSHOT_MANUAL: &str = "manual";
+#[allow(dead_code)] // vocabulary pinned against the DDL by a models.rs drift test
+pub const VALID_RECONCILIATION_SNAPSHOT_KINDS: &[&str] = &[
+    RECONCILIATION_SNAPSHOT_DAILY,
+    RECONCILIATION_SNAPSHOT_MANUAL,
+];
+/// Daily snapshot job: UTC hour after which today's snapshot is due
+/// (`RECONCILIATION_SNAPSHOT_UTC_HOUR`), how many custodial addresses a full
+/// report may read (`RECONCILIATION_MAX_ACCOUNTS`), and its wall-clock budget
+/// (`RECONCILIATION_DEADLINE_SECS`). Exceeding either budget records the
+/// snapshot with `complete = false` rather than skipping the day.
+pub const DEFAULT_RECONCILIATION_SNAPSHOT_UTC_HOUR: u32 = 0;
+pub const DEFAULT_RECONCILIATION_MAX_ACCOUNTS: i64 = 10_000;
+pub const DEFAULT_RECONCILIATION_DEADLINE_SECS: u64 = 600;
+/// How often the job checks whether today's daily snapshot exists.
+pub const RECONCILIATION_JOB_INTERVAL_SECS: u64 = 60;
+/// Concurrent Horizon account reads while walking custodial addresses.
+pub const RECONCILIATION_HORIZON_CONCURRENCY: usize = 8;
+/// Custodial page size for `GET /admin/reconciliation/positions` and the
+/// custody accounts list when the client names none (clamped to 1..=100).
+pub const CUSTODIAL_POSITIONS_DEFAULT_PER_PAGE: u64 = 25;
+
 // ── Admin key import ──────────────────────────────────────────────────
 
 /// Credential sets an admin can import. Deliberately the same vocabulary as
@@ -1106,3 +1269,54 @@ pub const FCM_ASSERTION_TTL_SECS: u64 = 3600;
 /// caching it: a 3600s token is reused for ~55 minutes, never right up to
 /// its expiry.
 pub const FCM_TOKEN_REFRESH_MARGIN_SECS: u64 = 300;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Two loops sharing a key would silently serialize against each other
+    /// (or one would skip its pass forever while the other runs).
+    #[test]
+    fn advisory_lock_keys_are_distinct() {
+        assert_eq!(ADVISORY_LOCK_KEYS.len(), 4);
+        for (i, a) in ADVISORY_LOCK_KEYS.iter().enumerate() {
+            for (j, b) in ADVISORY_LOCK_KEYS.iter().enumerate() {
+                assert!(
+                    i == j || a != b,
+                    "advisory lock keys {} and {} collide",
+                    i,
+                    j
+                );
+            }
+        }
+        assert!(ADVISORY_LOCK_KEYS.contains(&CUSTODIAL_SWEEP_LOCK_KEY));
+        assert!(ADVISORY_LOCK_KEYS.contains(&RECONCILIATION_LOCK_KEY));
+    }
+
+    #[test]
+    fn custodial_refusal_codes_are_unique_and_snake_case() {
+        let mut seen = std::collections::HashSet::new();
+        for code in CUSTODIAL_REFUSAL_CODES {
+            assert!(seen.insert(*code), "duplicate refusal code {}", code);
+            assert!(
+                code.chars().all(|c| c.is_ascii_lowercase() || c == '_'),
+                "refusal code {} must be snake_case",
+                code
+            );
+        }
+    }
+
+    #[test]
+    fn open_intent_statuses_are_the_non_terminal_subset() {
+        for s in CUSTODIAL_INTENT_OPEN_STATUSES {
+            assert!(VALID_CUSTODIAL_INTENT_STATUSES.contains(s));
+        }
+        for terminal in ["settled", "rejected"] {
+            assert!(!CUSTODIAL_INTENT_OPEN_STATUSES.contains(&terminal));
+        }
+        assert_eq!(
+            CUSTODIAL_INTENT_OPEN_STATUSES.len() + 2,
+            VALID_CUSTODIAL_INTENT_STATUSES.len()
+        );
+    }
+}

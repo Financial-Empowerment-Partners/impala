@@ -27,6 +27,22 @@ public class ArrayUtil {
     }
 
     /**
+     * dst (big-endian, any length) += addend (0..32767), carry propagated;
+     * returns the carry-out. The addend is at most 32767 so the per-byte split
+     * ({@code carry & 0xFF} then {@code carry >>> 8}) is exact; the applet
+     * passes MAX_COUNTER_JUMP (1024).
+     */
+    public static short addUnsignedShort(byte[] dst, short addend) {
+        short carry = addend;
+        for (short i = (short) (dst.length - 1); i >= 0 && carry != 0; i--) {
+            short v = (short) ((dst[i] & 0xFF) + (carry & 0xFF));
+            dst[i] = (byte) v;
+            carry = (short) ((carry >>> 8) + (v >>> 8));
+        }
+        return carry;
+    }
+
+    /**
      * Lexicographic comparison of two unsigned byte arrays.
      *
      * @param src     first array

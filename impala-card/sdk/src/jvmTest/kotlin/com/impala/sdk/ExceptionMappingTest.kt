@@ -204,4 +204,61 @@ class ExceptionMappingTest {
         assertIs<ImpalaException>(ex)
         assertEquals(ImpalaException::class, ex::class)
     }
+
+    // --- applet 0.2 / transfer protocol v1 status words (docs/apdu.md §1.2 registry) ---
+
+    private fun assertMapping(sw: Int, expected: kotlin.reflect.KClass<out ImpalaException>) {
+        val ex = ImpalaException.fromStatusWord(sw)
+        assertEquals(expected, ex::class, "0x${sw.toString(16).uppercase()} should map to ${expected.simpleName}")
+        val hex = sw.toString(16).uppercase().padStart(4, '0')
+        assertTrue(ex.message!!.uppercase().contains(hex), "message '${ex.message}' must carry 0x$hex")
+    }
+
+    @Test
+    fun `transfer counter invalid 0x6233 maps to ImpalaTransferException`() = assertMapping(0x6233, ImpalaTransferException::class)
+
+    @Test
+    fun `not personalized 0x6234 maps to ImpalaPersonalizationException`() = assertMapping(0x6234, ImpalaPersonalizationException::class)
+
+    @Test
+    fun `already personalized 0x6235 maps to ImpalaPersonalizationException`() = assertMapping(0x6235, ImpalaPersonalizationException::class)
+
+    @Test
+    fun `default SCP03 keys 0x6236 maps to ImpalaSecurityException`() = assertMapping(0x6236, ImpalaSecurityException::class)
+
+    @Test
+    fun `personalize sequence 0x6237 maps to ImpalaPersonalizationException`() = assertMapping(0x6237, ImpalaPersonalizationException::class)
+
+    @Test
+    fun `send sequence invalid 0x6238 maps to ImpalaTransferException`() = assertMapping(0x6238, ImpalaTransferException::class)
+
+    @Test
+    fun `zero amount 0x6239 maps to ImpalaTransferException`() = assertMapping(0x6239, ImpalaTransferException::class)
+
+    @Test
+    fun `transfer counter jump 0x623A maps to ImpalaTransferException`() = assertMapping(0x623A, ImpalaTransferException::class)
+
+    @Test
+    fun `program already bound 0x623B maps to ImpalaPersonalizationException`() = assertMapping(0x623B, ImpalaPersonalizationException::class)
+
+    @Test
+    fun `wrong data 0x6A80 maps to ImpalaCardDataException`() = assertMapping(0x6A80, ImpalaCardDataException::class)
+
+    @Test
+    fun `data invalid 0x6984 maps to ImpalaCardDataException`() = assertMapping(0x6984, ImpalaCardDataException::class)
+
+    @Test
+    fun `record not found 0x6A83 maps to ImpalaCardDataException`() = assertMapping(0x6A83, ImpalaCardDataException::class)
+
+    @Test
+    fun `CLA not supported 0x6E00 maps to ImpalaInstructionNotSupportedException`() = assertMapping(0x6E00, ImpalaInstructionNotSupportedException::class)
+
+    @Test
+    fun `card data signature invalid 0x6677 carries its hex`() = assertMapping(0x6677, ImpalaCardDataException::class)
+
+    @Test
+    fun `invalid AES key 0x6684 carries its hex`() = assertMapping(0x6684, ImpalaCryptoException::class)
+
+    @Test
+    fun `incorrect P1P2 0x6A86 is a base ImpalaException carrying its hex`() = assertMapping(0x6A86, ImpalaException::class)
 }

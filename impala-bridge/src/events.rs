@@ -222,6 +222,98 @@ pub enum AccountEvent {
         /// the single highest-value key in the deployment.
         is_reserve: bool,
     },
+    // Custodial conservation controls (037). Payloads carry ids, statuses
+    // and minor-unit amounts only — never a destination, memo, Stellar hash,
+    // signable or signature (pinned by `custodial_payloads_never_carry_
+    // addresses_or_hashes`). account_id is the beneficiary (the owner of
+    // the custodial account) for payment events and the acting admin for
+    // policy events.
+    /// A custodial payment intent settled on-chain and its ledger row exists
+    /// (`resolution` = submit_ok | sweep_settled | admin_complete).
+    CustodialPaymentSettled {
+        account_id: String,
+        intent_id: String,
+        btxid: String,
+        origin: String,
+        amount_minor: i64,
+        asset_code: String,
+        resolution: String,
+    },
+    /// A custodial submit's outcome is unknown; the intent is frozen for
+    /// resolution by hash (sweep or admin) and will never be resubmitted.
+    CustodialPaymentAmbiguous {
+        account_id: String,
+        intent_id: String,
+        origin: String,
+        amount_minor: i64,
+        asset_code: String,
+    },
+    /// The custodial brake was pulled. account_id is the acting admin.
+    CustodyPaused {
+        account_id: String,
+        reason: String,
+    },
+    /// The custodial brake was released (governance). `forced` = resumed
+    /// while ambiguous intents were still open.
+    CustodyResumed {
+        account_id: String,
+        forced: bool,
+    },
+    /// Custodial caps edited. account_id is the acting admin.
+    CustodyPolicyUpdated {
+        account_id: String,
+        per_tx_max_stroops: i64,
+        per_account_daily_max_stroops: i64,
+        require_idempotency_key: bool,
+    },
+    /// A per-account custodial daily override was set or cleared (None).
+    CustodyAccountLimitUpdated {
+        account_id: String,
+        target_account_id: String,
+        custodial_daily_max_stroops: Option<i64>,
+    },
+    /// An admin resolved a submitted/ambiguous intent (`action` =
+    /// complete | fail; `resolution` = admin_complete | admin_fail).
+    CustodyIntentResolved {
+        account_id: String,
+        intent_id: String,
+        action: String,
+        resolution: String,
+    },
+    /// The daily reconciliation found a chain-legged reserve bucket outside
+    /// its drift tolerance while Horizon was fresh. account_id is the
+    /// reserve account (or "bridge" when no reserve is configured).
+    ReserveDrift {
+        account_id: String,
+        currency: String,
+        ledger_total_minor: i64,
+        onchain_minor: i64,
+        drift_minor: i64,
+        tolerance_minor: i64,
+        snapshot_id: String,
+    },
+    /// A reconciliation snapshot was recorded (`kind` = daily | manual).
+    ReconciliationSnapshotRecorded {
+        account_id: String,
+        snapshot_id: String,
+        kind: String,
+        complete: bool,
+        drift_detected: bool,
+        invariants_ok: bool,
+        horizon_fresh: bool,
+    },
+    /// A Payala sync batch was applied for `account_id` (counts only: no
+    /// amounts, memos, ids or digests — the mirror is unverified data and
+    /// the outbox must not become a second copy of it).
+    PayalaSyncBatchApplied {
+        account_id: String,
+        batch_id: String,
+        sync_mode: String,
+        item_count: i64,
+        applied_count: i64,
+        duplicate_count: i64,
+        conflicting_count: i64,
+    },
 }
 
 impl AccountEvent {
@@ -259,6 +351,18 @@ impl AccountEvent {
             AccountEvent::BridgeKeyImported { .. } => "bridge.key_imported",
             AccountEvent::BridgeKeyRevoked { .. } => "bridge.key_revoked",
             AccountEvent::BridgeSeedProvisioned { .. } => "bridge.seed_provisioned",
+            AccountEvent::CustodialPaymentSettled { .. } => "custodial.payment_settled",
+            AccountEvent::CustodialPaymentAmbiguous { .. } => "custodial.payment_ambiguous",
+            AccountEvent::CustodyPaused { .. } => "custody.paused",
+            AccountEvent::CustodyResumed { .. } => "custody.resumed",
+            AccountEvent::CustodyPolicyUpdated { .. } => "custody.policy_updated",
+            AccountEvent::CustodyAccountLimitUpdated { .. } => "custody.account_limit_updated",
+            AccountEvent::CustodyIntentResolved { .. } => "custody.intent_resolved",
+            AccountEvent::ReserveDrift { .. } => "reserve.drift",
+            AccountEvent::ReconciliationSnapshotRecorded { .. } => {
+                "reconciliation.snapshot_recorded"
+            }
+            AccountEvent::PayalaSyncBatchApplied { .. } => "payala.sync_batch_applied",
         }
     }
 
@@ -292,7 +396,17 @@ impl AccountEvent {
             | AccountEvent::RoleChanged { account_id, .. }
             | AccountEvent::BridgeKeyImported { account_id, .. }
             | AccountEvent::BridgeKeyRevoked { account_id, .. }
-            | AccountEvent::BridgeSeedProvisioned { account_id, .. } => account_id,
+            | AccountEvent::BridgeSeedProvisioned { account_id, .. }
+            | AccountEvent::CustodialPaymentSettled { account_id, .. }
+            | AccountEvent::CustodialPaymentAmbiguous { account_id, .. }
+            | AccountEvent::CustodyPaused { account_id, .. }
+            | AccountEvent::CustodyResumed { account_id, .. }
+            | AccountEvent::CustodyPolicyUpdated { account_id, .. }
+            | AccountEvent::CustodyAccountLimitUpdated { account_id, .. }
+            | AccountEvent::CustodyIntentResolved { account_id, .. }
+            | AccountEvent::ReserveDrift { account_id, .. }
+            | AccountEvent::ReconciliationSnapshotRecorded { account_id, .. }
+            | AccountEvent::PayalaSyncBatchApplied { account_id, .. } => account_id,
         }
     }
 
@@ -519,6 +633,112 @@ impl AccountEvent {
                 "origin": origin,
                 "is_reserve": is_reserve,
             }),
+            AccountEvent::CustodialPaymentSettled {
+                intent_id,
+                btxid,
+                origin,
+                amount_minor,
+                asset_code,
+                resolution,
+                ..
+            } => json!({
+                "intent_id": intent_id,
+                "btxid": btxid,
+                "origin": origin,
+                "amount_minor": amount_minor,
+                "asset_code": asset_code,
+                "resolution": resolution,
+            }),
+            AccountEvent::CustodialPaymentAmbiguous {
+                intent_id,
+                origin,
+                amount_minor,
+                asset_code,
+                ..
+            } => json!({
+                "intent_id": intent_id,
+                "origin": origin,
+                "amount_minor": amount_minor,
+                "asset_code": asset_code,
+            }),
+            AccountEvent::CustodyPaused { reason, .. } => json!({ "reason": reason }),
+            AccountEvent::CustodyResumed { forced, .. } => json!({ "forced": forced }),
+            AccountEvent::CustodyPolicyUpdated {
+                per_tx_max_stroops,
+                per_account_daily_max_stroops,
+                require_idempotency_key,
+                ..
+            } => json!({
+                "per_tx_max_stroops": per_tx_max_stroops,
+                "per_account_daily_max_stroops": per_account_daily_max_stroops,
+                "require_idempotency_key": require_idempotency_key,
+            }),
+            AccountEvent::CustodyAccountLimitUpdated {
+                target_account_id,
+                custodial_daily_max_stroops,
+                ..
+            } => json!({
+                "target_account_id": target_account_id,
+                "custodial_daily_max_stroops": custodial_daily_max_stroops,
+            }),
+            AccountEvent::CustodyIntentResolved {
+                intent_id,
+                action,
+                resolution,
+                ..
+            } => json!({
+                "intent_id": intent_id,
+                "action": action,
+                "resolution": resolution,
+            }),
+            AccountEvent::ReserveDrift {
+                currency,
+                ledger_total_minor,
+                onchain_minor,
+                drift_minor,
+                tolerance_minor,
+                snapshot_id,
+                ..
+            } => json!({
+                "currency": currency,
+                "ledger_total_minor": ledger_total_minor,
+                "onchain_minor": onchain_minor,
+                "drift_minor": drift_minor,
+                "tolerance_minor": tolerance_minor,
+                "snapshot_id": snapshot_id,
+            }),
+            AccountEvent::ReconciliationSnapshotRecorded {
+                snapshot_id,
+                kind,
+                complete,
+                drift_detected,
+                invariants_ok,
+                horizon_fresh,
+                ..
+            } => json!({
+                "snapshot_id": snapshot_id,
+                "kind": kind,
+                "complete": complete,
+                "drift_detected": drift_detected,
+                "invariants_ok": invariants_ok,
+                "horizon_fresh": horizon_fresh,
+            }),
+            AccountEvent::PayalaSyncBatchApplied {
+                batch_id,
+                sync_mode,
+                item_count,
+                applied_count,
+                duplicate_count,
+                conflicting_count,
+                ..
+            } => json!({
+                "batch_id": batch_id,
+                "sync_mode": sync_mode,
+                "item_count": item_count,
+                "applied_count": applied_count,
+                "duplicate_count": duplicate_count,
+                "conflicting_count": conflicting_count,
+            }),
         }
     }
 }
@@ -696,6 +916,256 @@ mod tests {
         );
         for pii in ["sender_address", "sender_muxed", "memo", "addresses"] {
             assert!(data.get(pii).is_none(), "{} must not be in payload", pii);
+        }
+    }
+
+    /// No string value anywhere in a payload may look like a Stellar
+    /// address (56 chars starting with G) or a transaction hash (64 lowercase
+    /// hex): the outbox fans out to every registered admin webhook.
+    fn assert_no_ledger_pointers(v: &Value) {
+        match v {
+            Value::String(s) => {
+                assert!(
+                    !(s.len() == 56 && s.starts_with('G')),
+                    "payload carries an address-shaped value: {}",
+                    s
+                );
+                assert!(
+                    !(s.len() == 64
+                        && s.chars()
+                            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())),
+                    "payload carries a hash-shaped value: {}",
+                    s
+                );
+            }
+            Value::Array(items) => items.iter().for_each(assert_no_ledger_pointers),
+            Value::Object(map) => map.values().for_each(assert_no_ledger_pointers),
+            _ => {}
+        }
+    }
+
+    #[test]
+    fn custodial_payloads_never_carry_addresses_or_hashes() {
+        let settled = AccountEvent::CustodialPaymentSettled {
+            account_id: "acct-1".into(),
+            intent_id: "9b2f7a04-2f2a-4d4e-9c1e-1a2b3c4d5e6f".into(),
+            btxid: "0b2f7a04-2f2a-4d4e-9c1e-1a2b3c4d5e6f".into(),
+            origin: "sign".into(),
+            amount_minor: 12_500_000,
+            asset_code: "XLM".into(),
+            resolution: "submit_ok".into(),
+        };
+        let ambiguous = AccountEvent::CustodialPaymentAmbiguous {
+            account_id: "acct-1".into(),
+            intent_id: "9b2f7a04-2f2a-4d4e-9c1e-1a2b3c4d5e6f".into(),
+            origin: "sign".into(),
+            amount_minor: 12_500_000,
+            asset_code: "XLM".into(),
+        };
+        let resolved = AccountEvent::CustodyIntentResolved {
+            account_id: "admin-1".into(),
+            intent_id: "9b2f7a04-2f2a-4d4e-9c1e-1a2b3c4d5e6f".into(),
+            action: "complete".into(),
+            resolution: "admin_complete".into(),
+        };
+        assert_eq!(settled.event_type(), "custodial.payment_settled");
+        assert_eq!(ambiguous.event_type(), "custodial.payment_ambiguous");
+        assert_eq!(resolved.event_type(), "custody.intent_resolved");
+        for e in [settled, ambiguous, resolved] {
+            let data = e.data();
+            for forbidden in [
+                "destination",
+                "memo",
+                "stellar_hash",
+                "source_account",
+                "signable",
+                "signature",
+            ] {
+                assert!(
+                    data.get(forbidden).is_none(),
+                    "{} must not be in payload",
+                    forbidden
+                );
+            }
+            assert_no_ledger_pointers(&data);
+        }
+        // The helper itself must catch the shapes it exists for.
+        let addr = Value::String(format!("G{}", "A".repeat(55)));
+        assert!(std::panic::catch_unwind(|| assert_no_ledger_pointers(&addr)).is_err());
+        let hash = Value::String("ab".repeat(32));
+        assert!(std::panic::catch_unwind(|| assert_no_ledger_pointers(&hash)).is_err());
+    }
+
+    #[test]
+    fn custody_policy_payloads_carry_settings_only() {
+        let e = AccountEvent::CustodyAccountLimitUpdated {
+            account_id: "admin-1".into(),
+            target_account_id: "acct-2".into(),
+            custodial_daily_max_stroops: None,
+        };
+        assert_eq!(e.event_type(), "custody.account_limit_updated");
+        assert_eq!(
+            e.data(),
+            json!({ "target_account_id": "acct-2", "custodial_daily_max_stroops": null })
+        );
+        let e = AccountEvent::CustodyPaused {
+            account_id: "admin-1".into(),
+            reason: "incident".into(),
+        };
+        assert_eq!(e.data(), json!({ "reason": "incident" }));
+        let e = AccountEvent::CustodyResumed {
+            account_id: "admin-1".into(),
+            forced: true,
+        };
+        assert_eq!(e.data(), json!({ "forced": true }));
+    }
+
+    #[test]
+    fn reconciliation_payloads_carry_ids_and_minor_units_only() {
+        let e = AccountEvent::ReserveDrift {
+            account_id: "svc-reserve".into(),
+            currency: "XLM".into(),
+            ledger_total_minor: 100,
+            onchain_minor: 90,
+            drift_minor: -10,
+            tolerance_minor: 5,
+            snapshot_id: "9b2f7a04-2f2a-4d4e-9c1e-1a2b3c4d5e6f".into(),
+        };
+        assert_eq!(e.event_type(), "reserve.drift");
+        assert_no_ledger_pointers(&e.data());
+        assert!(e.data().get("stellar_address").is_none());
+        let e = AccountEvent::ReconciliationSnapshotRecorded {
+            account_id: "bridge".into(),
+            snapshot_id: "9b2f7a04-2f2a-4d4e-9c1e-1a2b3c4d5e6f".into(),
+            kind: "daily".into(),
+            complete: true,
+            drift_detected: false,
+            invariants_ok: true,
+            horizon_fresh: true,
+        };
+        assert_eq!(e.event_type(), "reconciliation.snapshot_recorded");
+        assert!(
+            e.data().get("payload").is_none(),
+            "the report body never rides the feed"
+        );
+    }
+
+    /// Every event-type string that existed before 037 must still be
+    /// produced by its variant: the outbox is an append-only contract
+    /// (webhook subscribers filter on these exact strings).
+    #[test]
+    fn sync_batch_payload_carries_counts_only() {
+        let ev = AccountEvent::PayalaSyncBatchApplied {
+            account_id: "acct".to_string(),
+            batch_id: "8d1b2c1e-4d3f-4b1e-9d2c-0c1a2b3c4d5e".to_string(),
+            sync_mode: "reserve".to_string(),
+            item_count: 3,
+            applied_count: 2,
+            duplicate_count: 1,
+            conflicting_count: 0,
+        };
+        assert_eq!(ev.event_type(), "payala.sync_batch_applied");
+        assert_eq!(ev.account_id(), "acct");
+        let data = ev.data();
+        let obj = data.as_object().expect("object");
+        let mut keys: Vec<&str> = obj.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "applied_count",
+                "batch_id",
+                "conflicting_count",
+                "duplicate_count",
+                "item_count",
+                "sync_mode"
+            ]
+        );
+        for forbidden in [
+            "amount",
+            "memo",
+            "net_deltas",
+            "digest",
+            "payala_tx_id",
+            "transactions",
+            "balance",
+        ] {
+            assert!(
+                !data.to_string().contains(forbidden),
+                "sync batch payload must not carry {}",
+                forbidden
+            );
+        }
+        // Every count is a plain integer, never a money string.
+        for k in [
+            "item_count",
+            "applied_count",
+            "duplicate_count",
+            "conflicting_count",
+        ] {
+            assert!(obj[k].is_i64(), "{} must be an integer count", k);
+        }
+        assert_no_ledger_pointers(&data);
+    }
+
+    #[test]
+    fn event_type_vocabulary_is_append_only() {
+        const FROZEN: &[&str] = &[
+            "account.created",
+            "account.updated",
+            "transaction.created",
+            "card.registered",
+            "card.deleted",
+            "mfa.enrolled",
+            "notify.mobile_verified",
+            "device_token.registered",
+            "device_token.deleted",
+            "exchange.order_created",
+            "exchange.order_updated",
+            "reserve.deposit_matched",
+            "reserve.trustline_added",
+            "reserve.fulfilled",
+            "reserve.payout_pending",
+            "reserve.disbursement_pending",
+            "reserve.order_expired",
+            "reserve.unmatched_deposit",
+            "reserve.unmatched_deposit_summary",
+            "reserve.low_water",
+            "reserve.policy_updated",
+            "reserve.refund_queued",
+            "reserve.refund_sent",
+            "reserve.refund_failed",
+            "reserve.entry_recorded",
+            "account.role_changed",
+            "bridge.key_imported",
+            "bridge.key_revoked",
+            "bridge.seed_provisioned",
+        ];
+        assert_eq!(FROZEN.len(), 29);
+        let src = include_str!("events.rs");
+        let event_type_fn = src
+            .find("pub fn event_type(&self)")
+            .expect("event_type present");
+        let body = &src[event_type_fn..];
+        let body = &body[..body.find("\n    }\n").expect("fn end")];
+        for t in FROZEN {
+            assert!(
+                body.contains(&format!("=> \"{}\"", t)) || body.contains(&format!("\"{}\"\n", t)),
+                "event type {} no longer produced by event_type()",
+                t
+            );
+        }
+        let mut seen = std::collections::HashSet::new();
+        for line in body.lines() {
+            if let Some(start) = line.find("=> \"") {
+                let rest = &line[start + 4..];
+                let end = rest.find('"').expect("closing quote");
+                assert!(
+                    seen.insert(rest[..end].to_string()),
+                    "duplicate event type {}",
+                    &rest[..end]
+                );
+            }
         }
     }
 

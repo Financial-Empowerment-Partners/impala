@@ -377,6 +377,98 @@ pub(crate) const STALE_CYCLE_SQL: &str = "SELECT cycle_id FROM conversion_reserv
        AND updated_at < CURRENT_TIMESTAMP - make_interval(secs => $1) \
      LIMIT 10";
 
+/// What a stale `sending` cycle armed, so the sweep can decide its fate by
+/// hash instead of freezing blind (see `stale_verdict`).
+pub(crate) const STALE_CYCLE_ROW_SQL: &str = "SELECT state, kind, send_tx_hash, send_address, \
+        spend_currency, spend_minor \
+     FROM conversion_reserve_replenishment WHERE cycle_id = $1";
+
+/// Hash before submit, journal half: the cycle's attempt row carries the
+/// signed envelope's hash BEFORE Horizon sees it. NULL-CAS: a row that
+/// already carries a hash is never overwritten (that envelope may have been
+/// submitted). `uq_conversion_reserve_entry_cycle_kind` guarantees at most
+/// one such row, so "exactly one row affected" is the arm.
+pub(crate) const CYCLE_ENTRY_HASH_SQL: &str = "UPDATE conversion_reserve_entry \
+     SET stellar_tx_hash = $2 \
+     WHERE cycle_id = $1 AND kind = $3 AND stellar_tx_hash IS NULL";
+
+/// Hash before submit, cycle half: `send_tx_hash` is written while the cycle
+/// is `sending` and hashless — the state 032 promised it would be captured
+/// in. NULL-CAS for the same reason as the journal half; 037 part D's
+/// `uq_crr_send_tx_hash` makes two cycles unable to share one hash.
+pub(crate) const CYCLE_ROW_HASH_SQL: &str = "UPDATE conversion_reserve_replenishment \
+     SET send_tx_hash = $2 \
+     WHERE cycle_id = $1 AND state = 'sending' AND send_tx_hash IS NULL";
+
+/// What `submit_spend` does with a classified outcome. Pure, so the branch
+/// that decides whether a hold is released or frozen is testable without a
+/// chain.
+#[derive(Debug, PartialEq)]
+pub(crate) enum SpendDisposition {
+    /// The spend landed: record it and release the hold as spent.
+    Sent,
+    /// Provably nothing left the reserve: unwind the cycle (hold released).
+    Abort(&'static str),
+    /// The payment MAY land: freeze with the hold intact for a human.
+    Freeze(&'static str),
+}
+
+/// Map a classified submit result onto a cycle disposition.
+///
+/// `prepared` is whether the envelope was signed; `hash_armed` is whether
+/// its hash was persisted on the write-ahead rows. A rejection while
+/// `prepared && !hash_armed` is the pre-submit "hash not recorded" refusal:
+/// nothing was sent, so the cycle is ABORTED (hold released) under its own
+/// reason — never re-queued, because `requeue_cycle`'s CAS only covers
+/// `creating` and the cycle is already `sending`.
+pub(crate) fn spend_disposition(
+    outcome: &SubmitOutcome,
+    prepared: bool,
+    hash_armed: bool,
+) -> SpendDisposition {
+    match outcome {
+        SubmitOutcome::Settled => SpendDisposition::Sent,
+        SubmitOutcome::Rejected { .. } if prepared && !hash_armed => {
+            SpendDisposition::Abort("hash_unrecorded")
+        }
+        SubmitOutcome::Rejected { .. } => SpendDisposition::Abort("send_rejected"),
+        SubmitOutcome::Ambiguous => SpendDisposition::Freeze("send_unknown"),
+    }
+}
+
+/// What the stale sweep may do with a cycle stuck past
+/// `RESERVE_REPLENISH_STALE_SECS`.
+#[derive(Debug, PartialEq)]
+pub(crate) enum StaleVerdict {
+    /// The armed hash settled on-chain: book the spend as sent.
+    Settle,
+    /// The armed hash provably did not and can no longer land: unwind.
+    Abort(&'static str),
+    /// Unknown, unreadable or never armed: freeze for a human, as before.
+    Freeze(&'static str),
+}
+
+/// `chain` is the hash lookup's answer: `Some(Ok(true))` settled,
+/// `Some(Ok(false))` proven absent/failed on a fresh Horizon, `Some(Err(()))`
+/// inconclusive (lagging or unreachable), `None` not consulted. Only a
+/// `sending` cycle that armed a hash is ever resolved; everything else
+/// freezes exactly as before this hash existed — a hashless `sending` row
+/// may have been armed by a pre-037 binary that submitted first.
+pub(crate) fn stale_verdict(
+    state: &str,
+    armed_hash: bool,
+    chain: Option<Result<bool, ()>>,
+) -> StaleVerdict {
+    if state != "sending" || !armed_hash {
+        return StaleVerdict::Freeze("stale_state");
+    }
+    match chain {
+        Some(Ok(true)) => StaleVerdict::Settle,
+        Some(Ok(false)) => StaleVerdict::Abort("send_expired"),
+        Some(Err(())) | None => StaleVerdict::Freeze("stale_state"),
+    }
+}
+
 #[derive(sqlx::FromRow)]
 pub(crate) struct DueCycleRow {
     pub cycle_id: Uuid,
@@ -403,6 +495,27 @@ pub(crate) struct DueCycleRow {
     /// because an ambiguous send must never be resubmitted.
     #[allow(dead_code)]
     pub attempts: i32,
+}
+
+/// The cycle facts a spend outcome needs. A projection of `DueCycleRow`, so
+/// the stale sweep can settle or unwind a cycle by hash without re-driving
+/// it.
+pub(crate) struct SpendCycle<'a> {
+    pub cycle_id: Uuid,
+    pub kind: &'a str,
+    pub spend_currency: &'a str,
+    pub spend_minor: i64,
+}
+
+impl DueCycleRow {
+    fn spend(&self) -> SpendCycle<'_> {
+        SpendCycle {
+            cycle_id: self.cycle_id,
+            kind: &self.kind,
+            spend_currency: &self.spend_currency,
+            spend_minor: self.spend_minor,
+        }
+    }
 }
 
 // ── Arrival matching ───────────────────────────────────────────────────
@@ -448,7 +561,9 @@ use crate::exchange::reserve::{
     journal_insert, minor_to_decimal_string, parse_decimal_to_minor, JournalEntry,
     RESERVE_BUCKET_APPLY_SQL, RESERVE_TREASURY_HOLD_SQL,
 };
-use crate::exchange::reserve_watch::{classify_submit, ReserveWatchDeps, SubmitOutcome};
+use crate::exchange::reserve_watch::{
+    classify_submit, record_intent_hash, IntentKey, ReserveWatchDeps, SubmitOutcome,
+};
 use crate::stellar::{Asset, PaymentParams};
 
 fn db_err(context: &'static str) -> impl FnOnce(sqlx::Error) -> AppError {
@@ -488,6 +603,12 @@ pub(crate) async fn drive_replenishment(deps: &ReserveWatchDeps) {
 
 /// Freeze cycles whose provider call or on-chain submit never recorded an
 /// outcome. Deliberately never resubmits: the funds may already be gone.
+///
+/// A `sending` cycle that armed its hash before the submit (037) is first
+/// resolved BY that hash — settled on-chain books the spend, proven absent
+/// on a fresh Horizon (the row is older than the envelope's validity window,
+/// `RESERVE_REPLENISH_STALE_SECS >= 2 * TX_TIMEOUT_SECS`) unwinds it, and
+/// anything inconclusive freezes exactly as before.
 pub(crate) async fn freeze_stale_cycles(deps: &ReserveWatchDeps) {
     let stale: Vec<(Uuid,)> = match sqlx::query_as(STALE_CYCLE_SQL)
         .bind(crate::constants::RESERVE_REPLENISH_STALE_SECS as f64)
@@ -501,9 +622,93 @@ pub(crate) async fn freeze_stale_cycles(deps: &ReserveWatchDeps) {
         }
     };
     for (cycle_id,) in stale {
-        if let Err(e) = freeze_cycle(&deps.pool, &deps.metrics, cycle_id, "stale_state").await {
+        let reason = match resolve_stale_cycle(deps, cycle_id).await {
+            Ok(None) => continue,
+            Ok(Some(reason)) => reason,
+            Err(e) => {
+                error!("replenish stale resolve {}: {:?}", cycle_id, e);
+                "stale_state"
+            }
+        };
+        if let Err(e) = freeze_cycle(&deps.pool, &deps.metrics, cycle_id, reason).await {
             error!("replenish stale freeze {}: {:?}", cycle_id, e);
         }
+    }
+}
+
+/// Decide one stale cycle. `Ok(None)` means it was settled or unwound here;
+/// `Ok(Some(reason))` means the caller must freeze it under `reason`.
+async fn resolve_stale_cycle(
+    deps: &ReserveWatchDeps,
+    cycle_id: Uuid,
+) -> Result<Option<&'static str>, AppError> {
+    type StaleRow = (String, String, Option<String>, Option<String>, String, i64);
+    let row: Option<StaleRow> = sqlx::query_as(STALE_CYCLE_ROW_SQL)
+        .bind(cycle_id)
+        .fetch_optional(&deps.pool)
+        .await
+        .map_err(db_err("stale row"))?;
+    let Some((state, kind, send_tx_hash, send_address, spend_currency, spend_minor)) = row else {
+        return Ok(None);
+    };
+    let cycle = SpendCycle {
+        cycle_id,
+        kind: &kind,
+        spend_currency: &spend_currency,
+        spend_minor,
+    };
+    let armed = match (&send_tx_hash, &send_address, state.as_str()) {
+        (Some(hash), Some(to), "sending") => Some((hash, to)),
+        _ => None,
+    };
+    let chain = match armed {
+        Some((hash, to)) => {
+            let asset = deps.reserve.asset_for_bucket(&spend_currency);
+            match crate::handlers::admin_reserve::resolve_intent_by_hash(
+                &deps.http,
+                &deps.horizon_url,
+                hash,
+                &deps.reserve.stellar_address,
+                to,
+                spend_minor,
+                asset.as_ref(),
+            )
+            .await
+            {
+                Ok(Some(_)) => Some(Ok(true)),
+                Ok(None) => Some(Ok(false)),
+                Err(e) => {
+                    warn!(
+                        "replenish cycle {}: stale hash {} inconclusive: {:?}",
+                        cycle_id, hash, e
+                    );
+                    Some(Err(()))
+                }
+            }
+        }
+        None => None,
+    };
+    match stale_verdict(&state, armed.is_some(), chain) {
+        StaleVerdict::Settle => {
+            let hash = send_tx_hash
+                .as_deref()
+                .expect("Settle implies an armed hash");
+            info!(
+                "replenish cycle {}: stale send {} settled on-chain; recording",
+                cycle_id, hash
+            );
+            record_spend_sent(deps, &cycle, hash).await?;
+            Ok(None)
+        }
+        StaleVerdict::Abort(reason) => {
+            warn!(
+                "replenish cycle {}: stale send {:?} provably did not land; unwinding ({})",
+                cycle_id, send_tx_hash, reason
+            );
+            abort_cycle(deps, &cycle, reason).await?;
+            Ok(None)
+        }
+        StaleVerdict::Freeze(reason) => Ok(Some(reason)),
     }
 }
 
@@ -869,7 +1074,7 @@ async fn create_provider_leg(deps: &ReserveWatchDeps, c: &DueCycleRow) -> Result
              aborting cycle {} and releasing its hold (see the runbook)",
             c.kind, c.cycle_id
         );
-        return abort_cycle(deps, c, "no_treasury_config").await;
+        return abort_cycle(deps, &c.spend(), "no_treasury_config").await;
     }
 
     let changelly = match deps.changelly_crypto.as_ref() {
@@ -904,7 +1109,7 @@ async fn create_provider_leg(deps: &ReserveWatchDeps, c: &DueCycleRow) -> Result
                 // No client idempotency key, so a retry could create a
                 // SECOND order. Abandoning is free instead: without our
                 // pay-in the swap simply expires unfunded.
-                abort_cycle(deps, c, "create_failed").await
+                abort_cycle(deps, &c.spend(), "create_failed").await
             };
         }
     };
@@ -1008,40 +1213,76 @@ async fn submit_spend(deps: &ReserveWatchDeps, c: &DueCycleRow) -> Result<(), Ap
         memo: send_memo,
         fee: None,
     };
-    let submitted = deps
-        .signer
-        .sign_and_submit_payment(seed.as_slice(), &params)
-        .await;
+    // Prepare, persist the hash on BOTH write-ahead rows (journal attempt +
+    // cycle `send_tx_hash`, NULL-CAS each), THEN submit — no hash, no submit
+    // (see reserve_watch::record_intent_hash).
+    let mut prepared_ok = false;
+    let mut hash_armed = false;
+    let submitted = match deps.signer.prepare_payment(seed.as_slice(), &params).await {
+        Ok(prepared) => {
+            prepared_ok = true;
+            match record_intent_hash(
+                &deps.pool,
+                IntentKey::Cycle {
+                    cycle_id: c.cycle_id,
+                    attempt_kind,
+                },
+                &prepared.stellar_hash,
+            )
+            .await
+            {
+                Ok(()) => {
+                    hash_armed = true;
+                    deps.signer.submit_prepared(&prepared).await
+                }
+                Err(e) => Err(e),
+            }
+        }
+        Err(e) => Err(e),
+    };
     // `seed` zeroizes on drop.
 
-    match classify_submit(&submitted) {
-        SubmitOutcome::Settled => {
-            let result = submitted.expect("Settled implies Ok");
-            record_spend_sent(deps, c, &result.stellar_hash).await
+    match spend_disposition(&classify_submit(&submitted), prepared_ok, hash_armed) {
+        SpendDisposition::Sent => {
+            let result = submitted.expect("Sent implies Ok");
+            record_spend_sent(deps, &c.spend(), &result.stellar_hash).await
         }
-        // Definitive: the transaction provably did not land, so the funds
+        // Definitive: the transaction provably did not land (or was never
+        // submitted because its hash could not be recorded), so the funds
         // are still ours and the cycle can be unwound cleanly.
-        SubmitOutcome::Rejected { msg, .. } => {
-            warn!("replenish cycle {}: send rejected: {}", c.cycle_id, msg);
-            abort_cycle(deps, c, "send_rejected").await
+        SpendDisposition::Abort(reason) => {
+            match &submitted {
+                Err(e) => warn!(
+                    "replenish cycle {}: send aborted ({}): {:?}",
+                    c.cycle_id, reason, e
+                ),
+                Ok(_) => warn!("replenish cycle {}: send aborted ({})", c.cycle_id, reason),
+            }
+            abort_cycle(deps, &c.spend(), reason).await
         }
         // Ambiguous: the payment MAY land. Freeze with the hold intact.
-        SubmitOutcome::Ambiguous => {
-            freeze_cycle(&deps.pool, &deps.metrics, c.cycle_id, "send_unknown").await
+        SpendDisposition::Freeze(reason) => {
+            freeze_cycle(&deps.pool, &deps.metrics, c.cycle_id, reason).await
         }
     }
 }
 
 /// The spend left the chain: the held amount is now genuinely gone.
+///
+/// `send_tx_hash` was armed before the submit (same value, idempotent); the
+/// guard refuses to overwrite a DIFFERENT armed hash, because that would
+/// mean the settled envelope is not the one this cycle recorded.
 async fn record_spend_sent(
     deps: &ReserveWatchDeps,
-    c: &DueCycleRow,
+    c: &SpendCycle<'_>,
     stellar_hash: &str,
 ) -> Result<(), AppError> {
     let mut tx = deps.pool.begin().await.map_err(db_err("sent begin"))?;
     let updated = sqlx::query(
         "UPDATE conversion_reserve_replenishment \
-         SET state = 'sent', send_tx_hash = $2 WHERE cycle_id = $1 AND state = 'sending'",
+         SET state = 'sent', send_tx_hash = $2 \
+         WHERE cycle_id = $1 AND state = 'sending' \
+           AND (send_tx_hash IS NULL OR send_tx_hash = $2)",
     )
     .bind(c.cycle_id)
     .bind(stellar_hash)
@@ -1058,7 +1299,7 @@ async fn record_spend_sent(
     }
 
     let bucket: Option<(i64, i64, i64)> = sqlx::query_as(RESERVE_BUCKET_APPLY_SQL)
-        .bind(&c.spend_currency)
+        .bind(c.spend_currency)
         .bind(0i64)
         .bind(-c.spend_minor)
         .fetch_optional(&mut *tx)
@@ -1075,7 +1316,7 @@ async fn record_spend_sent(
         "offramp_sent"
     };
     journal_insert(JournalEntry {
-        currency: c.spend_currency.clone(),
+        currency: c.spend_currency.to_string(),
         kind: sent_kind.to_string(),
         held_delta: -c.spend_minor,
         balance_after: bal_after,
@@ -1092,7 +1333,7 @@ async fn record_spend_sent(
     info!(
         "replenish cycle {}: sent {} {} hash={}",
         c.cycle_id,
-        minor_to_decimal_string(c.spend_minor, scale_for(&c.spend_currency)),
+        minor_to_decimal_string(c.spend_minor, scale_for(c.spend_currency)),
         c.spend_currency,
         stellar_hash
     );
@@ -1126,7 +1367,7 @@ async fn requeue_cycle(
 /// Unwind a cycle that provably moved nothing: release the hold and close it.
 async fn abort_cycle(
     deps: &ReserveWatchDeps,
-    c: &DueCycleRow,
+    c: &SpendCycle<'_>,
     reason: &'static str,
 ) -> Result<(), AppError> {
     let mut tx = deps.pool.begin().await.map_err(db_err("abort begin"))?;
@@ -1140,7 +1381,7 @@ async fn abort_cycle(
         return Ok(());
     }
     let bucket: Option<(i64, i64, i64)> = sqlx::query_as(RESERVE_BUCKET_APPLY_SQL)
-        .bind(&c.spend_currency)
+        .bind(c.spend_currency)
         .bind(c.spend_minor)
         .bind(-c.spend_minor)
         .fetch_optional(&mut *tx)
@@ -1151,7 +1392,7 @@ async fn abort_cycle(
         AppError::InternalError("Database error".to_string())
     })?;
     journal_insert(JournalEntry {
-        currency: c.spend_currency.clone(),
+        currency: c.spend_currency.to_string(),
         kind: "replenish_release".to_string(),
         delta: c.spend_minor,
         held_delta: -c.spend_minor,
@@ -1650,6 +1891,137 @@ mod tests {
         // The insert must not name a state: 'planned' is fixed, and the
         // in-flight unique index depends on it.
         assert!(CYCLE_INSERT_SQL.contains("'planned'"));
+    }
+
+    /// Hash before submit, pinned on the source text: inside `submit_spend`
+    /// the envelope is prepared, its hash recorded on the write-ahead rows,
+    /// and only then submitted — and the fused sign+submit is gone from this
+    /// file entirely (a fused call has no point at which a hash can be
+    /// persisted before Horizon sees the envelope).
+    #[test]
+    fn submit_spend_records_hash_before_submit() {
+        let src = include_str!("replenish.rs");
+        let start = src
+            .find("async fn submit_spend(")
+            .expect("submit_spend present");
+        let end = src[start..]
+            .find("async fn record_spend_sent(")
+            .expect("record_spend_sent follows");
+        let body = &src[start..start + end];
+        let pos = |needle: &str| {
+            body.find(needle)
+                .unwrap_or_else(|| panic!("{} missing from submit_spend", needle))
+        };
+        let prepare = pos("prepare_payment(");
+        let record = pos("record_intent_hash(");
+        let submit = pos("submit_prepared(");
+        assert!(
+            prepare < record,
+            "the hash comes from the prepared envelope"
+        );
+        assert!(record < submit, "no persisted hash, no submit");
+        assert!(body.contains("IntentKey::Cycle"));
+        // Never re-queued from `sending`: requeue's CAS covers `creating` only.
+        assert!(!body.contains("requeue_cycle("));
+        // The fused signer is banned from this file. Build the needle so this
+        // test's own text does not satisfy it.
+        let fused = ["sign_and_submit", "_payment("].concat();
+        assert!(!src.contains(&fused), "replenish.rs calls the fused signer");
+    }
+
+    #[test]
+    fn cycle_hash_sql_is_a_null_cas_on_both_rows() {
+        for sql in [CYCLE_ENTRY_HASH_SQL, CYCLE_ROW_HASH_SQL] {
+            assert!(
+                sql.contains("IS NULL"),
+                "hash arm must be a NULL-CAS: {}",
+                sql
+            );
+            assert!(sql.contains("cycle_id = $1"));
+            assert!(sql.contains("= $2"));
+        }
+        assert!(CYCLE_ENTRY_HASH_SQL.contains("stellar_tx_hash IS NULL"));
+        assert!(CYCLE_ENTRY_HASH_SQL.contains("kind = $3"));
+        assert!(CYCLE_ROW_HASH_SQL.contains("send_tx_hash IS NULL"));
+        assert!(CYCLE_ROW_HASH_SQL.contains("state = 'sending'"));
+        // The settle write may only confirm the armed hash, never replace it.
+        let src = include_str!("replenish.rs");
+        assert!(src.contains("AND (send_tx_hash IS NULL OR send_tx_hash = $2)"));
+    }
+
+    #[test]
+    fn hash_unrecorded_aborts_rather_than_requeues() {
+        let rejected = SubmitOutcome::Rejected {
+            msg: "intent hash not recorded; not submitting".to_string(),
+            permanent: false,
+        };
+        // Prepared but the hash never landed: nothing was sent, unwind under
+        // its own reason.
+        assert_eq!(
+            spend_disposition(&rejected, true, false),
+            SpendDisposition::Abort("hash_unrecorded")
+        );
+        // Armed and definitively rejected by Horizon: ordinary unwind.
+        assert_eq!(
+            spend_disposition(&rejected, true, true),
+            SpendDisposition::Abort("send_rejected")
+        );
+        // Failed before an envelope existed (sequence fetch, bad params).
+        assert_eq!(
+            spend_disposition(&rejected, false, false),
+            SpendDisposition::Abort("send_rejected")
+        );
+        assert_eq!(
+            spend_disposition(&SubmitOutcome::Settled, true, true),
+            SpendDisposition::Sent
+        );
+        // Ambiguous is never unwound, armed or not: the hold stays.
+        assert_eq!(
+            spend_disposition(&SubmitOutcome::Ambiguous, true, true),
+            SpendDisposition::Freeze("send_unknown")
+        );
+        assert_eq!(
+            spend_disposition(&SubmitOutcome::Ambiguous, true, false),
+            SpendDisposition::Freeze("send_unknown")
+        );
+        // Every abort reason is a state ABORT_CYCLE_SQL can unwind from:
+        // the cycle is `sending` at that point.
+        assert!(ABORT_CYCLE_SQL.contains("'sending'"));
+    }
+
+    #[test]
+    fn stale_sending_cycle_resolves_by_hash_before_freezing() {
+        // Settled on-chain: book it. Proven absent: unwind. Inconclusive or
+        // unreadable: freeze, exactly as before the hash existed.
+        assert_eq!(
+            stale_verdict("sending", true, Some(Ok(true))),
+            StaleVerdict::Settle
+        );
+        assert_eq!(
+            stale_verdict("sending", true, Some(Ok(false))),
+            StaleVerdict::Abort("send_expired")
+        );
+        assert_eq!(
+            stale_verdict("sending", true, Some(Err(()))),
+            StaleVerdict::Freeze("stale_state")
+        );
+        assert_eq!(
+            stale_verdict("sending", true, None),
+            StaleVerdict::Freeze("stale_state")
+        );
+        // Hashless `sending` (possibly armed by a pre-037 binary that
+        // submitted first) and `creating` are never resolved, only frozen —
+        // whatever the chain would have said.
+        assert_eq!(
+            stale_verdict("sending", false, Some(Ok(false))),
+            StaleVerdict::Freeze("stale_state")
+        );
+        assert_eq!(
+            stale_verdict("creating", true, Some(Ok(true))),
+            StaleVerdict::Freeze("stale_state")
+        );
+        assert!(STALE_CYCLE_ROW_SQL.contains("send_tx_hash"));
+        assert!(STALE_CYCLE_ROW_SQL.contains("WHERE cycle_id = $1"));
     }
 
     #[test]

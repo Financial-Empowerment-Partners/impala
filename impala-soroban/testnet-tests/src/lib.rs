@@ -4,6 +4,12 @@
 //! fund accounts via friendbot, deploy contracts, and invoke contract functions.
 //! All functions shell out to the CLI rather than using the Soroban SDK directly,
 //! exercising the full end-to-end deployment and invocation path.
+//!
+//! The pinned CLI version lives in `.github/workflows/impala-soroban.yml`
+//! (`STELLAR_CLI_VERSION`); the constructor-argument syntax
+//! (`stellar contract deploy … -- --arg value`) and the stderr formatting of
+//! failed simulations are confirmed on the first manual run and recorded in
+//! the deployment manifest / runbook.
 
 use std::path::PathBuf;
 use std::process::{Command, Output};
@@ -68,31 +74,68 @@ pub fn contract_wasm_path() -> PathBuf {
     path
 }
 
-/// Deploy the contract WASM to testnet using a source identity. Returns the contract ID.
-pub fn deploy_contract(source_identity: &str) -> TestResult<String> {
+fn require_wasm() -> TestResult<PathBuf> {
     let wasm_path = contract_wasm_path();
     if !wasm_path.exists() {
         return Err(format!(
-            "Contract WASM not found at {}. Run `cargo build --release --target wasm32-unknown-unknown` in integration-test/ first.",
+            "Contract WASM not found at {}. Run `cargo build --release --locked --target wasm32-unknown-unknown` in integration-test/ first.",
             wasm_path.display()
         )
         .into());
     }
+    Ok(wasm_path)
+}
 
-    let output = stellar_cmd(&[
+fn deploy_args<'a>(wasm: &'a str, source_identity: &'a str, ctor_args: &[&'a str]) -> Vec<&'a str> {
+    let mut cmd_args = vec![
         "contract",
         "deploy",
         "--wasm",
-        wasm_path.to_str().unwrap(),
+        wasm,
         "--source",
         source_identity,
         "--network",
         "testnet",
-    ])?;
+    ];
+    if !ctor_args.is_empty() {
+        cmd_args.push("--");
+        cmd_args.extend_from_slice(ctor_args);
+    }
+    cmd_args
+}
+
+/// Deploy the WASM with constructor args (`ctor_args` are appended after
+/// `--`, e.g. `["--signers", "[\"G…\"]", "--threshold", "1", …]`). The
+/// host runs `__constructor` inside the deploy transaction; a constructor
+/// panic aborts the deploy, so no instance exists on failure. Returns the
+/// contract ID.
+pub fn deploy_contract(source_identity: &str, ctor_args: &[&str]) -> TestResult<String> {
+    let wasm_path = require_wasm()?;
+    let wasm = wasm_path.to_str().unwrap();
+    let cmd_args = deploy_args(wasm, source_identity, ctor_args);
+    let output = stellar_cmd(&cmd_args)?;
     assert_cmd_success(&output, "contract deploy");
 
-    let contract_id = String::from_utf8(output.stdout)?.trim().to_string();
-    Ok(contract_id)
+    Ok(String::from_utf8(output.stdout)?.trim().to_string())
+}
+
+/// Deploy expecting the constructor to fail. Returns stderr; `Err` if the
+/// deploy succeeded (a contract was created — the test must treat that as a
+/// failed guard, not a flake).
+pub fn deploy_contract_expect_fail(
+    source_identity: &str,
+    ctor_args: &[&str],
+) -> TestResult<String> {
+    let wasm_path = require_wasm()?;
+    let wasm = wasm_path.to_str().unwrap();
+    let cmd_args = deploy_args(wasm, source_identity, ctor_args);
+    let output = stellar_cmd(&cmd_args)?;
+    if output.status.success() {
+        let id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        return Err(format!("Expected deploy to fail, but it succeeded (contract {id})").into());
+    }
+
+    Ok(String::from_utf8(output.stderr)?.trim().to_string())
 }
 
 /// Invoke a contract function on testnet. Returns stdout as a string.
@@ -155,9 +198,13 @@ pub fn invoke_expect_fail(
 /// (`USDC:<issuer public key>`) and return its contract ID.
 ///
 /// Circle's testnet faucet is not used: any funded account can issue an asset
-/// with code `USDC`, and the SAC's `symbol()` returns the asset code, so the
-/// contract's `initialize` validation passes. This is exactly the on-chain
-/// limitation the contract documents — the issuer is not verifiable.
+/// with code `USDC`. The SAC's `symbol()` returns the asset code and its
+/// `name()` is `USDC:<issuer>`, so the constructor's checks pass **because
+/// the fixture passes its own throwaway issuer as `--usdc_issuer`**. The
+/// issuer pin itself is exercised by `test_deploy_rejects_issuer_mismatch`,
+/// which deploys against a SAC from a different issuer. Which issuer is
+/// Circle's is a deployment-record question (`deployments/`, verified by
+/// `scripts/verify-deployment.sh`), not something the contract can decide.
 pub fn deploy_usdc_sac(issuer: &TestIdentity) -> TestResult<String> {
     let asset = format!("USDC:{}", issuer.public_key);
     deploy_sac(&issuer.name, &asset)
@@ -165,7 +212,7 @@ pub fn deploy_usdc_sac(issuer: &TestIdentity) -> TestResult<String> {
 
 /// Deploy the native XLM Stellar Asset Contract and return its contract ID.
 /// Kept for the negative test: the native SAC's `symbol()` is `"native"`,
-/// which `initialize` must reject.
+/// which the constructor must reject.
 pub fn deploy_sac_native(source_identity: &str) -> TestResult<String> {
     deploy_sac(source_identity, "native")
 }
@@ -236,12 +283,15 @@ pub fn pay_usdc(issuer: &TestIdentity, dest_pk: &str, amount: &str, asset: &str)
 /// Query an address's balance (in stroops) on a Stellar Asset Contract.
 pub fn sac_balance(sac_id: &str, source_identity: &str, address: &str) -> TestResult<i128> {
     let result = invoke(sac_id, source_identity, "balance", &["--id", address])?;
-    let parsed = result
-        .trim()
+    parse_i128(&result)
+}
+
+/// Parse an `i128` printed by `stellar contract invoke` (quoted or bare).
+pub fn parse_i128(raw: &str) -> TestResult<i128> {
+    raw.trim()
         .trim_matches('"')
         .parse::<i128>()
-        .map_err(|e| format!("Could not parse SAC balance from {result:?}: {e}"))?;
-    Ok(parsed)
+        .map_err(|e| format!("Could not parse i128 from {raw:?}: {e}").into())
 }
 
 /// Extract a contract ID from a SAC deploy invocation. The deploy may "fail"
@@ -286,5 +336,44 @@ fn assert_cmd_success(output: &Output, context: &str) {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);
         panic!("stellar {context} failed:\nstdout: {stdout}\nstderr: {stderr}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deploy_args_append_constructor_args_after_separator() {
+        let args = deploy_args("a.wasm", "deployer", &["--threshold", "1"]);
+        assert_eq!(
+            args,
+            vec![
+                "contract",
+                "deploy",
+                "--wasm",
+                "a.wasm",
+                "--source",
+                "deployer",
+                "--network",
+                "testnet",
+                "--",
+                "--threshold",
+                "1",
+            ]
+        );
+    }
+
+    #[test]
+    fn deploy_args_without_constructor_args_have_no_separator() {
+        let args = deploy_args("a.wasm", "deployer", &[]);
+        assert!(!args.contains(&"--"));
+    }
+
+    #[test]
+    fn parse_i128_accepts_quoted_and_bare() {
+        assert_eq!(parse_i128("\"1500000\"").unwrap(), 1_500_000);
+        assert_eq!(parse_i128(" 42 ").unwrap(), 42);
+        assert!(parse_i128("nope").is_err());
     }
 }

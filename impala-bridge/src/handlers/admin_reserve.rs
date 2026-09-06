@@ -45,6 +45,7 @@ use crate::models::{
     ReservePolicyUpdateRequest, ReservePolicyView, ReserveProviderUtilization,
     ReserveResolveRequest, ReserveStatusResponse, ReserveUnmatchedView,
 };
+use crate::stellar::horizon::{asset_matches, settles};
 use crate::telemetry::AppMetrics;
 
 const TS_FMT: &str = "YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"";
@@ -169,12 +170,8 @@ pub async fn get_status(
                 b.asset = Some(format!("{}:{}", code, issuer));
             }
         }
-        match crate::stellar::fetch_account_details(
-            &http,
-            &stellar_config.horizon_url,
-            &r.stellar_address,
-        )
-        .await
+        match crate::reconciliation::reserve_chain_snapshot(&http, &stellar_config.horizon_url, r)
+            .await
         {
             Ok(acct) if acct.exists => {
                 for b in &mut buckets {
@@ -269,7 +266,16 @@ pub async fn update_policy(
     Ok(ok("Reserve policy updated"))
 }
 
-/// `PUT /admin/exchange-reserve/buckets/{currency}` — low-water mark.
+/// Bucket edit. Absent optional fields keep their stored value.
+pub(crate) const BUCKET_UPDATE_SQL: &str = "UPDATE conversion_reserve \
+     SET low_water = $2, \
+         refund_max_minor = COALESCE($3, refund_max_minor), \
+         refund_daily_max_minor = COALESCE($4, refund_daily_max_minor), \
+         drift_tolerance_minor = COALESCE($5, drift_tolerance_minor) \
+     WHERE currency = $1";
+
+/// `PUT /admin/exchange-reserve/buckets/{currency}` — low-water mark,
+/// refund caps and reconciliation drift tolerance.
 pub async fn update_bucket(
     user: Privileged<ManageReserve>,
     Extension(pool): Extension<PgPool>,
@@ -284,25 +290,22 @@ pub async fn update_bucket(
     for (name, v) in [
         ("refund_max_minor", payload.refund_max_minor),
         ("refund_daily_max_minor", payload.refund_daily_max_minor),
+        ("drift_tolerance_minor", payload.drift_tolerance_minor),
     ] {
         if v.is_some_and(|v| v < 0) {
             return Err(AppError::BadRequest(format!("{} must be >= 0", name)));
         }
     }
-    let updated = sqlx::query(
-        "UPDATE conversion_reserve \
-         SET low_water = $2, \
-             refund_max_minor = COALESCE($3, refund_max_minor), \
-             refund_daily_max_minor = COALESCE($4, refund_daily_max_minor) \
-         WHERE currency = $1",
-    )
-    .bind(&currency)
-    .bind(payload.low_water_minor)
-    .bind(payload.refund_max_minor)
-    .bind(payload.refund_daily_max_minor)
-    .execute(&pool)
-    .await
-    .map_err(db_err("bucket update"))?;
+    // 5 binds: currency, low_water, two refund caps, drift tolerance (037).
+    let updated = sqlx::query(BUCKET_UPDATE_SQL)
+        .bind(&currency)
+        .bind(payload.low_water_minor)
+        .bind(payload.refund_max_minor)
+        .bind(payload.refund_daily_max_minor)
+        .bind(payload.drift_tolerance_minor)
+        .execute(&pool)
+        .await
+        .map_err(db_err("bucket update"))?;
     if updated.rows_affected() == 0 {
         return Err(AppError::NotFound("No such reserve bucket".to_string()));
     }
@@ -2180,7 +2183,7 @@ async fn refuse_if_payout_may_exist(
 /// transaction still lists its operations with their intended amounts, so
 /// `transaction_successful` is required. Fails closed when Horizon is
 /// unreachable. Returns the canonical lowercase hash.
-async fn verify_settlement_hash(
+pub(crate) async fn verify_settlement_hash(
     http: &reqwest::Client,
     horizon_url: &str,
     raw_hash: &str,
@@ -2225,7 +2228,7 @@ async fn verify_settlement_hash(
 /// validity window, so a fresh Horizon that lacks the hash has ingested past
 /// the point where it could still appear. A lagging Horizon is not a proof
 /// and fails closed.
-async fn resolve_intent_by_hash(
+pub(crate) async fn resolve_intent_by_hash(
     http: &reqwest::Client,
     horizon_url: &str,
     hash: &str,
@@ -2276,36 +2279,6 @@ async fn resolve_intent_by_hash(
             }
         }
     }
-}
-
-/// Whether a feed payment carries `asset` (native, or the pinned credit).
-fn asset_matches(
-    p: &crate::stellar::horizon::HorizonPayment,
-    asset: &crate::stellar::Asset,
-) -> bool {
-    match asset {
-        crate::stellar::Asset::Native => p.asset_type == "native",
-        crate::stellar::Asset::Credit { code, issuer } => {
-            p.asset_code.as_deref() == Some(code.as_str())
-                && p.asset_issuer.as_deref() == Some(issuer.as_str())
-        }
-    }
-}
-
-/// Pure predicate behind [`verify_settlement_hash`].
-fn settles(
-    p: &crate::stellar::horizon::HorizonPayment,
-    from: &str,
-    to: &str,
-    amount_minor: i64,
-    asset: Option<&crate::stellar::Asset>,
-) -> bool {
-    p.transaction_successful == Some(true)
-        && p.op_type == "payment"
-        && p.from.as_deref() == Some(from)
-        && p.to == to
-        && parse_decimal_to_minor(&p.amount, RESERVE_SCALE_STELLAR) == Some(amount_minor)
-        && asset.is_none_or(|a| asset_matches(p, a))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2573,6 +2546,18 @@ async fn resolve_complete(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 037 widened this UPDATE by one optional column; the bind list at the
+    /// call site must carry exactly five values.
+    #[test]
+    fn bucket_update_binds_five() {
+        assert!(BUCKET_UPDATE_SQL.contains("$5, drift_tolerance_minor"));
+        assert!(!BUCKET_UPDATE_SQL.contains("$6"));
+        let src = include_str!("admin_reserve.rs");
+        let call = &src[src.find("sqlx::query(BUCKET_UPDATE_SQL)").unwrap()..];
+        let call = &call[..call.find(".execute(").unwrap()];
+        assert_eq!(call.matches(".bind(").count(), 5);
+    }
 
     // ── EWMA ───────────────────────────────────────────────────────────
 

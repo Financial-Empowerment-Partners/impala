@@ -9,8 +9,8 @@
 //!    account* names. Whoever controls these credentials chooses a counterparty
 //!    the bridge pays, and every swap and off-ramp thereafter clears through
 //!    their provider account.
-//! 2. **A custodial seed is signing authority.** `sign_and_submit_payment`
-//!    derives the source account from the seed, so a seed decides which Stellar
+//! 2. **A custodial seed is signing authority.** `prepare_payment` derives
+//!    the source account from the seed, so a seed decides which Stellar
 //!    account the bridge signs as — not the row it is stored under.
 //! 3. **Confirmation is anti-accident, not anti-attacker.** Every gate below —
 //!    the expected-fingerprint compare-and-swap, the typed confirmation phrase,
@@ -549,6 +549,10 @@ async fn store_and_audit(
     // there is no stored row to compare against, and an audit trail that said
     // otherwise would be a lie about the thing it exists to record.
     let replaced = outcome.replaced;
+    let set_fingerprint = parts.set_fingerprint(kind);
+    // The audit event commits inside the store's own transaction (a stored
+    // credential never exists without its record, nor the record without
+    // the credential).
     let version = store::insert_version(
         pool,
         protector,
@@ -557,14 +561,7 @@ async fn store_and_audit(
         outcome.cas.as_deref(),
         actor,
         note,
-    )
-    .await?;
-    let set_fingerprint = parts.set_fingerprint(kind);
-
-    let mut tx = pool.begin().await.map_err(db_err("audit begin"))?;
-    emit_event(
-        &mut tx,
-        &AccountEvent::BridgeKeyImported {
+        &|version| AccountEvent::BridgeKeyImported {
             account_id: actor.to_string(),
             kind: kind.to_string(),
             version,
@@ -574,7 +571,6 @@ async fn store_and_audit(
         },
     )
     .await?;
-    tx.commit().await.map_err(db_err("audit commit"))?;
 
     // Bound how long the version this one just superseded stays recoverable.
     store::scrub_expired(pool).await;
@@ -865,21 +861,17 @@ pub async fn revoke_key(
         }
     }
 
-    let version = store::revoke_active(&pool, kind, &payload.expected_fingerprint).await?;
-
-    let mut tx = pool.begin().await.map_err(db_err("audit begin"))?;
-    emit_event(
-        &mut tx,
-        &AccountEvent::BridgeKeyRevoked {
+    // The audit event commits inside the same transaction as the scrub.
+    let version = store::revoke_active(&pool, kind, &payload.expected_fingerprint, &|version| {
+        AccountEvent::BridgeKeyRevoked {
             account_id: user.account_id.clone(),
             kind: kind.to_string(),
             version,
             set_fingerprint: payload.expected_fingerprint.clone(),
             next_source: next_source.clone(),
-        },
-    )
+        }
+    })
     .await?;
-    tx.commit().await.map_err(db_err("audit commit"))?;
 
     warn!(
         "admin_keys: REVOKED '{}' version {} by {}; next source: {}",
@@ -1119,7 +1111,7 @@ pub async fn generate_seed(
 ///
 /// Replacement is add-only by default and may never change the account's
 /// Stellar address. On this bridge an account's address IS its seed's public
-/// key (`sign_and_submit_payment` derives the source from the seed), so a
+/// key (`prepare_payment` derives the source from the seed), so a
 /// different seed is a different account: swapping one in would leave the
 /// bridge advertising one address for deposits while signing as another, and
 /// strand whatever the old address holds. Rotating a Stellar key without

@@ -259,9 +259,16 @@ pub struct SignSubmitRequest {
     pub amount: String,
     pub memo: Option<String>,
     pub fee: Option<u32>,
+    /// Optional client idempotency key: 1-64 chars of `[A-Za-z0-9._:-]`.
+    /// Same key + same request => the recorded outcome (never re-signed);
+    /// same key + different request => 409 `idempotency_conflict`. Absent =>
+    /// the bridge mints a UUIDv4 (`key_source` = server); the client cannot
+    /// replay it but can recover the intent via `GET /managed-account/intents`.
+    #[serde(default)]
+    pub idempotency_key: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 pub struct SignSubmitResponse {
     pub success: bool,
     pub message: String,
@@ -269,6 +276,246 @@ pub struct SignSubmitResponse {
     pub stellar_hash: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub btxid: Option<Uuid>,
+    // Custodial intent fields (037). All optional for old readers.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub intent_id: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
+    /// One of `VALID_CUSTODIAL_INTENT_STATUSES`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolution: Option<String>,
+    /// True when this response reports a previously recorded outcome for the
+    /// same idempotency key (nothing was signed or submitted again).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replayed: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub amount_minor: Option<i64>,
+}
+
+// ── Custodial payment intents / policy (037) ───────────────────────────
+
+/// One custodial payment intent, as served to its owner
+/// (`GET /managed-account/intents*`) and to custody admins
+/// (`GET /admin/custody/intents*`). Timestamps are UTC RFC3339 strings.
+#[derive(Debug, Serialize, sqlx::FromRow)]
+pub struct CustodialIntentView {
+    pub intent_id: Uuid,
+    pub payala_account_id: String,
+    pub origin: String,
+    pub status: String,
+    pub resolution: Option<String>,
+    pub key_source: String,
+    pub idempotency_key: String,
+    pub destination: String,
+    pub asset_code: String,
+    pub asset_issuer: Option<String>,
+    pub amount_minor: i64,
+    /// `amount_minor` rendered at the Stellar scale (7 dp). Not a column.
+    #[sqlx(skip)]
+    pub amount: String,
+    pub memo: Option<String>,
+    pub fee_stroops: Option<i64>,
+    pub stellar_hash: Option<String>,
+    pub btxid: Option<Uuid>,
+    pub last_error: Option<String>,
+    pub created_at: String,
+    pub armed_at: Option<String>,
+    pub resolved_at: Option<String>,
+}
+
+/// `GET /managed-account/intents` query (owner-scoped).
+#[derive(Debug, Deserialize)]
+pub struct CustodialIntentListQuery {
+    pub payala_account_id: String,
+    #[serde(default)]
+    pub idempotency_key: Option<String>,
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default = "default_page")]
+    pub page: u64,
+    #[serde(default = "default_per_page")]
+    pub per_page: u64,
+}
+
+/// `GET /admin/custody/intents` query.
+#[derive(Debug, Deserialize)]
+pub struct AdminCustodialIntentListQuery {
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub account: Option<String>,
+    #[serde(default)]
+    pub origin: Option<String>,
+    #[serde(default = "default_page")]
+    pub page: u64,
+    #[serde(default = "default_per_page")]
+    pub per_page: u64,
+}
+
+/// Open-intent counts by non-terminal status.
+#[derive(Debug, Default, Serialize)]
+pub struct CustodialOpenIntents {
+    pub prepared: i64,
+    pub submitted: i64,
+    pub ambiguous: i64,
+}
+
+/// `GET /admin/custody/policy` response.
+#[derive(Debug, Serialize)]
+pub struct CustodialPolicyView {
+    pub paused: bool,
+    pub paused_by: Option<String>,
+    pub paused_at: Option<String>,
+    pub pause_reason: Option<String>,
+    pub per_tx_max_stroops: i64,
+    pub per_account_daily_max_stroops: i64,
+    pub require_idempotency_key: bool,
+    /// False while either cap is 0 — custodial signing refuses until set.
+    pub configured: bool,
+    pub updated_by: Option<String>,
+    pub updated_at: String,
+    pub open_intents: CustodialOpenIntents,
+    /// The exact phrase `POST /admin/custody/resume` requires.
+    pub resume_phrase: String,
+}
+
+/// `PUT /admin/custody/policy` body. Absent fields keep their stored value.
+#[derive(Debug, Deserialize)]
+pub struct CustodialPolicyUpdateRequest {
+    #[serde(default)]
+    pub per_tx_max_stroops: Option<i64>,
+    #[serde(default)]
+    pub per_account_daily_max_stroops: Option<i64>,
+    #[serde(default)]
+    pub require_idempotency_key: Option<bool>,
+}
+
+/// `POST /admin/custody/pause` body.
+#[derive(Debug, Deserialize)]
+pub struct CustodyPauseRequest {
+    pub reason: String,
+}
+
+/// `POST /admin/custody/resume` body.
+#[derive(Debug, Deserialize)]
+pub struct CustodyResumeRequest {
+    pub confirm_phrase: String,
+    /// Reopen even while ambiguous intents exist (the double-pay moment).
+    #[serde(default)]
+    pub force: bool,
+}
+
+/// `PUT /admin/custody/accounts/{account_id}/limit` body. The key must be
+/// present: `null` clears the override (global cap applies), `0` freezes.
+#[derive(Debug, Deserialize)]
+pub struct CustodyAccountLimitRequest {
+    pub custodial_daily_max_stroops: Option<i64>,
+}
+
+/// `GET /admin/custody/accounts` query.
+#[derive(Debug, Deserialize)]
+pub struct CustodyAccountsQuery {
+    #[serde(default = "default_page")]
+    pub page: u64,
+    #[serde(default = "default_custodial_per_page")]
+    pub per_page: u64,
+    /// Read each address on Horizon (best-effort; unreachable rows report
+    /// `unreachable: true`, never a failed endpoint).
+    #[serde(default)]
+    pub onchain: bool,
+}
+
+pub(crate) fn default_custodial_per_page() -> u64 {
+    crate::constants::CUSTODIAL_POSITIONS_DEFAULT_PER_PAGE
+}
+
+/// One custodial account (managed seed) in the custody accounts list.
+#[derive(Debug, Serialize, sqlx::FromRow)]
+pub struct CustodialAccountView {
+    pub payala_account_id: String,
+    pub stellar_account_id: String,
+    pub origin: String,
+    pub format_version: i16,
+    pub backend: String,
+    pub created_at: String,
+    /// Per-account daily override (NULL = global cap; 0 = frozen).
+    pub custodial_daily_max_stroops: Option<i64>,
+    #[sqlx(skip)]
+    pub onchain: Option<crate::stellar::OnchainAccount>,
+    #[sqlx(skip)]
+    pub unreachable: bool,
+}
+
+/// `POST /admin/custody/intents/{intent_id}/resolve` body.
+#[derive(Debug, Deserialize)]
+pub struct CustodyResolveRequest {
+    /// "complete" (settlement verified on-chain by hash) or "fail" (proven
+    /// absent/failed on a fresh Horizon after the stale window).
+    pub action: String,
+    #[serde(default)]
+    pub stellar_hash: Option<String>,
+}
+
+/// Envelope for idempotent custody switches (`changed: false` = already in
+/// the requested state; nothing written, no event).
+#[derive(Debug, Serialize)]
+pub struct CustodyChangedResponse {
+    pub success: bool,
+    pub changed: bool,
+    pub message: String,
+}
+
+/// `GET /admin/custody/intents/{id}/resolve` response.
+#[derive(Debug, Serialize)]
+pub struct CustodyResolveResponse {
+    pub success: bool,
+    pub message: String,
+    pub intent_id: Uuid,
+    pub status: String,
+    pub resolution: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub btxid: Option<Uuid>,
+}
+
+// ── Reconciliation positions + snapshots (037 part C) ──────────────────
+
+/// `GET /admin/reconciliation/positions` query (custodial page).
+#[derive(Debug, Deserialize)]
+pub struct PositionsQuery {
+    #[serde(default = "default_page")]
+    pub page: u64,
+    #[serde(default = "default_custodial_per_page")]
+    pub per_page: u64,
+}
+
+/// `GET /admin/reconciliation/snapshots` query.
+#[derive(Debug, Deserialize)]
+pub struct SnapshotListQuery {
+    #[serde(default = "default_page")]
+    pub page: u64,
+    #[serde(default = "default_per_page")]
+    pub per_page: u64,
+}
+
+/// One row of `GET /admin/reconciliation/snapshots` (payload omitted).
+#[derive(Debug, Serialize, sqlx::FromRow)]
+pub struct ReconciliationSnapshotListItem {
+    pub snapshot_id: Uuid,
+    /// UTC calendar date (`YYYY-MM-DD`).
+    pub snapshot_date: String,
+    pub kind: String,
+    pub as_of: String,
+    pub horizon_fresh: bool,
+    pub complete: bool,
+    pub drift_detected: bool,
+    pub invariants_ok: bool,
+    /// `horizon_fresh && complete && invariants_ok` — a lagging or partial
+    /// day lists as unattested rather than silently clean.
+    #[sqlx(skip)]
+    pub attested: bool,
+    pub created_by: Option<String>,
 }
 
 // ── Authenticate ───────────────────────────────────────────────────────
@@ -1253,6 +1500,10 @@ pub struct ReserveBucketUpdateRequest {
     /// to express "unlimited".
     #[serde(default)]
     pub refund_daily_max_minor: Option<i64>,
+    /// Per-bucket tolerance for `|onchain - (available + held)|` before the
+    /// reconciliation report flags drift (037). Absent leaves the value.
+    #[serde(default)]
+    pub drift_tolerance_minor: Option<i64>,
 }
 
 /// `POST /admin/exchange-reserve/entries` body (manual ledger operation).
@@ -2447,6 +2698,462 @@ mod tests {
         }
         for lifecycle in ["hold", "deposit", "payout_attempt", "fulfillment"] {
             assert!(!crate::constants::RESERVE_ADMIN_ENTRY_KINDS.contains(&lifecycle));
+        }
+    }
+
+    // ── 037 custodial conservation drift guards ────────────────────────
+
+    const MIGRATION_037: &str = include_str!("../migrations/037_custodial_conservation.sql");
+
+    /// The `CHECK (col IN (...))` clause that starts on the line containing
+    /// `marker`, joined across continuation lines until its closing `))`.
+    fn check_clause(sql: &str, marker: &str) -> String {
+        let start = sql
+            .find(marker)
+            .unwrap_or_else(|| panic!("037 lacks {}", marker));
+        let rest = &sql[start..];
+        let end = rest
+            .find("))")
+            .unwrap_or_else(|| panic!("{}: unterminated CHECK", marker));
+        rest[..end + 2].to_string()
+    }
+
+    /// Every literal of `list` appears quoted in the clause and the clause
+    /// quotes exactly `list.len()` literals — no drift in either direction.
+    fn assert_clause_matches(clause: &str, list: &[&str], what: &str) {
+        for v in list {
+            assert!(
+                clause.contains(&format!("'{}'", v)),
+                "{}: CHECK missing literal '{}' in {}",
+                what,
+                v,
+                clause
+            );
+        }
+        assert_eq!(
+            clause.matches('\'').count(),
+            list.len() * 2,
+            "{}: CHECK quotes a different number of literals than the constant: {}",
+            what,
+            clause
+        );
+    }
+
+    #[test]
+    fn test_custodial_intent_vocabularies_match_ddl() {
+        assert_clause_matches(
+            &check_clause(
+                MIGRATION_037,
+                "CONSTRAINT chk_cpi_origin CHECK (origin IN (",
+            ),
+            crate::constants::VALID_CUSTODIAL_INTENT_ORIGINS,
+            "origin",
+        );
+        assert_clause_matches(
+            &check_clause(
+                MIGRATION_037,
+                "CONSTRAINT chk_cpi_key_source CHECK (key_source IN (",
+            ),
+            crate::constants::VALID_CUSTODIAL_KEY_SOURCES,
+            "key_source",
+        );
+        assert_clause_matches(
+            &check_clause(MIGRATION_037, "CONSTRAINT chk_cpi_status CHECK (status IN"),
+            crate::constants::VALID_CUSTODIAL_INTENT_STATUSES,
+            "status",
+        );
+        assert_clause_matches(
+            &check_clause(
+                MIGRATION_037,
+                "CONSTRAINT chk_cpi_resolution CHECK (resolution IS NULL OR resolution IN",
+            ),
+            crate::constants::VALID_CUSTODIAL_INTENT_RESOLUTIONS,
+            "resolution",
+        );
+        assert_clause_matches(
+            &check_clause(
+                MIGRATION_037,
+                "CONSTRAINT chk_reconciliation_snapshot_kind CHECK (kind IN (",
+            ),
+            crate::constants::VALID_RECONCILIATION_SNAPSHOT_KINDS,
+            "snapshot kind",
+        );
+    }
+
+    #[test]
+    fn test_transaction_origins_match_ddl() {
+        let clause = check_clause(
+            MIGRATION_037,
+            "ADD CONSTRAINT chk_transaction_origin\n    CHECK (origin IN (",
+        );
+        assert_clause_matches(&clause, crate::constants::VALID_TX_ORIGINS, "origin");
+        assert!(MIGRATION_037.contains("DROP CONSTRAINT chk_transaction_origin"));
+        assert!(MIGRATION_037.contains("VALIDATE CONSTRAINT chk_transaction_origin"));
+    }
+
+    #[test]
+    fn test_custodial_vocabularies_fit_their_columns() {
+        for s in crate::constants::VALID_CUSTODIAL_INTENT_STATUSES {
+            assert!(s.len() <= 12, "status '{}' exceeds VARCHAR(12)", s);
+        }
+        for o in crate::constants::VALID_CUSTODIAL_INTENT_ORIGINS {
+            assert!(o.len() <= 16, "origin '{}' exceeds VARCHAR(16)", o);
+        }
+        for k in crate::constants::VALID_CUSTODIAL_KEY_SOURCES {
+            assert!(k.len() <= 8, "key_source '{}' exceeds VARCHAR(8)", k);
+        }
+        for r in crate::constants::VALID_CUSTODIAL_INTENT_RESOLUTIONS {
+            assert!(r.len() <= 24, "resolution '{}' exceeds VARCHAR(24)", r);
+        }
+        for o in crate::constants::VALID_TX_ORIGINS {
+            assert!(
+                o.len() <= 32,
+                "transaction origin '{}' exceeds VARCHAR(32)",
+                o
+            );
+        }
+        for k in crate::constants::VALID_RECONCILIATION_SNAPSHOT_KINDS {
+            assert!(k.len() <= 8, "snapshot kind '{}' exceeds VARCHAR(8)", k);
+        }
+    }
+
+    /// The one-in-flight guard is a PARTIAL unique index on `sign` rows in
+    /// the non-terminal statuses only — a wider predicate would block a
+    /// second payment forever after the first settles; a narrower one would
+    /// admit two live payments.
+    #[test]
+    fn one_inflight_index_is_partial_on_sign_origin() {
+        let start = MIGRATION_037
+            .find("uq_custodial_intent_one_inflight")
+            .expect("index present");
+        let stmt = &MIGRATION_037[start..];
+        let stmt = &stmt[..stmt.find(';').expect("terminated")];
+        assert!(stmt.contains("WHERE origin = 'sign'"));
+        for open in crate::constants::CUSTODIAL_INTENT_OPEN_STATUSES {
+            assert!(stmt.contains(&format!("'{}'", open)), "missing {}", open);
+        }
+        assert!(!stmt.contains("'settled'"));
+        assert!(!stmt.contains("'rejected'"));
+    }
+
+    /// The daily anchor is a plain DATE column computed in Rust — an index
+    /// expression over `as_of::date` is STABLE, not IMMUTABLE, and Postgres
+    /// rejects it at migration time.
+    #[test]
+    fn snapshot_daily_anchor_is_a_date_column() {
+        assert!(MIGRATION_037.contains("snapshot_date           DATE"));
+        assert!(MIGRATION_037
+            .contains("ON reconciliation_snapshot(snapshot_date) WHERE kind = 'daily'"));
+        assert!(!MIGRATION_037.contains("as_of::date"));
+    }
+
+    /// 037 part D: the replenishment send hash is unique across cycles, as a
+    /// PARTIAL index so the many cycles that never reach `sending` (NULL
+    /// hash) do not collide with each other.
+    #[test]
+    fn uq_crr_send_tx_hash_is_partial() {
+        let start = MIGRATION_037
+            .find("uq_crr_send_tx_hash")
+            .expect("index present");
+        let stmt = &MIGRATION_037[start..];
+        let stmt = &stmt[..stmt.find(';').expect("terminated")];
+        assert!(stmt.contains("ON conversion_reserve_replenishment(send_tx_hash)"));
+        assert!(stmt.contains("WHERE send_tx_hash IS NOT NULL"));
+        assert!(MIGRATION_037.contains("CREATE UNIQUE INDEX IF NOT EXISTS uq_crr_send_tx_hash"));
+    }
+
+    #[test]
+    fn settlement_columns_are_nullable_so_shared_inserts_keep_their_binds() {
+        for col in [
+            "stellar_amount_minor BIGINT",
+            "stellar_destination VARCHAR(69)",
+            "stellar_asset_code VARCHAR(12)",
+            "stellar_asset_issuer VARCHAR(56)",
+        ] {
+            let at = MIGRATION_037
+                .find(col)
+                .unwrap_or_else(|| panic!("missing {}", col));
+            let line_end = MIGRATION_037[at..].find(',').map(|i| at + i).unwrap_or(at);
+            assert!(
+                !MIGRATION_037[at..line_end].contains("NOT NULL"),
+                "{} must be nullable",
+                col
+            );
+        }
+    }
+
+    // ── docs/conservation-spec.md pin ──────────────────────────────────
+
+    /// The conservation specification is a contract, not prose: every state
+    /// literal, every event type and every test it names must exist, or the
+    /// document is lying about what the code does. `include_str!` here is
+    /// test-only — the release build (Dockerfile copies src/ and
+    /// migrations/) never sees docs/.
+    #[test]
+    fn conservation_spec_names_every_vocabulary() {
+        let doc = include_str!("../../docs/conservation-spec.md");
+        let vocabularies: &[(&str, &[&str])] = &[
+            (
+                "VALID_RESERVE_ENTRY_KINDS",
+                crate::constants::VALID_RESERVE_ENTRY_KINDS,
+            ),
+            (
+                "VALID_CUSTODIAL_INTENT_STATUSES",
+                crate::constants::VALID_CUSTODIAL_INTENT_STATUSES,
+            ),
+            (
+                "VALID_CUSTODIAL_INTENT_RESOLUTIONS",
+                crate::constants::VALID_CUSTODIAL_INTENT_RESOLUTIONS,
+            ),
+            (
+                "VALID_REPLENISH_STATES",
+                crate::constants::VALID_REPLENISH_STATES,
+            ),
+            (
+                "VALID_RESERVE_REFUND_STATUSES",
+                crate::constants::VALID_RESERVE_REFUND_STATUSES,
+            ),
+            (
+                "VALID_EXCHANGE_STATUSES",
+                crate::constants::VALID_EXCHANGE_STATUSES,
+            ),
+            ("VALID_TX_ORIGINS", crate::constants::VALID_TX_ORIGINS),
+        ];
+        for (name, list) in vocabularies {
+            assert!(doc.contains(name), "spec must name {}", name);
+            for literal in *list {
+                assert!(
+                    doc.contains(&format!("`{}`", literal)),
+                    "spec omits {} literal `{}`",
+                    name,
+                    literal
+                );
+            }
+        }
+
+        // Every event type the outbox can produce, read from the source of
+        // truth rather than a copy of it.
+        let events = include_str!("events.rs");
+        let body = &events[events
+            .find("pub fn event_type(&self)")
+            .expect("event_type present")..];
+        let body = &body[..body.find("\n    }\n").expect("fn end")];
+        let mut event_types = 0;
+        for line in body.lines() {
+            let Some(start) = line.find('"') else {
+                continue;
+            };
+            let rest = &line[start + 1..];
+            let end = rest.find('"').expect("closing quote");
+            let event_type = &rest[..end];
+            assert!(
+                doc.contains(&format!("`{}`", event_type)),
+                "spec omits event type `{}`",
+                event_type
+            );
+            event_types += 1;
+        }
+        assert!(
+            event_types >= 39,
+            "event_type() parse found {}",
+            event_types
+        );
+
+        // Every test the failure-injection matrix (§6) and the state-machine
+        // tables (§3) cite must be named in the document AND exist in the
+        // bridge source as a test function — a renamed test must rename its
+        // citation, and a citation must never point at a test that does not
+        // exist.
+        const CITED: &[&str] = &[
+            "hold_sql_guards_balance_and_fraction",
+            "due_payouts_sql_selects_only_claimable_auto_swaps",
+            "stale_intent_sql_only_covers_unrecorded_outcomes",
+            "expiry_sql_only_touches_awaiting_deposit",
+            "only_horizon_400_with_result_codes_is_definitive",
+            "presubmit_retryable_is_transient_rejection_not_ambiguous",
+            "late_deposit_after_expiry_is_recorded_not_credited_to_order",
+            "claim_sql_collapses_every_invalid_case_to_zero_rows",
+            "expiry_and_replay_sql_are_guarded",
+            "refund_sql_guards_every_transition",
+            "caps_park_for_review_and_dust_is_recorded_without_an_obligation",
+            "refunds_refuse_unsafe_destinations",
+            "refund_memo_can_never_be_mistaken_for_an_order_ref",
+            "usd_float_is_never_refunded_on_chain",
+            "cycle_sql_guards_every_transition",
+            "abort_covers_every_pre_send_state",
+            "unconfigured_caps_refuse_rather_than_meaning_unlimited",
+            "an_unreadable_chain_skips_rather_than_spends",
+            "float_guard_reads_the_lower_of_ledger_and_chain",
+            "only_owlpay_creates_are_safe_to_retry_when_ambiguous",
+            "submit_spend_records_hash_before_submit",
+            "cycle_hash_sql_is_a_null_cas_on_both_rows",
+            "hash_unrecorded_aborts_rather_than_requeues",
+            "stale_sending_cycle_resolves_by_hash_before_freezing",
+            "uq_crr_send_tx_hash_is_partial",
+            "test_aggregate_overflow_is_error",
+            "test_valid_sync_modes_match_ddl",
+            "sync_batch_payload_carries_counts_only",
+            "claim_leases_under_skip_locked_and_keeps_rows_pending",
+            "outcome_marks_are_guarded_against_late_duplicates",
+            "prune_touches_only_terminal_deliveries_and_pending_free_dispatched_events",
+            "key_store_mutations_audit_in_the_same_transaction",
+            "credential_insert_columns_match_its_placeholders",
+            "replay_decision_table",
+            "same_key_different_fingerprint_is_conflict",
+            "arm_sql_requires_prepared_and_null_hash",
+            "one_inflight_index_is_partial_on_sign_origin",
+            "custody_admin_mutations_are_guarded_single_statements",
+            "resume_phrase_names_the_network",
+            "unmatched_insert_records_the_payer",
+            "sweep_verdict_table",
+            "abandon_sql_never_touches_armed_rows",
+            "stale_sql_selects_only_armed_open_rows",
+            "claimed_without_hash_is_provably_unsubmitted",
+            "settled_unrecorded_is_202_never_200_with_null_btxid",
+            "the_old_settle_then_record_insert_is_gone",
+            "active_job_guard_releases_on_panic",
+            "active_job_guard_releases_exactly_once_on_normal_drop",
+            "valid_bearer_fails_closed_when_redis_unreachable",
+            "session_cookie_fails_closed_when_redis_unreachable",
+            "test_none_protector_fails_closed",
+            "pause_path_never_touches_redis",
+            "head_freshness_boundary",
+            "scan_page_crosses_floor_proves_absence",
+            "scan_page_missing_created_at_never_stops_short",
+            "ambiguous_maps_to_202_and_is_never_resubmitted",
+            "stale_head_is_inconclusive",
+            "unreadable_chain_yields_null_not_ok",
+            "unreadable_chain_yields_leave_not_reject",
+            "missing_trustline_on_a_readable_chain_is_zero_not_null",
+            "resume_refuses_while_ambiguous_intents_exist",
+            "pause_precedes_seed_load",
+            "override_zero_freezes_the_account",
+            "override_replaces_global_even_when_global_is_zero",
+            "custody_reads_never_hand_out_a_mutation",
+            "auditor_holds_no_mutation_capability",
+            "lateral_roles_do_not_cross_surfaces",
+            "bucket_apply_sql_guards_both_columns",
+            "each_guard_fires_on_its_own",
+            "spend_ceiling_is_the_tightest_of_every_bound",
+            "low_water_breach_flag",
+            "drift_is_onchain_minus_ledger",
+            "tolerance_boundary_inclusive",
+            "positions_invariants_flag_uncovered_obligations",
+            "obligation_queries_name_their_states",
+            "custodial_walk_excludes_the_reserve_account",
+            "signing_paths_never_read_payala_tables",
+            "no_driver_calls_the_fused_signer",
+            "custodial_sign_orders_policy_before_seed_and_hash_before_submit",
+            "settles_requires_successful_matching_payment",
+            "failed_tx_is_rejected_not_settled",
+            "delete_guard_covers_every_non_terminal_intent_status",
+            "resolve_reads_the_chain_before_every_write",
+            "settle_sql_requires_hash_and_open_status",
+            "ambiguous_sql_only_leaves_submitted",
+            "daily_counts_every_non_rejected_status",
+            "daily_overflow_is_checked_arithmetic",
+            "decision_order_is_pause_unconfigured_frozen_pertx_daily",
+            "intent_insert_binds_thirteen_and_matches_ddl",
+            "settlement_transaction_insert_binds_ten",
+            "snapshot_insert_binds_eleven",
+            "bucket_update_binds_five",
+            "journal_replay_mismatch_flags_bucket",
+            "usd_bucket_has_no_drift_leg",
+            "test_reserve_entry_kinds_match_ddl",
+            "test_custodial_intent_vocabularies_match_ddl",
+            "test_transaction_origins_match_ddl",
+            "test_custodial_vocabularies_fit_their_columns",
+            "snapshot_daily_anchor_is_a_date_column",
+            "settlement_columns_are_nullable_so_shared_inserts_keep_their_binds",
+            "capability_matrix_matches_shared_fixture",
+            "every_privileged_handler_takes_its_exact_capability",
+            "extractor_swap_is_complete_per_module",
+            "advisory_lock_keys_are_distinct",
+            "event_type_vocabulary_is_append_only",
+            "schema_version_is_pinned",
+            "custodial_payloads_never_carry_addresses_or_hashes",
+            "custodial_refusal_codes_are_unique_and_snake_case",
+            "coded_error_serializes_code_and_details",
+            "every_refusal_code_is_in_the_pinned_list",
+            "idempotency_key_charset_and_length",
+            "fingerprint_is_amount_canonical",
+            "the_reserve_quarantine_is_armed_without_a_live_reserve",
+            "no_reserve_configured_quarantines_nothing",
+            "test_validate_batch_ok",
+            "test_validate_batch_duplicate_tx_id_rejected",
+            "test_validate_batch_abs_sum_overflow_rejected",
+            "conservation_spec_names_every_vocabulary",
+        ];
+        // The DB lane is an opt-in integration target (tests/db), compiled
+        // separately; its names are pinned against that directory.
+        const DB_LANE: &[&str] = &[
+            "uq_custodial_intent_key_rejects_second_insert",
+            "uq_custodial_intent_hash_rejects_second_arm",
+            "one_inflight_index_admits_one_live_sign_intent",
+            "arm_cas_loses_to_abandon_sweep",
+            "settle_tx_is_atomic_when_intent_cas_fails",
+            "journal_insert_conflict_rolls_back_bucket_apply",
+            "abandon_sweep_rejects_only_hashless_rows",
+            "reconciliation_snapshot_daily_anchor_admits_one_row_per_date",
+            "uq_crr_send_tx_hash_rejects_second_cycle",
+        ];
+        let sources: &[&str] = &[
+            include_str!("models.rs"),
+            include_str!("constants.rs"),
+            include_str!("auth.rs"),
+            include_str!("error.rs"),
+            include_str!("events.rs"),
+            include_str!("worker.rs"),
+            include_str!("admin_webhook_delivery.rs"),
+            include_str!("custody/intent.rs"),
+            include_str!("custody/policy.rs"),
+            include_str!("custody/sweep.rs"),
+            include_str!("custody/fingerprint.rs"),
+            include_str!("custody/mod.rs"),
+            include_str!("reconciliation/mod.rs"),
+            include_str!("reconciliation/compute.rs"),
+            include_str!("reconciliation/job.rs"),
+            include_str!("exchange/reserve.rs"),
+            include_str!("exchange/reserve_watch.rs"),
+            include_str!("exchange/replenish.rs"),
+            include_str!("exchange/reserve_quote.rs"),
+            include_str!("handlers/admin.rs"),
+            include_str!("handlers/admin_custody.rs"),
+            include_str!("handlers/admin_reserve.rs"),
+            include_str!("handlers/managed_seed.rs"),
+            include_str!("handlers/sync.rs"),
+            include_str!("keys/store.rs"),
+            include_str!("seed_protect/mod.rs"),
+            include_str!("stellar/horizon.rs"),
+        ];
+        let db_lane = [
+            include_str!("../tests/db/main.rs"),
+            include_str!("../tests/db/custodial_intent.rs"),
+            include_str!("../tests/db/reserve.rs"),
+        ]
+        .concat();
+        for name in CITED {
+            assert!(
+                doc.contains(&format!("`{}`", name)),
+                "spec omits test `{}`",
+                name
+            );
+            let defined = sources
+                .iter()
+                .any(|src| src.contains(&format!("fn {}(", name)));
+            assert!(defined, "spec cites `{}` but no such test exists", name);
+        }
+        for name in DB_LANE {
+            assert!(
+                doc.contains(&format!("`{}`", name)),
+                "spec omits DB-lane test `{}`",
+                name
+            );
+            assert!(
+                db_lane.contains(&format!("fn {}(", name)),
+                "spec cites DB-lane test `{}` but tests/db does not define it",
+                name
+            );
         }
     }
 

@@ -46,6 +46,9 @@ var Router = (function () {
         if (has('view_reserve') || has('manage_reserve')) {
             privileged.push({ href: 'reserve.html', label: 'Reserve' });
         }
+        if (has('view_custody') || has('manage_custody')) {
+            privileged.push({ href: 'custody.html', label: 'Custody' });
+        }
         if (has('view_keys') || has('manage_keys')) {
             privileged.push({ href: 'keys.html', label: 'Keys' });
         }

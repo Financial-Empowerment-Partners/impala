@@ -3,7 +3,7 @@
 
     <property name="debug" value="false"/>
 
-    <property name="applet.version" value="0.3"/>
+    <property name="applet.version" value="0.4"/>
     <!--
       Defaults below are testnet-safe. CI overrides the AIDs per network via
       gradle -P (forwarded to Ant in applet/build.gradle.kts):

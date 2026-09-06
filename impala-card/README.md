@@ -1,10 +1,15 @@
 # Impala card
 
-The impala smartcard implementation provides a means of transacting in a Payala
-program or the Stellar network using the impala bridge.
+Offline Payala stored-value transfer between issuer-certified cards, reconciled
+and settled through the bridge. Not an on-chain payment.
 
-Note that this minimal implementation does not support offline LUKs; only online
-transactions are supported.
+A card holds a balance in minor units and moves value to another card of the
+same program by signing a transfer the recipient verifies offline. A **LUK**
+(limited-use / issuer-certified card key) is the card's own signing key together
+with the issuer certificate that binds it to an account, currency and program;
+the certificate travels in the third slot of every `SIGN_TRANSFER_V2` response
+and is verified on the receiving card. Value is settled and reconciled against
+the bridge.
 
 ## Toolchain: JDK 17
 
@@ -23,254 +28,94 @@ Why 17 specifically (and not 21):
 
 17 is the single version satisfying all three, so the toolchain stays on 17.
 
-## Supported APDUs
-
-The following subset of Payala APDUs is provided as part of the Impala compatible
-implementation. In addition, a handful of new APDUs is defined for Stellar specific
-capabilities.
-
-Two new APDUs are Set Ext Pubkey (50) and Get Ext Pubkey (51) to identify the Stellar
-account for online transactions.
-
----
-
-### Initialize  (44)
-
-This command is used to clear any state in the card, including keys and card ID, and generate new EC and RSA keypairs. This command may only be invoked once.
-
-**Input:**
-
-| **Field Name** | **Byte Length** | **CDATA Offset** |
-| --- | --- | --- |
-| Random Seed | ? | +0 |
-
-**Output:** Boolean Success/Failure.
-
----
-
-### Update User PIN  (25)
-
-This command is used to update the user’s PIN.
-
-**Input:**
-
-| **Field Name** | **Byte Length** | **CDATA Offset** |
-| --- | --- | --- |
-| PIN | 4 | +0 |
-
-**Output:** Boolean Success/Failure.
-
----
-
-### Verify PIN  (24)
-
-This command is used to verify the user’s PIN code.
-
-**Input:**
-
-| **Field Name** | **Byte Length** | **CDATA Offset** |
-| --- | --- | --- |
-| PIN | 4 | +0 |
-
-**Output:** Boolean Success/Failure.
-
----
-
-### Update Master PIN  (43)
-
-This command updates the master PIN.
-
-**Input:**
-
-| **Field Name** | **Byte Length** | **CDATA Offset** |
-| --- | --- | --- |
-| PIN | 4 | +0 |
-
-**Output:** Boolean Success/Failure.
-
----
-
-### NOP  (2)
-
-This APDU does not get processed. Used to verify communication.
-
-**Input:** *[ NO Input CDATA Payload ]*
-
-**Output:** Boolean Success/Failure.
-
----
-
-### Get Account ID  (22)
-
-This command gets the Account UUID for the cardholder.
-
-**Input:** *[ NO Input CDATA Payload ]*
-
-**Output:**
-| **Field Name** | **Byte Length** | **CDATA Offset** |
-| --- | --- | --- |
-| Account UUID | 16 | +0 |
-
----
-
-### Get Version  (100)
-
-Used to obtain the current cardlet version. Required for compatibility checks.
-
-**Input:** *[ NO Input CDATA Payload ]*
-
-**Output:**
-| **Field Name** | **Byte Length** | **CDATA Offset** |
-| --- | --- | --- |
-| Major Version | 2 | +0 |
-| Minor Version | 2 | +2 |
-| Revision | 2 | +4 |
-| Git Short Hash | 7 | +6 |
-
----
-
-### Sign Auth  (37)
-
-This command is used to sign an authentication challenge proving the identity of the cardholder.
-
-**Input:** *Note that the Account UUID and Milliseconds are opaque ChallengeBytes to card.*
-
-| **Field Name** | **Byte Length** | **CDATA Offset** |
-| --- | --- | --- |
-| Account UUID | 16 | +0 |
-| DateTime Millis | 8 | +16 |
-
- **Output:**
-
-| **Field Name** | **Byte Length** | **CDATA Offset** |
-| --- | --- | --- |
-| ChallengeBytes | 24 | +0 |
-| Signature | 36 | +24 |
-
----
-
-### Get EC Pubkey  (36)
-
-This command returns the EC public key stored on the card.
-
-**Input:** *[ NO Input CDATA Payload ]*
-
-**Output:**
-
-| **Field Name** | **Byte Length** | **CDATA Offset** |
-| --- | --- | --- |
-| ECPubKey | 65 | +0 |
-
----
-
-### Get RSA Pubkey  (7)
-
-This command returns the RSA public key used for encryption via card.
-
-**Input:** *[ NO Input CDATA Payload ]*
-
-**Output:**
-
-| **Field Name** | **Byte Length** | **CDATA Offset** |
-| --- | --- | --- |
-| RSAPubKey | 128 | +0 |
-
----
-
-### Get Full Name  (32)
-
-This command returns the name associated with a card.
-
-**Input:** *[ NO Input CDATA Payload ]*
-
-**Output:**
-
-| **Field Name** | **Byte Length** | **CDATA Offset** |
-| --- | --- | --- |
-| Full Name | 128 | +0 |
-
----
-
-### Set Full Name  (31)
-
-This command sets the name associated with a card.
-
-**Input:**
-
-| **Field Name** | **Byte Length** | **CDATA Offset** |
-| --- | --- | --- |
-| Full Name | 128 | +0 |
-
-**Output:** Boolean Success/Failure.
-
----
-
-### Get User Data  (30)
-
-This is an aggregate command to obtain the card ID, account ID, and name.
-
-**Input:** *[ NO Input CDATA Payload ]*
-
-**Output:**
-
-| **Field Name** | **Byte Length** | **CDATA Offset** |
-| --- | --- | --- |
-| Account ID | 16 | +0 |
-| Card ID | 16 | +16 |
-| Full Name | 128 | +32 |
-
----
-
-### Set Card Data  (38)
-
-This is a convenience method for setting the account ID, card ID, and balance associated with a cardholder.
-
-**Input:**
-
-| **Field Name** | **Byte Length** | **CDATA Offset** |
-| --- | --- | --- |
-| Account ID | 16 | +0 |
-| Card ID | 16 | +16 |
-| Signature | 72 | +32 |
-
-**Output:** Boolean Success/Failure.
-
----
-
-### Is Card Alive  (46)
-
-This command checks if the card is able to process commands.
-
-**Input:** *[ NO Input CDATA Payload ]*
-
-**Output:** Boolean Success/Failure.
-
----
-
-### Set Ext Pubkey  (50)
-
-Set the public key for an external account on the Stellar network. (ed25519)
-
-**Input:**
-
-| **Field Name** | **Byte Length** | **CDATA Offset** |
-| --- | --- | --- |
-| Public Key | 65 | +0 |
-
-**Output:** Boolean Success/Failure.
-
----
-
-### Get Ext Pubkey  (51)
-
-Retrieve the public key for an external account on the Stellar network for this user.
-
-**Input:** *[ NO Input CDATA Payload ]*
-
-**Output:**
-
-| **Field Name** | **Byte Length** | **CDATA Offset** |
-| --- | --- | --- |
-| ECPubKey | 65 | +0 |
-
----
+## Build and test
+
+```bash
+cd impala-card
+./gradlew :sdk:jvmTest            # SDK + applet interop tests on jcardsim (no hardware)
+./gradlew :applet:buildJavacard   # build the CAP file (verify=true)
+```
+
+`GET_VERSION` (10 bytes: `major2 minor2 rev2 hash4`) reports `0.2`; applet 0.2 is
+the certified transfer protocol.
+
+## Threat-scoped claim
+
+A correctly personalized, non-compromised card atomically debits its local
+balance before releasing a transfer signature; a receiving card accepts a credit
+only from an issuer-certified key bound to the signable's sender, currency and
+program, and rejects repeated, non-increasing or out-of-bound counters.
+
+This holds only given, and does not itself provide:
+
+- **issuer-key custody** — the program key is install-only on the bridge and
+  never on a card/terminal;
+- **terminal integrity** — live-read the recipient counter, deliver
+  synchronously, never re-sign a signed transfer;
+- **card anti-cloning** — a platform property of the secure element;
+- **bridge reconciliation/quarantine** — see `impala-bridge/SECURITY.md`;
+- **backend integrity and bridge custody**.
+
+## Capability matrix
+
+| Capability | Implemented | jcardsim | Physical card | Without network | Production |
+|---|---|---|---|---|---|
+| Card issuance / personalization | ✓ | ✓ (`PersonalizationInteropTest` P1) | no evidence in repo | ✓ | ✗ |
+| Offline debit (SIGN_TRANSFER_V2) | ✓ | ✓ (`CertifiedTransferInteropTest` C1/C13) | no evidence in repo | ✓ | ✗ |
+| Offline credit (VERIFY_TRANSFER_V2) | ✓ | ✓ (C1/C11/C13) | no evidence in repo | ✓ | ✗ |
+| Issuer-key verification on receive | ✓ | ✓ (C2/C3/C5) | no evidence in repo | ✓ | ✗ |
+| Multi-hop onward spending | ✓ | ✓ (C13) | no evidence in repo | ✓ | ✗ |
+| Reconciliation / Stellar redemption | — | — | — | — | not in this repo (bridge follow-up) |
+
+## Issuance ceremony
+
+1. `gp --install --params 01 0B ‖ ENC‖MAC‖DEK ‖ programId‖issuerPubKey`
+   (flags `0x01` ENFORCE | `0x02` KEYS | `0x08` PROGRAM; add `0x04` + a PIN block
+   for factory PINs). The card is then `scp03KeysCustom`, `provisioningEnforced`
+   and `programBound`. Without `0x08`, bind later with PERSONALIZE part B.
+2. `INITIALIZE` (0x2C) with host entropy → card keypair + final cardId.
+3. `GET_USER_DATA` → cardId; `GET_EC_PUB_KEY` → the 65-byte card key.
+4. Open SCP03 with the transport keys → `APPLET_UPDATE` seq `0x0001` with per-card
+   keys derived by the issuer HSM from (KMK, cardId) → reopen with the per-card
+   keys (INITIALIZE UPDATE reports `cardId[0..10)` for lookup).
+5. The issuer HSM signs the CERT message (`docs/transfer-protocol.md` §2).
+6. `PERSONALIZE` A (accountId, currency, programId, initialReceiveCounter)[, B],
+   C over the per-card channel at security level `0x33`.
+7. `PROVISION_PIN` master + user (lifts ENFORCE).
+8. `GET_PERSONALIZATION` read-back; register with the bridge.
+
+The default-keys flag is a policy tripwire, not a cryptographic barrier —
+whoever holds the current SCP03 keys can rotate them.
+
+## Counter model
+
+One strictly increasing counter stream per receiving card, allocated off-card by
+the transfer coordinator (tap-present: read `GET_RECEIVE_STATE`, set
+`counter = L + 1`). Gaps are accepted, repeats and lower values rejected
+(`0x6233`), zero never accepted, a forward jump beyond 1024 rejected distinctly
+(`0x623A`), maximum `0x7FFFFFFF`. `dateTime` is a strictly increasing per-sender
+send sequence, never a timestamp. Full model, allocation and torn-delivery
+decision table: `docs/transfer-protocol.md` §6.
+
+## Lost card / replacement
+
+The bridge revokes the pubkey/cert_id; terminals refuse to present from a
+hot-listed key. A replacement uses the **same accountId**, a **new key and
+certificate**, and `initialReceiveCounter ≥ the bridge's last known L`, so every
+envelope the lost card accepted can never re-verify on the replacement. See
+`docs/transfer-protocol.md` §6.6.
+
+## Compatibility: applet 0.1 CAPs
+
+Already-flashed 0.1 CAPs answer `0x6D00` to every new INS and keep the retired v0
+behaviour; 0.2 receivers refuse v0 envelopes. There is no in-place upgrade:
+reflash (`gp --delete/--install`) then run the ceremony.
+`ImpalaSDK.requireCertifiedProtocol()` stops the SDK driving V2 flows against a
+0.1 card.
+
+## Reference
+
+- `docs/apdu.md` — the full APDU command table and status words.
+- `docs/transfer-protocol.md` — byte formats, golden vectors, lifecycle,
+  personalization, the counter model, and the claims → tests table.
+- `docs/IOS_NFC.md` — the iOS CoreNFC transport.

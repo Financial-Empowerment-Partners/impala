@@ -66,6 +66,9 @@ pub struct PreparedTx {
 pub struct SubmittedTx {
     pub stellar_hash: String,
     pub stellar_tx_id: Option<String>,
+    /// Carried for log context; every persisted source comes from the
+    /// PreparedTx (and, on the custodial path, the claimed row).
+    #[allow(dead_code)]
     pub source_account: String,
 }
 
@@ -85,14 +88,12 @@ pub trait StellarSigner: Send + Sync {
         params: &PaymentParams,
     ) -> Result<PreparedTx, AppError>;
     /// Submit a prepared transaction. The only step that can be ambiguous.
+    ///
+    /// There is deliberately NO fused "sign and submit" for payments: every
+    /// money path persists `PreparedTx::stellar_hash` on its write-ahead row
+    /// between these two calls, so an ambiguous submit is always resolvable
+    /// by an exact hash lookup (docs/conservation-spec.md §4.6).
     async fn submit_prepared(&self, prepared: &PreparedTx) -> Result<SubmittedTx, AppError>;
-    /// Build, sign, and submit a payment to Horizon using the seed
-    /// (`prepare_payment` + `submit_prepared`).
-    async fn sign_and_submit_payment(
-        &self,
-        seed: &[u8],
-        params: &PaymentParams,
-    ) -> Result<SubmittedTx, AppError>;
     /// Build, sign, and submit a `ChangeTrust` for an issued asset with the
     /// maximum limit, from the seed's account. Moves no money: it lets the
     /// account hold `asset`. Re-asserting an existing trustline is a no-op on
@@ -254,15 +255,6 @@ impl StellarSigner for StellarBaseSigner {
         // Constructing the keypair validates the strkey checksum.
         keypair_from_seed(s_strkey.as_bytes())?;
         Ok(SecretBytes::new(s_strkey.as_bytes().to_vec()))
-    }
-
-    async fn sign_and_submit_payment(
-        &self,
-        seed: &[u8],
-        params: &PaymentParams,
-    ) -> Result<SubmittedTx, AppError> {
-        let prepared = self.prepare_payment(seed, params).await?;
-        self.submit_prepared(&prepared).await
     }
 
     async fn submit_prepared(&self, prepared: &PreparedTx) -> Result<SubmittedTx, AppError> {

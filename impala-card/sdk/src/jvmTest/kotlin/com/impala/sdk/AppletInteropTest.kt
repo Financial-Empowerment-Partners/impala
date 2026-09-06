@@ -3,22 +3,11 @@ package com.impala.sdk
 import com.impala.sdk.apdu4j.CommandAPDU
 import com.impala.sdk.models.ImpalaException
 import com.impala.sdk.models.ImpalaInsufficientFundsException
+import com.impala.sdk.models.ImpalaPersonalizationException
 import com.impala.sdk.models.ImpalaPinException
 import com.impala.sdk.models.ImpalaSecurityException
 import com.impala.sdk.models.ImpalaWrongLengthException
-import java.math.BigInteger
-import java.security.AlgorithmParameters
-import java.security.KeyFactory
-import java.security.KeyPair
-import java.security.KeyPairGenerator
-import java.security.PrivateKey
-import java.security.PublicKey
-import java.security.Signature
-import java.security.interfaces.ECPublicKey
-import java.security.spec.ECGenParameterSpec
-import java.security.spec.ECParameterSpec
-import java.security.spec.ECPoint
-import java.security.spec.ECPublicKeySpec
+import okio.ByteString.Companion.toByteString
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
@@ -29,24 +18,23 @@ import kotlin.test.assertTrue
 
 /**
  * End-to-end interop tests of the SDK against the real [com.impala.applet.ImpalaApplet]
- * running in jcardsim. This is the interop oracle for the SCP03 wire format:
- * the SDK's pure-Kotlin crypto on one side, jcardsim's JCA-backed JavaCard
- * crypto on the other.
+ * running in jcardsim (applet 0.2, transfer protocol v1). This is the interop
+ * oracle for the SCP03 wire format, the personalization ceremony and the SIGN_AUTH
+ * contract; the certified transfer chain lives in [CertifiedTransferInteropTest]
+ * and personalization in [PersonalizationInteropTest]. Shared helpers are in
+ * IssuerFixture.kt.
  */
 class AppletInteropTest {
 
     private companion object {
         /** Mirrors MAX_PINLESS_TRANSFERS in ImpalaApplet.java. */
         const val MAX_PINLESS_TRANSFERS = 4
+
+        /** The bridge golden account UUID (card_auth.rs test_uuid). */
+        val GOLDEN_ACCOUNT = "00112233445566778899aabbccddeeff".chunked(2).map { it.toInt(16).toByte() }.toByteArray()
     }
 
-    private fun defaultScp03Keys(): Triple<ByteArray, ByteArray, ByteArray> {
-        // gp-master.jar default static keys (0x40..0x4F), as set in the applet constructor
-        val key = ByteArray(16) { (0x40 + it).toByte() }
-        return Triple(key, key.copyOf(), key.copyOf())
-    }
-
-    private fun newSdk(): ImpalaSDK = ImpalaSDK(SimulatorBibo(), defaultScp03Keys())
+    private fun newSdk(): ImpalaSDK = ImpalaSDK(SimulatorBibo(), defaultKeys())
 
     // --- Plain (unsecured) command round-trips ---
 
@@ -59,7 +47,7 @@ class AppletInteropTest {
 
         val version = sdk.getImpalaAppletVersion()
         assertEquals(0, version.major.toInt())
-        assertEquals(1, version.minor.toInt())
+        assertEquals(2, version.minor.toInt())
 
         sdk.setUserName("Jane Impala")
         assertEquals("Jane Impala", sdk.getFullName())
@@ -80,113 +68,6 @@ class AppletInteropTest {
         assertEquals(0x04, pubKey[0].toInt())
     }
 
-    // --- signTransfer / verifyTransfer (ECDSA via jcardsim) ---
-
-    @Test
-    fun `verifyTransfer credits and signTransfer debits with a JCA-verifiable signature`() {
-        val sdk = newSdk()
-        sdk.setSeed()
-
-        // Fund the card: an external JCA keypair signs a transfer whose recipient
-        // is the card's account id (all zeros until provisioned). verifyTransfer
-        // trusts the pubkey embedded in the message tail.
-        val externalKeys = genP256()
-        val externalId = ByteArray(16) { (it + 1).toByte() }
-        val cardAccountId = ByteArray(16)
-
-        val funding = buildSignable(sender = externalId, recipient = cardAccountId, amount = 1000)
-        sdk.verifyTransfer(
-            funding,
-            pad72(signP256(externalKeys.private, funding)),
-            uncompressedPoint(externalKeys.public as ECPublicKey),
-            ByteArray(72)
-        )
-        assertEquals(1000L, sdk.getBalance())
-
-        // Spend from the card with the default user PIN; verify the card's
-        // ECDSA-SHA256 signature host-side with JCA.
-        val spend = buildSignable(sender = cardAccountId, recipient = externalId, amount = 250)
-        val (signature, pubKey, _) = sdk.signTransfer("1111", spend)
-        assertEquals(750L, sdk.getBalance())
-
-        assertEquals(65, pubKey.size)
-        val cardPublicKey = jcaPublicKey(pubKey.toByteArray())
-        assertTrue(verifyP256(cardPublicKey, spend, trimDer(signature.toByteArray())))
-    }
-
-    // --- verifyTransfer replay protection (receive counter) ---
-
-    @Test
-    fun `verifyTransfer rejects replays and stale counters but allows counter gaps`() {
-        val sdk = newSdk()
-        sdk.setSeed()
-        val externalKeys = genP256()
-        val externalId = ByteArray(16) { (it + 1).toByte() }
-        val cardAccountId = ByteArray(16)
-        val pubKey = uncompressedPoint(externalKeys.public as ECPublicKey)
-
-        val funding = buildSignable(externalId, cardAccountId, amount = 1000, counter = 1)
-        val sig = pad72(signP256(externalKeys.private, funding))
-        sdk.verifyTransfer(funding, sig, pubKey, ByteArray(72))
-        assertEquals(1000L, sdk.getBalance())
-
-        // Replaying the full two-phase exchange must not credit again (0x6233)
-        val fullReplay = assertFailsWith<ImpalaException> {
-            sdk.verifyTransfer(funding, sig, pubKey, ByteArray(72))
-        }
-        assertTrue(fullReplay.message!!.contains("6233"))
-        assertEquals(1000L, sdk.getBalance())
-
-        // Replaying only the P1=0x01 tail cannot re-verify either: the applet
-        // consumed the buffered signable after the successful credit
-        assertFailsWith<ImpalaException> {
-            sdk.tx(
-                CommandAPDU(
-                    0x00, Constants.INS_VERIFY_TRANSFER.toInt(), 0x01, 0x00,
-                    sig + pubKey + ByteArray(72)
-                )
-            )
-        }
-        assertEquals(1000L, sdk.getBalance())
-
-        // A fresh, differently-signed transfer whose counter is not strictly
-        // greater than the last accepted one is rejected too
-        val stale = buildSignable(externalId, cardAccountId, amount = 500, counter = 1)
-        assertFailsWith<ImpalaException> {
-            sdk.verifyTransfer(stale, pad72(signP256(externalKeys.private, stale)), pubKey, ByteArray(72))
-        }
-        assertEquals(1000L, sdk.getBalance())
-
-        // ...while a gap in the counter stream is fine (5 > 1): a transfer that
-        // was signed but never presented must not jam later ones
-        val next = buildSignable(externalId, cardAccountId, amount = 500, counter = 5)
-        sdk.verifyTransfer(next, pad72(signP256(externalKeys.private, next)), pubKey, ByteArray(72))
-        assertEquals(1500L, sdk.getBalance())
-    }
-
-    @Test
-    fun `verifyTransfer never accepts a zero or negative counter`() {
-        val sdk = newSdk()
-        sdk.setSeed()
-        val externalKeys = genP256()
-        val externalId = ByteArray(16) { (it + 1).toByte() }
-        val cardAccountId = ByteArray(16)
-        val pubKey = uncompressedPoint(externalKeys.public as ECPublicKey)
-
-        for (counter in intArrayOf(0, -1)) {
-            val transfer = buildSignable(externalId, cardAccountId, amount = 100, counter = counter)
-            assertFailsWith<ImpalaException> {
-                sdk.verifyTransfer(
-                    transfer,
-                    pad72(signP256(externalKeys.private, transfer)),
-                    pubKey,
-                    ByteArray(72)
-                )
-            }
-            assertEquals(0L, sdk.getBalance())
-        }
-    }
-
     // --- SIGN_AUTH domain tag (pinned card-auth contract) ---
 
     /**
@@ -196,47 +77,44 @@ class AppletInteropTest {
      */
     @Test
     fun `sign auth signature verifies host-side over the pinned domain-tagged message`() {
-        val sdk = newSdk()
-        sdk.setSeed()
-        val cardPublicKey = jcaPublicKey(sdk.getECPubKey().toByteArray())
+        val issuer = TestIssuer()
+        val card = personalizedCard(issuer, GOLDEN_ACCOUNT)
+        val cardPublicKey = Jca.jcaPublicKey(card.sdk.getECPubKey().toByteArray())
 
         val challenge = ByteArray(32) { it.toByte() }
-        val signature = sdk.signAuthChallenge(challenge).toByteArray()
+        val signature = card.sdk.signAuthChallenge(challenge).toByteArray()
 
         // Pinned domain tag bytes: 49 4D 50 41 4C 41 2D 41 55 54 48 3A
-        val domainTag = byteArrayOf(
-            0x49, 0x4D, 0x50, 0x41, 0x4C, 0x41, 0x2D, 0x41, 0x55, 0x54, 0x48, 0x3A
-        )
+        val domainTag = byteArrayOf(0x49, 0x4D, 0x50, 0x41, 0x4C, 0x41, 0x2D, 0x41, 0x55, 0x54, 0x48, 0x3A)
         assertContentEquals("IMPALA-AUTH:".encodeToByteArray(), domainTag)
+        // The bridge golden (card_auth.rs:404): "IMPALA-AUTH:" ‖ accountId
+        assertEquals("494d50414c412d415554483a00112233445566778899aabbccddeeff",
+            (domainTag + GOLDEN_ACCOUNT).toByteString().hex())
 
-        val accountId = ByteArray(16) // all zeros until provisioned
-        assertTrue(verifyP256(cardPublicKey, domainTag + accountId + challenge, signature))
-
-        // The signature must NOT verify without the tag (the pre-contract format)...
-        assertFalse(verifyP256(cardPublicKey, accountId + challenge, signature))
-        // ...nor over the bare challenge, nor a different account id
-        assertFalse(verifyP256(cardPublicKey, challenge, signature))
-        assertFalse(verifyP256(cardPublicKey, domainTag + ByteArray(16) { 1 } + challenge, signature))
+        assertTrue(Jca.verifyP256(cardPublicKey, domainTag + GOLDEN_ACCOUNT + challenge, signature))
+        // The signature must NOT verify without the tag, over the bare challenge, or for a different account
+        assertFalse(Jca.verifyP256(cardPublicKey, GOLDEN_ACCOUNT + challenge, signature))
+        assertFalse(Jca.verifyP256(cardPublicKey, challenge, signature))
+        assertFalse(Jca.verifyP256(cardPublicKey, domainTag + ByteArray(16) { 1 } + challenge, signature))
     }
 
     @Test
     fun `sign auth accepts 8 to 64 byte challenges and rejects lengths outside that range`() {
-        val sdk = newSdk()
-        sdk.setSeed()
-        val cardPublicKey = jcaPublicKey(sdk.getECPubKey().toByteArray())
+        val issuer = TestIssuer()
+        val card = personalizedCard(issuer, GOLDEN_ACCOUNT)
+        val cardPublicKey = Jca.jcaPublicKey(card.sdk.getECPubKey().toByteArray())
         val domainTag = "IMPALA-AUTH:".encodeToByteArray()
-        val accountId = ByteArray(16)
 
         for (length in intArrayOf(8, 64)) {
             val challenge = ByteArray(length) { (length + it).toByte() }
-            val signature = sdk.signAuthChallenge(challenge).toByteArray()
-            assertTrue(verifyP256(cardPublicKey, domainTag + accountId + challenge, signature))
+            val signature = card.sdk.signAuthChallenge(challenge).toByteArray()
+            assertTrue(Jca.verifyP256(cardPublicKey, domainTag + GOLDEN_ACCOUNT + challenge, signature))
         }
 
         for (length in intArrayOf(1, 7, 65)) {
             // raw APDU: the length floor/ceiling is enforced by the applet itself
             assertFailsWith<ImpalaWrongLengthException> {
-                sdk.tx(CommandAPDU(Constants.INS_SIGN_AUTH, ByteArray(length)))
+                card.sdk.tx(CommandAPDU(Constants.INS_SIGN_AUTH, ByteArray(length)))
             }
         }
     }
@@ -245,39 +123,33 @@ class AppletInteropTest {
 
     @Test
     fun `failed PIN-less transfers do not burn the PIN-less budget`() {
-        val sdk = newSdk()
-        sdk.setSeed()
-        val externalKeys = genP256()
-        val externalId = ByteArray(16) { (it + 1).toByte() }
-        val cardAccountId = ByteArray(16)
+        val issuer = TestIssuer()
+        val cardAId = ByteArray(16) { (it + 1).toByte() }
+        val card = personalizedCard(issuer, cardAId)
+        val treasury = issuer.externalSender(ByteArray(16) { (0x50 + it).toByte() })
+        val recipient = ByteArray(16) { (0x70 + it).toByte() }
+        val seq = SeqAllocator()
 
-        // Balance is zero: PIN-less attempts keep failing with insufficient
-        // funds — never with "PIN required" (before the tearing fix, each failed
-        // attempt burned a unit of PIN-less budget before the balance check).
+        // Balance is zero: PIN-less attempts keep failing with insufficient funds —
+        // never "PIN required" (before the tearing fix each failed attempt burned budget).
         repeat(MAX_PINLESS_TRANSFERS + 1) {
             assertFailsWith<ImpalaInsufficientFundsException> {
-                sdk.signTransfer("0000", buildSignable(cardAccountId, externalId, amount = 1))
+                card.sdk.signTransferV2("0000", signable(cardAId, recipient, amount = 1, counter = 1, seq))
             }
         }
 
         // Fund the card — the full PIN-less budget must still be available
-        val funding = buildSignable(externalId, cardAccountId, amount = 1000)
-        sdk.verifyTransfer(
-            funding,
-            pad72(signP256(externalKeys.private, funding)),
-            uncompressedPoint(externalKeys.public as ECPublicKey),
-            ByteArray(72)
-        )
+        fund(card, treasury, 1000, seq)
         repeat(MAX_PINLESS_TRANSFERS) {
-            sdk.signTransfer("0000", buildSignable(cardAccountId, externalId, amount = 1))
+            card.sdk.signTransferV2("0000", signable(cardAId, recipient, amount = 1, counter = 1, seq))
         }
         // Budget exhausted: the next PIN-less attempt requires a real PIN (0x6690)
         assertFailsWith<ImpalaSecurityException> {
-            sdk.signTransfer("0000", buildSignable(cardAccountId, externalId, amount = 1))
+            card.sdk.signTransferV2("0000", signable(cardAId, recipient, amount = 1, counter = 1, seq))
         }
         // A PIN-verified transfer resets the counter, re-enabling PIN-less
-        sdk.signTransfer("1111", buildSignable(cardAccountId, externalId, amount = 1))
-        sdk.signTransfer("0000", buildSignable(cardAccountId, externalId, amount = 1))
+        card.sdk.signTransferV2("1111", signable(cardAId, recipient, amount = 1, counter = 1, seq))
+        card.sdk.signTransferV2("0000", signable(cardAId, recipient, amount = 1, counter = 1, seq))
     }
 
     // --- Master-PIN-authorized user PIN update ---
@@ -285,28 +157,18 @@ class AppletInteropTest {
     @Test
     fun `update user PIN rejects lengths other than 4 digits`() {
         val sdk = newSdk()
-        sdk.tx(verifyMasterPinCmd(byteArrayOf(1, 4, 1, 1, 7, 2, 9, 8)))
+        sdk.tx(Jca.verifyMasterPinCmd(byteArrayOf(1, 4, 1, 1, 7, 2, 9, 8)))
 
         // A stored PIN of any other length could never satisfy SIGN_TRANSFER's
         // fixed 4-digit check and would lock the user out attempt by attempt
         for (pin in listOf(byteArrayOf(1, 2, 3), byteArrayOf(1, 2, 3, 4, 5))) {
             assertFailsWith<ImpalaWrongLengthException> {
-                sdk.tx(
-                    CommandAPDU(
-                        0x00, Constants.INS_UPDATE_USER_PIN.toInt(),
-                        0x00, Constants.P2_USER_PIN.toInt(), pin
-                    )
-                )
+                sdk.tx(CommandAPDU(0x00, Constants.INS_UPDATE_USER_PIN.toInt(), 0x00, Constants.P2_USER_PIN.toInt(), pin))
             }
         }
         // The stored PIN is unchanged, and a 4-digit update still works
         sdk.verifyUserPin("1111")
-        sdk.tx(
-            CommandAPDU(
-                0x00, Constants.INS_UPDATE_USER_PIN.toInt(),
-                0x00, Constants.P2_USER_PIN.toInt(), byteArrayOf(9, 9, 9, 9)
-            )
-        )
+        sdk.tx(CommandAPDU(0x00, Constants.INS_UPDATE_USER_PIN.toInt(), 0x00, Constants.P2_USER_PIN.toInt(), byteArrayOf(9, 9, 9, 9)))
         sdk.verifyUserPin("9999")
     }
 
@@ -315,12 +177,13 @@ class AppletInteropTest {
     @Test
     fun `empty install parameters leave all defaults in place`() {
         // exercises the install envelope parser with a zero-length applet data field
-        val sdk = ImpalaSDK(SimulatorBibo(installParams = ByteArray(0)), defaultScp03Keys())
+        val sdk = ImpalaSDK(SimulatorBibo(installParams = ByteArray(0)), defaultKeys())
         sdk.verifyUserPin("1111")
         assertTrue(sdk.openSecureChannel())
         sdk.closeSecureChannel()
         sdk.setSeed()
-        assertTrue(sdk.signAuthChallenge(ByteArray(32)).size > 0) // no signing gate
+        // No provisioning gate (no 0x6985); an unpersonalized card refuses SIGN_AUTH with 0x6234
+        assertFailsWith<ImpalaPersonalizationException> { sdk.signAuthChallenge(ByteArray(32)) }
     }
 
     @Test
@@ -336,7 +199,7 @@ class AppletInteropTest {
 
         // The default static keys must no longer open a secure channel...
         assertFailsWith<ImpalaException> {
-            ImpalaSDK(bibo, defaultScp03Keys()).openSecureChannel()
+            ImpalaSDK(bibo, defaultKeys()).openSecureChannel()
         }
         // ...but the injected keys do
         val sdk = ImpalaSDK(bibo, Triple(enc, mac, dek))
@@ -345,41 +208,78 @@ class AppletInteropTest {
 
         // The injected PINs replace the defaults
         sdk.verifyUserPin("4321")
-        sdk.tx(verifyMasterPinCmd(masterPin))
+        sdk.tx(Jca.verifyMasterPinCmd(masterPin))
         assertFailsWith<ImpalaPinException> { sdk.verifyUserPin("1111") }
     }
 
     @Test
     fun `provisioning enforcement gates signing until a user PIN is provisioned`() {
-        val sdk = ImpalaSDK(SimulatorBibo(installParams = byteArrayOf(0x01, 0x01)), defaultScp03Keys())
+        val bibo = SimulatorBibo(installParams = byteArrayOf(0x01, 0x01)) // ENFORCE, default keys
+        val sdk = ImpalaSDK(bibo, defaultKeys())
         sdk.setSeed()
 
-        // SIGN_AUTH and SIGN_TRANSFER answer 0x6985 while unprovisioned...
+        // SIGN_AUTH and SIGN_TRANSFER_V2 answer 0x6985 while unprovisioned...
         assertFailsWith<ImpalaSecurityException> { sdk.signAuthChallenge(ByteArray(32)) }
         assertFailsWith<ImpalaSecurityException> {
-            sdk.signTransfer("1111", buildSignable(ByteArray(16), ByteArray(16) { 1 }, amount = 1))
+            sdk.signTransferV2("1111", signable(ByteArray(16), ByteArray(16) { 1 }, amount = 1, counter = 1, SeqAllocator()))
         }
         // ...while plain reads still work
         assertEquals(0L, sdk.getBalance())
 
-        // Provisioning a user PIN over SCP03 lifts the gate
+        // PROVISION_PIN over the default keys is refused (0x6236): the ENFORCE gate
+        // must not be liftable while the SCP03 keys are still public.
         sdk.openSecureChannel()
-        sdk.provisionUserPIN("2468")
+        assertFailsWith<ImpalaSecurityException> { sdk.provisionUserPIN("2468") }
+        val custom = customKeys()
+        sdk.rotateScp03Keys(custom.first, custom.second, custom.third)
+        sdk.closeSecureChannel()
+
+        // Reopen with the rotated keys — now PROVISION_PIN succeeds and lifts the gate
+        val sdk2 = ImpalaSDK(bibo, custom)
+        sdk2.openSecureChannel()
+        sdk2.provisionUserPIN("2468")
+        sdk2.closeSecureChannel()
+
+        // Gate lifted, but the card is still unpersonalized → SIGN_AUTH is 0x6234
+        assertFailsWith<ImpalaPersonalizationException> { sdk2.signAuthChallenge(ByteArray(32)) }
+
+        // Personalize, then SIGN_AUTH succeeds
+        val issuer = TestIssuer()
+        val accountId = ByteArray(16) { (it + 2).toByte() }
+        sdk2.openSecureChannel()
+        val pub = sdk2.getECPubKey().toByteArray()
+        sdk2.personalize(accountId, USDC, issuer.programId, issuer.certify(accountId, USDC, pub), issuerPubKey = issuer.pub65)
+        sdk2.closeSecureChannel()
+        assertTrue(sdk2.signAuthChallenge(ByteArray(32)).size > 0)
+    }
+
+    @Test
+    fun `install-time PIN injection satisfies provisioning enforcement`() {
+        val custom = customKeys()
+        val params = byteArrayOf(0x01, 0x07) + custom.first + custom.second + custom.third +
+            byteArrayOf(8, 7, 6, 5, 4, 3, 2, 1) + byteArrayOf(4, 3, 2, 1)
+        val bibo = SimulatorBibo(installParams = params)
+        val sdk = ImpalaSDK(bibo, custom)
+        sdk.setSeed()
+
+        // ENFORCE is satisfied by the install PINs, but the card is not personalized → 0x6234
+        assertFailsWith<ImpalaPersonalizationException> { sdk.signAuthChallenge(ByteArray(32)) }
+
+        // Personalize over the custom keys (no PROVISION_PIN needed) → signing works
+        val issuer = TestIssuer()
+        val accountId = ByteArray(16) { (it + 3).toByte() }
+        sdk.openSecureChannel()
+        val pub = sdk.getECPubKey().toByteArray()
+        sdk.personalize(accountId, USDC, issuer.programId, issuer.certify(accountId, USDC, pub), issuerPubKey = issuer.pub65)
         sdk.closeSecureChannel()
         assertTrue(sdk.signAuthChallenge(ByteArray(32)).size > 0)
     }
 
     @Test
-    fun `install-time PIN injection satisfies provisioning enforcement`() {
-        val params = byteArrayOf(0x01, 0x05) +
-            byteArrayOf(8, 7, 6, 5, 4, 3, 2, 1) + byteArrayOf(4, 3, 2, 1)
-        val sdk = ImpalaSDK(SimulatorBibo(installParams = params), defaultScp03Keys())
-        sdk.setSeed()
-        assertTrue(sdk.signAuthChallenge(ByteArray(32)).size > 0)
-    }
-
-    @Test
     fun `malformed install parameters fail the install cleanly`() {
+        val validPub = ByteArray(65) { if (it == 0) 0x04 else (it + 1).toByte() }
+        val custom = customKeys()
+
         // truncated key block (flags claim keys but only 8 bytes follow)
         assertFails { SimulatorBibo(installParams = byteArrayOf(0x01, 0x02) + ByteArray(8)) }
         // unknown tag
@@ -388,13 +288,20 @@ class AppletInteropTest {
         assertFails { SimulatorBibo(installParams = byteArrayOf(0x01, 0x40)) }
         // all-zeros user PIN is reserved for PIN-less transfers
         assertFails {
-            SimulatorBibo(
-                installParams = byteArrayOf(0x01, 0x04) +
-                    byteArrayOf(1, 4, 1, 1, 7, 2, 9, 8) + ByteArray(4)
-            )
+            SimulatorBibo(installParams = byteArrayOf(0x01, 0x04) + byteArrayOf(1, 4, 1, 1, 7, 2, 9, 8) + ByteArray(4))
+        }
+        // program binding without custom keys (0x08 without 0x02)
+        assertFails { SimulatorBibo(installParams = byteArrayOf(0x01, 0x08) + PROGRAM_A + validPub) }
+        // program binding with a zero programId
+        assertFails {
+            SimulatorBibo(installParams = byteArrayOf(0x01, 0x0A) + custom.first + custom.second + custom.third + ByteArray(16) + validPub)
+        }
+        // custom-key flag but the key bytes ARE the GP defaults
+        assertFails {
+            SimulatorBibo(installParams = byteArrayOf(0x01, 0x02) + ByteArray(48) { (0x40 + (it % 16)).toByte() })
         }
         // a fresh default install still works after the failures above
-        ImpalaSDK(SimulatorBibo(), defaultScp03Keys()).verifyUserPin("1111")
+        ImpalaSDK(SimulatorBibo(), defaultKeys()).verifyUserPin("1111")
     }
 
     // --- SCP03 secure channel ---
@@ -428,14 +335,12 @@ class AppletInteropTest {
     @Test
     fun `unwrapped CLA 80 provision and update commands are no longer dispatched`() {
         val bibo = SimulatorBibo()
-        val sdk = ImpalaSDK(bibo, defaultScp03Keys())
+        val sdk = ImpalaSDK(bibo, defaultKeys())
         sdk.openSecureChannel()
 
         // Even with an authenticated session, the plain (un-MACed) CLA 0x80 path
         // for PROVISION_PIN / APPLET_UPDATE is gone: both answer 0x6D00.
-        val provisionPin = byteArrayOf(
-            0x80.toByte(), 0x70, 0x00, 0x00, 0x06, Constants.P2_USER_PIN, 0x04, 9, 9, 9, 9
-        )
+        val provisionPin = byteArrayOf(0x80.toByte(), 0x70, 0x00, 0x00, 0x06, Constants.P2_USER_PIN, 0x04, 9, 9, 9, 9)
         assertEquals(0x6D00, swOf(bibo.transceive(provisionPin)))
 
         val keyRotation = byteArrayOf(0x80.toByte(), 0x71, 0x00, 0x00, 0x04, 0x00, 0x01, 0x00, 0x00)
@@ -462,26 +367,20 @@ class AppletInteropTest {
     fun `master PIN provisioned over the secure channel takes effect`() {
         val sdk = newSdk()
         // Default master PIN digits accepted before provisioning
-        sdk.tx(verifyMasterPinCmd(byteArrayOf(1, 4, 1, 1, 7, 2, 9, 8)))
+        sdk.tx(Jca.verifyMasterPinCmd(byteArrayOf(1, 4, 1, 1, 7, 2, 9, 8)))
 
         sdk.openSecureChannel()
         sdk.provisionMasterPIN("87654321")
         sdk.closeSecureChannel()
 
-        sdk.tx(verifyMasterPinCmd(byteArrayOf(8, 7, 6, 5, 4, 3, 2, 1)))
+        sdk.tx(Jca.verifyMasterPinCmd(byteArrayOf(8, 7, 6, 5, 4, 3, 2, 1)))
         assertFailsWith<ImpalaPinException> {
-            sdk.tx(verifyMasterPinCmd(byteArrayOf(1, 4, 1, 1, 7, 2, 9, 8)))
+            sdk.tx(Jca.verifyMasterPinCmd(byteArrayOf(1, 4, 1, 1, 7, 2, 9, 8)))
         }
     }
 
     @Test
     fun `verifyMasterPin string API maps digits, not ASCII`() {
-        // Exercise the PUBLIC ImpalaSDK.verifyMasterPin(String) — the other
-        // tests build the APDU from raw bytes and so never covered the string
-        // mapping, which sent ASCII char codes ([0x31,...]) against a card
-        // storing raw digits ([1,...]): verification could never succeed and
-        // 10 attempts would brick the master PIN. The install default is
-        // 14117298; a correct mapping must verify, a wrong PIN must not.
         val sdk = newSdk()
         sdk.verifyMasterPin("14117298") // throws on any non-9000 SW
         assertFailsWith<ImpalaPinException> {
@@ -511,82 +410,5 @@ class AppletInteropTest {
         sdk.closeSecureChannel()
 
         sdk.verifyUserPin("2468")
-    }
-
-    // --- Helpers ---
-
-    /** Extracts the status word from a raw response APDU. */
-    private fun swOf(resp: ByteArray): Int =
-        ((resp[resp.size - 2].toInt() and 0xFF) shl 8) or (resp[resp.size - 1].toInt() and 0xFF)
-
-    /**
-     * Builds the 60-byte signable transaction buffer:
-     * [dateTime(8) | sender(16) | recipient(16) | currency(4) | amount(4) | phoneId(8) | counter(4)]
-     */
-    private fun buildSignable(sender: ByteArray, recipient: ByteArray, amount: Int, counter: Int = 1): ByteArray {
-        require(sender.size == 16 && recipient.size == 16)
-        val signable = ByteArray(60)
-        sender.copyInto(signable, 8)
-        recipient.copyInto(signable, 24)
-        writeInt32(signable, 44, amount)
-        writeInt32(signable, 56, counter)
-        return signable
-    }
-
-    private fun writeInt32(dest: ByteArray, offset: Int, value: Int) {
-        dest[offset] = ((value shr 24) and 0xFF).toByte()
-        dest[offset + 1] = ((value shr 16) and 0xFF).toByte()
-        dest[offset + 2] = ((value shr 8) and 0xFF).toByte()
-        dest[offset + 3] = (value and 0xFF).toByte()
-    }
-
-    private fun verifyMasterPinCmd(pinDigits: ByteArray): CommandAPDU =
-        CommandAPDU(0x00, Constants.INS_VERIFY_PIN.toInt(), 0x00, Constants.P2_MASTER_PIN.toInt(), pinDigits)
-
-    /** Pads a DER signature with trailing zeros to the fixed 72-byte wire slot. */
-    private fun pad72(der: ByteArray): ByteArray {
-        require(der.size <= 72) { "DER signature too long: ${der.size}" }
-        return der + ByteArray(72 - der.size)
-    }
-
-    /** Trims the trailing zero padding off a 72-byte signature slot using the DER length byte. */
-    private fun trimDer(padded: ByteArray): ByteArray =
-        padded.copyOfRange(0, (padded[1].toInt() and 0xFF) + 2)
-
-    private fun genP256(): KeyPair =
-        KeyPairGenerator.getInstance("EC").apply { initialize(ECGenParameterSpec("secp256r1")) }.generateKeyPair()
-
-    private fun signP256(privateKey: PrivateKey, data: ByteArray): ByteArray =
-        Signature.getInstance("SHA256withECDSA").run {
-            initSign(privateKey)
-            update(data)
-            sign()
-        }
-
-    private fun verifyP256(publicKey: PublicKey, data: ByteArray, der: ByteArray): Boolean =
-        Signature.getInstance("SHA256withECDSA").run {
-            initVerify(publicKey)
-            update(data)
-            verify(der)
-        }
-
-    /** Encodes a JCA EC public key as a 65-byte uncompressed SEC1 point. */
-    private fun uncompressedPoint(publicKey: ECPublicKey): ByteArray {
-        fun pad32(value: BigInteger): ByteArray {
-            val raw = value.toByteArray().let { if (it.size > 32) it.copyOfRange(it.size - 32, it.size) else it }
-            return ByteArray(32 - raw.size) + raw
-        }
-        return byteArrayOf(0x04) + pad32(publicKey.w.affineX) + pad32(publicKey.w.affineY)
-    }
-
-    /** Reconstructs a JCA public key from a 65-byte uncompressed SEC1 point on secp256r1. */
-    private fun jcaPublicKey(uncompressed: ByteArray): PublicKey {
-        require(uncompressed.size == 65 && uncompressed[0] == 0x04.toByte())
-        val x = BigInteger(1, uncompressed.copyOfRange(1, 33))
-        val y = BigInteger(1, uncompressed.copyOfRange(33, 65))
-        val params = AlgorithmParameters.getInstance("EC")
-            .apply { init(ECGenParameterSpec("secp256r1")) }
-            .getParameterSpec(ECParameterSpec::class.java)
-        return KeyFactory.getInstance("EC").generatePublic(ECPublicKeySpec(ECPoint(x, y), params))
     }
 }

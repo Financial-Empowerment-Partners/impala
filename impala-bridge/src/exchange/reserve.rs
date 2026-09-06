@@ -408,6 +408,12 @@ impl ReserveAccountGuard {
         self.account_id.as_deref() == Some(payala_account_id)
     }
 
+    /// The configured reserve account id, for listings that must exclude it
+    /// (its custody is reported under the reserve, never as a user account).
+    pub fn account_id(&self) -> Option<&str> {
+        self.account_id.as_deref()
+    }
+
     /// True when `RESERVE_ACCOUNT_ID` is set — the reserve is at least
     /// *armed*, whether or not a live handle exists. Lets `/health` tell
     /// "off" from "armed but inactive" without exposing the account id.

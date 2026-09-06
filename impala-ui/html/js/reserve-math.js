@@ -303,6 +303,27 @@ var ReserveMath = (function () {
     }
 
     /**
+     * Badge for a bucket's reconciliation drift, from a positions-report
+     * bucket (`GET /admin/reconciliation/positions`, `reserve.buckets[]`).
+     *
+     * Three-valued on purpose: `drift_ok` is null whenever the chain could
+     * not be verified (Horizon lagging/unreachable), and that must read as
+     * "unverified" — never as "fine" and never as "drift".
+     * @param {{chain_leg: boolean, drift_ok: (boolean|null|undefined), drift_minor: (number|null|undefined)}} bucket
+     * @returns {{label: string, cls: string}}
+     */
+    function driftBadge(bucket) {
+        if (!bucket || !bucket.chain_leg) return { label: 'no chain leg', cls: 'neutral' };
+        if (bucket.drift_ok === true) {
+            return bucket.drift_minor === 0
+                ? { label: 'no drift', cls: 'ok' }
+                : { label: 'in tolerance', cls: 'ok' };
+        }
+        if (bucket.drift_ok === false) return { label: 'drift', cls: 'error' };
+        return { label: 'unverified', cls: 'pending' };
+    }
+
+    /**
      * Geometry for the utilization chart: outflow bars + an inflow line,
      * scaled into a width x height viewBox. Pure data — reserve.js turns it
      * into SVG markup.
@@ -360,6 +381,7 @@ var ReserveMath = (function () {
         depletionBadge: depletionBadge,
         refundBadge: refundBadge,
         cycleBadge: cycleBadge,
+        driftBadge: driftBadge,
         chartData: chartData
     };
 })();

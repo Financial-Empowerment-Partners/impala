@@ -67,7 +67,8 @@ export default [
                 Drawer: 'writable',
                 TxFilter: 'writable',
                 ReserveMath: 'writable',
-                KeysView: 'writable'
+                KeysView: 'writable',
+                CustodyView: 'writable'
             }
         },
         rules: {

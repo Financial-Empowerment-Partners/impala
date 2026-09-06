@@ -284,6 +284,16 @@ pub struct Config {
     /// customer while it waits, so it is pure optionality against the pool.
     /// [300]
     pub reserve_quote_ttl_secs: u64,
+    /// UTC hour (0..=23) after which the daily reconciliation snapshot is
+    /// due (`RECONCILIATION_SNAPSHOT_UTC_HOUR`). [0]
+    pub reconciliation_snapshot_utc_hour: u32,
+    /// Most custodial addresses a full reconciliation walk reads
+    /// (`RECONCILIATION_MAX_ACCOUNTS`); beyond it the snapshot records
+    /// `complete = false`. [10000]
+    pub reconciliation_max_accounts: i64,
+    /// Wall-clock budget (seconds) for a full reconciliation walk
+    /// (`RECONCILIATION_DEADLINE_SECS`). [600]
+    pub reconciliation_deadline_secs: u64,
 }
 
 /// Render an optional secret as its presence, never its value.
@@ -342,6 +352,18 @@ impl std::fmt::Debug for Config {
             .field("reserve_usdt0_tickers", &self.reserve_usdt0_tickers)
             .field("reserve_deposit_ttl_secs", &self.reserve_deposit_ttl_secs)
             .field("reserve_watch_secs", &self.reserve_watch_secs)
+            .field(
+                "reconciliation_snapshot_utc_hour",
+                &self.reconciliation_snapshot_utc_hour,
+            )
+            .field(
+                "reconciliation_max_accounts",
+                &self.reconciliation_max_accounts,
+            )
+            .field(
+                "reconciliation_deadline_secs",
+                &self.reconciliation_deadline_secs,
+            )
             .field("reserve_quote_ttl_secs", &self.reserve_quote_ttl_secs)
             // Presence only — never the value.
             .field("twilio_sid", &secret_state(&self.twilio_sid))
@@ -861,6 +883,28 @@ pub fn load_config() -> Config {
         .unwrap_or(DEFAULT_RESERVE_QUOTE_TTL_SECS)
         .clamp(RESERVE_QUOTE_TTL_MIN_SECS, RESERVE_QUOTE_TTL_MAX_SECS);
 
+    let reconciliation_snapshot_utc_hour = env::var("RECONCILIATION_SNAPSHOT_UTC_HOUR")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .or_else(|| from_file("reconciliation_snapshot_utc_hour"))
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(crate::constants::DEFAULT_RECONCILIATION_SNAPSHOT_UTC_HOUR)
+        .min(23);
+    let reconciliation_max_accounts = env::var("RECONCILIATION_MAX_ACCOUNTS")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .or_else(|| from_file("reconciliation_max_accounts"))
+        .and_then(|v| v.parse::<i64>().ok())
+        .unwrap_or(crate::constants::DEFAULT_RECONCILIATION_MAX_ACCOUNTS)
+        .max(1);
+    let reconciliation_deadline_secs = env::var("RECONCILIATION_DEADLINE_SECS")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .or_else(|| from_file("reconciliation_deadline_secs"))
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(crate::constants::DEFAULT_RECONCILIATION_DEADLINE_SECS)
+        .max(10);
+
     Config {
         public_endpoint,
         service_address,
@@ -933,6 +977,9 @@ pub fn load_config() -> Config {
         reserve_deposit_ttl_secs,
         reserve_watch_secs,
         reserve_quote_ttl_secs,
+        reconciliation_snapshot_utc_hour,
+        reconciliation_max_accounts,
+        reconciliation_deadline_secs,
     }
 }
 
@@ -1012,6 +1059,10 @@ pub(crate) fn test_config() -> Config {
         reserve_deposit_ttl_secs: DEFAULT_RESERVE_DEPOSIT_TTL_SECS,
         reserve_watch_secs: DEFAULT_RESERVE_WATCH_SECS,
         reserve_quote_ttl_secs: DEFAULT_RESERVE_QUOTE_TTL_SECS,
+        reconciliation_snapshot_utc_hour:
+            crate::constants::DEFAULT_RECONCILIATION_SNAPSHOT_UTC_HOUR,
+        reconciliation_max_accounts: crate::constants::DEFAULT_RECONCILIATION_MAX_ACCOUNTS,
+        reconciliation_deadline_secs: crate::constants::DEFAULT_RECONCILIATION_DEADLINE_SECS,
     }
 }
 

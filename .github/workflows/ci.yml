@@ -48,12 +48,20 @@ on:
       - 'impala-bridge/**'
       - '.github/workflows/ci.yml'
       - 'terraform/**'
+      # docs/conservation-spec.md is pinned by a bridge test
+      # (models.rs::conservation_spec_names_every_vocabulary): a doc edit
+      # must run the pin.
+      - 'docs/conservation-spec.md'
   pull_request:
     branches: [main]
     paths:
       - 'impala-bridge/**'
       - '.github/workflows/ci.yml'
       - 'terraform/**'
+      # docs/conservation-spec.md is pinned by a bridge test
+      # (models.rs::conservation_spec_names_every_vocabulary): a doc edit
+      # must run the pin.
+      - 'docs/conservation-spec.md'
   workflow_dispatch:
     inputs:
       architecture:
@@ -154,6 +162,62 @@ jobs:
       # `cargo audit` reads Cargo.lock as-is (it has no --locked flag).
       - name: Audit dependencies for vulnerabilities
         run: cargo audit
+
+  # ===========================================================================
+  # DB lane — the opt-in integration tests under impala-bridge/tests/db prove
+  # the money-path constraints (UNIQUE anchors, NULL-CAS arms, rollbacks)
+  # against a real Postgres. The default `cargo test` stays DB-free; these run
+  # only with RUN_DB_TESTS=1 and are #[ignore] otherwise. See
+  # docs/conservation-spec.md §6.1.
+  # ===========================================================================
+  bridge-db-tests:
+    name: Bridge DB lane
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: impala-bridge
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: impala
+          POSTGRES_PASSWORD: impala
+          POSTGRES_DB: impala
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U impala"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: '1.96.0'
+
+      - name: Cache cargo registry + build
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            impala-bridge/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('impala-bridge/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Run the DB lane
+        env:
+          RUN_DB_TESTS: '1'
+          DATABASE_URL: postgres://impala:impala@localhost:5432/impala
+        run: cargo test --locked --test db -- --ignored
 
   # ===========================================================================
   # Terraform check — PR-time validation, no AWS credentials and no state.

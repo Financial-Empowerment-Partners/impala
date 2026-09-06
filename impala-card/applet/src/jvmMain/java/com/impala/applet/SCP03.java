@@ -39,10 +39,12 @@ public class SCP03 {
     private static final short KEY_LENGTH = 16;
     private static final short DERIVATION_DATA_LENGTH = 32;
 
-    // Key diversification data (10 bytes) — fixed placeholder
-    private static final byte[] KEY_DIVERSIFICATION = {
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
-    };
+    // Key diversification data (10 bytes) reported by INITIALIZE UPDATE: the
+    // first 10 bytes of the applet's cardId (setDiversificationSource stores the
+    // REFERENCE; INITIALIZE regenerates cardId in place so it stays valid). Lets
+    // a host look up per-card SCP03 keys before authenticating.
+    private static final short KEY_DIVERSIFICATION_LENGTH = 10;
+    private byte[] diversificationSource;
     // Key information (3 bytes): key version, SCP ID, SCP parameter.
     // Key version 0x02 = counter-ICV wire format; must match KEY_VERSION in the
     // SDK's SCP03Constants.kt so hosts can reject old-firmware cards cleanly.
@@ -132,10 +134,27 @@ public class SCP03 {
     }
 
     /**
+     * Sets the array whose first 10 bytes INITIALIZE UPDATE reports as key
+     * diversification data (the applet passes its cardId; the reference is kept,
+     * not a copy). Must be at least 10 bytes long.
+     */
+    public void setDiversificationSource(byte[] src) {
+        diversificationSource = src;
+    }
+
+    /**
      * Returns the current channel state.
      */
     public byte getState() {
         return channelState[IDX_STATE];
+    }
+
+    /**
+     * Returns the security level negotiated by EXTERNAL AUTHENTICATE (bit mask of
+     * SEC_CMAC / SEC_CDEC / SEC_RMAC / SEC_RENC); 0 when no session is open.
+     */
+    public byte getSecurityLevel() {
+        return channelState[IDX_SEC_LEVEL];
     }
 
     /**
@@ -209,8 +228,12 @@ public class SCP03 {
 
         // Build response: keyDiversification(10) + keyInfo(3) + cardChallenge(8) + cardCryptogram(8) = 29 bytes
         short respOffset = 0;
-        Util.arrayCopyNonAtomic(KEY_DIVERSIFICATION, (short) 0, buffer, respOffset, (short) KEY_DIVERSIFICATION.length);
-        respOffset += (short) KEY_DIVERSIFICATION.length; // +10
+        if (diversificationSource == null) {
+            Util.arrayFillNonAtomic(buffer, respOffset, KEY_DIVERSIFICATION_LENGTH, (byte) 0);
+        } else {
+            Util.arrayCopyNonAtomic(diversificationSource, (short) 0, buffer, respOffset, KEY_DIVERSIFICATION_LENGTH);
+        }
+        respOffset += KEY_DIVERSIFICATION_LENGTH; // +10
 
         Util.arrayCopyNonAtomic(KEY_INFO, (short) 0, buffer, respOffset, (short) KEY_INFO.length);
         respOffset += (short) KEY_INFO.length; // +3
@@ -370,7 +393,10 @@ public class SCP03 {
             // We'll instead modify the approach: compute CMAC block by block manually.
 
             // Practical approach: build contiguous MAC input using the buffer's unused upper portion
-            // The APDU buffer is at least 261 bytes. We can use area after the command data.
+            // The APDU buffer is 260 bytes (jcardsim 3.0.6.0 allocates exactly 260; real cards
+            // guarantee at least 261 minus the header). The MAC input ends at
+            // 5 + dataLength + 21 + payloadLen, so a secured command may carry at most
+            // 113 plaintext bytes without C-DEC and 111 with C-DEC (2*pad16(P) + 34 <= 260).
 
             short macBuildOffset = (short) (dataOffset + dataLength);
             // Build: macChainValue(16) + header(5) + payload

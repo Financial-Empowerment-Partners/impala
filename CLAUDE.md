@@ -85,7 +85,7 @@ cd terraform && terraform fmt -check -recursive && terraform init -backend=false
 
 - `ADMIN_ACCOUNT_IDS` overrides the stored DB role to admin at every token issuance — the accounts API/UI mark such accounts `allowlisted` ("effective admin"); treat the allowlist as break-glass, incompatible with granular scoping.
 - `JWT_SECRET` rotates with zero downtime via `JWT_SECRET_PREVIOUS` overlap (see `docs/runbooks/rotate-secrets.md`).
-- `cargo test` (788) runs with no Postgres/Redis: SQL is pinned by string/tripwire tests only, so schema-vs-query drift is a runtime failure class — double-check migrations against every query touching changed tables.
+- `cargo test` (875) runs with no Postgres/Redis (an opt-in DB lane, `RUN_DB_TESTS=1 DATABASE_URL=… cargo test --test db`, executes the pinned SQL against a real Postgres): SQL is pinned by string/tripwire tests only, so schema-vs-query drift is a runtime failure class — double-check migrations against every query touching changed tables.
 - lumencli's `verify-linux` pins `--platform` on every `docker run`; a bare image tag silently resolves to whichever arch was pulled last.
 - Do not run `git checkout -- <file>` to "restore" during experiments on uncommitted work — it restores HEAD and destroys in-flight changes; mutate copies outside the repo instead.
 - CI workflows are path-filtered per sub-project; the workflow file itself belongs in its own path filter.

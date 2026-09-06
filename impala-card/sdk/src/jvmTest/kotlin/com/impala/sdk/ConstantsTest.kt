@@ -1,5 +1,6 @@
 package com.impala.sdk
 
+import com.impala.sdk.scp03.SCP03Constants
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotEquals
@@ -31,6 +32,42 @@ class ConstantsTest {
         assertEquals(45, Constants.INS_SUICIDE.toInt())
         assertEquals(46, Constants.INS_IS_CARD_ALIVE.toInt())
         assertEquals(100, Constants.INS_GET_VERSION.toInt())
+        // applet 0.2 / transfer protocol v1
+        assertEquals(0x30, Constants.INS_SIGN_TRANSFER_V2.toInt())
+        assertEquals(0x31, Constants.INS_VERIFY_TRANSFER_V2.toInt())
+        assertEquals(0x34, Constants.INS_GET_PERSONALIZATION.toInt())
+        assertEquals(0x35, Constants.INS_GET_RECEIVE_STATE.toInt())
+        assertEquals(0x36, Constants.INS_GET_LAST_TRANSFER.toInt())
+        assertEquals(0x72, SCP03Constants.INS_PERSONALIZE.toInt())
+        assertEquals(0x73, SCP03Constants.INS_TERMINATE.toInt())
+    }
+
+    @Test
+    fun `transfer protocol v1 status words and constants are pinned`() {
+        assertEquals(0x6233.toShort(), Constants.SW_ERROR_TRANSFER_COUNTER_INVALID)
+        assertEquals(0x6234.toShort(), Constants.SW_ERROR_NOT_PERSONALIZED)
+        assertEquals(0x6235.toShort(), Constants.SW_ERROR_ALREADY_PERSONALIZED)
+        assertEquals(0x6236.toShort(), Constants.SW_ERROR_DEFAULT_SCP03_KEYS)
+        assertEquals(0x6237.toShort(), Constants.SW_ERROR_PERSONALIZE_SEQUENCE)
+        assertEquals(0x6238.toShort(), Constants.SW_ERROR_SEND_SEQUENCE_INVALID)
+        assertEquals(0x6239.toShort(), Constants.SW_ERROR_ZERO_AMOUNT)
+        assertEquals(0x623A.toShort(), Constants.SW_ERROR_TRANSFER_COUNTER_JUMP)
+        assertEquals(0x623B.toShort(), Constants.SW_ERROR_PROGRAM_ALREADY_BOUND)
+        assertEquals(0x6A80.toShort(), Constants.SW_WRONG_DATA)
+        assertEquals(0x6984.toShort(), Constants.SW_DATA_INVALID)
+        assertEquals(0x6A83.toShort(), Constants.SW_RECORD_NOT_FOUND)
+        assertEquals(0x6E00.toShort(), Constants.SW_CLA_NOT_SUPPORTED)
+        assertEquals(1024.toShort(), Constants.MAX_COUNTER_JUMP)
+        assertEquals(1, Constants.TRANSFER_PROTOCOL_VERSION.toInt())
+        assertEquals(1, Constants.CERT_VERSION.toInt())
+        assertEquals(89, Constants.XFER_MESSAGE_LENGTH.toInt())
+        assertEquals(114, Constants.CERT_MESSAGE_LENGTH.toInt())
+        assertEquals(159, Constants.PERSONALIZATION_LENGTH.toInt())
+        assertEquals(36, Constants.RECEIVE_STATE_LENGTH.toInt())
+        assertEquals(132, Constants.LAST_TRANSFER_LENGTH.toInt())
+        assertEquals(209, Constants.TRANSFER_RESPONSE_LENGTH.toInt())
+        assertEquals(81, Constants.PROGRAM_BLOCK_LENGTH.toInt())
+        assertEquals(40, Constants.PERSONALIZE_IDENTITY_LENGTH.toInt())
     }
 
     @Test
@@ -78,7 +115,22 @@ class ConstantsTest {
             Constants.INS_SUICIDE,
             Constants.INS_IS_CARD_ALIVE,
             Constants.INS_GET_VERSION,
+            Constants.INS_SIGN_TRANSFER_V2,
+            Constants.INS_VERIFY_TRANSFER_V2,
+            Constants.INS_GET_PERSONALIZATION,
+            Constants.INS_GET_RECEIVE_STATE,
+            Constants.INS_GET_LAST_TRANSFER,
         )
         assertEquals(codes.size, codes.toSet().size, "All INS codes should be unique")
+
+        // The secure-channel INS (CLA 0x84 only) must not overlap the application INS either
+        val scp03 = listOf(
+            SCP03Constants.INS_PROVISION_PIN,
+            SCP03Constants.INS_APPLET_UPDATE,
+            SCP03Constants.INS_PERSONALIZE,
+            SCP03Constants.INS_TERMINATE,
+        )
+        assertEquals(scp03.size, scp03.toSet().size, "All SCP03 INS codes should be unique")
+        assertTrue(codes.toSet().intersect(scp03.toSet()).isEmpty(), "SCP03 INS must not overlap application INS")
     }
 }

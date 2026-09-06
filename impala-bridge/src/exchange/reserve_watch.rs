@@ -46,7 +46,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::constants::{
-    RESERVE_AUTO_REFUND_REASONS, RESERVE_CURRENCY_USD, RESERVE_CURRENCY_USDC,
+    HORIZON_MAX_LAG_SECS, RESERVE_AUTO_REFUND_REASONS, RESERVE_CURRENCY_USD, RESERVE_CURRENCY_USDC,
     RESERVE_CURRENCY_USDT0, RESERVE_CURRENCY_XLM, RESERVE_MAX_PAYOUT_ATTEMPTS,
     RESERVE_REFUND_COOLDOWN_SECS, RESERVE_REFUND_MAX_ATTEMPTS, RESERVE_REFUND_MAX_PER_TICK,
     RESERVE_REFUND_MEMO_PREFIX, RESERVE_REFUND_MIN_MINOR, RESERVE_SCALE_STELLAR,
@@ -60,7 +60,9 @@ use crate::exchange::reserve::{
     ConversionReserve, JournalEntry, ORDER_HOLD_SQL, RESERVE_BUCKET_APPLY_SQL,
 };
 use crate::seed_protect::SeedProtector;
-use crate::stellar::horizon::{fetch_latest_cursor, fetch_payments_page, HorizonPayment};
+use crate::stellar::horizon::{
+    fetch_head_closed_at, fetch_latest_cursor, fetch_payments_page, head_is_fresh, HorizonPayment,
+};
 use crate::stellar::{PaymentParams, StellarSigner};
 use crate::telemetry::AppMetrics;
 
@@ -110,7 +112,7 @@ const STALE_INTENT_SQL: &str = "SELECT o.order_id, o.payala_account_id \
 /// Deposit-window expiry scan.
 const EXPIRABLE_SQL: &str = "SELECT order_id, payala_account_id FROM exchange_order \
      WHERE provider = 'reserve' AND status = 'awaiting_deposit' \
-       AND created_at < CURRENT_TIMESTAMP - make_interval(secs => $1) \
+       AND created_at < $2::timestamptz - make_interval(secs => $1) \
      LIMIT 50";
 
 /// What an on-chain submission actually proved.
@@ -380,6 +382,140 @@ pub async fn run(deps: ReserveWatchDeps, cancel: CancellationToken) {
     }
 }
 
+/// Which write-ahead intent row a prepared transaction's hash belongs to.
+pub(crate) enum IntentKey {
+    Order(Uuid),
+    Refund(Uuid),
+    /// A replenishment spend: the hash lands on BOTH the journal's attempt
+    /// row (`replenish_attempt` / `offramp_attempt`) and the cycle row's
+    /// `send_tx_hash`, in one transaction, each as a NULL-CAS. A re-arm can
+    /// therefore never overwrite a hash that may already have been submitted
+    /// (037 part D `uq_crr_send_tx_hash` makes two cycles unable to share
+    /// one envelope).
+    Cycle {
+        cycle_id: Uuid,
+        attempt_kind: &'static str,
+    },
+}
+
+/// Persist a prepared transaction's hash on its write-ahead intent row
+/// BEFORE submission (`UNIQUE(order_id, kind)` / the refund_id link make the
+/// row unique; a definitive-rejection retry overwrites with the new
+/// sequence's hash). The hash of a signed transaction is final, so a later
+/// "did it land?" question becomes an exact lookup by hash — a sibling
+/// order's identical payout (same address, memo and amount) can no longer be
+/// mistaken for this one. A failure here is provably pre-submit and surfaces
+/// as `Retryable`, which `classify_submit` treats as a non-permanent
+/// rejection: the driver retries later rather than submitting a transaction
+/// it could never resolve exactly.
+pub(crate) async fn record_intent_hash(
+    pool: &PgPool,
+    key: IntentKey,
+    stellar_hash: &str,
+) -> Result<(), AppError> {
+    let result = match key {
+        IntentKey::Order(order_id) => {
+            sqlx::query(
+                "UPDATE conversion_reserve_entry SET stellar_tx_hash = $2 \
+                 WHERE order_id = $1 AND kind = 'payout_attempt'",
+            )
+            .bind(order_id)
+            .bind(stellar_hash)
+            .execute(pool)
+            .await
+        }
+        IntentKey::Refund(refund_id) => {
+            sqlx::query(
+                "UPDATE conversion_reserve_entry SET stellar_tx_hash = $2 \
+                 WHERE refund_id = $1 AND kind = 'refund_intent'",
+            )
+            .bind(refund_id)
+            .bind(stellar_hash)
+            .execute(pool)
+            .await
+        }
+        IntentKey::Cycle {
+            cycle_id,
+            attempt_kind,
+        } => return record_cycle_hash(pool, cycle_id, attempt_kind, stellar_hash).await,
+    };
+    match result {
+        Ok(r) if r.rows_affected() == 1 => Ok(()),
+        Ok(_) => {
+            error!(
+                "record_intent_hash: no intent row to carry hash {}",
+                stellar_hash
+            );
+            Err(AppError::Retryable(
+                "intent row missing; not submitting".to_string(),
+            ))
+        }
+        Err(e) => {
+            error!("record_intent_hash: {}", e);
+            Err(AppError::Retryable(
+                "intent hash not recorded; not submitting".to_string(),
+            ))
+        }
+    }
+}
+
+/// `IntentKey::Cycle`: ONE transaction, two NULL-CAS statements
+/// (`CYCLE_ENTRY_HASH_SQL`, `CYCLE_ROW_HASH_SQL`), each of which must affect
+/// exactly one row — anything else rolls back and refuses the submit. A
+/// cycle that already carries a hash is never re-armed here: its earlier
+/// envelope may have been submitted, and only the stale sweep may decide
+/// what happened to it (by hash).
+async fn record_cycle_hash(
+    pool: &PgPool,
+    cycle_id: Uuid,
+    attempt_kind: &'static str,
+    stellar_hash: &str,
+) -> Result<(), AppError> {
+    let not_recorded =
+        || AppError::Retryable("intent hash not recorded; not submitting".to_string());
+    let mut tx = pool.begin().await.map_err(|e| {
+        error!("record_intent_hash: cycle begin: {}", e);
+        not_recorded()
+    })?;
+    let entry = sqlx::query(crate::exchange::replenish::CYCLE_ENTRY_HASH_SQL)
+        .bind(cycle_id)
+        .bind(stellar_hash)
+        .bind(attempt_kind)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| {
+            error!("record_intent_hash: cycle entry: {}", e);
+            not_recorded()
+        })?;
+    if entry.rows_affected() != 1 {
+        error!(
+            "record_intent_hash: cycle {} has no hashless {} row to carry hash {}",
+            cycle_id, attempt_kind, stellar_hash
+        );
+        return Err(not_recorded());
+    }
+    let row = sqlx::query(crate::exchange::replenish::CYCLE_ROW_HASH_SQL)
+        .bind(cycle_id)
+        .bind(stellar_hash)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| {
+            error!("record_intent_hash: cycle row: {}", e);
+            not_recorded()
+        })?;
+    if row.rows_affected() != 1 {
+        error!(
+            "record_intent_hash: cycle {} is not a hashless 'sending' row; refusing hash {}",
+            cycle_id, stellar_hash
+        );
+        return Err(not_recorded());
+    }
+    tx.commit().await.map_err(|e| {
+        error!("record_intent_hash: cycle commit: {}", e);
+        not_recorded()
+    })
+}
+
 /// A session-level Postgres advisory lock that is safe to hold across
 /// cancellable and panicking work.
 ///
@@ -464,8 +600,11 @@ async fn tick_inner(deps: &ReserveWatchDeps) -> Result<(), AppError> {
     freeze_stale_refunds(deps).await;
     // Expiry only when this tick saw the chain up to now: a Horizon outage
     // must delay expiry rather than race a deposit that already landed.
-    if deposits_drained.is_ok() {
-        expire_stale_orders(deps).await;
+    // The deadline is measured against Horizon's own ingestion head, not the
+    // wall clock, so an order expires only once the chain is proven past its
+    // deposit window (a lag never races a landed-but-uningested deposit).
+    if let Ok(head) = deposits_drained {
+        expire_stale_orders(deps, head).await;
     }
     // Quote expiry is deliberately NOT gated: a price lock has no on-chain
     // leg, so nothing can race it but create_order — which the row lock
@@ -479,7 +618,7 @@ async fn tick_inner(deps: &ReserveWatchDeps) -> Result<(), AppError> {
         crate::exchange::replenish::drive_replenishment(deps).await;
     }
     crate::exchange::replenish::freeze_stale_cycles(deps).await;
-    deposits_drained
+    deposits_drained.map(|_| ())
 }
 
 /// Release capacity held by price locks that were never used.
@@ -583,13 +722,33 @@ impl UnmatchedEventBudget {
     }
 }
 
-async fn drain_deposits(deps: &ReserveWatchDeps) -> Result<(), AppError> {
+/// Drain the payments feed, then prove the chain view is CURRENT: returns
+/// Horizon's ingestion head (latest ledger close time) when it is within
+/// `HORIZON_MAX_LAG_SECS` of now, and an error otherwise. A lagging Horizon
+/// answers every page honestly for what it has ingested — which is exactly
+/// how an empty page used to read as "chain up to date" and let expiry run
+/// against deposits that had landed but not yet been ingested. Everything
+/// chain-dependent in `tick_inner` (expiry, payouts, refunds, replenishment)
+/// keys off this result; the records Horizon has are still processed.
+async fn drain_deposits(
+    deps: &ReserveWatchDeps,
+) -> Result<chrono::DateTime<chrono::Utc>, AppError> {
     let mut budget = UnmatchedEventBudget::default();
     let result = drain_deposit_pages(deps, &mut budget).await;
     // Summaries go out even when the scan failed part-way: the rows they
     // describe are already committed, and the feed must not lose them.
     flush_unmatched_summaries(deps, &budget).await;
-    result
+    result?;
+    let head = fetch_head_closed_at(&deps.http, &deps.horizon_url).await?;
+    if !head_is_fresh(head, chrono::Utc::now(), HORIZON_MAX_LAG_SECS) {
+        warn!(
+            "reserve watcher: Horizon head {} is more than {}s behind; deferring expiry, \
+             payouts, refunds and replenishment until it catches up",
+            head, HORIZON_MAX_LAG_SECS
+        );
+        return Err(AppError::Retryable("Horizon is lagging".to_string()));
+    }
+    Ok(head)
 }
 
 /// One `reserve.unmatched_deposit_summary` per currency whose rows were
@@ -1377,10 +1536,23 @@ async fn drive_one_payout(deps: &ReserveWatchDeps, order: &PayoutOrderRow) -> Re
         ),
         fee: None,
     };
-    let submitted = deps
-        .signer
-        .sign_and_submit_payment(seed.as_slice(), &params)
-        .await;
+    // Prepare, persist the hash on the write-ahead intent, THEN submit — no
+    // hash, no submit (see record_intent_hash).
+    let submitted = match deps.signer.prepare_payment(seed.as_slice(), &params).await {
+        Ok(prepared) => {
+            match record_intent_hash(
+                &deps.pool,
+                IntentKey::Order(order.order_id),
+                &prepared.stellar_hash,
+            )
+            .await
+            {
+                Ok(()) => deps.signer.submit_prepared(&prepared).await,
+                Err(e) => Err(e),
+            }
+        }
+        Err(e) => Err(e),
+    };
     // `seed` zeroizes on drop.
 
     match classify_submit(&submitted) {
@@ -1974,10 +2146,23 @@ async fn drive_one_refund(deps: &ReserveWatchDeps, r: &DueRefundRow) -> Result<(
         memo: r.memo.clone(),
         fee: None,
     };
-    let submitted = deps
-        .signer
-        .sign_and_submit_payment(seed.as_slice(), &params)
-        .await;
+    // As for payouts: the prepared hash is persisted on the refund_intent
+    // row before submission, so an ambiguous outcome resolves by hash.
+    let submitted = match deps.signer.prepare_payment(seed.as_slice(), &params).await {
+        Ok(prepared) => {
+            match record_intent_hash(
+                &deps.pool,
+                IntentKey::Refund(r.refund_id),
+                &prepared.stellar_hash,
+            )
+            .await
+            {
+                Ok(()) => deps.signer.submit_prepared(&prepared).await,
+                Err(e) => Err(e),
+            }
+        }
+        Err(e) => Err(e),
+    };
     // `seed` zeroizes on drop.
 
     match classify_submit(&submitted) {
@@ -2287,9 +2472,13 @@ async fn freeze_stale_intents(deps: &ReserveWatchDeps) {
 
 // ── Phase 4: expiry ────────────────────────────────────────────────────
 
-async fn expire_stale_orders(deps: &ReserveWatchDeps) {
+async fn expire_stale_orders(
+    deps: &ReserveWatchDeps,
+    head_closed_at: chrono::DateTime<chrono::Utc>,
+) {
     let expirable: Vec<(Uuid, String)> = match sqlx::query_as(EXPIRABLE_SQL)
         .bind(deps.reserve.deposit_ttl_secs as f64)
+        .bind(head_closed_at)
         .fetch_all(&deps.pool)
         .await
     {

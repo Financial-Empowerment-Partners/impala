@@ -40,6 +40,7 @@ use crate::constants::{
     CREDENTIAL_SUPERSEDE_GRACE_SECS, VALID_CREDENTIAL_KINDS,
 };
 use crate::error::AppError;
+use crate::events::{emit_event, AccountEvent};
 use crate::seed_protect::{ProtectedSeed, ProtectorBackend, SeedProtector};
 
 const TS_FMT: &str = "YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"";
@@ -447,6 +448,11 @@ async fn resolve_one(
 /// active and `None` when it believes there is none. Both are verified under
 /// the row lock, so two admins racing cannot both win, and an admin cannot
 /// replace a credential that changed under them since they read it.
+///
+/// `audit` builds the outbox event for the version that won; it is emitted
+/// INSIDE the winning transaction, before the commit, so a stored credential
+/// can never exist without its audit row (nor the row without the
+/// credential). A losing attempt never reaches it.
 #[allow(clippy::too_many_arguments)]
 pub async fn insert_version(
     pool: &PgPool,
@@ -456,6 +462,7 @@ pub async fn insert_version(
     expected_active_fp: Option<&str>,
     imported_by: &str,
     note: Option<&str>,
+    audit: &(dyn Fn(i32) -> AccountEvent + Sync),
 ) -> Result<i32, AppError> {
     let fingerprints = parts.fingerprints(kind);
     let set_fingerprint = super::set_fingerprint_from_parts(kind, &fingerprints);
@@ -592,6 +599,10 @@ pub async fn insert_version(
                 })?;
         }
 
+        // Transactional outbox: the audit row commits with the credential
+        // or not at all.
+        emit_event(&mut tx, &audit(next)).await?;
+
         tx.commit().await.map_err(|e| {
             error!("keys: commit failed: {}", e);
             AppError::InternalError("Database error".to_string())
@@ -609,7 +620,20 @@ pub async fn insert_version(
 /// Unlike supersession there is no overlap window: revocation is the action an
 /// operator takes when a key is believed compromised, and keeping it
 /// decryptable would leave a database reader able to recover it.
-pub async fn revoke_active(pool: &PgPool, kind: &str, expected_fp: &str) -> Result<i32, AppError> {
+///
+/// `audit` builds the outbox event for the revoked version; it commits in
+/// the same transaction as the scrub (a fingerprint mismatch rolls back and
+/// emits nothing).
+pub async fn revoke_active(
+    pool: &PgPool,
+    kind: &str,
+    expected_fp: &str,
+    audit: &(dyn Fn(i32) -> AccountEvent + Sync),
+) -> Result<i32, AppError> {
+    let mut tx = pool.begin().await.map_err(|e| {
+        error!("keys: revoke begin failed: {}", e);
+        AppError::InternalError("Database error".to_string())
+    })?;
     let revoked: Option<i32> = sqlx::query_scalar(
         "UPDATE bridge_credential \
          SET state = 'revoked', \
@@ -621,18 +645,25 @@ pub async fn revoke_active(pool: &PgPool, kind: &str, expected_fp: &str) -> Resu
     )
     .bind(kind)
     .bind(expected_fp)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *tx)
     .await
     .map_err(|e| {
         error!("keys: revoke failed: {}", e);
         AppError::InternalError("Database error".to_string())
     })?;
 
-    revoked.ok_or_else(|| {
-        AppError::Conflict(
+    let Some(version) = revoked else {
+        // Nothing changed; the transaction drops (rolls back) here.
+        return Err(AppError::Conflict(
             "No active stored credential with that fingerprint; refresh and retry".to_string(),
-        )
-    })
+        ));
+    };
+    emit_event(&mut tx, &audit(version)).await?;
+    tx.commit().await.map_err(|e| {
+        error!("keys: revoke commit failed: {}", e);
+        AppError::InternalError("Database error".to_string())
+    })?;
+    Ok(version)
 }
 
 /// Scrub superseded rows past the overlap grace. Called at startup and after
@@ -786,6 +817,44 @@ mod tests {
         assert!(ACTIVE_SQL.contains("state = 'active'"));
         assert!(PREVIOUS_SQL.contains("state = 'superseded'"));
         assert!(PREVIOUS_SQL.contains("ciphertext IS NOT NULL"));
+    }
+
+    // Transactional outbox: a credential mutation and its audit event commit
+    // together or not at all. The handler used to open a second "audit"
+    // transaction after the store committed — a crash between the two left a
+    // live credential with no record of who installed it.
+    #[test]
+    fn key_store_mutations_audit_in_the_same_transaction() {
+        let handler = include_str!("../handlers/admin_keys.rs");
+        assert!(
+            !handler.contains("\"audit begin\""),
+            "admin_keys.rs must not open a separate audit transaction"
+        );
+        let store = include_str!("store.rs");
+        let body = &store[..store.find("#[cfg(test)]").expect("tests present")];
+        assert!(
+            body.matches("emit_event(&mut tx").count() >= 2,
+            "insert_version and revoke_active each emit inside their own transaction"
+        );
+        let insert = &body[body.find("pub async fn insert_version(").unwrap()..];
+        let insert = &insert[..insert.find("pub async fn revoke_active(").unwrap()];
+        let emit = insert
+            .find("emit_event(&mut tx")
+            .expect("insert_version emits");
+        let commit = insert.find("tx.commit()").expect("insert_version commits");
+        assert!(emit < commit, "the audit row must precede the commit");
+        // A losing attempt `continue`s before the emit: the only emit sits
+        // after the version race is decided.
+        let race = insert.find("continue;").expect("version race retry");
+        assert!(race < emit);
+        let revoke = &body[body.find("pub async fn revoke_active(").unwrap()..];
+        let revoke = &revoke[..revoke.find("pub async fn scrub_expired(").unwrap()];
+        let emit = revoke
+            .find("emit_event(&mut tx")
+            .expect("revoke_active emits");
+        let commit = revoke.find("tx.commit()").expect("revoke_active commits");
+        assert!(emit < commit);
+        assert!(revoke.find("RETURNING version").unwrap() < emit);
     }
 
     // sqlx checks bind TYPES at compile time but not bind COUNT: a widened

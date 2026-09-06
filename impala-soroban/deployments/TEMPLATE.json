@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "network": "testnet",
+  "network_passphrase": "Test SDF Network ; September 2015",
+  "contract_id": "<placeholder: C… printed by stellar contract deploy>",
+  "wasm_sha256": "<placeholder: 64 hex from stellar contract upload / CI build-info.json>",
+  "wasm_artifact": "soroban_impala_integration_test.wasm",
+  "source": {
+    "git_sha": "<placeholder: 40 hex, build-info.json git_sha>",
+    "git_tag": "impala-soroban-v0.2.0",
+    "rust_toolchain": "1.96.0",
+    "target": "wasm32-unknown-unknown",
+    "soroban_sdk": "23.5.3",
+    "soroban_env_host": "23.0.1",
+    "cargo_lock_sha256": "<placeholder: 64 hex, build-info.json cargo_lock_sha256>",
+    "ci_run": "<placeholder: build-info.json ci_run URL>"
+  },
+  "usdc": {
+    "sac_contract_id": "<placeholder: stellar contract id asset --asset USDC:<issuer>>",
+    "issuer": "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5",
+    "expected_name": "USDC:GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5",
+    "self_issued": false
+  },
+  "governance": {
+    "signers": [
+      "<placeholder: G… signer 1 public key>",
+      "<placeholder: G… signer 2 public key>",
+      "<placeholder: G… signer 3 public key>"
+    ],
+    "threshold": 2,
+    "min_threshold": 2,
+    "min_lock_duration_seconds": 86400
+  },
+  "policy": {
+    "max_lock_duration_seconds": 7776000,
+    "execution_window_seconds": 2592000,
+    "ttl_threshold_ledgers": 518400,
+    "ttl_extend_to_ledgers": 2764800,
+    "instance_ttl_threshold_ledgers": 120960,
+    "instance_ttl_extend_to_ledgers": 518400,
+    "network_max_entry_ttl_at_deploy": "<placeholder: integer from `stellar contract invoke … -- max_entry_ttl`>"
+  },
+  "deploy": {
+    "upload_tx_hash": "<placeholder: 64 hex>",
+    "tx_hash": "<placeholder: 64 hex>",
+    "ledger": "<placeholder: integer>",
+    "deployer": "<placeholder: G… deployer public key>",
+    "stellar_cli_version": "<placeholder: output of `stellar --version`>",
+    "deployed_at": "<placeholder: ISO-8601 UTC>"
+  },
+  "evaluator_accounts": [
+    "<placeholder: G… holder account bumped by the keep-alive job (optional)>"
+  ],
+  "status": "active",
+  "retired": null
+}

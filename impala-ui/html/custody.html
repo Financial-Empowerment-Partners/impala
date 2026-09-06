@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Impala - Custody</title>
+    <link rel="stylesheet" href="vendor/foundation.min.css" integrity="sha384-2ZAo6d0r9zxtxn7DvMBmpd3hscGP+LkxQ/kMShaUz/TqqsBPtbtZ1K3+3/CgndDu">
+    <link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+    <a class="skip-link" href="#main-content">Skip to content</a>
+    <div class="top-bar" id="main-nav"></div>
+    <div id="toast-container" class="toast-container"></div>
+
+    <div class="grid-container" id="main-content" tabindex="-1">
+        <div class="page-header">
+            <h3>Custody</h3>
+            <p class="text-muted">The custodial payment brake and spend caps for <code>POST /managed-account/sign</code>, every payment intent the bridge has claimed, and the reconciliation snapshots that attest the reserve against the chain. Caps of 0 mean <em>unconfigured</em> &mdash; signing refuses until both are set.</p>
+        </div>
+
+        <div class="card">
+            <div class="card-section">
+                <div style="display:flex;justify-content:space-between;align-items:center;gap:1rem;flex-wrap:wrap;">
+                    <h5 style="margin:0;">Policy</h5>
+                    <div style="display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap;">
+                        <button type="button" class="button small secondary" id="policy-edit" data-permission="manage_custody">Set caps</button>
+                        <button type="button" class="button small alert" id="policy-pause" data-permission="manage_custody">Pause payments</button>
+                        <button type="button" class="button small" id="policy-resume" data-permission="manage_roles">Resume payments</button>
+                    </div>
+                </div>
+                <p class="text-muted">Anyone with the treasurer or admin role may pull the brake; only an admin releases it, with the confirmation phrase the bridge serves, and never while an intent&rsquo;s on-chain fate is unknown unless forced.</p>
+                <div id="custody-policy"><p class="text-muted">Loading&hellip;</p></div>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-section">
+                <div style="display:flex;justify-content:space-between;align-items:center;gap:1rem;flex-wrap:wrap;">
+                    <h5 style="margin:0;">Payment Intents</h5>
+                    <select id="intent-status" aria-label="Filter by status">
+                        <option value="">All statuses</option>
+                    </select>
+                </div>
+                <p class="text-muted">Every custodial payment is claimed as a write-ahead intent before the seed is opened, and its signed hash is persisted before submit. <em>Ambiguous</em> rows had an unknown submit outcome: they are resolved by hash (by the sweep after 600s, or here after reading the chain) and never resubmitted.</p>
+                <div id="custody-intents"><p class="text-muted">Loading&hellip;</p></div>
+                <div id="intents-pagination"></div>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-section">
+                <h5>Custodial Accounts</h5>
+                <p class="text-muted">Managed seeds this bridge signs for (the conversion reserve is reported on the Reserve page). A per-account daily override replaces the global cap; 0 freezes the account.</p>
+                <div id="custody-accounts"><p class="text-muted">Loading&hellip;</p></div>
+                <div id="accounts-pagination"></div>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-section">
+                <div style="display:flex;justify-content:space-between;align-items:center;gap:1rem;flex-wrap:wrap;">
+                    <h5 style="margin:0;">Reconciliation Snapshots</h5>
+                    <button type="button" class="button small secondary" id="snapshot-run" data-permission="manage_custody">Run snapshot now</button>
+                </div>
+                <p class="text-muted">One daily snapshot per UTC date is recorded automatically. A row is <em>attested</em> only when Horizon was fresh, every custodial address was read, and every invariant held &mdash; a lagging day is kept as evidence, not as a pass.</p>
+                <div id="custody-snapshots"><p class="text-muted">Loading&hellip;</p></div>
+                <div id="snapshots-pagination"></div>
+            </div>
+        </div>
+    </div>
+
+    <script src="config.js"></script>
+    <script src="js/escape-html.js"></script>
+    <script src="js/api.js"></script>
+    <script src="js/theme.js"></script>
+    <script src="js/roles.js"></script>
+    <script src="js/auth.js"></script>
+    <script src="js/net-config.js"></script>
+    <script src="js/net.js"></script>
+    <script src="js/session-timer.js"></script>
+    <script src="js/router.js"></script>
+    <script src="js/modal.js"></script>
+    <script src="js/paginate.js"></script>
+    <script src="js/custody-view.js"></script>
+    <script src="js/custody.js"></script>
+</body>
+</html>

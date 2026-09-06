@@ -22,7 +22,8 @@
  *
  * Lateral privileged roles — specializations of the admin surface, none
  * includes another; admin remains the superset:
- *  - treasurer:     reserve & replenishment money operations
+ *  - treasurer:     reserve & replenishment money operations, custodial
+ *                   pause/caps (the money brake; only admin releases it)
  *  - key-custodian: bridge credentials & custodial seeds
  *  - auditor:       read-only oversight of every privileged surface
  *
@@ -51,8 +52,8 @@ var Roles = (function () {
         },
         'treasurer': {
             label: 'Treasurer',
-            description: 'Reserve & replenishment money operations: disbursement, refunds, write-offs, policy. No key custody, no governance.',
-            permissions: ['view_accounts', 'view_mfa', 'view_transactions', 'view_cards', 'view_reserve', 'manage_reserve', 'view_roles']
+            description: 'Reserve & replenishment money operations: disbursement, refunds, write-offs, policy, custodial pause/limits. No key custody, no governance.',
+            permissions: ['view_accounts', 'view_mfa', 'view_transactions', 'view_cards', 'view_reserve', 'manage_reserve', 'view_custody', 'manage_custody', 'view_roles']
         },
         'key-custodian': {
             label: 'Key Custodian',
@@ -62,12 +63,12 @@ var Roles = (function () {
         'auditor': {
             label: 'Auditor',
             description: 'Read-only oversight of every privileged surface for compliance and reconciliation. Holds no privileged mutation.',
-            permissions: ['view_accounts', 'view_accounts_list', 'view_mfa', 'view_transactions', 'view_cards', 'view_reserve', 'view_keys', 'view_roles']
+            permissions: ['view_accounts', 'view_accounts_list', 'view_mfa', 'view_transactions', 'view_cards', 'view_reserve', 'view_keys', 'view_custody', 'view_roles']
         },
         'admin': {
             label: 'Admin',
             description: 'Everything, including governance: role grants, account deletion, directory sync, webhooks, transaction review.',
-            permissions: ['view_accounts', 'view_accounts_list', 'manage_accounts', 'delete_accounts', 'sync_profile', 'view_mfa', 'manage_mfa', 'view_transactions', 'create_transactions', 'review_transactions', 'view_cards', 'manage_cards', 'view_roles', 'manage_roles', 'view_reserve', 'manage_reserve', 'view_keys', 'manage_keys']
+            permissions: ['view_accounts', 'view_accounts_list', 'manage_accounts', 'delete_accounts', 'sync_profile', 'view_mfa', 'manage_mfa', 'view_transactions', 'create_transactions', 'review_transactions', 'view_cards', 'manage_cards', 'view_roles', 'manage_roles', 'view_reserve', 'manage_reserve', 'view_keys', 'manage_keys', 'view_custody', 'manage_custody']
         }
     };
 

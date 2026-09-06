@@ -59,6 +59,18 @@ describe('lateral role isolation (no lateral role includes another)', () => {
     it('key-custodian holds no treasury access at all', () => {
         expect(Roles.roleHasPermission('key-custodian', 'manage_reserve')).toBe(false);
         expect(Roles.roleHasPermission('key-custodian', 'view_reserve')).toBe(false);
+        expect(Roles.roleHasPermission('key-custodian', 'manage_custody')).toBe(false);
+        expect(Roles.roleHasPermission('key-custodian', 'view_custody')).toBe(false);
+    });
+
+    it('custody is the treasurer surface, readable by the auditor', () => {
+        // The money brake: treasurer and admin pull it; the auditor sees the
+        // policy and every open intent but can act on none of it.
+        expect(Roles.roleHasPermission('treasurer', 'manage_custody')).toBe(true);
+        expect(Roles.roleHasPermission('treasurer', 'view_custody')).toBe(true);
+        expect(Roles.roleHasPermission('auditor', 'view_custody')).toBe(true);
+        expect(Roles.roleHasPermission('auditor', 'manage_custody')).toBe(false);
+        expect(Roles.roleHasPermission('admin', 'manage_custody')).toBe(true);
     });
 
     it('auditor holds no manage_* permission that exists anywhere', () => {
@@ -116,16 +128,16 @@ describe('governance isolation', () => {
         // pattern: adding a permission to a lateral role must be a conscious
         // edit here, not a quiet drift.
         expect([...Roles.DEFINITIONS['treasurer'].permissions].sort()).toEqual([
-            'manage_reserve', 'view_accounts', 'view_cards', 'view_mfa',
-            'view_reserve', 'view_roles', 'view_transactions'
+            'manage_custody', 'manage_reserve', 'view_accounts', 'view_cards',
+            'view_custody', 'view_mfa', 'view_reserve', 'view_roles', 'view_transactions'
         ]);
         expect([...Roles.DEFINITIONS['key-custodian'].permissions].sort()).toEqual([
             'manage_keys', 'view_accounts', 'view_accounts_list', 'view_cards',
             'view_keys', 'view_mfa', 'view_roles', 'view_transactions'
         ]);
         expect([...Roles.DEFINITIONS['auditor'].permissions].sort()).toEqual([
-            'view_accounts', 'view_accounts_list', 'view_cards', 'view_keys',
-            'view_mfa', 'view_reserve', 'view_roles', 'view_transactions'
+            'view_accounts', 'view_accounts_list', 'view_cards', 'view_custody',
+            'view_keys', 'view_mfa', 'view_reserve', 'view_roles', 'view_transactions'
         ]);
     });
 });

@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "network": "testnet",
+  "network_passphrase": "Test SDF Network ; September 2015",
+  "contract_id": "<TF_VAR_testnet_soroban_contract_id>",
+  "wasm_sha256": null,
+  "wasm_artifact": "soroban_impala_integration_test.wasm",
+  "source": null,
+  "usdc": null,
+  "governance": null,
+  "policy": null,
+  "deploy": null,
+  "evaluator_accounts": [],
+  "status": "retired",
+  "retired": {
+    "reason": "pre-constructor ABI; instance storage; no issuer pin. Deployed before this record existed via the initialize() entry point; its id lives only in the CI secret TF_VAR_testnet_soroban_contract_id (terraform/variables.tf testnet_soroban_contract_id). It never held recorded value and the bridge never invoked it. Rename this file to <contract_id>.json and fill contract_id once the id is read from the secret.",
+    "superseded_by": null,
+    "retired_at": "2026-09-05T00:00:00Z"
+  }
+}

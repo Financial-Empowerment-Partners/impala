@@ -41,25 +41,26 @@ describe('Router.linksForRole', () => {
         expect(privilegedLabels('token')).toEqual([]);
     });
 
-    it('treasurer sees Reserve and Roles but never Keys', () => {
-        expect(privilegedLabels('treasurer')).toEqual(['Reserve', 'Roles']);
+    it('treasurer sees Reserve, Custody and Roles but never Keys', () => {
+        expect(privilegedLabels('treasurer')).toEqual(['Reserve', 'Custody', 'Roles']);
     });
 
-    it('key-custodian sees Keys and Roles but never Reserve', () => {
+    it('key-custodian sees Keys and Roles but never Reserve or Custody', () => {
         expect(privilegedLabels('key-custodian')).toEqual(['Keys', 'Roles']);
     });
 
     it('auditor sees every privileged surface (read-only oversight)', () => {
-        expect(privilegedLabels('auditor')).toEqual(['Reserve', 'Keys', 'Roles']);
+        expect(privilegedLabels('auditor')).toEqual(['Reserve', 'Custody', 'Keys', 'Roles']);
     });
 
     it('admin sees every privileged surface', () => {
-        expect(privilegedLabels('admin')).toEqual(['Reserve', 'Keys', 'Roles']);
+        expect(privilegedLabels('admin')).toEqual(['Reserve', 'Custody', 'Keys', 'Roles']);
     });
 
     it('privileged links carry the expected hrefs', () => {
         expect(Router.linksForRole('admin').privileged).toEqual([
             { href: 'reserve.html', label: 'Reserve' },
+            { href: 'custody.html', label: 'Custody' },
             { href: 'keys.html', label: 'Keys' },
             { href: 'admin.html', label: 'Roles' }
         ]);

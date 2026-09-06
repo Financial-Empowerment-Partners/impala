@@ -7,7 +7,9 @@
     "ReadKeys": ["admin", "key-custodian", "auditor"],
     "ReadAccounts": ["admin", "auditor", "key-custodian"],
     "ReadTransactions": ["admin", "auditor"],
-    "ReadEvents": ["admin", "auditor"]
+    "ReadEvents": ["admin", "auditor"],
+    "ManageCustody": ["admin", "treasurer"],
+    "ReadCustody": ["admin", "treasurer", "auditor"]
   },
   "roles": ["view-only", "device", "token", "treasurer", "key-custodian", "auditor", "admin"]
 }

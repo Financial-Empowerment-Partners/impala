@@ -42,6 +42,7 @@
      */
     var state = {
         status: null,
+        positions: null,     // reconciliation report (view_custody only)
         forecast: null,
         scales: {},          // currency -> minor_scale, from status buckets only
         ledger: null,
@@ -105,6 +106,28 @@
         });
     }
 
+    /**
+     * The reconciliation report's bucket for `currency`, when the report is
+     * loaded. Drift is computed by the bridge (chain minus ledger against
+     * the bucket's tolerance); this page only renders the verdict.
+     */
+    function positionFor(currency) {
+        var list = (state.positions && state.positions.reserve && state.positions.reserve.buckets) || [];
+        for (var i = 0; i < list.length; i++) {
+            if (list[i].currency === currency) return list[i];
+        }
+        return null;
+    }
+
+    /** Drift verdicts come from /admin/reconciliation/positions (ReadCustody). */
+    function loadPositions() {
+        if (!Roles.currentUserHasPermission('view_custody')) return Promise.resolve();
+        return API.get('/admin/reconciliation/positions?per_page=1').then(function (res) {
+            state.positions = res;
+            renderBuckets();
+        });
+    }
+
     function forecastFor(currency) {
         var list = (state.forecast && state.forecast.currencies) || [];
         for (var i = 0; i < list.length; i++) {
@@ -123,6 +146,8 @@
             var badge = ReserveMath.depletionBadge(days === undefined ? null : days);
             var daysLabel = (days === null || days === undefined) ? 'no outflow' : days + 'd left';
             var low = b.low_water_minor > 0 && b.available_minor < b.low_water_minor;
+            var pos = positionFor(b.currency);
+            var drift = pos ? ReserveMath.driftBadge(pos) : null;
             html += '<div class="cell medium-4"><div class="stat-card">' +
                 '<div style="display:flex;justify-content:space-between;align-items:baseline;">' +
                 '<strong>' + escapeHtml(b.currency) + '</strong>' +
@@ -133,6 +158,14 @@
                 '<dt>Held</dt><dd>' + escapeHtml(ReserveMath.display(b.held_minor, b.minor_scale)) + '</dd>' +
                 '<dt>Low water</dt><dd>' + escapeHtml(ReserveMath.display(b.low_water_minor, b.minor_scale)) + '</dd>' +
                 '<dt>On-chain</dt><dd>' + (b.onchain_balance ? escapeHtml(b.onchain_balance) : '<span class="text-muted">unavailable</span>') + '</dd>' +
+                // Reconciliation verdict: three-valued, never a guess.
+                (drift
+                    ? '<dt>Drift</dt><dd><span class="badge ' + drift.cls + '">' + escapeHtml(drift.label) + '</span>' +
+                        (typeof pos.drift_minor === 'number'
+                            ? ' <span class="mono">' + escapeHtml(ReserveMath.fmtDelta(pos.drift_minor, b.minor_scale)) + '</span>'
+                            : '') +
+                        ' <span class="text-muted">tolerance ' + escapeHtml(ReserveMath.display(pos.drift_tolerance_minor || 0, b.minor_scale)) + '</span></dd>'
+                    : '') +
                 // Stablecoin buckets carry their pinned CODE:ISSUER; a
                 // configured asset the account cannot hold yet is the one
                 // state an admin must act on, so it gets a badge + button.
@@ -938,6 +971,9 @@
             loadStatus,
             [
                 loadForecast,
+                // Best-effort: the Custody page is where a failed report is
+                // explained; here a missing verdict simply renders no badge.
+                function () { return loadPositions().catch(function () { state.positions = null; }); },
                 sectionLoad('reserve-ledger', loadLedger),
                 sectionLoad('reserve-refunds', loadRefunds),
                 sectionLoad('reserve-replenishment', loadReplenishment)

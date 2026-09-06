@@ -63,7 +63,25 @@ tags:
       treasurer, or auditor); mutations need ManageReserve (admin or
       treasurer).
   - name: managed-account
-    description: Custodial Stellar accounts — server-side seed generation/import and sign+submit.
+    description: >
+      Custodial Stellar accounts — server-side seed generation/import and
+      sign+submit. Since migration 037 every custodial payment is claimed as
+      a write-ahead intent (idempotent by `idempotency_key`, hash persisted
+      before submit, one live payment per account) and refuses with a
+      machine-readable `error.code` while the custodial policy is paused or
+      unconfigured.
+  - name: custody
+    description: >
+      Custodial conservation controls (037) — the money brake, spend caps,
+      per-account limits and payment-intent resolution. Reads need the
+      ReadCustody capability (admin, treasurer, or auditor); mutations need
+      ManageCustody (admin or treasurer); `resume` is admin-only governance.
+  - name: reconciliation
+    description: >
+      Positions report (ledger vs chain vs obligations) and its durable daily
+      or manual snapshots. Reads need ReadCustody; recording a manual snapshot
+      needs ManageCustody. An unverifiable state (Horizon lagging or
+      unreachable) reads as `null`, never as clean.
   - name: keys
     description: >
       Privileged import of the credentials the bridge uses to move money
@@ -1188,6 +1206,16 @@ paths:
                     `0` disables automatic refunds for the bucket; omit the
                     field to leave the stored value unchanged. Negative values
                     are rejected (400).
+                drift_tolerance_minor:
+                  type: integer
+                  format: int64
+                  minimum: 0
+                  description: >-
+                    Reconciliation tolerance for `|onchain - (available +
+                    held)|` before the positions report flags drift (037).
+                    XLM needs a non-zero value because network fees are paid
+                    by the reserve account and not journaled. Omit to leave
+                    the stored value unchanged.
               required: [low_water_minor]
       responses:
         '200': { description: Bucket updated. }
@@ -1437,8 +1465,14 @@ paths:
     get:
       tags: [reserve]
       summary: Replenishment policies and recent cycles (admin, treasurer, or auditor).
+      description: |
+        Each cycle carries `send_tx_hash`: the hash of the signed spend
+        envelope, persisted BEFORE the submit (migration 037 part D; see
+        docs/conservation-spec.md §3.4). A `sending` cycle with a hash is
+        resolved by that hash (settled, expired, or frozen for a human); a
+        `frozen` cycle still holds its spend until resolved.
       responses:
-        '200': { description: Policies plus cycle history. }
+        '200': { description: Policies plus cycle history (each cycle includes `send_tx_hash`, null until armed). }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
 
@@ -1658,6 +1692,346 @@ paths:
         '404': { $ref: '#/components/responses/NotFound' }
         '409': { description: Not resolvable yet (in-flight payout, or state changed). }
         '429': { $ref: '#/components/responses/RateLimited' }
+
+  /admin/custody/policy:
+    get:
+      tags: [custody]
+      summary: Custodial policy — pause state, caps, open intents, resume phrase (ReadCustody).
+      responses:
+        '200':
+          description: The policy.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CustodialPolicyView' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    put:
+      tags: [custody]
+      summary: Set custodial caps and the idempotency-key requirement (ManageCustody).
+      description: >-
+        Absent fields keep their stored value. `0` means UNCONFIGURED (signing
+        refuses), never unlimited; negatives are 400. Audited in the same
+        transaction (`custody.policy_updated`). Rate limited (5/min).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                per_tx_max_stroops: { type: integer, format: int64, minimum: 0 }
+                per_account_daily_max_stroops: { type: integer, format: int64, minimum: 0 }
+                require_idempotency_key: { type: boolean }
+      responses:
+        '200':
+          description: Updated.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CustodyChangedResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /admin/custody/pause:
+    post:
+      tags: [custody]
+      summary: Pull the custodial money brake (ManageCustody).
+      description: >-
+        Every `POST /managed-account/sign` answers `503 custodial_paused` until
+        resumed. Idempotent: already paused answers `changed: false` with no
+        event. Does NOT gate reserve payouts, refunds or replenishment (those
+        have their own switches). Emits `custody.paused`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason: { type: string, minLength: 1, maxLength: 200 }
+              required: [reason]
+      responses:
+        '200':
+          description: Paused (or already paused).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CustodyChangedResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /admin/custody/resume:
+    post:
+      tags: [custody]
+      summary: Release the custodial money brake (admin only — governance).
+      description: >-
+        Requires `confirm_phrase` equal to the `resume_phrase` served by
+        `GET /admin/custody/policy` (`resume custody <network>`). Refuses 409
+        while any intent is `ambiguous` unless `force: true` — reopening with
+        unknown chain state is the double-pay moment. Emits `custody.resumed`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                confirm_phrase: { type: string }
+                force: { type: boolean, default: false }
+              required: [confirm_phrase]
+      responses:
+        '200':
+          description: Resumed (or was not paused).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CustodyChangedResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /admin/custody/accounts:
+    get:
+      tags: [custody]
+      summary: Custodial accounts (managed seeds), the reserve account excluded (ReadCustody).
+      parameters:
+        - { in: query, name: page, schema: { type: integer, minimum: 1, default: 1 } }
+        - { in: query, name: per_page, schema: { type: integer, minimum: 1, maximum: 100, default: 25 } }
+        - in: query
+          name: onchain
+          schema: { type: boolean, default: false }
+          description: >-
+            Read each address on Horizon (best-effort; unreachable rows
+            report `unreachable` = true, never a failed endpoint).
+      responses:
+        '200':
+          description: Paginated accounts.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/CustodialAccountView' }
+                  page: { type: integer }
+                  per_page: { type: integer }
+                  total: { type: integer }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /admin/custody/accounts/{account_id}/limit:
+    put:
+      tags: [custody]
+      summary: Set or clear a per-account daily custodial cap (ManageCustody).
+      description: >-
+        `null` clears the override (global cap applies); `0` freezes the
+        account; `n` replaces the global daily cap for this account. The
+        configured reserve account is refused (409). Emits
+        `custody.account_limit_updated`.
+      parameters:
+        - { in: path, name: account_id, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                custodial_daily_max_stroops: { type: integer, format: int64, minimum: 0, nullable: true }
+              required: [custodial_daily_max_stroops]
+      responses:
+        '200':
+          description: Updated.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CustodyChangedResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /admin/custody/intents:
+    get:
+      tags: [custody]
+      summary: Custodial payment intents across accounts (ReadCustody).
+      parameters:
+        - { in: query, name: status, schema: { type: string, enum: [prepared, submitted, settled, rejected, ambiguous] } }
+        - { in: query, name: account, schema: { type: string } }
+        - { in: query, name: origin, schema: { type: string, enum: [sign, redemption] } }
+        - { in: query, name: page, schema: { type: integer, minimum: 1, default: 1 } }
+        - { in: query, name: per_page, schema: { type: integer, minimum: 1, maximum: 100, default: 20 } }
+      responses:
+        '200':
+          description: Paginated intents.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CustodialIntentPage' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /admin/custody/intents/{intent_id}:
+    get:
+      tags: [custody]
+      summary: One custodial payment intent (ReadCustody).
+      parameters:
+        - { in: path, name: intent_id, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200':
+          description: The intent.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CustodialIntentView' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /admin/custody/intents/{intent_id}/resolve:
+    post:
+      tags: [custody]
+      summary: Resolve a submitted/ambiguous intent after reading the chain (ManageCustody).
+      description: >-
+        `complete`: the bridge VERIFIES the intent's signed hash (or the
+        supplied `stellar_hash`, which must equal it) settled on Horizon —
+        a successful payment from the source to the destination of the exact
+        amount in the exact asset — and records the ledger row
+        (`resolution: admin_complete`). `fail`: allowed only 600s after
+        arming AND when a fresh Horizon proves the hash failed or never
+        landed (`resolution: admin_fail`); a lagging Horizon fails closed
+        (409). Both are bridge-verified, never client-asserted. Emits
+        `custody.intent_resolved`.
+      parameters:
+        - { in: path, name: intent_id, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                action: { type: string, enum: [complete, fail] }
+                stellar_hash: { type: string, nullable: true, description: 64-hex settling hash (complete only). }
+              required: [action]
+      responses:
+        '200':
+          description: Resolved.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+                  message: { type: string }
+                  intent_id: { type: string, format: uuid }
+                  status: { type: string, enum: [settled, rejected] }
+                  resolution: { type: string, enum: [admin_complete, admin_fail] }
+                  btxid: { type: string, format: uuid, nullable: true }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /admin/reconciliation/positions:
+    get:
+      tags: [reconciliation]
+      summary: Live positions report — ledger vs chain vs obligations (ReadCustody).
+      description: >-
+        `schema_version: 1`, append-only; all money in integer minor units.
+        Per reserve bucket: ledger (`available + held`), journal replay,
+        on-chain balance, `drift_minor = onchain - ledger` against the
+        bucket's `drift_tolerance_minor`. Custodial addresses are read one
+        page at a time (`page`, `per_page` ≤ 100). `invariants[].ok` is
+        `null` (not asserted) whenever Horizon is unreachable or lagging.
+        Payala balances are self-reported and unverified; on-card balances
+        never reach the bridge.
+      parameters:
+        - { in: query, name: page, schema: { type: integer, minimum: 1, default: 1 } }
+        - { in: query, name: per_page, schema: { type: integer, minimum: 1, maximum: 100, default: 25 } }
+      responses:
+        '200':
+          description: The report.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PositionsResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /admin/reconciliation/snapshots:
+    get:
+      tags: [reconciliation]
+      summary: Recorded snapshots, newest first, payloads omitted (ReadCustody).
+      parameters:
+        - { in: query, name: page, schema: { type: integer, minimum: 1, default: 1 } }
+        - { in: query, name: per_page, schema: { type: integer, minimum: 1, maximum: 100, default: 20 } }
+      responses:
+        '200':
+          description: Paginated snapshot rows (`attested` = fresh AND complete AND invariants ok).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/ReconciliationSnapshotListItem' }
+                  page: { type: integer }
+                  per_page: { type: integer }
+                  total: { type: integer }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [reconciliation]
+      summary: Record a manual snapshot over EVERY custodial address (ManageCustody).
+      description: >-
+        Same budgets as the daily job (`RECONCILIATION_MAX_ACCOUNTS`,
+        `RECONCILIATION_DEADLINE_SECS`); exceeding either records
+        `complete: false`. Emits `reconciliation.snapshot_recorded` and one
+        `reserve.drift` per chain-legged bucket outside tolerance (fresh
+        Horizon only). `created_by` is the acting user.
+      responses:
+        '200':
+          description: Recorded.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+                  snapshot_id: { type: string, format: uuid }
+                  kind: { type: string, enum: [manual] }
+                  as_of: { type: string, format: date-time }
+                  horizon_fresh: { type: boolean }
+                  complete: { type: boolean }
+                  drift_detected: { type: boolean }
+                  invariants_ok: { type: boolean }
+                  attested: { type: boolean }
+                  warnings: { type: array, items: { type: string } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /admin/reconciliation/snapshots/{snapshot_id}:
+    get:
+      tags: [reconciliation]
+      summary: The stored report of one snapshot, verbatim (ReadCustody).
+      parameters:
+        - { in: path, name: snapshot_id, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200':
+          description: The `PositionsResponse` exactly as computed at the time.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PositionsResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
 
   /sync:
     post:
@@ -1919,12 +2293,33 @@ paths:
   /managed-account/sign:
     post:
       tags: [managed-account]
-      summary: Sign and submit a native payment from a custodial account (owner-scoped).
+      summary: Sign and submit a native payment from a custodial account (owner-scoped, idempotent).
       description: |
-        Loads the protected seed for the owner's account, signs a native (XLM)
-        payment to `destination`, submits it to the network, and records the
-        resulting transaction. Synchronous and server-only so a retry cannot
-        double-submit. Rate limited per account.
+        Claims a write-ahead `custodial_payment_intent` for the request under
+        the custodial policy (pause switch, per-transaction and rolling-24h
+        caps, per-account override), loads the protected seed, signs a native
+        (XLM) payment to `destination`, persists the signed envelope's hash
+        BEFORE submitting, submits, and records the settlement row together
+        with the intent's terminal status.
+
+        Idempotency: the same `idempotency_key` with the same request returns
+        the recorded outcome (`replayed: true`) and never signs again; the
+        same key with a different request is `409 idempotency_conflict`. With
+        no key the bridge mints a UUIDv4 (`key_source: server`) — recover it
+        via `GET /managed-account/intents`. One unresolved payment per account
+        at a time (`409 payment_in_flight`).
+
+        Outcomes: `200` settled (first time or replay); `202` with
+        `status: ambiguous` — the submit's fate is unknown, the intent is
+        frozen and resolved by hash (sweep after 600s, or an admin), NEVER
+        resubmitted: resend with the same key or poll the intent; `202` with
+        `status: submitted` — landed on-chain, ledger row pending (the sweep
+        records it by hash; never a 200 with `btxid: null`); `400
+        payment_rejected` — the network definitively rejected it, nothing
+        landed (a replay of the same key also answers 400; use a new key);
+        `503 custodial_paused` / `custodial_unconfigured` — never sent, safe
+        to retry later. Bridge-verified: settlement is recorded only from the
+        signed hash. Rate limited per account (5/min).
       requestBody:
         required: true
         content:
@@ -1932,15 +2327,89 @@ paths:
             schema: { $ref: '#/components/schemas/SignSubmitRequest' }
       responses:
         '200':
-          description: Payment signed and submitted.
+          description: "Payment settled and recorded (`status: settled`)."
           content:
             application/json:
               schema: { $ref: '#/components/schemas/SignSubmitResponse' }
-        '400': { $ref: '#/components/responses/BadRequest' }
+        '202':
+          description: >-
+            Accepted but not settled from the bridge's point of view:
+            `status: ambiguous` (outcome unknown; do NOT resubmit) or
+            `status: submitted` (landed; ledger row pending). Poll
+            `GET /managed-account/intents/{intent_id}` or replay the key.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SignSubmitResponse' }
+        '400':
+          description: >-
+            Invalid request, `custodial_tx_limit`, `idempotency_key_required`,
+            or `payment_rejected` (definitive network rejection; details carry
+            `intent_id`, `resolution`, `replayed`).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: >-
+            `payment_in_flight` (details: the live `intent_id`, `status`,
+            `stellar_hash` when armed), `idempotency_conflict` (details:
+            `intent_id`), `custodial_account_frozen`, or
+            `custodial_daily_limit` (details: `remaining_stroops`,
+            `resets_at`).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
         '429': { $ref: '#/components/responses/RateLimited' }
+        '503':
+          description: >-
+            `custodial_paused`, `custodial_unconfigured` (caps of 0), or
+            `service_unavailable` (a pre-submit transient; the intent is
+            rejected and a retry needs a NEW key). Nothing was sent.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /managed-account/intents:
+    get:
+      tags: [managed-account]
+      summary: List the owner's custodial payment intents (newest first).
+      description: >-
+        Owner-scoped (`payala_account_id` must be the caller's). `idempotency_key`
+        lets a client that lost the response of a server-minted-key request find
+        its intent; `status` filters on the intent vocabulary.
+      parameters:
+        - { in: query, name: payala_account_id, required: true, schema: { type: string } }
+        - { in: query, name: idempotency_key, schema: { type: string, pattern: '^[A-Za-z0-9._:-]{1,64}$' } }
+        - { in: query, name: status, schema: { type: string, enum: [prepared, submitted, settled, rejected, ambiguous] } }
+        - { in: query, name: page, schema: { type: integer, minimum: 1, default: 1 } }
+        - { in: query, name: per_page, schema: { type: integer, minimum: 1, maximum: 100, default: 20 } }
+      responses:
+        '200':
+          description: Paginated intents.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CustodialIntentPage' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /managed-account/intents/{intent_id}:
+    get:
+      tags: [managed-account]
+      summary: One custodial payment intent (owner-scoped; a non-owner sees 404).
+      parameters:
+        - { in: path, name: intent_id, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200':
+          description: The intent.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CustodialIntentView' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
 
   /card:
     post:
@@ -2537,8 +3006,27 @@ components:
         error:
           type: object
           properties:
-            code: { type: string, example: "unauthorized" }
+            code:
+              type: string
+              example: "unauthorized"
+              description: >-
+                Machine-readable code clients branch on. The custodial paths
+                answer with one of `custodial_paused`,
+                `custodial_unconfigured`, `custodial_tx_limit`,
+                `custodial_daily_limit`, `custodial_account_frozen`,
+                `idempotency_conflict`, `idempotency_key_required`,
+                `payment_in_flight`, `payment_rejected` (the bridge constant
+                `CUSTODIAL_REFUSAL_CODES`) in addition to the generic codes.
             message: { type: string }
+            details:
+              type: object
+              nullable: true
+              additionalProperties: true
+              description: >-
+                Structured refusal details (append-only; absent unless the
+                error carries them): e.g. `intent_id`, `status`,
+                `stellar_hash`, `resolution`, `replayed`,
+                `per_tx_max_stroops`, `remaining_stroops`, `resets_at`.
           required: [code, message]
       required: [error]
 
@@ -3410,9 +3898,18 @@ components:
       properties:
         payala_account_id: { type: string }
         destination: { type: string, description: Destination Stellar G-address. }
-        amount: { type: string, description: Native (XLM) amount as a decimal string. }
-        memo: { type: string, nullable: true }
-        fee: { type: integer, nullable: true, description: Base fee in stroops. }
+        amount: { type: string, description: Native (XLM) amount as a decimal string (at most 7 fraction digits). }
+        memo: { type: string, nullable: true, description: MEMO_TEXT, at most 28 bytes. }
+        fee: { type: integer, nullable: true, description: Base fee in stroops (positive). }
+        idempotency_key:
+          type: string
+          nullable: true
+          pattern: '^[A-Za-z0-9._:-]{1,64}$'
+          description: >-
+            Optional client idempotency key. Same key + same request => the
+            recorded outcome (never re-signed); same key + different request
+            => 409 idempotency_conflict. Absent => the bridge mints a UUIDv4
+            (`key_source: server`).
       required: [payala_account_id, destination, amount]
 
     SignSubmitResponse:
@@ -3422,6 +3919,195 @@ components:
         message: { type: string }
         stellar_hash: { type: string, nullable: true }
         btxid: { type: string, format: uuid, nullable: true }
+        intent_id: { type: string, format: uuid, nullable: true }
+        idempotency_key: { type: string, nullable: true }
+        status:
+          type: string
+          nullable: true
+          enum: [prepared, submitted, settled, rejected, ambiguous]
+        resolution: { type: string, nullable: true }
+        replayed:
+          type: boolean
+          nullable: true
+          description: True when this reports a previously recorded outcome for the same key.
+        amount_minor: { type: integer, format: int64, nullable: true, description: Stroops. }
+
+    CustodialIntentView:
+      type: object
+      description: One custodial payment intent (037). Timestamps are UTC RFC3339.
+      properties:
+        intent_id: { type: string, format: uuid }
+        payala_account_id: { type: string }
+        origin: { type: string, enum: [sign, redemption] }
+        status: { type: string, enum: [prepared, submitted, settled, rejected, ambiguous] }
+        resolution:
+          type: string
+          nullable: true
+          enum: [submit_ok, submit_rejected, prepare_rejected, arm_failed, sweep_settled, sweep_failed, sweep_expired, sweep_abandoned, admin_complete, admin_fail]
+        key_source: { type: string, enum: [client, server] }
+        idempotency_key: { type: string }
+        destination: { type: string }
+        asset_code: { type: string }
+        asset_issuer: { type: string, nullable: true }
+        amount_minor: { type: integer, format: int64 }
+        amount: { type: string, description: amount_minor at 7 dp. }
+        memo: { type: string, nullable: true }
+        fee_stroops: { type: integer, format: int64, nullable: true }
+        stellar_hash: { type: string, nullable: true, description: Hash of the signed envelope, persisted before submit. }
+        btxid: { type: string, format: uuid, nullable: true }
+        last_error: { type: string, nullable: true }
+        created_at: { type: string }
+        armed_at: { type: string, nullable: true }
+        resolved_at: { type: string, nullable: true }
+
+    CustodialIntentPage:
+      type: object
+      properties:
+        data:
+          type: array
+          items: { $ref: '#/components/schemas/CustodialIntentView' }
+        page: { type: integer }
+        per_page: { type: integer }
+        total: { type: integer }
+
+    CustodialPolicyView:
+      type: object
+      properties:
+        paused: { type: boolean }
+        paused_by: { type: string, nullable: true }
+        paused_at: { type: string, nullable: true }
+        pause_reason: { type: string, nullable: true }
+        per_tx_max_stroops: { type: integer, format: int64, description: 0 = unconfigured (signing refuses). }
+        per_account_daily_max_stroops: { type: integer, format: int64, description: 0 = unconfigured (signing refuses). }
+        require_idempotency_key: { type: boolean }
+        configured: { type: boolean, description: Both caps set. }
+        updated_by: { type: string, nullable: true }
+        updated_at: { type: string }
+        open_intents:
+          type: object
+          properties:
+            prepared: { type: integer, format: int64 }
+            submitted: { type: integer, format: int64 }
+            ambiguous: { type: integer, format: int64 }
+        resume_phrase: { type: string, description: The exact phrase POST /admin/custody/resume requires. }
+
+    CustodyChangedResponse:
+      type: object
+      properties:
+        success: { type: boolean }
+        changed: { type: boolean, description: False when already in the requested state (nothing written, no event). }
+        message: { type: string }
+
+    CustodialAccountView:
+      type: object
+      properties:
+        payala_account_id: { type: string }
+        stellar_account_id: { type: string }
+        origin: { type: string, enum: [generated, imported] }
+        format_version: { type: integer }
+        backend: { type: string }
+        created_at: { type: string }
+        custodial_daily_max_stroops: { type: integer, format: int64, nullable: true, description: NULL = global cap; 0 = frozen. }
+        onchain: { type: object, nullable: true, additionalProperties: true, description: Horizon account details when `onchain=true` and reachable. }
+        unreachable: { type: boolean }
+
+    ReconciliationSnapshotListItem:
+      type: object
+      properties:
+        snapshot_id: { type: string, format: uuid }
+        snapshot_date: { type: string, description: UTC calendar date (YYYY-MM-DD). }
+        kind: { type: string, enum: [daily, manual] }
+        as_of: { type: string }
+        horizon_fresh: { type: boolean }
+        complete: { type: boolean }
+        drift_detected: { type: boolean }
+        invariants_ok: { type: boolean }
+        attested: { type: boolean, description: horizon_fresh AND complete AND invariants_ok. }
+        created_by: { type: string, nullable: true, description: NULL for the daily job. }
+
+    PositionsResponse:
+      type: object
+      description: >-
+        The reconciliation report (schema_version 1, append-only). All money
+        is integer minor units. `invariants[].ok` is null (not asserted)
+        whenever the state is unverifiable.
+      properties:
+        schema_version: { type: integer, enum: [1] }
+        as_of: { type: string, format: date-time }
+        complete: { type: boolean, description: Every custodial address in scope was read within budget. }
+        horizon:
+          type: object
+          properties:
+            url: { type: string }
+            head_closed_at: { type: string, nullable: true }
+            lag_secs: { type: integer, format: int64, nullable: true }
+            fresh: { type: boolean }
+        reserve:
+          type: object
+          properties:
+            configured: { type: boolean }
+            stellar_address: { type: string, nullable: true }
+            buckets:
+              type: array
+              items:
+                type: object
+                properties:
+                  currency: { type: string }
+                  minor_scale: { type: integer }
+                  asset: { type: string, nullable: true, description: CODE:ISSUER for a configured stablecoin. }
+                  chain_leg: { type: boolean }
+                  available_minor: { type: integer, format: int64 }
+                  held_minor: { type: integer, format: int64 }
+                  ledger_total_minor: { type: integer, format: int64, nullable: true }
+                  journal_available_minor: { type: integer, format: int64 }
+                  journal_held_minor: { type: integer, format: int64 }
+                  journal_replay_ok: { type: boolean }
+                  onchain_minor: { type: integer, format: int64, nullable: true }
+                  onchain_raw: { type: string, nullable: true }
+                  trustline: { type: boolean, nullable: true }
+                  drift_minor: { type: integer, format: int64, nullable: true, description: onchain - ledger_total. }
+                  drift_tolerance_minor: { type: integer, format: int64 }
+                  drift_ok: { type: boolean, nullable: true, description: '|drift| <= tolerance; null when unverifiable.' }
+                  offline_held_minor: { type: integer, format: int64 }
+            obligations: { type: object, additionalProperties: true }
+        custodial:
+          type: object
+          properties:
+            source: { type: string, enum: [managed_seed+horizon] }
+            accounts_total: { type: integer, format: int64 }
+            page: { type: integer }
+            per_page: { type: integer }
+            checked: { type: integer }
+            positions: { type: array, items: { type: object, additionalProperties: true } }
+            totals: { type: object, additionalProperties: true }
+            policy:
+              type: object
+              properties:
+                paused: { type: boolean }
+                configured: { type: boolean }
+        payala:
+          type: object
+          properties:
+            source: { type: string, enum: [self_reported_unverified] }
+            accounts_with_reserve: { type: integer, format: int64 }
+            net_minor_by_currency: { type: object, additionalProperties: { type: integer, format: int64 } }
+            last_batch_at: { type: string, nullable: true }
+        card:
+          type: object
+          properties:
+            source: { type: string, enum: [bridge_issued_only] }
+            note: { type: string }
+        invariants:
+          type: array
+          items:
+            type: object
+            properties:
+              name:
+                type: string
+                enum: [reserve_journal_replays, reserve_chain_covers_ledger, reserve_drift_within_tolerance, reserve_available_covers_queued_refunds, offline_liabilities_are_held, custodial_no_stale_intents, custodial_addresses_reachable]
+              ok: { type: boolean, nullable: true }
+              detail: { type: string }
+        warnings: { type: array, items: { type: string } }
 
     RegisterWebhookRequest:
       type: object

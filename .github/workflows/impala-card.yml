@@ -93,8 +93,19 @@ jobs:
       - name: SDK JVM tests
         run: ./gradlew :sdk:jvmTest --no-daemon --stacktrace
 
-      - name: Upload test reports on failure
-        if: failure()
+      # Shared card/bridge golden vectors (spec §3.3): the script is created by the
+      # bridge lane; run it here when present so the card literals never drift from
+      # the bridge's. Skips cleanly until that lane lands, keeping card CI green.
+      - name: Check shared card/bridge vectors
+        run: |
+          if [ -f ../scripts/check-shared-vectors.sh ]; then
+            bash ../scripts/check-shared-vectors.sh
+          else
+            echo "scripts/check-shared-vectors.sh not present yet (created by the bridge lane) — skipping"
+          fi
+
+      - name: Upload test reports
+        if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: gradle-test-reports-${{ github.sha }}

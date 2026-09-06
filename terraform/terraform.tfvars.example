@@ -110,7 +110,7 @@ container_image_tag = "CHANGE_ME_git_sha_or_prod-<short-sha>"
 # =============================================================================
 # testnet_enabled              = true
 # testnet_jwt_secret           = "CHANGE_ME_testnet_jwt_secret"
-# testnet_soroban_contract_id  = "CABC123..."
+# testnet_soroban_contract_id  = "CABC123..."  # must equal the `active` entry in impala-soroban/deployments/testnet/ (CI-checked by impala-soroban/scripts/check-manifests.sh)
 # testnet_server_desired_count = 1
 # testnet_worker_desired_count = 1
 # testnet_rds_instance_class   = "db.t3.micro"

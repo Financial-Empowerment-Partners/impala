@@ -8,6 +8,10 @@ package com.impala.sdk
  *
  * INS codes identify the applet command to execute. Status words in the
  * response indicate success ([SW_OK] = 0x9000) or a specific error condition.
+ *
+ * This file mirrors `applet/.../Constants.java` byte-for-byte (applet 0.2,
+ * transfer protocol v1); `ApduDocDriftTest` and `ConstantsTest` pin the two
+ * together. Secure-channel INS live in [com.impala.sdk.scp03.SCP03Constants].
  */
 object Constants {
     // ---- Numeric helpers ----
@@ -19,8 +23,10 @@ object Constants {
     // ---- APDU instruction (INS) bytes ----
     const val INS_NOP: Byte = 2
     const val INS_GET_BALANCE: Byte = 4
+    /** Retired in applet 0.2 — the applet answers 0x6D00; never reuse. */
     const val INS_SIGN_TRANSFER: Byte = 6
     const val INS_GET_RSA_PUB_KEY: Byte = 7
+    /** Retired in applet 0.2 — the applet answers 0x6D00; never reuse. */
     const val INS_VERIFY_TRANSFER: Byte = 20
     const val INS_GET_ACCOUNT_ID: Byte = 22
     const val INS_VERIFY_PIN: Byte = 24 // P2=1 for master PIN P1=2 for user_pin
@@ -40,6 +46,33 @@ object Constants {
     const val INS_IS_CARD_ALIVE: Byte = 46
     const val INS_GET_VERSION: Byte = 100
 
+    // Transfer protocol v1 (applet 0.2). 0x32 / 0x33 are never assigned.
+    const val INS_SIGN_TRANSFER_V2: Byte = 0x30      // CLA 0x00 only
+    const val INS_VERIFY_TRANSFER_V2: Byte = 0x31    // CLA 0x00 only
+    const val INS_GET_PERSONALIZATION: Byte = 0x34   // CLA 0x00 only
+    const val INS_GET_RECEIVE_STATE: Byte = 0x35     // CLA 0x00 or 0x84
+    const val INS_GET_LAST_TRANSFER: Byte = 0x36     // CLA 0x00 only
+
+    // PERSONALIZE parts (P1)
+    const val P1_PERSONALIZE_IDENTITY: Byte = 0x01
+    const val P1_PERSONALIZE_ISSUER_KEY: Byte = 0x02
+    const val P1_PERSONALIZE_CERTIFICATE: Byte = 0x03
+
+    // GET_PERSONALIZATION state byte
+    const val PERSONALIZATION_STATE_BLANK: Byte = 0x00
+    const val PERSONALIZATION_STATE_INITIALIZED: Byte = 0x01
+    const val PERSONALIZATION_STATE_PERSONALIZED: Byte = 0x02
+    const val PERSONALIZATION_STATE_TERMINATED: Byte = 0xFF.toByte()
+
+    // GET_PERSONALIZATION flags byte
+    const val PFLAG_INITIALIZED: Byte = 0x01
+    const val PFLAG_PROGRAM_BOUND: Byte = 0x02
+    const val PFLAG_PERSONALIZED: Byte = 0x04
+    const val PFLAG_SCP03_KEYS_DEFAULT: Byte = 0x08
+    const val PFLAG_PIN_PROVISIONED: Byte = 0x10
+    const val PFLAG_PROVISIONING_ENFORCED: Byte = 0x20
+    const val PFLAG_TERMINATED: Byte = 0x40
+
     // PIN type
     const val P2_MASTER_PIN: Byte = 129.toByte() // P2 byte for Master PIN in Verify 0x81
     const val P2_USER_PIN: Byte = 130.toByte() // P2 byte for User PIN in Verify 0x82
@@ -50,13 +83,34 @@ object Constants {
     const val UUID_LENGTH: Short = 16
 
     const val HASH_LENGTH: Short = 32
+    @Deprecated("the 252-byte hashable record was removed in applet 0.2")
     const val HASHABLE_LENGTH: Short = 252
     const val INIT_LENGTH: Short = 56
     const val MAX_SIG_LENGTH: Short = 72
+    const val MIN_DER_SIG_LENGTH: Short = 8
     const val PRIV_KEY_LENGTH: Short = 32
     const val PUB_KEY_LENGTH: Short = 65
     const val SIGNABLE_LENGTH: Short = 60
     const val TAG_LENGTH_LENGTH: Short = 2
+
+    // Transfer protocol v1 lengths / versions
+    const val PROGRAM_ID_LENGTH: Short = 16
+    const val CURRENCY_LENGTH: Short = 4
+    const val DOMAIN_TAG_LENGTH: Short = 12
+    const val XFER_MESSAGE_LENGTH: Short = 89
+    const val CERT_MESSAGE_LENGTH: Short = 114
+    const val PERSONALIZE_IDENTITY_LENGTH: Short = 40
+    const val PERSONALIZE_STAGE_LENGTH: Short = 177
+    const val PERSONALIZATION_LENGTH: Short = 159
+    const val RECEIVE_STATE_LENGTH: Short = 36
+    const val LAST_TRANSFER_LENGTH: Short = 132
+    const val TRANSFER_RESPONSE_LENGTH: Short = 209
+    const val PROGRAM_BLOCK_LENGTH: Short = 81
+    const val KEY_DIVERSIFICATION_LENGTH: Short = 10
+    const val TRANSFER_PROTOCOL_VERSION: Byte = 0x01
+    const val CERT_VERSION: Byte = 0x01
+    const val MAX_COUNTER_JUMP: Short = 1024
+
     // ---- Status words (SW1-SW2) ----
     const val SW_OK: Short = 0x9000.toShort()
     const val SW_INS_NOT_SUPPORTED: Short = 0x6d00
@@ -85,6 +139,15 @@ object Constants {
     const val SW_ERROR_EC_CARD_KEY_MISSING: Short = 0x6230
     const val SW_ERROR_WRONG_SENDER: Short = 0x6231
     const val SW_ERROR_WRONG_RECIPIENT: Short = 0x6232
+    const val SW_ERROR_TRANSFER_COUNTER_INVALID: Short = 0x6233
+    const val SW_ERROR_NOT_PERSONALIZED: Short = 0x6234
+    const val SW_ERROR_ALREADY_PERSONALIZED: Short = 0x6235
+    const val SW_ERROR_DEFAULT_SCP03_KEYS: Short = 0x6236
+    const val SW_ERROR_PERSONALIZE_SEQUENCE: Short = 0x6237
+    const val SW_ERROR_SEND_SEQUENCE_INVALID: Short = 0x6238
+    const val SW_ERROR_ZERO_AMOUNT: Short = 0x6239
+    const val SW_ERROR_TRANSFER_COUNTER_JUMP: Short = 0x623A
+    const val SW_ERROR_PROGRAM_ALREADY_BOUND: Short = 0x623B
     const val SW_ERROR_CARD_DATA_SIGNATURE_INVALID: Short = 0x6677
     const val SW_ERROR_CARD_DATA_NONCE_INVALID: Short = 0x6678
     const val SW_ERROR_WRONG_CARD_ID: Short = 0x6679
@@ -102,6 +165,11 @@ object Constants {
     const val SW_ERROR_WRONG_SIGNABLE_LENGTH: Short = 0x6226
     const val SW_ERROR_WRONG_TAIL_LENGTH: Short = 0x6C02
     const val SW_ERROR_ALREADY_INITIALIZED: Short = 0x6686
+    // ISO 7816-4 words the applet throws
+    const val SW_WRONG_DATA: Short = 0x6A80
+    const val SW_DATA_INVALID: Short = 0x6984
+    const val SW_RECORD_NOT_FOUND: Short = 0x6A83
+    const val SW_CLA_NOT_SUPPORTED: Short = 0x6E00
     const val SW_UNKNOWN: Short = 0x6F00
     const val SW_UNKNOWN_4469: Short = 0x4469
     const val SW_UNKNOWN_6F15: Short = 0x6F15

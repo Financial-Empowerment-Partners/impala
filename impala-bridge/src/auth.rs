@@ -137,6 +137,11 @@ pub enum Capability {
     ReadTransactions,
     /// Read the admin event feed and webhook registrations.
     ReadEvents,
+    /// Mutate custodial policy: pause, caps, per-account limits, intent
+    /// resolution, offline issuance policy. Money-moving.
+    ManageCustody,
+    /// Read custodial policy, intents, positions, snapshots, offline queues.
+    ReadCustody,
 }
 
 impl Capability {
@@ -144,7 +149,7 @@ impl Capability {
     /// [`role_has_capability`] until it gets a row, and the matrix tests
     /// iterate this so they cannot silently go stale.
     #[allow(dead_code)] // consumed by the test-side matrix/invariant loops
-    pub const ALL: [Capability; 7] = [
+    pub const ALL: [Capability; 9] = [
         Capability::ManageReserve,
         Capability::ReadReserve,
         Capability::ManageKeys,
@@ -152,6 +157,8 @@ impl Capability {
         Capability::ReadAccounts,
         Capability::ReadTransactions,
         Capability::ReadEvents,
+        Capability::ManageCustody,
+        Capability::ReadCustody,
     ];
 }
 
@@ -175,6 +182,8 @@ pub fn role_has_capability(role: &str, cap: Capability) -> bool {
         }
         Capability::ReadTransactions => matches!(role, ROLE_ADMIN | ROLE_AUDITOR),
         Capability::ReadEvents => matches!(role, ROLE_ADMIN | ROLE_AUDITOR),
+        Capability::ManageCustody => matches!(role, ROLE_ADMIN | ROLE_TREASURER),
+        Capability::ReadCustody => matches!(role, ROLE_ADMIN | ROLE_TREASURER | ROLE_AUDITOR),
     }
 }
 
@@ -200,6 +209,8 @@ pub struct ManageKeys;
 pub struct ReadKeys;
 pub struct ReadAccounts;
 pub struct ReadEvents;
+pub struct ManageCustody;
+pub struct ReadCustody;
 
 impl RequiredCapability for ManageReserve {
     const CAPABILITY: Capability = Capability::ManageReserve;
@@ -218,6 +229,12 @@ impl RequiredCapability for ReadAccounts {
 }
 impl RequiredCapability for ReadEvents {
     const CAPABILITY: Capability = Capability::ReadEvents;
+}
+impl RequiredCapability for ManageCustody {
+    const CAPABILITY: Capability = Capability::ManageCustody;
+}
+impl RequiredCapability for ReadCustody {
+    const CAPABILITY: Capability = Capability::ReadCustody;
 }
 
 /// An authenticated user holding a specific capability — the granular
@@ -659,6 +676,8 @@ mod tests {
             Capability::ReadAccounts => &[ROLE_ADMIN, ROLE_AUDITOR, ROLE_KEY_CUSTODIAN],
             Capability::ReadTransactions => &[ROLE_ADMIN, ROLE_AUDITOR],
             Capability::ReadEvents => &[ROLE_ADMIN, ROLE_AUDITOR],
+            Capability::ManageCustody => &[ROLE_ADMIN, ROLE_TREASURER],
+            Capability::ReadCustody => &[ROLE_ADMIN, ROLE_TREASURER, ROLE_AUDITOR],
         }
     }
 
@@ -717,7 +736,11 @@ mod tests {
     fn auditor_holds_no_mutation_capability() {
         // The auditor is the read-only oversight role; a Manage* grant to it
         // is a security incident, not a tweak.
-        for cap in [Capability::ManageReserve, Capability::ManageKeys] {
+        for cap in [
+            Capability::ManageReserve,
+            Capability::ManageKeys,
+            Capability::ManageCustody,
+        ] {
             assert!(
                 !role_has_capability(crate::constants::ROLE_AUDITOR, cap),
                 "auditor must not hold {:?}",
@@ -738,6 +761,29 @@ mod tests {
         assert!(!role_has_capability(
             ROLE_KEY_CUSTODIAN,
             Capability::ReadReserve
+        ));
+        // Custody is the treasurer's surface (money ops), readable by the
+        // auditor, and invisible to the key custodian.
+        assert!(!role_has_capability(
+            ROLE_KEY_CUSTODIAN,
+            Capability::ManageCustody
+        ));
+        assert!(!role_has_capability(
+            ROLE_KEY_CUSTODIAN,
+            Capability::ReadCustody
+        ));
+        assert!(role_has_capability(
+            ROLE_TREASURER,
+            Capability::ManageCustody
+        ));
+        assert!(role_has_capability(ROLE_TREASURER, Capability::ReadCustody));
+        assert!(role_has_capability(
+            crate::constants::ROLE_AUDITOR,
+            Capability::ReadCustody
+        ));
+        assert!(!role_has_capability(
+            crate::constants::ROLE_AUDITOR,
+            Capability::ManageCustody
         ));
     }
 
@@ -872,6 +918,10 @@ mod tests {
                 include_str!("handlers/admin_replenish.rs"),
             ),
             ("admin_keys.rs", include_str!("handlers/admin_keys.rs")),
+            (
+                "admin_reconciliation.rs",
+                include_str!("handlers/admin_reconciliation.rs"),
+            ),
         ] {
             assert!(
                 !src.contains("AdminUser"),
@@ -879,6 +929,14 @@ mod tests {
                 name
             );
         }
+        // admin_custody keeps AdminUser for exactly ONE handler: `resume`
+        // (governance releases the brake; money-ops may only pull it).
+        let custody = include_str!("handlers/admin_custody.rs");
+        assert_eq!(
+            custody.matches(": AdminUser").count(),
+            1,
+            "admin_custody.rs must have exactly one handler (resume) on AdminUser"
+        );
         // admin_webhook keeps AdminUser for its three mutating handlers
         // (register/delete/test) and Privileged<ReadEvents> for the reads.
         let webhook = include_str!("handlers/admin_webhook.rs");
@@ -922,6 +980,8 @@ mod tests {
         let keys = include_str!("handlers/admin_keys.rs");
         let webhook = include_str!("handlers/admin_webhook.rs");
         let admin = include_str!("handlers/admin.rs");
+        let custody = include_str!("handlers/admin_custody.rs");
+        let reconciliation = include_str!("handlers/admin_reconciliation.rs");
 
         let table: &[(&str, &str, &str)] = &[
             // admin_reserve.rs — reads
@@ -961,6 +1021,27 @@ mod tests {
             (webhook, "list_events", "Privileged<ReadEvents>"),
             // admin.rs
             (admin, "list_accounts", "Privileged<ReadAccounts>"),
+            // admin_custody.rs — reads
+            (custody, "get_policy", "Privileged<ReadCustody>"),
+            (custody, "list_accounts", "Privileged<ReadCustody>"),
+            (custody, "list_intents", "Privileged<ReadCustody>"),
+            (custody, "get_intent", "Privileged<ReadCustody>"),
+            // admin_custody.rs — money mutations (the brake and the caps)
+            (custody, "update_policy", "Privileged<ManageCustody>"),
+            (custody, "pause", "Privileged<ManageCustody>"),
+            (custody, "set_account_limit", "Privileged<ManageCustody>"),
+            (custody, "resolve_intent", "Privileged<ManageCustody>"),
+            // admin_custody.rs — governance releases the brake
+            (custody, "resume", "AdminUser"),
+            // admin_reconciliation.rs
+            (reconciliation, "get_positions", "Privileged<ReadCustody>"),
+            (reconciliation, "list_snapshots", "Privileged<ReadCustody>"),
+            (reconciliation, "get_snapshot", "Privileged<ReadCustody>"),
+            (
+                reconciliation,
+                "create_snapshot",
+                "Privileged<ManageCustody>",
+            ),
         ];
 
         for (src, name, expected) in table {
@@ -981,5 +1062,25 @@ mod tests {
         assert_eq!(replenish.matches("pub async fn ").count(), 5);
         assert_eq!(keys.matches("pub async fn ").count(), 6);
         assert_eq!(webhook.matches("pub async fn ").count(), 5);
+        // The newer modules carry source-text tests of their own that name
+        // handlers; count only the non-test half so a test literal cannot
+        // pass for a handler.
+        let non_test = |src: &'static str| -> &'static str {
+            src.find("#[cfg(test)]").map_or(src, |i| &src[..i])
+        };
+        assert_eq!(non_test(custody).matches("pub async fn ").count(), 9);
+        assert_eq!(non_test(reconciliation).matches("pub async fn ").count(), 4);
+    }
+
+    /// The custody surface carries the seed-bearing sign path's brake; the
+    /// whole point of `ReadCustody` is that the auditor can SEE every open
+    /// intent without being able to release or resolve anything.
+    #[test]
+    fn custody_reads_never_hand_out_a_mutation() {
+        let custody = include_str!("handlers/admin_custody.rs");
+        for reader in ["get_policy", "list_accounts", "list_intents", "get_intent"] {
+            let sig = signature_of(custody, reader);
+            assert!(!sig.contains("ManageCustody") && !sig.contains("AdminUser"));
+        }
     }
 }

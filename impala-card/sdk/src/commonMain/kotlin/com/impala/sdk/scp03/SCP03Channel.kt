@@ -53,6 +53,14 @@ class SCP03Channel(
     private var isOpen: Boolean = false
 
     /**
+     * The 10-byte key diversification data reported by the last INITIALIZE
+     * UPDATE — the card's `cardId[0..10)` (applet 0.2). A host can use it to look
+     * up per-card SCP03 keys before authenticating.
+     */
+    var keyDiversification: ByteArray = ByteArray(10)
+        private set
+
+    /**
      * Opens a secure channel by performing INITIALIZE UPDATE and EXTERNAL AUTHENTICATE.
      *
      * @param secLevel desired security level (default 0x33 = C-MAC | C-DEC | R-MAC | R-ENC)
@@ -78,6 +86,7 @@ class SCP03Channel(
         }
 
         // Parse response: keyDiversification(10) + keyInfo(3) + cardChallenge(8) + cardCryptogram(8)
+        keyDiversification = respData.copyOfRange(0, 10)
         val keyVersion = respData[10]
         val cardChallenge = respData.copyOfRange(13, 21)
         val cardCryptogram = respData.copyOfRange(21, 29)
