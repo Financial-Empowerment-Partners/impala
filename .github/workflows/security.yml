@@ -32,19 +32,61 @@ permissions:
   contents: read
 
 jobs:
-  gitleaks:
-    name: gitleaks (secret scan)
+  # Secret scan. Runs the gitleaks CLI directly instead of gitleaks-action.
+  #
+  # Why (2026-09-08): gitleaks-action has been proprietary since v2.0.0 and
+  # requires a GITLEAKS_LICENSE secret for ORGANISATION-owned repositories —
+  # which this repo is — while personal accounts run it free. The scanner
+  # itself is unaffected: the gitleaks binary is MIT, free for organisations,
+  # and is what did the detecting all along. Dropping the wrapper removes the
+  # licence obligation and changes no coverage: same rules, same git-history
+  # walk, same .gitleaks.toml and .gitleaksignore.
+  #
+  # Do not "simplify" this back to the action, and do not switch to a
+  # `latest` download: the binary is pinned by version AND verified against
+  # the checksum gitleaks publishes with each release, so a tampered or
+  # truncated asset fails the job instead of silently scanning nothing.
+  secret-scan:
+    name: secret scan (gitleaks CLI)
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    env:
+      # Bump both together; the digest is from gitleaks_<version>_checksums.txt
+      # on the release page.
+      GITLEAKS_VERSION: '8.30.1'
+      GITLEAKS_SHA256: '551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb'
     steps:
+      # fetch-depth: 0 is load-bearing — `gitleaks git` walks the whole history,
+      # so a shallow clone would scan only the tip commit and report clean.
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           fetch-depth: 0
           persist-credentials: false
-      - uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2.3.9
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install gitleaks (MIT binary, checksum-verified)
+        run: |
+          set -euo pipefail
+          asset="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -sSfL --retry 3 --retry-delay 5 -o "$asset" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${asset}"
+          echo "${GITLEAKS_SHA256}  ${asset}" | sha256sum -c -
+          tar -xzf "$asset" gitleaks
+          ./gitleaks version
+
+      # Two scans, because they cover different things and the repo's
+      # suppressions are recorded for both (see .gitleaksignore):
+      #   git — every commit in history, catching a secret that was added and
+      #         later deleted, which a tree scan cannot see;
+      #   dir — the working tree, catching anything present but unreachable
+      #         from the scanned history.
+      # Both exit non-zero on a finding, which fails the job exactly as the
+      # action did. --redact keeps the secret itself out of the public log.
+      - name: Scan git history
+        run: ./gitleaks git . --redact --verbose --exit-code 1
+
+      - name: Scan working tree
+        run: ./gitleaks dir . --redact --verbose --exit-code 1
 
   trivy-fs:
     name: trivy (filesystem scan)
