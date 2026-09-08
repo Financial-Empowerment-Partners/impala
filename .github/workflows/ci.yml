@@ -52,6 +52,11 @@ on:
       # (models.rs::conservation_spec_names_every_vocabulary): a doc edit
       # must run the pin.
       - 'docs/conservation-spec.md'
+      # impala-ui/tests/fixtures/role-capabilities.json is pinned by a bridge
+      # test (auth.rs::capability_matrix_matches_shared_fixture): a fixture
+      # edit must run the pin. These two files are the only out-of-crate
+      # include_str! sources in the bridge.
+      - 'impala-ui/tests/fixtures/role-capabilities.json'
   pull_request:
     branches: [main]
     paths:
@@ -62,6 +67,11 @@ on:
       # (models.rs::conservation_spec_names_every_vocabulary): a doc edit
       # must run the pin.
       - 'docs/conservation-spec.md'
+      # impala-ui/tests/fixtures/role-capabilities.json is pinned by a bridge
+      # test (auth.rs::capability_matrix_matches_shared_fixture): a fixture
+      # edit must run the pin. These two files are the only out-of-crate
+      # include_str! sources in the bridge.
+      - 'impala-ui/tests/fixtures/role-capabilities.json'
   workflow_dispatch:
     inputs:
       architecture:
@@ -156,8 +166,13 @@ jobs:
       - name: Run tests
         run: cargo test --locked
 
+      # Version-pinned for the same reason the toolchain is: an unpinned
+      # `cargo install` lets a new cargo-audit release change this gate's
+      # verdict on an unchanged tree. The advisory data is NOT frozen by this
+      # — cargo audit fetches the RustSec database at run time — so new
+      # advisories still fail the job. Bump deliberately.
       - name: Install cargo-audit
-        run: cargo install cargo-audit --locked
+        run: cargo install cargo-audit --version 0.22.2 --locked
 
       # `cargo audit` reads Cargo.lock as-is (it has no --locked flag).
       - name: Audit dependencies for vulnerabilities

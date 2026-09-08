@@ -79,6 +79,19 @@ cd impala-android-demo
 ./gradlew assembleTnetDebug assembleLiveDebug          # two APKs (testnet + pubnet)
 ./gradlew testTnetDebugUnitTest testLiveDebugUnitTest  # JVM unit tests
 ```
+Seed the Firebase config first — the `google-services` Gradle plugin refuses to
+configure without it, so on a fresh clone *every* task here fails, unit tests
+included, with `File google-services.json is missing`:
+
+```bash
+cp impala-android-demo/app/google-services.json.example \
+   impala-android-demo/app/google-services.json
+```
+
+The real file is gitignored by exact path; keep that line in `.gitignore`
+narrow, because a glob like `**/google-services.json*` would also swallow the
+tracked `.example` and break the Android CI jobs again.
+
 Copy OAuth/bridge config into `local.properties` (`TESTNET_*` / `LIVE_*` keys)
 before exercising auth flows.
 
@@ -91,6 +104,11 @@ npm install && npm test   # Vitest unit tests
 Bring `impala-bridge` up first so the `impala-bridge_default` Docker network exists.
 
 ### terraform
+Needs Terraform >= 1.9 (`main.tf` pins `required_version = ">= 1.9, < 2.0"`, and
+CI installs `~> 1.9`). Older binaries cannot parse this configuration: 1.5.x
+reports thirteen spurious `Invalid reference in variable validation` errors for
+cross-variable `validation` conditions, which are legal from 1.9 onward. Check
+with `terraform version` before believing a validation failure.
 ```bash
 cd terraform
 terraform fmt -check -recursive

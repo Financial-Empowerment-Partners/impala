@@ -1,5 +1,8 @@
 # --- SNS Topic for job dispatch ---
 
+# AWS-managed alias/aws/sns key: a CMK adds cost and rotation burden with no
+# threat-model benefit for internal job fan-out (payloads carry no secrets).
+#trivy:ignore:AVD-AWS-0136
 resource "aws_sns_topic" "jobs" {
   name = "${local.name_prefix}-jobs"
 

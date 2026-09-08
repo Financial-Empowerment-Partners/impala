@@ -2,6 +2,8 @@
 name = "impala-bridge"
 version = "0.0.0"
 edition = "2021"
+# Matches the repository LICENSE-2.0.txt (checked by cargo-deny).
+license = "Apache-2.0"
 publish = false
 rust-version = "1.91"
 

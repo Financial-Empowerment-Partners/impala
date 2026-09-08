@@ -20,6 +20,9 @@ resource "aws_subnet" "public" {
   cidr_block        = cidrsubnet(var.vpc_cidr, 8, count.index)
   availability_zone = data.aws_availability_zones.available.names[count.index]
 
+  # Public subnets host only the ALB and the NAT gateways and need public IPs;
+  # ECS tasks, RDS and ElastiCache live in the private subnets below.
+  #trivy:ignore:AVD-AWS-0164
   map_public_ip_on_launch = true
 
   tags = {

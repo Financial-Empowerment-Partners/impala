@@ -21,6 +21,9 @@ resource "aws_security_group" "alb" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
+  # Open ALB egress is by design: the ALB forwards to Fargate task ENIs whose
+  # IPs are dynamic, so the target side cannot be pinned by CIDR.
+  #trivy:ignore:AVD-AWS-0104
   egress {
     from_port   = 0
     to_port     = 0
@@ -52,7 +55,11 @@ resource "aws_security_group" "ecs_tasks" {
     security_groups = [aws_security_group.alb.id]
   }
 
-  # HTTPS outbound (Stellar, SNS, SQS, SES, ECR, Secrets Manager)
+  # HTTPS outbound (Stellar, SNS, SQS, SES, ECR, Secrets Manager).
+  # 0.0.0.0/0 on 443 only: the bridge calls Stellar Horizon/Soroban RPC and
+  # operator webhook endpoints whose addresses are not knowable up front.
+  # Every other port stays closed.
+  #trivy:ignore:AVD-AWS-0104
   egress {
     description = "HTTPS outbound"
     from_port   = 443

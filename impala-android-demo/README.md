@@ -5,7 +5,10 @@ Android demo application for Payala-Impala, demonstrating authentication (passwo
 ## Requirements
 
 - Android Studio Hedgehog (2023.1.1) or later
-- JDK 17
+- JDK 17 to launch Gradle (bytecode targets 17). Unit tests run on a Java 21
+  toolchain — Robolectric's SDK-36 sandbox requires it — which
+  `settings.gradle.kts` auto-provisions via the foojay resolver if no JDK 21 is
+  installed.
 - Android SDK 37 (compileSdk / targetSdk)
 - minSdk 24 (Android 7.0)
 
@@ -25,6 +28,24 @@ cd impala-android-demo
 ```
 
 Or open the project in Android Studio and run on an emulator or device.
+
+### Firebase config (`app/google-services.json`)
+
+The app applies the `com.google.gms.google-services` plugin (Firebase Cloud
+Messaging), so **every** variant build — including `testTnetDebugUnitTest` —
+fails with `File google-services.json is missing` until that file exists.
+`app/google-services.json` is gitignored, so a fresh clone has none. Seed the
+committed placeholder:
+
+```bash
+cp app/google-services.json.example app/google-services.json
+```
+
+The placeholder satisfies the plugin and leaves FCM inert (push registration
+will not work); replace it with the real Firebase config to exercise push. CI
+does the same copy — see the "Provision placeholder google-services.json" step
+in `.github/workflows/impala-android.yml`, which never overwrites an existing
+file.
 
 ## Configuration
 

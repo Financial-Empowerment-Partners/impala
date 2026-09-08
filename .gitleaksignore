@@ -1,0 +1,83 @@
+# =============================================================================
+# gitleaks per-finding suppressions (security.yml job `gitleaks`).
+#
+# One line per audited finding, NEVER a path and NEVER a rule — a new secret in
+# any of these files still fails the scan. Entries appear in two forms because
+# the fingerprint depends on the scan mode: `<commit>:<file>:<rule>:<line>`
+# when gitleaks walks git history (how CI runs it, fetch-depth 0) and
+# `<file>:<rule>:<line>` for a working-tree scan (`gitleaks detect --no-git`).
+# The two disagree on line numbers when a file changed after the commit that
+# introduced the finding; both are listed.
+#
+# Audit performed 2026-09-08 over the full history (109 commits). Verdict for
+# all of them: none is a credential. Most are string literals inside
+# `#[cfg(test)]` modules, two are doc comments naming a PEM header, and two are
+# unparseable placeholder JWTs. The RSA keys in changelly.rs were generated for
+# the test suite and authenticate nothing — the real Changelly key is
+# operator-installed through /admin/keys and never lives in the repo
+# (CLAUDE.md § Key custody).
+#
+# NOTE: comments here deliberately avoid writing PEM header lines verbatim,
+# because this file is itself scanned.
+#
+# Re-audit trigger: any NEW fingerprint reported by the job — including one of
+# these findings reappearing under a later commit because its line moved. Do
+# not add a line here without reading the flagged code and recording why it is
+# not a secret.
+# =============================================================================
+
+# --- history-scan fingerprints (what CI produces) ----------------------------
+
+# changelly.rs:67 (commit 7a9d1c5d) — doc comment on parse_public_key naming
+# the PEM headers it accepts. Prose, not key material.
+7a9d1c5dda212d695dde0e8be866733e6e484714:impala-bridge/src/exchange/changelly.rs:private-key:67
+
+# changelly.rs:1072,1101 (commit 7a9d1c5d) — the TEST_RSA_PKCS8_PEM and
+# TEST_RSA_PKCS1_PEM constants inside the `#[cfg(test)]` module, generated for
+# the signature-verification tests.
+7a9d1c5dda212d695dde0e8be866733e6e484714:impala-bridge/src/exchange/changelly.rs:private-key:1072
+7a9d1c5dda212d695dde0e8be866733e6e484714:impala-bridge/src/exchange/changelly.rs:private-key:1101
+
+# changelly.rs:1203 (commit 7a9d1c5d) — a #[test] body asserting
+# parse_public_key accepts the SPKI form of that same test key.
+7a9d1c5dda212d695dde0e8be866733e6e484714:impala-bridge/src/exchange/changelly.rs:private-key:1203
+
+# fcm.rs:31 (commit 71abed3a) — doc comment on ServiceAccountKey::private_key
+# describing the expected PKCS#8 PEM. Prose.
+71abed3a1b665c8b44cea737133dd1cbfc8ad06c:impala-bridge/src/fcm.rs:private-key:31
+
+# fcm.rs:360 (commit 71abed3a) — a #[test] assertion that the parsed key starts
+# with the PEM header; its fixture is an elided literal whose body is "MIIE...".
+71abed3a1b665c8b44cea737133dd1cbfc8ad06c:impala-bridge/src/fcm.rs:private-key:360
+
+# google.rs:262 (commit 71abed3a) — the placeholder id token
+# "eyJhbGciOiJSUzI1NiIsImtpZCI6ImsxIn0.e30.c2ln" in a `#[cfg(test)]` module: a
+# JOSE header, the empty payload {}, and the three ASCII bytes "sig".
+71abed3a1b665c8b44cea737133dd1cbfc8ad06c:impala-bridge/src/google.rs:generic-api-key:262
+
+# keys/mod.rs:506 (commit da1e1e3e) — a test helper that wraps a locally
+# generated DER in PEM armour.
+da1e1e3e7c8f12b6bf1519ee528723ad465377e5:impala-bridge/src/keys/mod.rs:private-key:506
+
+# keys/mod.rs:745 (commit da1e1e3e) — note_rejects_pasted_key_material asserts
+# that looks_like_secret() returns true for a PKCS#1 header string. The repo's
+# own secret detector under test.
+da1e1e3e7c8f12b6bf1519ee528723ad465377e5:impala-bridge/src/keys/mod.rs:private-key:745
+
+# okta.rs:416 (commit 71abed3a) — the same placeholder JWT as google.rs:262.
+71abed3a1b665c8b44cea737133dd1cbfc8ad06c:impala-bridge/src/okta.rs:generic-api-key:416
+
+# --- working-tree fingerprints (`--no-git`, for local runs) -------------------
+# The same findings as above, addressed by working-tree line. changelly.rs
+# gained ~20 lines after commit 7a9d1c5d, so its numbers differ from the
+# history form; the rest match.
+impala-bridge/src/exchange/changelly.rs:private-key:47
+impala-bridge/src/exchange/changelly.rs:private-key:1052
+impala-bridge/src/exchange/changelly.rs:private-key:1081
+impala-bridge/src/exchange/changelly.rs:private-key:1183
+impala-bridge/src/fcm.rs:private-key:31
+impala-bridge/src/fcm.rs:private-key:360
+impala-bridge/src/google.rs:generic-api-key:262
+impala-bridge/src/keys/mod.rs:private-key:506
+impala-bridge/src/keys/mod.rs:private-key:745
+impala-bridge/src/okta.rs:generic-api-key:416

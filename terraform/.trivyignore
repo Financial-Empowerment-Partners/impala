@@ -1,36 +1,33 @@
 # Trivy misconfiguration baseline for terraform/.
-# Established when the pre-commit hook migrated from the deprecated tfsec to
-# trivy (tfsec could not parse the Terraform 1.5 `check` blocks in testnet.tf).
-# Entries are either intentional architecture (kept, with rationale) or
-# pre-existing findings queued for the validation-fixes pass (marked TODO).
-
-# --- Intentional architecture ---
-
-# Public-facing ALB fronted by WAF (waf.tf); exposure is the design.
-AVD-AWS-0053
-
-# HTTP listener forwards only when no certificate_arn is configured; with a
-# cert it 301-redirects to HTTPS (alb.tf). Production sets certificate_arn.
-AVD-AWS-0054
-
-# ECS tasks need unrestricted egress to reach ECR, Stellar Horizon/RPC,
-# Twilio, FCM, and other external APIs; scoping would require VPC endpoints
-# plus an allowlist that breaks the bridge's outbound integrations.
-AVD-AWS-0104
-
-# Public subnets host only the ALB and NAT gateways; auto-assign public IPs
-# is required there. Services run in private subnets.
-AVD-AWS-0164
-
-# ALB access-log delivery does not support SSE-KMS; the alb_logs bucket must
-# use SSE-S3 (AES256). Backup buckets use SSE-S3 by choice (no CMK to manage).
-AVD-AWS-0132
-
-# The jobs topics are encrypted with the AWS-managed SNS key (alias/aws/sns);
-# a customer-managed key is not worth the key-policy and rotation surface for
-# internal job-dispatch payloads. Same trade-off as AVD-AWS-0132 above.
-AVD-AWS-0136
-
-# (SNS/SQS at-rest encryption AVD-AWS-0095/0096 and ALB header-dropping
-# AVD-AWS-0052 were fixed rather than ignored; the alerts topic in
-# monitoring.tf carries a scoped inline trivy:ignore instead.)
+#
+# DELIBERATELY EMPTY OF IDs. Every accepted finding is suppressed with an
+# inline `#trivy:ignore:AVD-AWS-xxxx` marker directly above the resource or
+# attribute it applies to, next to the sentence explaining why.
+#
+# Why not list the IDs here: trivy resolves --ignorefile relative to the
+# process working directory, not to the scan target. Both callers scan this
+# tree from the repo root --
+#
+#     .github/workflows/security.yml   trivy-action, scan-ref: terraform
+#     Justfile                         scan-tf: trivy config ... terraform
+#
+# -- so `terraform/.trivyignore` was never loaded by either one, and the
+# entries that used to live here silently did nothing: `just scan-tf` reported
+# 2 CRITICAL + 7 HIGH accepted findings on every run, which is exactly how a
+# genuinely new finding gets lost. Inline markers are path-independent and
+# work from either working directory; modules/, bootstrap/ and monitoring.tf
+# already used them.
+#
+# Accepted findings and where their marker lives:
+#   AVD-AWS-0053  internet-facing ALB (by design, WAF in front)   alb.tf, modules/*
+#   AVD-AWS-0054  plain-HTTP listener for certificate-less stacks alb.tf, modules/ecs-stack
+#   AVD-AWS-0095  unencrypted alerts topic (alarms cannot publish
+#                 through the AWS-managed SNS key)                monitoring.tf
+#   AVD-AWS-0104  unrestricted egress (ALB to dynamic task ENIs;
+#                 tasks to Horizon/RPC/webhooks on 443)           security_groups.tf, modules/*
+#   AVD-AWS-0132  S3 without a customer-managed key               s3.tf, bootstrap/, modules/*
+#   AVD-AWS-0136  SNS jobs topic on alias/aws/sns                 sns_sqs.tf, modules/ecs-stack
+#   AVD-AWS-0164  auto-assign public IP on public subnets         vpc.tf, modules/*
+#
+# Adding a new acceptance: put the marker and its justification on the
+# resource. Do not re-add IDs to this file - they would not be read.

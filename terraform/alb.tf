@@ -1,3 +1,6 @@
+# Internet-facing ALB is the public API entry point for this stack - by design;
+# WAF (waf.tf) is attached in front of it.
+#trivy:ignore:AVD-AWS-0053
 resource "aws_lb" "main" {
   name                       = "${local.name_prefix}-alb"
   internal                   = false
@@ -71,6 +74,7 @@ resource "aws_lb_target_group" "server" {
 # validations reject environment = "production" without certificate_arn, and
 # reject live_enabled / any pubnet ecs-stack without a certificate (see
 # variables.tf and modules/ecs-stack/variables.tf).
+#trivy:ignore:AVD-AWS-0054
 resource "aws_lb_listener" "http" {
   load_balancer_arn = aws_lb.main.arn
   port              = 80

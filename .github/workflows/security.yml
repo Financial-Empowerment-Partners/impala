@@ -11,6 +11,23 @@ on:
 # Every `uses:` is pinned to a full commit SHA (release in the trailing
 # comment; Dependabot bumps them) and checkouts never persist GITHUB_TOKEN.
 # security-events: write is granted only to the jobs that upload SARIF.
+#
+# trivy-action, why it must not go stale (2026-09-08): the three trivy jobs
+# were failing before the run at all. The previous pin (v0.28.0) is a composite
+# action whose first step is `uses: aquasecurity/setup-trivy@v0.2.1`, and
+# upstream has since DELETED that tag (only v0.2.6 / v0.3.0 / v0.3.1 remain),
+# so the job died at action resolution. Even past that, v0.28.0 asks
+# setup-trivy for trivy v0.56.1, and aquasecurity prunes old trivy releases —
+# every version below v0.70.0 has already lost its GitHub release assets, so
+# the download 404s. v0.36.0 pins setup-trivy by SHA (deletion-proof) and
+# defaults to trivy v0.70.0, which still publishes assets.
+#
+# Consequences for whoever maintains this: (a) do NOT pin the trivy BINARY
+# version here — the action's default tracks a release that still exists, a
+# hard pin becomes an install failure the day it is pruned; (b) keep the
+# action pin moving (Dependabot), because a frozen pin re-acquires both
+# failures above. Findings never fail these jobs (no `exit-code`); they upload
+# as SARIF, so a scanner bump can change the alert list but cannot turn CI red.
 permissions:
   contents: read
 
@@ -40,12 +57,17 @@ jobs:
         with:
           persist-credentials: false
       - name: Run Trivy FS scan
-        uses: aquasecurity/trivy-action@915b19bbe73b92a6cf82a1bc12b087c9a19a5fe2 # v0.28.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: fs
           scan-ref: .
           ignore-unfixed: true
           severity: CRITICAL,HIGH
+          # Without this the action DELETES the severity filter whenever the
+          # format is sarif (entrypoint.sh: "Building SARIF report with all
+          # severities"), so the line above would be decorative and every
+          # LOW/MEDIUM/UNKNOWN finding would land in code scanning.
+          limit-severities-for-sarif: true
           format: sarif
           output: trivy-fs.sarif
       - name: Upload SARIF
@@ -66,11 +88,14 @@ jobs:
         with:
           persist-credentials: false
       - name: Trivy config scan (bridge Dockerfile)
-        uses: aquasecurity/trivy-action@915b19bbe73b92a6cf82a1bc12b087c9a19a5fe2 # v0.28.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: config
           scan-ref: impala-bridge
           severity: CRITICAL,HIGH
+          # See the trivy-fs job: sarif output drops `severity` unless this is
+          # set.
+          limit-severities-for-sarif: true
           format: sarif
           output: trivy-dockerfile.sarif
       - name: Upload SARIF
@@ -93,11 +118,15 @@ jobs:
         with:
           persist-credentials: false
       - name: Trivy config scan (terraform)
-        uses: aquasecurity/trivy-action@915b19bbe73b92a6cf82a1bc12b087c9a19a5fe2 # v0.28.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: config
           scan-ref: terraform
           severity: CRITICAL,HIGH
+          # See the trivy-fs job: sarif output drops `severity` unless this is
+          # set. terraform/ has accepted MEDIUM findings (documented in
+          # terraform/README.md) that must not become code-scanning alerts.
+          limit-severities-for-sarif: true
           format: sarif
           output: trivy-terraform.sarif
       - name: Upload SARIF

@@ -1,0 +1,22 @@
+# =============================================================================
+# Trivy configuration, auto-loaded from the working directory (trivy's
+# `--config` defaults to trivy.yaml), so the scans in security.yml pick this up
+# with no change to the workflow and a local `trivy fs .` behaves identically
+# to CI.
+#
+# It exists for one reason: trivy auto-detects a plain `.trivyignore` but not
+# the YAML form, and the YAML form is the one that can scope a suppression to a
+# rule AND a path instead of disabling the rule everywhere. See
+# .trivyignore.yaml for the audited suppressions.
+# =============================================================================
+
+ignorefile: .trivyignore.yaml
+
+# Build output is never committed and is absent from a CI checkout; skipping it
+# keeps a local scan from walking gigabytes of target/ and node_modules/.
+scan:
+  skip-dirs:
+    - "**/target"
+    - "**/build"
+    - "**/node_modules"
+    - "**/.gradle"

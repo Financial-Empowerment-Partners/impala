@@ -595,7 +595,11 @@ that would otherwise surface only on the next code change. The gate itself is
 fail the job unless they are on the script's accept list — each accepted
 finding carries its justification in the script, so a known, assessed,
 unfixable transitive finding cannot turn the job permanently red (which would
-only train everyone to ignore it), while anything new still fails.
+only train everyone to ignore it), while anything new still fails. An accept
+entry is keyed on OSV id **plus module path plus fixed version**, so it
+expires by itself: as soon as a fixed release exists, or the vulnerable code
+arrives through a different module path, the key stops matching and the gate
+goes red until someone re-assesses it.
 
 `scripts/testnet-smoke.sh` is an opt-in end-to-end exercise against real
 testnet Horizon (Friendbot funding, a create + payment with an id memo, then

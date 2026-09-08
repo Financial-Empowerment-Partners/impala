@@ -8,8 +8,25 @@ no-default-features = false
 
 [advisories]
 version = 2
-ignore = []
-# Block the build on any advisory unless explicitly ignored above.
+# Block the build on any advisory unless explicitly ignored below. Keep this
+# list empty of vulnerabilities: only informational (unmaintained/unsound)
+# notices with no upgrade path and no reachable code belong here, each with a
+# recheck trigger.
+ignore = [
+    # RUSTSEC-2022-0081 — `json` 0.12.4 is unmaintained (informational; not a
+    # vulnerability). No upgrade path: it arrives only through stellar-base
+    # 0.7.0 (the newest release), which declares a hard `json = "0.12.4"`
+    # dependency, and 0.12.4 is the newest `json`. Acceptable HERE because the
+    # crate is linked but never called: `json` appears exactly once in the
+    # whole stellar-base source tree, as the bare `extern crate json;` on
+    # src/lib.rs:72, with no `json::` reference anywhere — so the parser the
+    # advisory's soundness concern points at is not reachable from any bridge
+    # code path (we parse Horizon/provider JSON with serde_json).
+    # Recheck when stellar-base publishes >0.7.0 (drop this the moment a
+    # release removes the dep), or if RUSTSEC upgrades this to a
+    # `vulnerability` — a vulnerability advisory must never be ignored here.
+    { id = "RUSTSEC-2022-0081", reason = "unmaintained-only; stellar-base 0.7.0 links `json` via a bare `extern crate` and never calls it" },
+]
 
 [licenses]
 version = 2
@@ -27,6 +44,14 @@ allow = [
     "CC0-1.0",
     "MPL-2.0",
     "OpenSSL",
+    # Mozilla's CA root bundle, shipped as data by webpki-roots (sqlx-core's
+    # TLS trust anchors) and webpki-root-certs (reqwest's
+    # rustls-platform-verifier fallback). CDLA-Permissive-2.0 is a permissive
+    # data license with no copyleft or attribution-on-redistribution burden.
+    "CDLA-Permissive-2.0",
+    # Boost Software License: OSI-approved, permissive, no binary-form
+    # attribution requirement. Reaches us through redis -> xxhash-rust.
+    "BSL-1.0",
 ]
 confidence-threshold = 0.8
 exceptions = []

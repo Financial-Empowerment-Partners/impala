@@ -12,6 +12,9 @@ resource "aws_s3_bucket" "alb_logs" {
   }
 }
 
+# ELB access-log delivery only supports SSE-S3 (AES256); the log-delivery
+# service rejects SSE-KMS destination buckets, so a CMK is not an option.
+#trivy:ignore:AVD-AWS-0132
 resource "aws_s3_bucket_server_side_encryption_configuration" "alb_logs" {
   bucket = aws_s3_bucket.alb_logs.id
 
@@ -117,6 +120,11 @@ resource "aws_s3_bucket_versioning" "backups" {
   }
 }
 
+# SSE-KMS with the AWS-managed aws/s3 key: encrypted at rest with no CMK to
+# create, rotate and write a key policy for, and bucket_key_enabled keeps the
+# per-object KMS call volume (and cost) down. Revisit only if backups ever
+# need key-level access separation from the rest of the account.
+#trivy:ignore:AVD-AWS-0132
 resource "aws_s3_bucket_server_side_encryption_configuration" "backups" {
   bucket = aws_s3_bucket.backups.id
 

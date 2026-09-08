@@ -46,7 +46,11 @@ test-card:
 test-lib:
     cd impala-lib && ./gradlew test
 
-# impala-android-demo unit tests. Needs JDK 17, Android SDK, app/google-services.json.
+# impala-android-demo unit tests. Needs JDK 17, Android SDK, and
+# app/google-services.json — the google-services plugin fails EVERY task
+# without it, unit tests included. On a fresh clone seed the placeholder:
+#   cp impala-android-demo/app/google-services.json.example \
+#      impala-android-demo/app/google-services.json
 test-demo:
     cd impala-android-demo && ./gradlew test
 

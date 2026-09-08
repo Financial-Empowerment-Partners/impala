@@ -12,11 +12,21 @@ on:
     paths:
       - 'impala-ui/**'
       - '.github/workflows/impala-ui.yml'
+      # tests/custody-view.test.js parses CUSTODIAL_REFUSAL_CODES out of the
+      # bridge's constants.rs and asserts CustodyView.REFUSAL_CODES matches
+      # it, so a bridge-only edit to that file must run this job or the
+      # UI/bridge drift lands unnoticed.
+      - 'impala-bridge/src/constants.rs'
   pull_request:
     branches: [main]
     paths:
       - 'impala-ui/**'
       - '.github/workflows/impala-ui.yml'
+      # tests/custody-view.test.js parses CUSTODIAL_REFUSAL_CODES out of the
+      # bridge's constants.rs and asserts CustodyView.REFUSAL_CODES matches
+      # it, so a bridge-only edit to that file must run this job or the
+      # UI/bridge drift lands unnoticed.
+      - 'impala-bridge/src/constants.rs'
   workflow_dispatch:
 
 concurrency:
@@ -53,14 +63,14 @@ jobs:
       - name: Lint (eslint)
         run: npm run lint
 
+      # No artifact-upload step follows on purpose: `npm test` is `vitest run`
+      # with reporters: ['default'] and no coverage provider in the tree, so
+      # nothing is ever written to disk. The step that used to sit here
+      # uploaded `impala-ui/**/coverage/**` with `if-no-files-found: ignore` —
+      # a silent no-op that promised failure diagnostics and delivered an empty
+      # artifact. Vitest's default reporter prints the whole failure body into
+      # the job log. If a real artifact is ever wanted, add vitest's built-in
+      # `junit` reporter with an `outputFile` in impala-ui/vitest.config.js and
+      # upload that exact path.
       - name: Run unit tests
         run: npm test
-
-      - name: Upload test reports on failure
-        if: failure()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: vitest-reports-${{ github.sha }}
-          path: impala-ui/**/coverage/**
-          if-no-files-found: ignore
-          retention-days: 14

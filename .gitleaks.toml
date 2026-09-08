@@ -1,0 +1,44 @@
+# =============================================================================
+# gitleaks configuration for impala (security.yml job `gitleaks`).
+#
+# The default ruleset is kept in full — this file only adds one path allowlist
+# for VENDORED third-party material we do not author and cannot rewrite. Every
+# other benign finding is suppressed one at a time by fingerprint in
+# `.gitleaksignore`, never by path, so a real secret newly added to any of our
+# own source files still fails the scan.
+#
+# Audited 2026-09-08 against the whole history (109 commits): 12 findings, all
+# non-secrets — see `.gitleaksignore` for the per-finding verdicts.
+# =============================================================================
+
+title = "Impala"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = """
+Two path classes only, both of which we do not author.
+
+1. The Oracle JavaCard 3.0.4 SDK, vendored under impala-card/applet/libs/sdks/
+   so the applet builds reproducibly. Its classic_simulator ships a self-signed
+   SSL key pair (ssl.selfIdentitySSLPrivateKeyExp / -Mod in
+   lib/config.properties) that Oracle publishes identically to every licensee:
+   it authenticates a localhost simulator socket, is not ours, and grants
+   nothing. We never edit this tree; a secret of ours must never be added here
+   — it belongs in the deployment's secret store.
+
+2. Gitignored build output (target/, build/, node_modules/). CI scans a clean
+   checkout where these do not exist; skipping them keeps a local
+   `gitleaks detect --no-git` usable and fast, and nothing in them is
+   committed.
+
+Everything else is suppressed one finding at a time, by fingerprint, in
+.gitleaksignore — see that file for the per-finding audit verdicts.
+"""
+paths = [
+  '''impala-card/applet/libs/sdks/.*''',
+  '''(^|/)target/''',
+  '''(^|/)build/''',
+  '''(^|/)node_modules/''',
+]

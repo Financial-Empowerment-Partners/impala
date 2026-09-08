@@ -35,10 +35,13 @@ terraform init -backend=false && terraform validate
 
 CI (`.github/workflows/ci.yml`) runs init/validate/fmt on every pull request and
 a plan-only pass on pushes to `main`; `apply` runs only from an explicit
-`workflow_dispatch`. `security.yml` and the pre-commit hook scan the config with **trivy**
+`workflow_dispatch`. `security.yml` and `just scan-tf` scan the config with **trivy**
 (the deprecated tfsec parser rejects the Terraform 1.5+ `check` syntax).
-Accepted findings live in `.trivyignore` with a one-line justification next to
-the resource; new findings must be fixed or get the same treatment.
+Accepted findings are suppressed with an inline `#trivy:ignore:AVD-AWS-xxxx`
+marker on the resource, above the sentence justifying it; new findings must be
+fixed or get the same treatment. The markers are inline rather than listed in
+`.trivyignore` because both callers run trivy from the repo root, where a
+`terraform/.trivyignore` is never loaded - see the header of that file.
 
 ## Files (map)
 

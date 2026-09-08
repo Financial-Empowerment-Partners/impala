@@ -1,0 +1,56 @@
+# =============================================================================
+# Trivy suppressions (security.yml jobs `trivy-fs`, `trivy-dockerfile`,
+# `trivy-terraform`). Those jobs publish SARIF to GitHub code scanning rather
+# than failing the build, so everything here is about keeping the security tab
+# meaningful — an alert list full of known-benign test fixtures is an alert
+# list nobody reads.
+#
+# Only Trivy's secret scanner is suppressed, only for the exact files audited
+# below, and only for the rule that fires there. Vulnerability and
+# misconfiguration findings are never suppressed here: fix those instead.
+#
+# Same audit as .gitleaksignore (2026-09-08). Both files must be updated
+# together when test fixtures move.
+# =============================================================================
+
+misconfigurations:
+  # impala-ui/Dockerfile — DS-0002 "no USER instruction". The stock nginx
+  # entrypoint starts as root to bind :80, then runs its workers as the
+  # unprivileged `nginx` user (the image's own `user nginx;` default); trivy
+  # only looks for a USER line and cannot see that hand-off. The image serves
+  # static files for local development: terraform/ deploys no ECS task, service
+  # or task definition that references it, and impala-ui/docker-compose.yml
+  # does not build it (it runs the upstream nginx image with html/ and
+  # nginx.conf bind-mounted). Accepted with the same reasoning recorded in the
+  # Dockerfile header, which also names the real fix.
+  #
+  # Re-audit trigger: this image being deployed anywhere, or the compose file
+  # starting to build it.
+  - id: DS-0002
+    paths:
+      - "impala-ui/Dockerfile"
+    statement: "Dev-only static-file image; nginx drops workers to a non-root user and it is not deployed."
+
+secrets:
+  # impala-bridge/src/exchange/changelly.rs — TEST_RSA_PKCS8_PEM and
+  # TEST_RSA_PKCS1_PEM, declared inside the `#[cfg(test)]` module that begins
+  # at line 1044 and used only to exercise parse_private_key_pem /
+  # parse_public_key / the signature verifier. Generated for the test suite;
+  # they authenticate nothing. The real Changelly credential is
+  # operator-installed through /admin/keys and never lives in the repo
+  # (CLAUDE.md § Key custody).
+  - id: private-key
+    paths:
+      - "impala-bridge/src/exchange/changelly.rs"
+    statement: "RSA keys generated for the unit tests; not a live credential."
+
+  # impala-bridge/src/fcm.rs — the service-account JSON fixture in the
+  # `#[cfg(test)]` module (line 278 onward) that
+  # service_account_key_parses_the_three_used_fields_and_ignores_the_rest
+  # feeds to ServiceAccountKey::parse. Its private_key body is the elided
+  # literal "MIIE..." and its client_email points at the placeholder project
+  # "impala-demo".
+  - id: gcp-service-account
+    paths:
+      - "impala-bridge/src/fcm.rs"
+    statement: "Placeholder service-account JSON in a unit test; no real key material."

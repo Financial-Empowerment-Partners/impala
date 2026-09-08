@@ -80,6 +80,22 @@ jobs:
         with:
           cache-read-only: ${{ github.ref != 'refs/heads/main' }}
 
+      # app/google-services.json is gitignored (repo-root .gitignore), so a clean
+      # checkout has none and AGP's :app:process<Variant>GoogleServices task fails
+      # the build outright ("File google-services.json is missing"). Seed the
+      # committed placeholder — it satisfies the plugin for compile/test/package
+      # and leaves FCM inert, which is what a CI artifact should be. Never
+      # overwrites an existing file, so a self-hosted runner keeps its real one.
+      - name: Provision placeholder google-services.json
+        run: |
+          f=impala-android-demo/app/google-services.json
+          if [ -f "$f" ]; then
+            echo "google-services.json already present — leaving it in place"
+          else
+            cp "$f.example" "$f"
+            echo "seeded placeholder google-services.json (CI has no Firebase config)"
+          fi
+
       - name: impala-android-demo unit tests (tnet + live flavors)
         working-directory: impala-android-demo
         run: ./gradlew testTnetDebugUnitTest testLiveDebugUnitTest --no-daemon --stacktrace
@@ -138,6 +154,17 @@ jobs:
           if ! python3 -c "import re,sys; s=open(sys.argv[1]).read(); s=re.sub(r'<!--.*?-->','',s,flags=re.S); sys.exit(1 if ('<pin-set' in s and '_BASE64=' in s) else 0)" "$f"; then
             echo "::error::live network_security_config has an active pin-set with placeholder pins"
             exit 1
+          fi
+
+      # See the unit-tests job for why this is needed on a clean checkout.
+      - name: Provision placeholder google-services.json
+        run: |
+          f=impala-android-demo/app/google-services.json
+          if [ -f "$f" ]; then
+            echo "google-services.json already present — leaving it in place"
+          else
+            cp "$f.example" "$f"
+            echo "seeded placeholder google-services.json (CI has no Firebase config)"
           fi
 
       - name: Assemble demo APKs (tnet + live)
@@ -212,6 +239,17 @@ jobs:
         with:
           cache-read-only: ${{ github.ref != 'refs/heads/main' }}
 
+      # See the unit-tests job for why this is needed on a clean checkout.
+      - name: Provision placeholder google-services.json
+        run: |
+          f=impala-android-demo/app/google-services.json
+          if [ -f "$f" ]; then
+            echo "google-services.json already present — leaving it in place"
+          else
+            cp "$f.example" "$f"
+            echo "seeded placeholder google-services.json (CI has no Firebase config)"
+          fi
+
       - name: Enable KVM
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
@@ -248,9 +286,15 @@ jobs:
           force-avd-creation: false
           emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
           disable-animations: true
+          # android-emulator-runner splits `script` on newlines and runs each
+          # line as its own `sh -c` from the workspace root (see the action's
+          # script-parser + `exec.exec('sh', ['-c', script])`), so a `cd` on one
+          # line does NOT carry to the next. Each line must therefore be rooted
+          # at the workspace: `cd ../impala-lib` here would resolve outside the
+          # checkout and fail the step with "cd: ../impala-lib: No such file".
           script: |
             cd impala-android-demo && ./gradlew connectedTnetDebugAndroidTest --no-daemon --stacktrace
-            cd ../impala-lib && ./gradlew connectedDebugAndroidTest --no-daemon --stacktrace
+            cd impala-lib && ./gradlew connectedDebugAndroidTest --no-daemon --stacktrace
 
       - name: Upload instrumented test reports on failure
         if: failure()

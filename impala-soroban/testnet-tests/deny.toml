@@ -1,0 +1,67 @@
+# cargo-deny configuration for the testnet end-to-end test crate.
+# Run with: `cargo deny check advisories bans sources licenses`
+# (CI: .github/workflows/security.yml, cargo-deny job matrix — it passes only
+# --manifest-path, so cargo-deny reads the deny.toml next to that manifest.
+# Without this file the crate inherits cargo-deny's defaults, whose empty
+# license allow-list rejects every dependency.)
+#
+# Mirrors impala-soroban/integration-test/deny.toml; this crate's tree is the
+# reqwest HTTP client (Horizon/RPC calls), not the contract, so the two trees
+# share almost nothing. Never add advisory ignores here: this crate's
+# dependencies all have upstream releases, so a vulnerability is fixed by
+# bumping Cargo.lock (`cargo update -p <crate>`), not by silencing it.
+
+[graph]
+all-features = false
+no-default-features = false
+
+[advisories]
+version = 2
+ignore = []
+# Block the check on any vulnerability advisory unless explicitly ignored
+# above (nothing is, and nothing should be).
+#
+# Unlike the contract crate — which scopes this to "workspace" because the
+# pinned soroban-env-host drags in unmaintained ark-* helpers — this tree has
+# no unmaintained-crate notices at all, so the strictest scope stays on.
+unmaintained = "all"
+
+[licenses]
+version = 2
+# Allow common permissive licenses. Reject GPL/AGPL etc. by omission.
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-DFS-2016",
+    "Unicode-3.0",
+    "Zlib",
+    "CC0-1.0",
+    "MPL-2.0",
+    "OpenSSL",
+    # webpki-root-certs (Mozilla's CA root store, pulled by rustls through
+    # reqwest) is CDLA-Permissive-2.0 only — a permissive data license with no
+    # copyleft or attribution-on-binary obligation. Not in the other crates'
+    # allow lists because nothing else in the repo depends on it.
+    "CDLA-Permissive-2.0",
+]
+confidence-threshold = 0.8
+exceptions = []
+
+[bans]
+multiple-versions = "warn"
+wildcards = "warn"
+deny = [
+    # Explicitly banned crates go here (e.g. known-abandoned duplicates).
+]
+skip = []
+skip-tree = []
+
+[sources]
+unknown-registry = "warn"
+unknown-git = "warn"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
