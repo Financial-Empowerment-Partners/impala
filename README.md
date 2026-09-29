@@ -2,6 +2,8 @@
 
 **A secure bridge between offline Payala payments and the Stellar network, using Soroban smart contracts, hardware-protected cryptographic primitives (JavaCard smartcard), and Android bindings.**
 
+This project made possible through a generous grant from the <a href="https://communityfund.stellar.org/"><b>Stellar Community Fund</b></a>.
+
 ## What It Does
 
 Impala connects the Payala offline payment system to Stellar's on-chain infrastructure. Transactions happen offline through Payala's existing network, but those funds need to move on-chain when users want to interact with the broader Stellar ecosystem. Impala makes that crossing seamless — whether a user is wrapping tokens into a Soroban smart contract, transferring value between accounts, or checking their balance from a phone.
