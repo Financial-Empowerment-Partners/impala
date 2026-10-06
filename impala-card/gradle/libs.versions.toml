@@ -19,6 +19,9 @@ javacard-simulator = { module = "com.klinec:jcardsim", version = "3.0.6.0" }
 # 2026-06 as a dead commonMain dep); declared explicitly now that it is the only user.
 bouncycastle = { module = "org.bouncycastle:bcprov-jdk18on", version = "1.84" }
 okio = { module = "com.squareup.okio:okio", version.ref = "okio" }
+# tools/issue only: JSON for the bridge client, and a fake bridge in its tests.
+gson = { module = "com.google.code.gson:gson", version = "2.14.0" }
+mockwebserver = { module = "com.squareup.okhttp3:mockwebserver", version = "4.12.0" }
 uuid = { module = "com.benasher44:uuid", version.ref = "uuid" }
 bignum = { module = "com.ionspin.kotlin:bignum", version.ref = "bignum" }
 
@@ -28,6 +31,7 @@ bignum = { module = "com.ionspin.kotlin:bignum", version.ref = "bignum" }
 androidKmpLibrary = { id = "com.android.kotlin.multiplatform.library", version.ref = "agp" }
 kotlinAndroid = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
 kotlinMultiplatform = { id = "org.jetbrains.kotlin.multiplatform", version.ref = "kotlin" }
+kotlinJvm = { id = "org.jetbrains.kotlin.jvm", version.ref = "kotlin" }
 kotlinCocoapods = { id = "org.jetbrains.kotlin.native.cocoapods", version.ref = "kotlin" }
 compose-compiler = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
 mavenPublish = { id = "com.vanniktech.maven.publish", version = "0.36.0" }

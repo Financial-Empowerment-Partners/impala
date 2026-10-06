@@ -5,6 +5,7 @@ import com.impala.sdk.apdu4j.ResponseAPDU
 import com.impala.sdk.models.ImpalaException
 import com.impala.sdk.models.PersonalizationProtocol
 import com.impala.sdk.scp03.SCP03Constants
+import com.impala.simulator.SimulatorBibo
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals

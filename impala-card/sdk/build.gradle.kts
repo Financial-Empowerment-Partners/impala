@@ -7,7 +7,11 @@ plugins {
 kotlin {
     jvmToolchain(17)
 
-    jvm()
+    jvm {
+        // PcscBibo (jvmMain) uses javax.smartcardio, which is not among the
+        // default root modules the Kotlin compiler resolves.
+        compilerOptions { freeCompilerArgs.add("-Xadd-modules=java.smartcardio") }
+    }
 
     listOf(
         iosX64(),
@@ -42,6 +46,9 @@ kotlin {
             implementation(libs.bouncycastle)
             // implementation(files("../build/applet.jar"))
             implementation(project(":applet"))
+            // SimulatorBibo + the JCA test issuer live in :simulator so impala-lib
+            // and the demo can reuse them; the SDK's own interop tests use it too.
+            implementation(project(":simulator"))
         }
 
         // iosMain (shared by iosX64/iosArm64/iosSimulatorArm64 via the default

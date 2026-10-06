@@ -5,6 +5,7 @@ import com.impala.sdk.apdu4j.CommandAPDU
 import com.impala.sdk.models.ImpalaCardDataException
 import com.impala.sdk.models.ImpalaException
 import com.impala.sdk.models.ImpalaSecurityException
+import com.impala.simulator.SimulatorBibo
 import org.bouncycastle.crypto.engines.AESEngine
 import org.bouncycastle.crypto.macs.CMac
 import org.bouncycastle.crypto.params.KeyParameter

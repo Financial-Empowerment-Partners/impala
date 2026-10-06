@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- One string per com.impala.sdk.flows.CardError.userMessageKey (pinned by
+     CardErrorStringsTest). Apps may override any of them. -->
+<resources>
+    <string name="card_error_not_personalized">This card has not been issued yet.</string>
+    <string name="card_error_provisioning_required">This card has no PIN set up yet. Ask the issuer to finish issuing it.</string>
+    <string name="card_error_terminated">This card has been terminated and can no longer be used.</string>
+    <string name="card_error_wrong_pin">Wrong PIN. Tries left: %1$d.</string>
+    <string name="card_error_pin_blocked">The card PIN is blocked.</string>
+    <string name="card_error_insufficient_funds">The card balance is too low for this amount.</string>
+    <string name="card_error_counter_invalid">The card refused this transfer as already applied or out of date.</string>
+    <string name="card_error_counter_jump">The card refused this transfer: its counter is too far ahead.</string>
+    <string name="card_error_send_sequence_invalid">The card refused this transfer: its send sequence is out of order.</string>
+    <string name="card_error_wrong_protocol_version">This card runs applet %1$s, which is too old for this app (0.2 or newer is required).</string>
+    <string name="card_error_tag_lost">The card moved away. Hold it still against the phone and tap again.</string>
+    <string name="card_error_invalid_request">The request could not be sent to the card: %1$s</string>
+    <string name="card_error_other">The card operation failed.</string>
+</resources>

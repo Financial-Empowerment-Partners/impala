@@ -1,40 +1,30 @@
 package com.payala.impala.demo.ui.nfc
 
-import android.app.PendingIntent
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
-import android.content.IntentFilter
-import android.nfc.NdefMessage
 import android.nfc.NfcAdapter
 import android.nfc.Tag
-import android.nfc.tech.IsoDep
 import android.nfc.tech.MifareClassic
 import android.nfc.tech.MifareUltralight
 import android.nfc.tech.Ndef
-import android.nfc.tech.NdefFormatable
 import android.nfc.tech.NfcA
 import android.nfc.tech.NfcB
-import android.nfc.tech.NfcF
-import android.nfc.tech.NfcV
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
 import android.view.View
 import androidx.appcompat.app.AppCompatActivity
-import androidx.core.content.IntentCompat
 import com.google.android.material.snackbar.Snackbar
+import com.impala.sdk.flows.CardError
+import com.impala.sdk.flows.CardIdentity
+import com.impala.sdk.flows.Hex
+import com.payala.impala.card.ImpalaCardSession
+import com.payala.impala.demo.BuildConfig
 import com.payala.impala.demo.R
 import com.payala.impala.demo.databinding.ActivityNfcDebugBinding
 import com.payala.impala.demo.log.AppLogger
-import com.payala.impala.demo.nfc.APDUBIBO
-import com.payala.impala.demo.nfc.BIBOException
-import com.payala.impala.demo.nfc.CardUser
-import com.payala.impala.demo.nfc.CommandAPDU
-import com.payala.impala.demo.nfc.ImpalaCardReader
-import com.payala.impala.demo.nfc.IsoDepBibo
-import com.payala.impala.demo.nfc.NfcEventHandler
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
 import java.util.concurrent.CopyOnWriteArrayList
@@ -45,11 +35,12 @@ import java.util.concurrent.CopyOnWriteArrayList
  * Provides:
  * - Device NFC hardware capabilities report (adapter state, supported
  *   technologies, host-card-emulation support, reader mode support)
- * - Live NFC tap test that activates foreground dispatch and displays raw
- *   tag information including UID, tech list, ATQA/SAK for NfcA, and
- *   APDU card reader results for IsoDep tags
- * - Real-time event log capturing all NFC events dispatched through
- *   [NfcEventHandler] while the debug screen is active
+ * - Live NFC tap test in reader mode that displays raw tag information (UID,
+ *   tech list, ATQA/SAK for NfcA, NDEF records) and, for Impala cards, an
+ *   [ImpalaCardSession] read-out: applet version, identity, personalization
+ *   state and flags, receive state, balance and whether a signed transfer is
+ *   recorded. Only non-mutating commands are sent.
+ * - An event log of what this screen saw
  * - Instructions for enabling Android developer options and NFC debugging
  *
  * Accessible from the overflow menu (Build Info > NFC Debug) or directly
@@ -63,10 +54,6 @@ class NfcDebugActivity : AppCompatActivity() {
 
     private val eventLog = CopyOnWriteArrayList<String>()
     private val timeFormatter = DateTimeFormatter.ofPattern("HH:mm:ss.SSS")
-
-    // Save previous listeners so we can restore them on exit
-    private var previousApduListener: NfcEventHandler.ApduEventListener? = null
-    private var previousNdefListener: NfcEventHandler.NdefEventListener? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -82,7 +69,6 @@ class NfcDebugActivity : AppCompatActivity() {
         AppLogger.i(TAG, "NFC Debug opened")
 
         refreshCapabilities()
-        registerEventListeners()
 
         binding.btnRefreshCapabilities.setOnClickListener { refreshCapabilities() }
 
@@ -127,27 +113,18 @@ class NfcDebugActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         if (testModeActive) {
-            enableForegroundDispatch()
+            enableReaderMode()
         }
     }
 
     override fun onPause() {
         super.onPause()
-        disableForegroundDispatch()
+        disableReaderMode()
     }
 
     override fun onDestroy() {
         super.onDestroy()
-        // No listener restore needed — ImpalaApp will re-register its own
-        // listeners on next NFC event, and the singleton pattern replaces anyway
         AppLogger.i(TAG, "NFC Debug closed")
-    }
-
-    override fun onNewIntent(intent: Intent) {
-        super.onNewIntent(intent)
-        if (testModeActive) {
-            processDebugTag(intent)
-        }
     }
 
     // ---- Capabilities ----
@@ -179,7 +156,7 @@ class NfcDebugActivity : AppCompatActivity() {
                 appendLine()
 
                 appendLine("Supported Technologies")
-                appendLine("  IsoDep (ISO 14443-4)")
+                appendLine("  ISO-DEP (ISO 14443-4)")
                 appendLine("  NfcA (ISO 14443-3A)")
                 appendLine("  NfcB (ISO 14443-3B)")
                 appendLine("  NfcF (JIS 6319-4 / FeliCa)")
@@ -188,17 +165,12 @@ class NfcDebugActivity : AppCompatActivity() {
                 appendLine("  MifareClassic / MifareUltralight")
                 appendLine()
 
-                appendLine("Impala Card Reader")
-                appendLine("  APDU protocol:   ISO 7816-4")
-                appendLine("  Transport:       IsoDep -> IsoDepBibo -> APDUBIBO")
-                appendLine("  INS commands:")
-                appendLine("    GET_USER_DATA      0x${hex(ImpalaCardReader.INS_GET_USER_DATA)}")
-                appendLine("    GET_EC_PUB_KEY     0x${hex(ImpalaCardReader.INS_GET_EC_PUB_KEY)}")
-                appendLine("    GET_RSA_PUB_KEY    0x${hex(ImpalaCardReader.INS_GET_RSA_PUB_KEY)}")
-                appendLine("    SIGN_AUTH          0x${hex(ImpalaCardReader.INS_SIGN_AUTH)}")
-                appendLine("    VERIFY_PIN         0x${hex(ImpalaCardReader.INS_VERIFY_PIN)}")
-                appendLine("    GET_CARD_NONCE     0x${hex(ImpalaCardReader.INS_GET_CARD_NONCE)}")
-                appendLine("    GET_VERSION        0x${hex(ImpalaCardReader.INS_GET_VERSION)}")
+                appendLine("Impala Card Session (impala-lib)")
+                appendLine("  Transport:       reader mode -> ImpalaCardSession")
+                appendLine("  Applet AID:      ${BuildConfig.CARD_APPLET_AID.ifEmpty { "(default selection)" }}")
+                appendLine("  Reads:           GET_VERSION, GET_PERSONALIZATION, GET_USER_DATA,")
+                appendLine("                   GET_EC_PUB_KEY, GET_RECEIVE_STATE, GET_BALANCE,")
+                appendLine("                   GET_LAST_TRANSFER (no state-changing command)")
             } else {
                 appendLine("NFC hardware is not available on this device.")
                 appendLine()
@@ -225,7 +197,7 @@ class NfcDebugActivity : AppCompatActivity() {
         binding.btnTestTap.text = getString(R.string.nfc_debug_stop_test)
         binding.tvTestResult.visibility = View.VISIBLE
         binding.tvTestResult.text = getString(R.string.nfc_debug_waiting_for_tag)
-        enableForegroundDispatch()
+        enableReaderMode()
 
         addEvent("TEST", "Test mode activated — waiting for tag")
         AppLogger.d(TAG, "NFC test mode started")
@@ -234,244 +206,133 @@ class NfcDebugActivity : AppCompatActivity() {
     private fun stopTestMode() {
         testModeActive = false
         binding.btnTestTap.text = getString(R.string.nfc_debug_start_test)
-        disableForegroundDispatch()
+        disableReaderMode()
 
         addEvent("TEST", "Test mode deactivated")
         AppLogger.d(TAG, "NFC test mode stopped")
     }
 
-    private fun enableForegroundDispatch() {
+    /** Reader mode for every tag family; the callback runs on the NFC binder thread. */
+    private fun enableReaderMode() {
         val adapter = nfcAdapter ?: return
-        val intent = Intent(this, javaClass).apply {
-            addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
-        }
-        val pendingIntent = PendingIntent.getActivity(
-            this, 0, intent,
-            PendingIntent.FLAG_MUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
-        )
-        // Catch all tag types for debugging
-        val filters = arrayOf(
-            IntentFilter(NfcAdapter.ACTION_TECH_DISCOVERED),
-            IntentFilter(NfcAdapter.ACTION_TAG_DISCOVERED),
-            IntentFilter(NfcAdapter.ACTION_NDEF_DISCOVERED)
-        )
-        val techList = arrayOf(
-            arrayOf(IsoDep::class.java.name),
-            arrayOf(NfcA::class.java.name),
-            arrayOf(NfcB::class.java.name),
-            arrayOf(NfcF::class.java.name),
-            arrayOf(NfcV::class.java.name),
-            arrayOf(Ndef::class.java.name),
-            arrayOf(NdefFormatable::class.java.name)
-        )
-        adapter.enableForegroundDispatch(this, pendingIntent, filters, techList)
+        val flags = NfcAdapter.FLAG_READER_NFC_A or NfcAdapter.FLAG_READER_NFC_B or
+            NfcAdapter.FLAG_READER_NFC_F or NfcAdapter.FLAG_READER_NFC_V
+        val extras = Bundle().apply { putInt(NfcAdapter.EXTRA_READER_PRESENCE_CHECK_DELAY, 250) }
+        adapter.enableReaderMode(this, { tag -> onDebugTag(tag) }, flags, extras)
     }
 
-    private fun disableForegroundDispatch() {
-        nfcAdapter?.disableForegroundDispatch(this)
+    private fun disableReaderMode() {
+        nfcAdapter?.disableReaderMode(this)
     }
 
-    private fun processDebugTag(intent: Intent) {
-        val action = intent.action ?: return
-        addEvent("INTENT", "Action: $action")
-
-        val tag: Tag? = IntentCompat.getParcelableExtra(intent, NfcAdapter.EXTRA_TAG, Tag::class.java)
-        if (tag == null) {
-            // Could be NDEF-only
-            val rawMessages = IntentCompat.getParcelableArrayExtra(
-                intent, NfcAdapter.EXTRA_NDEF_MESSAGES, NdefMessage::class.java
-            )
-            if (rawMessages != null && rawMessages.isNotEmpty()) {
-                processDebugNdef(rawMessages)
-            } else {
-                addEvent("WARN", "No tag or NDEF data in intent")
-                binding.tvTestResult.text = getString(R.string.nfc_debug_no_tag_data)
-            }
-            return
-        }
-
+    /** Binder thread: describe the tag, try an Impala session, then render on the main thread. */
+    private fun onDebugTag(tag: Tag) {
         val tagId = tag.id
         val techList = tag.techList
-
         val result = buildString {
             appendLine("Tag Discovered")
             appendLine("  UID:  ${tagId?.toHexString() ?: "N/A"}")
             appendLine("  Tech: ${techList.joinToString(", ") { it.substringAfterLast('.') }}")
             appendLine()
 
-            // NfcA details (ATQA + SAK)
-            val nfcA = NfcA.get(tag)
-            if (nfcA != null) {
+            NfcA.get(tag)?.let { nfcA ->
                 appendLine("NfcA (ISO 14443-3A)")
                 appendLine("  ATQA: ${nfcA.atqa?.toHexString() ?: "N/A"}")
                 appendLine("  SAK:  0x${Integer.toHexString(nfcA.sak.toInt() and 0xFF)}")
                 appendLine("  Max transceive: ${nfcA.maxTransceiveLength}B")
                 appendLine()
             }
-
-            // NfcB details
-            val nfcB = NfcB.get(tag)
-            if (nfcB != null) {
+            NfcB.get(tag)?.let { nfcB ->
                 appendLine("NfcB (ISO 14443-3B)")
                 appendLine("  App data: ${nfcB.applicationData?.toHexString() ?: "N/A"}")
                 appendLine("  Protocol: ${nfcB.protocolInfo?.toHexString() ?: "N/A"}")
-                appendLine("  Max transceive: ${nfcB.maxTransceiveLength}B")
                 appendLine()
             }
 
-            // IsoDep details
-            val isoDep = IsoDep.get(tag)
-            if (isoDep != null) {
-                appendLine("IsoDep (ISO 14443-4)")
-                appendLine("  Hist bytes: ${isoDep.historicalBytes?.toHexString() ?: "N/A"}")
-                appendLine("  Hi-layer:   ${isoDep.hiLayerResponse?.toHexString() ?: "N/A"}")
-                appendLine("  Max transceive: ${isoDep.maxTransceiveLength}B")
-                appendLine("  Extended APDU:  ${isoDep.isExtendedLengthApduSupported}")
-                appendLine()
-
-                // Try Impala card read
-                appendLine("Impala Card Read...")
-                try {
-                    isoDep.connect()
-                    isoDep.timeout = 5000
-                    val bibo = IsoDepBibo(isoDep)
-                    val reader = ImpalaCardReader(bibo)
-
-                    val user = reader.getUserData()
-                    appendLine("  Account ID:  ${user.accountId}")
-                    appendLine("  Card ID:     ${user.cardId}")
-                    appendLine("  Name:        ${user.fullName}")
-
-                    val ecPubKey = reader.getECPubKey()
-                    appendLine("  EC PubKey:   ${ecPubKey.size}B ${ecPubKey.take(8).toByteArray().toHexString()}...")
-
-                    try {
-                        val nonce = reader.getNonce()
-                        appendLine("  Card Nonce:  $nonce (0x${Integer.toHexString(nonce)})")
-                    } catch (_: Exception) {
-                        appendLine("  Card Nonce:  N/A")
-                    }
-
-                    appendLine("  Status:      OK")
-
-                    addEvent("CARD", "Read OK: ${user.accountId} / ${user.cardId}")
-                    NfcEventHandler.dispatchCardRead(user, ecPubKey, tagId)
-                } catch (e: BIBOException) {
-                    appendLine("  Error: ${e.message}")
-                    addEvent("CARD", "BIBO Error: ${e.message}")
-                    NfcEventHandler.dispatchCardError(e.message ?: "BIBO error")
-                } catch (e: Exception) {
-                    appendLine("  Error: ${e.message}")
-                    addEvent("CARD", "Error: ${e.message}")
-                    NfcEventHandler.dispatchCardError(e.message ?: "Card read failed")
-                } finally {
-                    try { isoDep.close() } catch (_: Exception) { }
+            appendLine("Impala Card")
+            try {
+                ImpalaCardSession.open(tag, aidHex = BuildConfig.CARD_APPLET_AID.ifEmpty { null }).use { session ->
+                    val identity = session.identity
+                    appendIdentity(identity)
+                    val receive = session.sdk.getReceiveState()
+                    appendLine("  Receive ctr:  ${receive.counter}")
+                    appendLine("  Balance:      ${session.sdk.getBalance()} (card minor units)")
+                    appendLine("  Last signed:  ${if (session.sdk.getLastTransfer() != null) "present" else "none"}")
+                    appendLine("  Status:       OK")
+                    runOnUiThread { addEvent("CARD", "Read OK: card ${identity.wireCardId}") }
                 }
+            } catch (e: Exception) {
+                val err = CardError.from(e)
+                appendLine("  Not read: $err")
+                runOnUiThread { addEvent("CARD", "Not read: $err") }
             }
+            appendLine()
 
-            // NDEF details
-            val ndef = Ndef.get(tag)
-            if (ndef != null) {
+            Ndef.get(tag)?.let { ndef ->
                 appendLine("NDEF")
                 appendLine("  Type:     ${ndef.type}")
                 appendLine("  Max size: ${ndef.maxSize}B")
                 appendLine("  Writable: ${ndef.isWritable}")
-                val msg = ndef.cachedNdefMessage
-                if (msg != null) {
+                ndef.cachedNdefMessage?.let { msg ->
                     appendLine("  Records:  ${msg.records.size}")
                     for ((j, record) in msg.records.withIndex()) {
-                        val tnf = record.tnf
                         val type = String(record.type, Charsets.US_ASCII)
-                        val payloadSize = record.payload?.size ?: 0
-                        appendLine("    [$j] TNF=$tnf type=$type payload=${payloadSize}B")
+                        appendLine("    [$j] TNF=${record.tnf} type=$type payload=${record.payload?.size ?: 0}B")
                     }
                 }
                 appendLine()
             }
-
-            // MifareClassic
-            val mifare = MifareClassic.get(tag)
-            if (mifare != null) {
+            MifareClassic.get(tag)?.let { mifare ->
                 appendLine("MIFARE Classic")
                 appendLine("  Type:    ${mifare.type}")
                 appendLine("  Size:    ${mifare.size}B")
                 appendLine("  Sectors: ${mifare.sectorCount}")
-                appendLine("  Blocks:  ${mifare.blockCount}")
                 appendLine()
             }
-
-            // MifareUltralight
-            val mifareUl = MifareUltralight.get(tag)
-            if (mifareUl != null) {
+            MifareUltralight.get(tag)?.let { ul ->
                 appendLine("MIFARE Ultralight")
-                appendLine("  Type: ${mifareUl.type}")
-                appendLine("  Max transceive: ${mifareUl.maxTransceiveLength}B")
+                appendLine("  Type: ${ul.type}")
                 appendLine()
             }
         }
-
-        addEvent("TAG", "UID=${tagId?.toHexString() ?: "?"} tech=${techList.joinToString(",") { it.substringAfterLast('.') }}")
-        binding.tvTestResult.visibility = View.VISIBLE
-        binding.tvTestResult.text = result
-        AppLogger.d(TAG, "Debug tag processed: UID=${tagId?.toHexString()}")
+        runOnUiThread {
+            addEvent("TAG", "UID=${tagId?.toHexString() ?: "?"} tech=${techList.joinToString(",") { it.substringAfterLast('.') }}")
+            binding.tvTestResult.visibility = View.VISIBLE
+            binding.tvTestResult.text = result
+        }
     }
 
-    private fun processDebugNdef(rawMessages: Array<android.os.Parcelable>) {
-        val messages = rawMessages.map { it as NdefMessage }.toTypedArray()
-        val result = buildString {
-            appendLine("NDEF Messages: ${messages.size}")
-            for ((i, msg) in messages.withIndex()) {
-                appendLine("  Message $i: ${msg.records.size} record(s)")
-                for ((j, record) in msg.records.withIndex()) {
-                    val tnf = record.tnf
-                    val type = String(record.type, Charsets.US_ASCII)
-                    val payload = record.payload
-                    val payloadHex = payload?.take(32)?.toByteArray()?.toHexString() ?: ""
-                    val truncated = if ((payload?.size ?: 0) > 32) "..." else ""
-                    appendLine("    [$j] TNF=$tnf type=$type size=${payload?.size ?: 0}B")
-                    appendLine("         $payloadHex$truncated")
-                }
-            }
-        }
+    private fun StringBuilder.appendIdentity(identity: CardIdentity) {
+        appendLine("  Applet:       ${identity.versionString}")
+        appendLine("  Account ID:   ${identity.accountUuid}")
+        appendLine("  Card ID:      ${identity.wireCardId}")
+        if (identity.fullName.isNotBlank()) appendLine("  Name:         ${identity.fullName}")
+        appendLine("  EC pubkey:    ${identity.pubKeyHex.take(20)}...")
+        appendLine("  State:        0x${"%02X".format(identity.state)} (${stateName(identity.state)})")
+        val p = identity.personalization
+        appendLine(
+            "  Flags:        0x${"%02X".format(identity.flags)} " +
+                listOfNotNull(
+                    "INITIALIZED".takeIf { p.initialized }, "PROGRAM_BOUND".takeIf { p.programBound },
+                    "PERSONALIZED".takeIf { p.personalized }, "SCP03_KEYS_DEFAULT".takeIf { p.scp03KeysDefault },
+                    "PIN_PROVISIONED".takeIf { p.pinProvisioned }, "ENFORCED".takeIf { p.provisioningEnforced },
+                    "TERMINATED".takeIf { p.terminated }
+                ).joinToString("|")
+        )
+        appendLine("  Program ID:   ${identity.programIdHex}")
+        appendLine("  Currency:     ${identity.currency.decodeToString().trimEnd('\u0000')}")
+        appendLine("  Certificate:  ${identity.certificate?.let { "${it.size}B ${Hex.encode(it).take(16)}..." } ?: "none"}")
+    }
 
-        addEvent("NDEF", "${messages.size} message(s)")
-        binding.tvTestResult.visibility = View.VISIBLE
-        binding.tvTestResult.text = result
-        NfcEventHandler.dispatchNdef(messages)
+    private fun stateName(state: Int): String = when (state) {
+        CardIdentity.STATE_BLANK -> "blank"
+        CardIdentity.STATE_INITIALIZED -> "initialized"
+        CardIdentity.STATE_PERSONALIZED -> "personalized"
+        CardIdentity.STATE_TERMINATED -> "terminated"
+        else -> "unknown"
     }
 
     // ---- Event Log ----
-
-    private fun registerEventListeners() {
-        NfcEventHandler.setApduEventListener(object : NfcEventHandler.ApduEventListener {
-            override fun onCardRead(user: CardUser, ecPubKey: ByteArray, tagId: ByteArray?) {
-                runOnUiThread {
-                    addEvent("APDU", "Card read: ${user.accountId} / ${user.cardId} (${user.fullName})")
-                    addEvent("APDU", "EC pubkey: ${ecPubKey.size}B, Tag ID: ${tagId?.toHexString() ?: "N/A"}")
-                }
-            }
-
-            override fun onCardError(message: String) {
-                runOnUiThread {
-                    addEvent("APDU", "Error: $message")
-                }
-            }
-        })
-
-        NfcEventHandler.setNdefEventListener(object : NfcEventHandler.NdefEventListener {
-            override fun onNdefReceived(messages: Array<NdefMessage>) {
-                runOnUiThread {
-                    addEvent("NDEF", "Received ${messages.size} message(s)")
-                    for ((i, msg) in messages.withIndex()) {
-                        for ((j, record) in msg.records.withIndex()) {
-                            val type = String(record.type, Charsets.US_ASCII)
-                            addEvent("NDEF", "  [$i][$j] TNF=${record.tnf} type=$type ${record.payload?.size ?: 0}B")
-                        }
-                    }
-                }
-            }
-        })
-    }
 
     private fun addEvent(category: String, message: String) {
         val timestamp = LocalDateTime.now().format(timeFormatter)
@@ -514,8 +375,6 @@ class NfcDebugActivity : AppCompatActivity() {
     }
 
     // ---- Helpers ----
-
-    private fun hex(b: Byte): String = String.format("%02X", b.toInt() and 0xFF)
 
     private fun ByteArray.toHexString(): String =
         joinToString("") { String.format("%02X", it.toInt() and 0xFF) }

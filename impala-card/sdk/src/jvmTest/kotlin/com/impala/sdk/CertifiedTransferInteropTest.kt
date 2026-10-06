@@ -3,6 +3,7 @@ package com.impala.sdk
 import com.impala.sdk.models.ImpalaException
 import com.impala.sdk.models.Signable
 import com.impala.sdk.models.TransferProtocol
+import com.impala.simulator.SimulatorBibo
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals

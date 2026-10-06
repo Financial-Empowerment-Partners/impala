@@ -40,8 +40,10 @@ android {
 
     lint {
         // Integration artifact, not a Play submission; report lint findings
-        // without failing `build`.
+        // without failing `build`. The committed baseline makes *new* findings
+        // stand out in CI output (regenerate: delete it and run lintDebug).
         abortOnError = false
+        baseline = file("lint-baseline.xml")
     }
 }
 
@@ -64,6 +66,8 @@ dependencies {
     implementation("com.impala:sdk:0.0.1-HEAD")
 
     testImplementation("junit:junit:4.13.2")
+    // jcardsim-backed ImpalaApplet + JCA test issuer (composite build, ../impala-card :simulator).
+    testImplementation("com.impala:simulator:0.0.1-HEAD")
     testImplementation("org.mockito:mockito-core:5.23.0")
     testImplementation("org.robolectric:robolectric:4.16.1")
     testImplementation("androidx.test:core:1.7.0")

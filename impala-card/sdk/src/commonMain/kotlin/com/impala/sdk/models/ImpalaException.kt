@@ -14,6 +14,14 @@ open class ImpalaException : BIBOException {
     val code: Int
 
     /**
+     * The card status word this exception was mapped from by [fromStatusWord],
+     * or null when it did not come from a card response (transport failure,
+     * malformed response, SDK-side refusal).
+     */
+    var statusWord: Int? = null
+        private set
+
+    /**
      * Creates an exception with SW and message.
      *
      * @param code    the error code
@@ -50,7 +58,9 @@ open class ImpalaException : BIBOException {
          * @param sw the status word from the card response (e.g. 0x9000, 0x69C3)
          * @return an ImpalaException subclass matching the error condition
          */
-        fun fromStatusWord(sw: Int): ImpalaException {
+        fun fromStatusWord(sw: Int): ImpalaException = mapStatusWord(sw).also { it.statusWord = sw }
+
+        private fun mapStatusWord(sw: Int): ImpalaException {
             // PIN failure range 0x69C0-0x69C9: low nibble = tries remaining
             if (sw in 0x69C0..0x69C9) {
                 val tries = sw and 0x0F

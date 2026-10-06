@@ -6,6 +6,7 @@ import android.util.Log;
 
 import com.impala.sdk.apdu4j.BIBO;
 import com.impala.sdk.apdu4j.BIBOException;
+import com.impala.sdk.apdu4j.BIBOTagLostException;
 
 import java.io.IOException;
 
@@ -47,7 +48,7 @@ public class IsoDepBibo implements BIBO {
             return isoDep.transceive(bytes);
         } catch (TagLostException e) {
             Log.e(TAG, "Tag lost during transceive");
-            throw new BIBOException("NFC tag lost (card removed during transceive)", e);
+            throw new BIBOTagLostException("NFC tag lost (card removed during transceive)", e);
         } catch (IOException e) {
             Log.e(TAG, "Transceive failed: " + e.getMessage());
             throw new BIBOException("NFC transceive failed", e);

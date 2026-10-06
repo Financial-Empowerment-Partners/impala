@@ -57,6 +57,9 @@ on:
       # edit must run the pin. These two files are the only out-of-crate
       # include_str! sources in the bridge.
       - 'impala-ui/tests/fixtures/role-capabilities.json'
+      # The shared card/bridge golden vectors (run below and in
+      # impala-card.yml) pin literals in card_auth.rs.
+      - 'scripts/check-shared-vectors.sh'
   pull_request:
     branches: [main]
     paths:
@@ -72,6 +75,9 @@ on:
       # edit must run the pin. These two files are the only out-of-crate
       # include_str! sources in the bridge.
       - 'impala-ui/tests/fixtures/role-capabilities.json'
+      # The shared card/bridge golden vectors (run below and in
+      # impala-card.yml) pin literals in card_auth.rs.
+      - 'scripts/check-shared-vectors.sh'
   workflow_dispatch:
     inputs:
       architecture:
@@ -165,6 +171,13 @@ jobs:
 
       - name: Run tests
         run: cargo test --locked
+
+      # Shared card/bridge golden vectors (contract-addendum.md §A.11): the
+      # CERT/XFER/transfer_id/cert_id literals must stay identical in
+      # card_auth.rs and the card SDK's golden tests.
+      - name: Check shared card/bridge vectors
+        working-directory: .
+        run: bash scripts/check-shared-vectors.sh
 
       # Version-pinned for the same reason the toolchain is: an unpinned
       # `cargo install` lets a new cargo-audit release change this gate's

@@ -37,17 +37,42 @@
     <string name="dialog_delete_card_title">Delete Card</string>
     <string name="dialog_delete_card_message">Remove card %s?</string>
 
-    <!-- Transfers -->
-    <string name="btn_new_transfer">New Transfer</string>
-    <string name="empty_transfers">No transfers yet</string>
-    <string name="dialog_new_transfer_title">New Transfer</string>
+    <!-- Transfers (card redemption and load) -->
+    <string name="btn_new_transfer">Redeem from card or load card</string>
+    <string name="empty_transfers">No card transfers yet</string>
+    <string name="transfer_choose_action">Card transfer</string>
+    <string name="transfer_action_redeem">Redeem from card</string>
+    <string name="transfer_action_load">Load card</string>
+    <string name="transfer_choose_card">Choose a registered card</string>
+    <string name="transfer_no_cards">Register a card first (Cards tab).</string>
     <string name="dialog_submit">Submit</string>
-    <string name="hint_source_account">Source Account</string>
-    <string name="hint_amount">Amount</string>
-    <string name="hint_currency">Currency</string>
-    <string name="hint_memo">Memo (optional)</string>
-    <string name="transfer_created">Transfer created successfully</string>
-    <string name="transfer_failed">Transfer failed</string>
+    <string name="hint_card_amount">Amount (card minor units)</string>
+    <string name="hint_card_pin">Card PIN (4 digits)</string>
+    <string name="transfer_amount_decimal">= %1$s %2$s</string>
+    <string name="transfer_amount_invalid">Enter a whole number of minor units between 1 and 4294967295.</string>
+    <string name="transfer_pin_invalid">Enter the 4-digit card PIN.</string>
+    <string name="transfer_pin_less_refused">PIN 0000 is not accepted here.</string>
+    <string name="transfer_tap_to_sign">Hold the card to the phone to sign the transfer</string>
+    <string name="transfer_tap_to_read">Hold the card to the phone</string>
+    <string name="transfer_tap_to_apply">Hold the card to the phone to apply the credit</string>
+    <string name="transfer_resume_offer">Resume pending transfer</string>
+    <string name="transfer_resume_message">A transfer this card signed was not sent yet. Tap the card to recover it (it is not signed again).</string>
+    <string name="transfer_frozen">Outcome unknown — do not repeat. Waiting for the bridge to resolve this payout.</string>
+    <string name="transfer_refused_needs_operator">The bridge refused this signed transfer (%1$s). The card was debited; the value is held for operator resolution.</string>
+    <string name="transfer_issuer_unconfigured">The bridge has no card issuer configured.</string>
+    <string name="transfer_card_not_certified">This card is not certified by the bridge.</string>
+    <string name="transfer_pending_exists">This card has a transfer in progress. Finish or resolve it first.</string>
+    <string name="transfer_card_mismatch">That is not the selected card (%1$s).</string>
+    <string name="transfer_fund_title">Fund the load</string>
+    <string name="transfer_fund_message">Pay %1$s %2$s from your custodial account to\n%3$s\nmemo %4$s</string>
+    <string name="transfer_fund_button">Fund</string>
+    <string name="transfer_fund_ambiguous">Funding outcome unknown — do not resend. The same request is replayed only.</string>
+    <string name="transfer_fund_rejected">Funding was rejected. You can try again.</string>
+    <string name="transfer_apply_button">Apply to card</string>
+    <string name="transfer_card_refused_credit">The card refused the credit (SW %1$s). It cannot be re-issued; an operator resolves it.</string>
+    <string name="transfer_credit_exception">Another credit landed on this card first. An operator must resolve this load.</string>
+    <string name="transfer_done_redeem">Redemption %1$s</string>
+    <string name="transfer_done_load">Load %1$s</string>
 
     <!-- Settings -->
     <string name="section_account">Account</string>
@@ -96,9 +121,15 @@
     <string name="nfc_disabled">Please enable NFC in device settings</string>
     <string name="card_registered">Card registered successfully</string>
     <string name="card_registration_failed">Card registration failed</string>
-
-    <!-- NFC Watcher Service -->
-    <string name="nfc_watcher_title">Impala NFC</string>
+    <string name="card_refused_wrong_version">This card runs applet %1$s; registration needs 0.2 or newer.</string>
+    <string name="card_refused_not_personalized">This card has not been issued yet.</string>
+    <string name="card_refused_account_mismatch">This card was issued to a different account.</string>
+    <string name="card_refused_no_session">Sign in again before registering a card.</string>
+    <string name="card_offer_register">Register this card?</string>
+    <string name="card_local_record">local record</string>
+    <string name="card_state_issued">Issued · applet %1$s · %2$s</string>
+    <string name="error_card_rejected">Card not recognised or challenge expired — tap again</string>
+    <string name="error_card_locked_out">Too many failed card sign-ins. Wait 15 minutes, then try again.</string>
 
     <!-- NFC Debug -->
     <string name="menu_nfc_debug">NFC Debug</string>
@@ -110,7 +141,7 @@
     <string name="nfc_debug_refresh">Refresh</string>
     <string name="nfc_debug_start_test">Start NFC Test</string>
     <string name="nfc_debug_stop_test">Stop NFC Test</string>
-    <string name="nfc_debug_test_description">Activates foreground NFC dispatch to capture any tag type. Tap a card or tag to see raw technical details, APDU responses, and NDEF records.</string>
+    <string name="nfc_debug_test_description">Activates NFC reader mode for any tag type. Tap a card or tag to see raw technical details, the Impala card read-out (identity, personalization, receive state) and NDEF records.</string>
     <string name="nfc_debug_waiting_for_tag">Waiting for NFC tag\u2026 Hold a card or tag to the device.</string>
     <string name="nfc_debug_no_tag_data">No tag or NDEF data found in intent</string>
     <string name="nfc_debug_no_events">No events captured yet. Start a test or tap a card while this screen is open.</string>

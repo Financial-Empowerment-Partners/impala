@@ -403,6 +403,44 @@ mod tests {
         );
     }
 
+    /// Shared card/bridge golden vectors (impala-card/docs/transfer-protocol.md
+    /// §4; contract-addendum.md §A.11). The SDK's TransferProtocolGoldenTest
+    /// embeds the same four literals; scripts/check-shared-vectors.sh fails CI
+    /// if either side loses one.
+    const GOLDEN_CERT_HEX: &str = "494d50414c412d434552543a01a0a1a2a3a4a5a6a7a8a9aaabacadaeaf00112233445566778899aabbccddeeff55534443046b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c2964fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5";
+    const GOLDEN_XFER_HEX: &str = "494d50414c412d584645523a01a0a1a2a3a4a5a6a7a8a9aaabacadaeaf000000000000000100112233445566778899aabbccddeeffffeeddccbbaa9988776655443322110055534443000003e8000000000000000000000001";
+    const GOLDEN_TRANSFER_ID: &str =
+        "6b3c272189bde62d55636e21b345929c1c077d008bb533af44f813adf56b67b9";
+    const GOLDEN_CERT_ID: &str = "82cb580b058873f2554b100cfee07bc7ef7fa5def3ddc477e333f2f60258b77b";
+
+    #[test]
+    fn golden_cert_message_layout() {
+        use crate::offline::signable::{card_cert_message, cert_id_hex, currency_tag, tests as v};
+        let point: [u8; 65] = hex::decode(v::G_POINT_HEX).unwrap().try_into().unwrap();
+        let msg = card_cert_message(
+            &v::PROGRAM,
+            &uuid::Uuid::parse_str(v::ACCOUNT).unwrap(),
+            currency_tag("USDC").unwrap(),
+            &point,
+        );
+        assert_eq!(msg.len(), 114);
+        assert_eq!(hex::encode(msg), GOLDEN_CERT_HEX);
+        assert_eq!(cert_id_hex(&msg), GOLDEN_CERT_ID);
+    }
+
+    #[test]
+    fn golden_xfer_message_layout() {
+        use crate::offline::signable::{tests as v, transfer_id_hex, xfer_message};
+        let signable = v::golden_signable();
+        let msg = xfer_message(&v::PROGRAM, &signable);
+        assert_eq!(msg.len(), 89);
+        assert_eq!(hex::encode(msg), GOLDEN_XFER_HEX);
+        assert_eq!(transfer_id_hex(&v::PROGRAM, &signable), GOLDEN_TRANSFER_ID);
+        // The AUTH, CERT and XFER domains never collide at equal length.
+        assert_eq!(&msg[..7], &CARD_AUTH_DOMAIN_PREFIX[..7]);
+        assert_ne!(&msg[..12], CARD_AUTH_DOMAIN_PREFIX);
+    }
+
     fn keypair() -> (EcdsaKeyPair, Vec<u8>) {
         let key_pair = EcdsaKeyPair::generate(&ECDSA_P256_SHA256_ASN1_SIGNING)
             .expect("P-256 keypair generation");

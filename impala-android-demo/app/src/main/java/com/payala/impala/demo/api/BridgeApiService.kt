@@ -1,6 +1,7 @@
 package com.payala.impala.demo.api
 
 import com.payala.impala.demo.model.*
+import retrofit2.Response
 import retrofit2.http.*
 
 /**
@@ -166,4 +167,40 @@ interface BridgeApiService {
     /** Retrieve bridge build info and database schema version. */
     @GET("version")
     suspend fun getVersion(): VersionResponse
+
+    // ── Offline issuance / redemption (card transfers) ──────────────────
+    // Response<T> where the status code is part of the contract (202 replay,
+    // 409 counter_consumed, 503 unconfigured): callers branch on it.
+
+    /** Public: the program key and redemption identity, or `{configured:false}`. */
+    @GET("card-issuer")
+    suspend fun cardIssuer(): CardIssuerResponse
+
+    @GET("offline/cards/{card_id}")
+    suspend fun offlineCard(@Path("card_id") cardId: String): OfflineCardResponse
+
+    @POST("offline/redemptions")
+    suspend fun createRedemption(@Body request: RedemptionRequest): Response<RedemptionResponse>
+
+    @GET("offline/redemptions/{id}")
+    suspend fun redemptionStatus(@Path("id") redemptionId: String): RedemptionStatusResponse
+
+    @POST("offline/issuances")
+    suspend fun createIssuance(@Body request: IssuanceRequest): Response<IssuanceResponse>
+
+    @GET("offline/issuances/{id}")
+    suspend fun issuance(@Path("id") issuanceId: String): IssuanceResponse
+
+    @GET("offline/issuances/{id}/credit")
+    suspend fun issuanceCredit(@Path("id") issuanceId: String): Response<IssuanceCreditResponse>
+
+    @POST("offline/issuances/{id}/ack")
+    suspend fun ackIssuance(@Path("id") issuanceId: String, @Body request: IssuanceAckRequest): Response<IssuanceResponse>
+
+    /** Custodial payment from the owner's managed account (idempotency-keyed; 202 = submitted/ambiguous). */
+    @POST("managed-account/sign")
+    suspend fun signAndSubmit(@Body request: SignSubmitRequest): Response<SignSubmitResponse>
+
+    @GET("managed-account/intents/{intent_id}")
+    suspend fun custodialIntent(@Path("intent_id") intentId: String): CustodialIntentResponse
 }

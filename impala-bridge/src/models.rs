@@ -760,7 +760,10 @@ pub struct CreateCardRequest {
     pub account_id: String,
     pub card_id: String,
     pub ec_pubkey: String,
-    pub rsa_pubkey: String,
+    /// Legacy. Applet 0.2 has no RSA key; absent, `null` and `""` all store
+    /// NULL (migration 038). Validated only when non-empty.
+    #[serde(default)]
+    pub rsa_pubkey: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -772,6 +775,78 @@ pub struct CardResponse {
 #[derive(Deserialize)]
 pub struct DeleteCardRequest {
     pub card_id: String,
+}
+
+// ── Card issuer + certificates (039) ───────────────────────────────────
+
+/// `POST /admin/card-issuer/generate`. Both fields are required only when an
+/// issuer key is already active (rotation): `confirm_supersede` must equal its
+/// fingerprint and `confirm_phrase` must read `replace card-issuer {network}`.
+#[derive(Deserialize, Default)]
+pub struct GenerateIssuerKeyRequest {
+    #[serde(default)]
+    pub confirm_supersede: Option<String>,
+    #[serde(default)]
+    pub confirm_phrase: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct GenerateIssuerKeyResponse {
+    pub version: i32,
+    pub public_key_hex: String,
+    pub fingerprint: String,
+    pub redemption_uuid: String,
+    pub program_id_hex: String,
+    pub replaced: bool,
+    pub note: String,
+}
+
+#[derive(Serialize)]
+pub struct IssuerKeyView {
+    pub version: i32,
+    pub state: String,
+    pub public_key_hex: String,
+    pub fingerprint: String,
+    pub generated_by: String,
+    pub generated_at: String,
+    pub superseded_at: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct IssuerKeyListResponse {
+    pub keys: Vec<IssuerKeyView>,
+    pub redemption_uuid: Option<String>,
+    pub program_id_hex: Option<String>,
+}
+
+/// `POST /admin/cards/{card_id}/certificate`.
+#[derive(Deserialize)]
+pub struct CertifyCardRequest {
+    /// Bucket currency: XLM, or a configured reserve stablecoin.
+    pub currency: String,
+    /// Card minor-unit scale (0..=7).
+    pub card_minor_scale: i16,
+    /// Replace an existing certificate (re-issue after a torn personalization,
+    /// or after issuer-key rotation). Default false: write-once.
+    #[serde(default)]
+    pub recertify: bool,
+}
+
+#[derive(Serialize)]
+pub struct CertifyCardResponse {
+    pub card_id: String,
+    pub issuer_version: i32,
+    /// DER ECDSA over the 114-byte CERT message: PERSONALIZE part C.
+    pub issuer_cert_hex: String,
+    pub cert_message_hex: String,
+    pub cert_id: String,
+    /// PERSONALIZE part B.
+    pub issuer_public_key_hex: String,
+    /// PERSONALIZE part A.
+    pub program_id_hex: String,
+    pub currency: String,
+    pub card_minor_scale: i16,
+    pub replaced: bool,
 }
 
 // ── MFA ────────────────────────────────────────────────────────────────

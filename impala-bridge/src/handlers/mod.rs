@@ -1,5 +1,6 @@
 pub mod account;
 pub mod admin;
+pub mod admin_card_issuer;
 pub mod admin_custody;
 pub mod admin_keys;
 pub mod admin_reconciliation;
@@ -9,6 +10,7 @@ pub mod admin_webhook;
 pub mod authenticate;
 pub mod card;
 pub mod card_auth;
+pub mod card_issuer;
 pub mod device_token;
 pub mod exchange;
 pub mod exchange_webhook;

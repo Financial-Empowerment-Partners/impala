@@ -17,6 +17,7 @@ mod ldap;
 mod middleware;
 mod models;
 mod notifications;
+mod offline;
 mod oidc;
 mod okta;
 mod password;
@@ -53,9 +54,9 @@ use tower_http::trace::TraceLayer;
 
 use config::load_config;
 use handlers::{
-    account, admin, admin_custody, admin_keys, admin_reconciliation, admin_replenish,
-    admin_reserve, admin_webhook, authenticate, card, card_auth, device_token,
-    exchange as exchange_handler, exchange_webhook, github as github_handler,
+    account, admin, admin_card_issuer, admin_custody, admin_keys, admin_reconciliation,
+    admin_replenish, admin_reserve, admin_webhook, authenticate, card, card_auth, card_issuer,
+    device_token, exchange as exchange_handler, exchange_webhook, github as github_handler,
     google as google_handler, health, logout, managed_seed, mfa, network,
     notification_subscription, notify, okta as okta_handler, session as session_handler,
     sso as sso_handler, subscribe, sync, token, transaction,
@@ -681,6 +682,8 @@ async fn run_server(
         .route("/healthz", get(health::liveness))
         .route("/readyz", get(health::readiness))
         .route("/network", get(network::network_info))
+        // Card program issuer: public program key + identities for terminals.
+        .route("/card-issuer", get(card_issuer::get_card_issuer))
         // Webhook management and event feed: register/delete/test stay
         // AdminUser-gated; the list/feed reads take Privileged<ReadEvents>
         // (admin, auditor).
@@ -716,6 +719,20 @@ async fn run_server(
             post(admin_keys::generate_seed),
         )
         .route("/admin/stellar-seeds/import", post(admin_keys::import_seed))
+        // Card program issuer key: generate-only (no import route, ever — see
+        // handlers/admin_card_issuer.rs) and bridge-issued card certificates.
+        .route(
+            "/admin/card-issuer",
+            get(admin_card_issuer::list_issuer_keys),
+        )
+        .route(
+            "/admin/card-issuer/generate",
+            post(admin_card_issuer::generate_issuer_key),
+        )
+        .route(
+            "/admin/cards/{card_id}/certificate",
+            post(admin_card_issuer::certify_card),
+        )
         // Conversion-reserve management: reads on Privileged<ReadReserve>
         // (admin, treasurer, auditor), money mutations on
         // Privileged<ManageReserve> (admin, treasurer): pool status,

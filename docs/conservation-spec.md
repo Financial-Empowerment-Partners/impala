@@ -482,4 +482,7 @@ destination, memo, Stellar hash, signable, signature, secret or PII.
 `custodial.payment_ambiguous`, `custody.paused`, `custody.resumed`,
 `custody.policy_updated`, `custody.account_limit_updated`,
 `custody.intent_resolved`, `reserve.drift`,
-`reconciliation.snapshot_recorded`, `payala.sync_batch_applied`.
+`reconciliation.snapshot_recorded`, `payala.sync_batch_applied`,
+`custody.issuer_key_generated`, `custody.card_certified` (card program
+issuer, migration 039: public-key fingerprints and card ids only; no money
+moves on either).

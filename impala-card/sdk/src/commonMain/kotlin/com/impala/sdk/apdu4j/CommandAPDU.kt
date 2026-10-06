@@ -525,6 +525,11 @@ class CommandAPDU {
          */
         get() = apdu.copyOf()
 
+    /** Zeroes this command's internal buffer (best-effort hygiene for PIN-bearing commands). */
+    internal fun wipe() {
+        apdu.fill(0)
+    }
+
     /**
      * Returns a string representation of this command APDU.
      *

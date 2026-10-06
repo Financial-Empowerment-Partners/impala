@@ -7,179 +7,159 @@ import android.view.ViewGroup
 import android.widget.ImageButton
 import android.widget.TextView
 import androidx.fragment.app.Fragment
-import androidx.lifecycle.lifecycleScope
+import androidx.fragment.app.viewModels
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.snackbar.Snackbar
+import com.impala.sdk.flows.CardFlowException
+import com.impala.sdk.flows.CardIdentity
+import com.payala.impala.card.CardErrorMessages
 import com.payala.impala.demo.BuildConfig
 import com.payala.impala.demo.ImpalaApp
 import com.payala.impala.demo.R
 import com.payala.impala.demo.api.ApiClient
-import com.payala.impala.demo.auth.NfcCardResult
-import com.payala.impala.demo.log.AppLogger
+import com.payala.impala.demo.card.CardStore
+import com.payala.impala.demo.card.StoredCard
 import com.payala.impala.demo.databinding.FragmentCardsBinding
-import com.payala.impala.demo.model.CreateCardRequest
-import com.payala.impala.demo.model.DeleteCardRequest
+import com.payala.impala.demo.ui.cards.CardsViewModel
+import com.payala.impala.demo.ui.cards.CardsViewModel.Event
+import com.payala.impala.demo.ui.cards.CardsViewModel.Refusal
 import com.payala.impala.demo.ui.main.MainActivity
-import kotlinx.coroutines.launch
-import java.time.LocalDate
 
 /**
- * Displays registered smartcards in a [RecyclerView].
+ * Registered smartcards of the signed-in account.
  *
- * Each card shows its ID, EC public-key fingerprint, and registration date.
- * A delete button triggers a confirmation dialog that calls `DELETE /card`
- * on the bridge API. The FAB initiates NFC card registration via the
- * bridge's `POST /card` endpoint using the card's public keys read over NFC.
- *
- * Card data is maintained locally (the bridge has no GET /card list endpoint).
+ * The list is this device's local record ([CardStore], per account, survives
+ * logout); the bridge has no card-list endpoint. The FAB registers a card:
+ * the card is read through the activity's reader mode and checked
+ * ([CardsViewModel.checkRegistrable]) before `POST /card`. Tapping a card on
+ * this screen without pressing the FAB offers to register it.
  */
 class CardsFragment : Fragment(R.layout.fragment_cards) {
 
     private var _binding: FragmentCardsBinding? = null
     private val binding get() = _binding!!
+    private val viewModel: CardsViewModel by viewModels()
 
-    /** Represents a registered Impala smartcard. */
-    data class CardItem(
-        val cardId: String,
-        val ecPubkeyFingerprint: String,
-        val registeredDate: String
-    )
-
-    private val cards = mutableListOf<CardItem>()
     private lateinit var adapter: CardsAdapter
+    private lateinit var store: CardStore
+
+    private val app get() = requireActivity().application as ImpalaApp
+    private val api get() = ApiClient.getService(BuildConfig.BRIDGE_BASE_URL, app.tokenManager)
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
         _binding = FragmentCardsBinding.bind(view)
+        store = CardStore(requireContext())
 
-        adapter = CardsAdapter(cards) { card, position ->
+        adapter = CardsAdapter(getString(R.string.card_local_record)) { card ->
             MaterialAlertDialogBuilder(requireContext())
                 .setTitle(R.string.dialog_delete_card_title)
                 .setMessage(getString(R.string.dialog_delete_card_message, card.cardId))
                 .setPositiveButton("Delete") { _, _ ->
-                    deleteCard(card, position)
+                    val accountId = app.tokenManager.getAccountId() ?: return@setPositiveButton
+                    viewModel.delete(api, store, accountId, card.cardId)
                 }
                 .setNegativeButton("Cancel", null)
                 .show()
         }
-
         binding.recyclerView.layoutManager = LinearLayoutManager(requireContext())
         binding.recyclerView.adapter = adapter
-        updateEmptyState()
+
+        viewModel.cards.observe(viewLifecycleOwner) { cards ->
+            adapter.submit(cards)
+            binding.emptyState.visibility = if (cards.isEmpty()) View.VISIBLE else View.GONE
+            binding.recyclerView.visibility = if (cards.isEmpty()) View.GONE else View.VISIBLE
+        }
+        viewModel.events.observe(viewLifecycleOwner) { event ->
+            if (event != null) {
+                Snackbar.make(view, describe(event), Snackbar.LENGTH_LONG).show()
+                viewModel.eventHandled()
+            }
+        }
+        viewModel.load(store, app.tokenManager.getAccountId())
 
         binding.fabRegisterCard.setOnClickListener {
-            val mainActivity = requireActivity() as MainActivity
-            if (!mainActivity.nfcHelper.isNfcEnabled) {
+            val main = requireActivity() as MainActivity
+            if (!main.cardReader.isNfcEnabled) {
                 Snackbar.make(view, R.string.nfc_disabled, Snackbar.LENGTH_LONG).show()
                 return@setOnClickListener
             }
-
             Snackbar.make(view, R.string.nfc_tap_prompt, Snackbar.LENGTH_LONG).show()
-            mainActivity.nfcCallback = { result ->
-                mainActivity.nfcCallback = null
-                when (result) {
-                    is NfcCardResult.Success -> registerCard(result)
-                    is NfcCardResult.Error ->
-                        Snackbar.make(view, result.message, Snackbar.LENGTH_SHORT).show()
-                    is NfcCardResult.NfcNotAvailable ->
-                        Snackbar.make(view, R.string.nfc_not_available, Snackbar.LENGTH_SHORT).show()
+            main.awaitCardTap(
+                onTap = { session -> session.identity },
+                onResult = { result ->
+                    if (_binding == null) return@awaitCardTap
+                    result.fold(
+                        onSuccess = { identity -> register(identity) },
+                        onFailure = { e -> Snackbar.make(view, failureMessage(e), Snackbar.LENGTH_LONG).show() }
+                    )
                 }
-            }
+            )
         }
     }
 
-    private fun registerCard(result: NfcCardResult.Success) {
-        val app = requireActivity().application as ImpalaApp
-        val api = ApiClient.getService(BuildConfig.BRIDGE_BASE_URL, app.tokenManager)
+    override fun onResume() {
+        super.onResume()
+        (activity as? MainActivity)?.idleCardTapListener = { identity -> offerRegistration(identity) }
+    }
+
+    override fun onPause() {
+        super.onPause()
+        (activity as? MainActivity)?.idleCardTapListener = null
+    }
+
+    private fun register(identity: CardIdentity) {
+        viewModel.register(api, store, app.tokenManager.getAccountId(), identity)
+    }
+
+    private fun offerRegistration(identity: CardIdentity) {
         val accountId = app.tokenManager.getAccountId() ?: return
-
-        viewLifecycleOwner.lifecycleScope.launch {
-            try {
-                val ecHex = result.ecPubKey.joinToString("") { "%02x".format(it) }
-                val rsaHex = result.rsaPubKey.joinToString("") { "%02x".format(it) }
-                val response = api.createCard(
-                    CreateCardRequest(
-                        account_id = accountId,
-                        card_id = result.user.wireCardId,
-                        ec_pubkey = ecHex,
-                        rsa_pubkey = rsaHex
-                    )
-                )
-                if (response.success) {
-                    AppLogger.i("Cards", "Card registered: ${result.user.cardId}")
-                    val fingerprint = ecHex.take(20).chunked(2).joinToString(":")
-                    cards.add(
-                        CardItem(
-                            result.user.wireCardId,
-                            fingerprint,
-                            LocalDate.now().toString()
-                        )
-                    )
-                    adapter.notifyItemInserted(cards.size - 1)
-                    updateEmptyState()
-                    Snackbar.make(requireView(), R.string.card_registered, Snackbar.LENGTH_SHORT).show()
-                } else {
-                    AppLogger.w("Cards", "Card registration rejected: ${response.message}")
-                    Snackbar.make(requireView(), response.message, Snackbar.LENGTH_SHORT).show()
-                }
-            } catch (e: Exception) {
-                AppLogger.e("Cards", "Card registration failed: ${e.message}")
-                Snackbar.make(
-                    requireView(),
-                    "${getString(R.string.card_registration_failed)}: ${e.message}",
-                    Snackbar.LENGTH_SHORT
-                ).show()
-            }
-        }
+        if (store.find(accountId, identity.wireCardId) != null) return
+        MaterialAlertDialogBuilder(requireContext())
+            .setTitle(R.string.card_offer_register)
+            .setMessage(identity.wireCardId)
+            .setPositiveButton(R.string.btn_register_card) { _, _ -> register(identity) }
+            .setNegativeButton("Cancel", null)
+            .show()
     }
 
-    private fun deleteCard(card: CardItem, position: Int) {
-        val app = requireActivity().application as ImpalaApp
-        val api = ApiClient.getService(BuildConfig.BRIDGE_BASE_URL, app.tokenManager)
+    private fun failureMessage(e: Throwable): String =
+        if (e is CardFlowException) CardErrorMessages.message(requireContext(), e.error, BuildConfig.DEBUG)
+        else "${getString(R.string.card_registration_failed)}: ${e.message ?: e.javaClass.simpleName}"
 
-        viewLifecycleOwner.lifecycleScope.launch {
-            try {
-                val response = api.deleteCard(DeleteCardRequest(card.cardId))
-                if (response.success) {
-                    AppLogger.i("Cards", "Card deleted: ${card.cardId}")
-                    cards.removeAt(position)
-                    adapter.notifyItemRemoved(position)
-                    updateEmptyState()
-                    Snackbar.make(requireView(), "Card ${card.cardId} deleted", Snackbar.LENGTH_SHORT).show()
-                } else {
-                    AppLogger.w("Cards", "Card deletion rejected: ${response.message}")
-                    Snackbar.make(requireView(), response.message, Snackbar.LENGTH_SHORT).show()
-                }
-            } catch (e: Exception) {
-                AppLogger.e("Cards", "Card deletion failed: ${e.message}")
-                Snackbar.make(requireView(), "Delete failed: ${e.message}", Snackbar.LENGTH_SHORT).show()
-            }
+    private fun describe(event: Event): String = when (event) {
+        is Event.Registered -> getString(R.string.card_registered)
+        is Event.Refused -> when (event.refusal) {
+            Refusal.WRONG_VERSION -> getString(R.string.card_refused_wrong_version, event.detail)
+            Refusal.NOT_PERSONALIZED -> getString(R.string.card_refused_not_personalized)
+            Refusal.ACCOUNT_MISMATCH -> getString(R.string.card_refused_account_mismatch)
+            Refusal.NO_SESSION -> getString(R.string.card_refused_no_session)
         }
-    }
-
-    private fun updateEmptyState() {
-        if (cards.isEmpty()) {
-            binding.emptyState.visibility = View.VISIBLE
-            binding.recyclerView.visibility = View.GONE
-        } else {
-            binding.emptyState.visibility = View.GONE
-            binding.recyclerView.visibility = View.VISIBLE
-        }
+        is Event.BridgeRefused -> event.message
+        is Event.Failed -> "${getString(R.string.card_registration_failed)}: ${event.message}"
+        is Event.Deleted -> "Card ${event.cardId} deleted"
+        is Event.DeleteFailed -> "Delete failed: ${event.message}"
     }
 
     override fun onDestroyView() {
         super.onDestroyView()
-        // Clear NFC callback when fragment is destroyed
-        (activity as? MainActivity)?.nfcCallback = null
+        (activity as? MainActivity)?.cancelCardTap()
         _binding = null
     }
 
     private class CardsAdapter(
-        private val items: List<CardItem>,
-        private val onDelete: (CardItem, Int) -> Unit
+        private val localLabel: String,
+        private val onDelete: (StoredCard) -> Unit
     ) : RecyclerView.Adapter<CardsAdapter.ViewHolder>() {
+        private var items: List<StoredCard> = emptyList()
+
+        fun submit(cards: List<StoredCard>) {
+            items = cards
+            @Suppress("NotifyDataSetChanged")
+            notifyDataSetChanged()
+        }
 
         class ViewHolder(view: View) : RecyclerView.ViewHolder(view) {
             val tvCardId: TextView = view.findViewById(R.id.tvCardId)
@@ -188,20 +168,20 @@ class CardsFragment : Fragment(R.layout.fragment_cards) {
             val btnDelete: ImageButton = view.findViewById(R.id.btnDelete)
         }
 
-        override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): ViewHolder {
-            val view = LayoutInflater.from(parent.context)
-                .inflate(R.layout.item_card, parent, false)
-            return ViewHolder(view)
-        }
+        override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): ViewHolder =
+            ViewHolder(LayoutInflater.from(parent.context).inflate(R.layout.item_card, parent, false))
 
         override fun onBindViewHolder(holder: ViewHolder, position: Int) {
             val card = items[position]
+            val ctx = holder.itemView.context
             holder.tvCardId.text = card.cardId
-            holder.tvPubkeyFingerprint.text = card.ecPubkeyFingerprint
-            holder.tvDate.text = card.registeredDate
-            holder.btnDelete.setOnClickListener {
-                onDelete(card, position)
-            }
+            holder.tvPubkeyFingerprint.text = card.pubkeyFingerprint
+            holder.tvDate.text = listOf(
+                card.registeredAt.take(10),
+                ctx.getString(R.string.card_state_issued, card.appletVersion, card.currency),
+                localLabel
+            ).joinToString(" · ")
+            holder.btnDelete.setOnClickListener { onDelete(card) }
         }
 
         override fun getItemCount() = items.size

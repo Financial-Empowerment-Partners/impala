@@ -8,13 +8,17 @@ Impala-lib bridges Android NFC and location services with the [impala-card SDK](
 
 ## Build
 
-Requires Android SDK (min 30, target 34), JDK 17 (Gradle 8.14 cannot run on
-newer JDKs like 26 — set `JAVA_HOME`), and the sibling `impala-card/` checkout.
+Requires Android SDK 37 (`minSdk 24`, `compileSdk 37`), a JDK 17 to launch
+Gradle (set `JAVA_HOME`; newer launchers such as 26 are not supported), and the
+sibling `impala-card/` checkout. Kotlin compiles on a JDK 21 toolchain
+(auto-provisioned by the foojay resolver; Robolectric's SDK-36 sandbox needs
+21) and emits JVM 17 bytecode.
 
 ```bash
 export JAVA_HOME=$(/usr/libexec/java_home -v 17)   # macOS; or point at any JDK 17
-./gradlew build                    # Build
-./gradlew test                     # Unit tests (JUnit 4, runs on host JVM)
+./gradlew assembleDebug            # Build
+./gradlew testDebugUnitTest        # Unit tests (JUnit 4 + Robolectric + jcardsim, host JVM)
+./gradlew lintDebug                # Lint; new findings only (lint-baseline.xml holds the rest)
 ./gradlew connectedAndroidTest     # Instrumented tests (requires device/emulator)
 ```
 
@@ -25,22 +29,35 @@ built, not its iOS/JVM targets). The Android SDK location comes from
 `ANDROID_HOME` or a `local.properties` with `sdk.dir=` (gitignored) in both
 this directory and `impala-card/`.
 
-The min SDK is 30 because the impala-card SDK's Android library declares
-minSdk 30; this module cannot honestly target lower.
+Unit tests also use `com.impala:simulator` (substituted with `:simulator`):
+the real ImpalaApplet on jcardsim plus a JCA test issuer, so card flows are
+tested against the applet rather than mocks. It is a test-only dependency.
 
 ## Architecture
 
 ### NFC Flows
 
-**IsoDep (Smartcard Contact)** — for communicating with Impala JavaCard applets:
+**Reader mode (the app's card flows)** — the only path that signs or moves value:
+
+```
+CardReaderController.enableReaderMode(onTap, onResult)   (foreground activity)
+  → NFC binder thread: ImpalaCardSession.open(tag)  (IsoDep.connect, SELECT applet AID)
+    → onTap(session)     card stays connected: read identity, fetch the bridge
+                         challenge, CardAuthenticator / CardTransfers
+  → main thread: onResult(Result<R>)   card failures arrive as CardFlowException(CardError)
+```
+
+**System dispatch (IsoDep tapped outside reader mode)** — identity only:
 
 ```
 ACTION_TECH_DISCOVERED intent
-  → NfcContactActivity
-    → IsoDep.connect()
-    → IsoDepBibo (BIBO adapter)
-    → ImpalaSDK.tx(CommandAPDU)
+  → NfcContactActivity (finishes immediately)
+    → background thread: ImpalaCardSession.open(tag).identity
+                         (GET_VERSION, GET_PERSONALIZATION, GET_USER_DATA, GET_EC_PUB_KEY)
+    → main thread: registered CardTapListener.onCardTapped(CardTapEvent)
 ```
+
+No state-changing command is ever sent from system dispatch.
 
 > **Platform note:** this IsoDep/NDEF NFC transport is **Android-only**. iOS has no native NFC transport yet — native iOS NFC is deferred. See [`docs/ios-nfc.md`](../docs/ios-nfc.md) for the rationale (Apple NFC & SE Platform constraints) and the recommended external-reader path.
 
@@ -66,7 +83,13 @@ ACTION_LOCATION_UPDATE broadcast
 
 | Class | Purpose |
 |-------|---------|
-| `NfcContactActivity` | Transient activity handling IsoDep tag discovery, creates `ImpalaSDK` session |
+| `card.ImpalaCardSession` | One connected card: `sdk`, lazily read `identity` (`CardIdentity`), idempotent `close()`. Refuses to open on the main thread. |
+| `card.CardReaderController` | Reader mode (NFC-A/B, NDEF check skipped, 250 ms presence check); `onTap` on the binder thread with the session open, `onResult` on the main thread |
+| `card.CardAuthenticator` | `signChallenge(session, challengeHex)` for `POST /auth/card` |
+| `card.CardTransfers` | `redeem` (zeroes the PIN `CharArray`), `recoverLastSigned`, `previousSendSequence`, `applyCredit` |
+| `card.CardErrorMessages` | String resource / message for each `CardError` (`card_error_*`, overridable by the app) |
+| `card.ImpalaCardTapHandler` / `CardTapListener` | Static registry for system-dispatched taps |
+| `NfcContactActivity` | Transient activity for system-dispatched IsoDep taps; reads identity only |
 | `NdefDispatchActivity` | Transient activity handling NDEF message discovery |
 | `IsoDepBibo` | Adapter wrapping Android `IsoDep` to implement the SDK's `BIBO` interface |
 | `ImpalaNdefHandler` | Static listener registry for NDEF messages |
@@ -94,3 +117,23 @@ ImpalaGeoHandler.setGeoUpdateListener((lat, lng, accuracy, timestamp) -> {
     // process location update
 });
 ```
+
+Card login from a foreground activity (Kotlin):
+
+```kotlin
+val reader = CardReaderController(this)
+reader.enableReaderMode(
+    onTap = { session ->                       // binder thread, card connected
+        val identity = session.identity.requirePersonalized()
+        val challenge = api.cardChallenge(identity.wireCardId)   // blocking call is fine here
+        identity to CardAuthenticator.signChallenge(session, challenge)
+    },
+    onResult = { result -> /* main thread */ }
+)
+```
+
+The library's contract types (`CardIdentity`, `CardError`, `RedemptionFlow`,
+`CreditFlow`, `Hex`) come from the SDK's `com.impala.sdk.flows` package, so the
+Android demo and JVM tools share one implementation. The demo app consumes this
+module through a composite build (`includeBuild("../impala-lib")`). iOS is out
+of scope here; see [`docs/ios-nfc.md`](../docs/ios-nfc.md).

@@ -4,32 +4,42 @@ import android.app.Activity;
 import android.content.Intent;
 import android.nfc.NfcAdapter;
 import android.nfc.Tag;
-import android.nfc.tech.IsoDep;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.util.Log;
 
-import com.impala.sdk.ImpalaSDK;
-import com.impala.sdk.apdu4j.CommandAPDU;
+import androidx.core.content.IntentCompat;
+
+import com.payala.impala.card.CardTapEvent;
+import com.payala.impala.card.ImpalaCardSession;
+import com.payala.impala.card.ImpalaCardTapHandler;
+
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 /**
- * Transient activity that handles NFC IsoDep (ISO 14443-4) tag discovery.
+ * Transient activity for system-dispatched IsoDep (ISO 14443-4) taps — a card
+ * presented while the app is not in reader mode.
  *
- * <p>When Android detects an IsoDep-compatible smartcard (e.g. an Impala JavaCard),
- * this activity:
- * <ol>
- *   <li>Connects to the card via {@link IsoDep}</li>
- *   <li>Wraps the connection in an {@link IsoDepBibo} adapter</li>
- *   <li>Creates an {@link ImpalaSDK} instance</li>
- *   <li>Transmits the tag ID as a {@link CommandAPDU}</li>
- * </ol>
+ * <p>It opens an {@link ImpalaCardSession} off the main thread, reads the
+ * card identity (GET_VERSION, GET_PERSONALIZATION, GET_USER_DATA,
+ * GET_EC_PUB_KEY — nothing that changes card state), and forwards a
+ * {@link CardTapEvent} to the registered
+ * {@link com.payala.impala.card.CardTapListener} on the main thread. With no
+ * listener registered it logs at DEBUG and does nothing. Signing and transfers
+ * only ever happen in reader mode
+ * ({@link com.payala.impala.card.CardReaderController}), where the user started
+ * the action.
  *
- * <p>Declared in AndroidManifest.xml with {@code ACTION_TECH_DISCOVERED} and
- * a tech filter for {@code android.nfc.tech.IsoDep}. Uses {@code Theme.NoDisplay}
- * so no UI is shown. The activity finishes immediately after processing.
+ * <p>Declared in AndroidManifest.xml with {@code ACTION_TECH_DISCOVERED} and a
+ * tech filter for {@code android.nfc.tech.IsoDep}; {@code Theme.NoDisplay}, and
+ * finishes immediately.
  */
 public class NfcContactActivity extends Activity {
 
     private static final String TAG = "NfcContactActivity";
+    private static final ExecutorService EXECUTOR = Executors.newSingleThreadExecutor();
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -45,58 +55,31 @@ public class NfcContactActivity extends Activity {
         finish();
     }
 
-    /**
-     * Connect to the IsoDep tag, instantiate the SDK, and transmit the tag ID.
-     * Ensures the IsoDep connection is closed in the finally block.
-     */
     private void handleIntent(Intent intent) {
-        String action = intent.getAction();
-        if (!NfcAdapter.ACTION_TECH_DISCOVERED.equals(action)) {
+        if (intent == null || !NfcAdapter.ACTION_TECH_DISCOVERED.equals(intent.getAction())) {
             return;
         }
-
-        Tag tag = intent.getParcelableExtra(NfcAdapter.EXTRA_TAG);
+        Tag tag = IntentCompat.getParcelableExtra(intent, NfcAdapter.EXTRA_TAG, Tag.class);
         if (tag == null) {
             Log.w(TAG, "No tag in intent");
             return;
         }
-
-        IsoDep isoDep = IsoDep.get(tag);
-        if (isoDep == null) {
-            Log.w(TAG, "Tag does not support IsoDep");
+        if (ImpalaCardTapHandler.getCardTapListener() == null) {
+            Log.d(TAG, "Card tapped with no CardTapListener registered");
             return;
         }
-
-        try {
-            isoDep.connect();
-
-            IsoDepBibo bibo = new IsoDepBibo(isoDep);
-            // Pass null for scp03Keys; SCP03 channel only needed for provisioning APDUs.
-            // Default-parameter aware Kotlin constructors aren't visible to Java callers
-            // unless annotated @JvmOverloads, so we have to pass the second arg explicitly.
-            ImpalaSDK sdk = new ImpalaSDK(bibo, null);
-
-            // Use the tag ID from the intent, falling back to tag.getId()
-            byte[] tagId = intent.getByteArrayExtra(NfcAdapter.EXTRA_ID);
-            if (tagId == null) {
-                tagId = tag.getId();
+        Handler main = new Handler(Looper.getMainLooper());
+        EXECUTOR.execute(() -> {
+            CardTapEvent event = null;
+            try (ImpalaCardSession session = ImpalaCardSession.open(tag)) {
+                event = ImpalaCardTapHandler.readTap(session);
+            } catch (Exception e) {
+                Log.d(TAG, "System-dispatched tap could not be read: " + e.getClass().getSimpleName());
             }
-            if (tagId == null || tagId.length == 0) {
-                Log.w(TAG, "No tag ID available");
-                return;
+            if (event != null) {
+                CardTapEvent delivered = event;
+                main.post(() -> ImpalaCardTapHandler.deliver(delivered));
             }
-
-            CommandAPDU cmd = new CommandAPDU(tagId);
-            sdk.tx(cmd);
-
-            Log.i(TAG, "APDU transmitted to ImpalaSDK via NFC contact");
-        } catch (Exception e) {
-            Log.e(TAG, "Error processing NFC contact", e);
-        } finally {
-            try {
-                isoDep.close();
-            } catch (Exception ignored) {
-            }
-        }
+        });
     }
 }

@@ -2,6 +2,7 @@ package com.impala.sdk
 
 import com.impala.applet.Constants as AppletConstants
 import com.impala.applet.ImpalaApplet
+import com.impala.simulator.SimulatorBibo
 import java.io.File
 import kotlin.test.Test
 import kotlin.test.assertEquals

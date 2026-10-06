@@ -8,18 +8,21 @@ import android.view.MenuItem
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
 import androidx.navigation.fragment.NavHostFragment
-import androidx.navigation.ui.setupWithNavController
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
+import androidx.navigation.ui.setupWithNavController
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
+import com.impala.sdk.apdu4j.BIBOException
+import com.impala.sdk.flows.CardError
+import com.impala.sdk.flows.CardFlowException
+import com.impala.sdk.flows.CardIdentity
+import com.payala.impala.card.CardReaderController
+import com.payala.impala.card.ImpalaCardSession
 import com.payala.impala.demo.BuildConfig
 import com.payala.impala.demo.R
-import com.payala.impala.demo.auth.NfcCardAuthHelper
-import com.payala.impala.demo.auth.NfcCardResult
+import com.payala.impala.demo.card.DebugCards
 import com.payala.impala.demo.databinding.ActivityMainBinding
 import com.payala.impala.demo.log.AppLogger
-import com.payala.impala.demo.nfc.NfcWatcherService
 import com.payala.impala.demo.ui.log.LogViewerActivity
 import com.payala.impala.demo.ui.nfc.NfcDebugActivity
 
@@ -31,21 +34,52 @@ import com.payala.impala.demo.ui.nfc.NfcDebugActivity
  * `activity_main.xml`. The toolbar title updates automatically when the
  * user switches tabs.
  *
- * Also manages NFC foreground dispatch so that fragments (e.g., [CardsFragment])
- * can register cards by tapping an NFC smartcard while the app is open.
- * Fragments set [nfcCallback] to receive tag events.
+ * Owns the one [CardReaderController] (impala-lib reader mode) for every
+ * screen it hosts. A fragment that needs the card (registration, load, redeem)
+ * calls [awaitCardTap]; its `onTap` runs on the NFC binder thread with the card
+ * connected and its `onResult` on the main thread. With no request pending, a
+ * tap only reads the identity and is offered to [idleCardTapListener] (the
+ * Cards screen offers "Register this card?"). Fragments never register NFC
+ * callbacks with the activity themselves.
  */
 class MainActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityMainBinding
-    lateinit var nfcHelper: NfcCardAuthHelper
+    lateinit var cardReader: CardReaderController
         private set
 
+    private class PendingTap(
+        val onTap: (ImpalaCardSession) -> Any?,
+        val onResult: (Result<Any?>) -> Unit
+    )
+
+    /** At most one card request at a time; read on the binder thread. */
+    @Volatile
+    private var pendingTap: PendingTap? = null
+
+    /** Receives the identity of a card tapped while no request is pending (main thread). */
+    var idleCardTapListener: ((CardIdentity) -> Unit)? = null
+
     /**
-     * Callback for NFC tag events. Fragments set this to receive card read
-     * results when the user taps a smartcard. Set to `null` when not listening.
+     * Runs [onTap] with the next tapped card (binder thread, card connected) and
+     * delivers its outcome to [onResult] on the main thread. Replaces any
+     * request still waiting for a tap.
      */
-    var nfcCallback: ((NfcCardResult) -> Unit)? = null
+    @Suppress("UNCHECKED_CAST")
+    fun <R> awaitCardTap(onTap: (ImpalaCardSession) -> R, onResult: (Result<R>) -> Unit) {
+        pendingTap = PendingTap(onTap, { r -> onResult(r as Result<R>) })
+        if (DebugCards.isConfigured()) {
+            // Emulator lane (debug builds only): the simulated card "taps" now.
+            lifecycleScope.launch(Dispatchers.IO) {
+                DebugCards.openSession()?.let { cardReader.debugInjectTap(it) }
+            }
+        }
+    }
+
+    /** Drops a request that is still waiting for a tap. */
+    fun cancelCardTap() {
+        pendingTap = null
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -53,7 +87,7 @@ class MainActivity : AppCompatActivity() {
         setContentView(binding.root)
 
         setSupportActionBar(binding.toolbar)
-        nfcHelper = NfcCardAuthHelper(this)
+        cardReader = CardReaderController(this, aidHex = BuildConfig.CARD_APPLET_AID.ifEmpty { null })
 
         val navHostFragment = supportFragmentManager
             .findFragmentById(R.id.nav_host_fragment) as NavHostFragment
@@ -68,30 +102,64 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
-        nfcHelper.enableForegroundDispatch()
+        cardReader.enableReaderMode(
+            onTap = { session ->
+                val request = pendingTap
+                if (request != null) {
+                    pendingTap = null
+                    TapOutcome.Requested(request, runRequest(request, session))
+                } else if (idleCardTapListener != null) {
+                    TapOutcome.Idle(session.identity)
+                } else {
+                    TapOutcome.Ignored
+                }
+            },
+            onResult = { result ->
+                result.fold(
+                    onSuccess = { outcome ->
+                        when (outcome) {
+                            is TapOutcome.Requested -> outcome.request.onResult(outcome.result)
+                            is TapOutcome.Idle -> idleCardTapListener?.invoke(outcome.identity)
+                            TapOutcome.Ignored -> Unit
+                        }
+                    },
+                    onFailure = { e ->
+                        // The session could not be opened (tag lost, not an
+                        // Impala card): hand it to the waiting request, if any.
+                        val request = pendingTap
+                        if (request != null) {
+                            pendingTap = null
+                            request.onResult(Result.failure(e))
+                        } else {
+                            AppLogger.d("NFC", "Card tap not read: ${e.javaClass.simpleName}")
+                        }
+                    }
+                )
+            }
+        )
     }
 
     override fun onPause() {
         super.onPause()
-        nfcHelper.disableForegroundDispatch()
+        cardReader.disableReaderMode()
     }
 
-    override fun onNewIntent(intent: Intent) {
-        super.onNewIntent(intent)
-        val callback = nfcCallback
-        if (callback != null) {
-            // A fragment is actively listening for card taps (e.g. card registration).
-            // The IsoDep exchange is blocking, so run it off the main thread and
-            // deliver the result back on the main thread.
-            lifecycleScope.launch {
-                val result = withContext(Dispatchers.IO) { nfcHelper.processTag(intent) }
-                callback(result)
-            }
-        } else {
-            // No fragment callback — forward to the background watcher service
-            // so NFC events are still processed (mirroring impala-lib behaviour)
-            NfcWatcherService.processNfcIntent(this, intent)
+    /** Runs a request's onTap, typing card/transport failures as [CardFlowException]. */
+    private fun runRequest(request: PendingTap, session: ImpalaCardSession): Result<Any?> =
+        try {
+            Result.success(request.onTap(session))
+        } catch (e: CardFlowException) {
+            Result.failure(e)
+        } catch (e: BIBOException) {
+            Result.failure(CardFlowException(CardError.from(e), e))
+        } catch (e: Exception) {
+            Result.failure(e)
         }
+
+    private sealed class TapOutcome {
+        class Requested(val request: PendingTap, val result: Result<Any?>) : TapOutcome()
+        class Idle(val identity: CardIdentity) : TapOutcome()
+        object Ignored : TapOutcome()
     }
 
     override fun onCreateOptionsMenu(menu: Menu): Boolean {
@@ -130,8 +198,8 @@ class MainActivity : AppCompatActivity() {
             appendLine("Device: ${Build.MANUFACTURER} ${Build.MODEL}")
             appendLine("Android: ${Build.VERSION.RELEASE}")
             appendLine()
-            appendLine("NFC Available: ${nfcHelper.isNfcAvailable}")
-            appendLine("NFC Enabled: ${nfcHelper.isNfcEnabled}")
+            appendLine("NFC Available: ${cardReader.isNfcAvailable}")
+            appendLine("NFC Enabled: ${cardReader.isNfcEnabled}")
         }
 
         AppLogger.i("BuildInfo", "Build info viewed")

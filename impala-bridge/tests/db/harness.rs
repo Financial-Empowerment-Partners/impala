@@ -61,11 +61,19 @@ impl Db {
 /// file, with Rust's `\`-newline continuations collapsed exactly as the
 /// compiler does. The tests run the binary's statements, not copies of them.
 pub fn sql_const(src: &'static str, name: &str) -> String {
-    let decl = format!("const {}: &str = \"", name);
-    let start = src
+    // `rustfmt` may move a long literal onto the line after the `=`.
+    let decl = format!("const {}: &str =", name);
+    let after_eq = src
         .find(&decl)
         .unwrap_or_else(|| panic!("{} not found in source", name))
         + decl.len();
+    let ws = src[after_eq..].len() - src[after_eq..].trim_start().len();
+    assert!(
+        src[after_eq + ws..].starts_with('"'),
+        "{} is not a plain string literal",
+        name
+    );
+    let start = after_eq + ws + 1;
     let rest = &src[start..];
     let end = rest.find("\";").expect("literal terminated");
     let raw = &rest[..end];

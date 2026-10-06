@@ -922,6 +922,10 @@ mod tests {
                 "admin_reconciliation.rs",
                 include_str!("handlers/admin_reconciliation.rs"),
             ),
+            (
+                "admin_card_issuer.rs",
+                include_str!("handlers/admin_card_issuer.rs"),
+            ),
         ] {
             assert!(
                 !src.contains("AdminUser"),
@@ -982,6 +986,7 @@ mod tests {
         let admin = include_str!("handlers/admin.rs");
         let custody = include_str!("handlers/admin_custody.rs");
         let reconciliation = include_str!("handlers/admin_reconciliation.rs");
+        let card_issuer = include_str!("handlers/admin_card_issuer.rs");
 
         let table: &[(&str, &str, &str)] = &[
             // admin_reserve.rs — reads
@@ -1042,6 +1047,10 @@ mod tests {
                 "create_snapshot",
                 "Privileged<ManageCustody>",
             ),
+            // admin_card_issuer.rs — the program key is key custody
+            (card_issuer, "generate_issuer_key", "Privileged<ManageKeys>"),
+            (card_issuer, "certify_card", "Privileged<ManageKeys>"),
+            (card_issuer, "list_issuer_keys", "Privileged<ReadKeys>"),
         ];
 
         for (src, name, expected) in table {
@@ -1070,6 +1079,7 @@ mod tests {
         };
         assert_eq!(non_test(custody).matches("pub async fn ").count(), 9);
         assert_eq!(non_test(reconciliation).matches("pub async fn ").count(), 4);
+        assert_eq!(non_test(card_issuer).matches("pub async fn ").count(), 3);
     }
 
     /// The custody surface carries the seed-bearing sign path's brake; the

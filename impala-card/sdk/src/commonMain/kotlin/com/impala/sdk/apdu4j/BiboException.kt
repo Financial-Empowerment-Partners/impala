@@ -11,3 +11,14 @@ open class BIBOException : RuntimeException {
         const val serialVersionUID: Long = 6710240956038548175L
     }
 }
+
+/**
+ * The card left the field mid-exchange (Android `TagLostException`, a removed
+ * PC/SC card). Transports throw this instead of a plain [BIBOException] so
+ * callers can ask for a re-tap rather than report a failure.
+ */
+class BIBOTagLostException : BIBOException {
+    constructor(message: String?) : super(message)
+
+    constructor(message: String?, e: Throwable?) : super(message, e)
+}

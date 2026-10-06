@@ -25,8 +25,11 @@ plugins {
 
 // Composite build: resolves com.impala:sdk to the ../impala-card :sdk project
 // so impala-lib can consume the SDK from source without needing it published.
+// com.impala:simulator (jcardsim + the applet + a JCA test issuer) is a
+// test-only dependency.
 includeBuild("../impala-card") {
     dependencySubstitution {
         substitute(module("com.impala:sdk")).using(project(":sdk"))
+        substitute(module("com.impala:simulator")).using(project(":simulator"))
     }
 }

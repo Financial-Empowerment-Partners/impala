@@ -12,8 +12,8 @@ local run/test loop for each component. For architecture see
 |------|---------|---------|
 | Rust | **1.91+** (workspace floor; bridge pins `rust-version = "1.91"`) | `impala-bridge`, `impala-soroban` |
 | `wasm32-unknown-unknown` target | `rustup target add wasm32-unknown-unknown` | `impala-soroban` |
-| JDK | 17 | all Gradle projects |
-| Android SDK | compileSdk/targetSdk **36**, build-tools 35.0.0, minSdk 24 | `impala-card`, `impala-lib`, `impala-android-demo` |
+| JDK | 17 to **launch** Gradle (the Ant CAP task runs in the Gradle JVM); Kotlin/Robolectric compile and test on a **JDK 21 toolchain** auto-provisioned by the foojay resolver (bytecode targets 17) | all Gradle projects |
+| Android SDK | compileSdk/targetSdk **37** (platform `android-37`), minSdk 24; Robolectric runs the SDK-36 sandbox | `impala-card`, `impala-lib`, `impala-android-demo` |
 | Docker + Docker Compose | recent | `impala-bridge`, `impala-ui` |
 | PostgreSQL 16 / Redis 7 | (or use the bridge's `docker compose`) | `impala-bridge` |
 | `stellar-cli` | recent | `impala-soroban` testnet tests (the fixture self-issues a test USDC asset — throwaway issuer, SAC deploy, trustlines, payment — no Circle faucet needed) |
@@ -70,7 +70,8 @@ iOS NFC: see [`impala-card/docs/IOS_NFC.md`](impala-card/docs/IOS_NFC.md)
 ```bash
 cd impala-lib
 ./gradlew assembleDebug
-./gradlew testDebugUnitTest        # Robolectric multi-SDK (24 + 36)
+./gradlew testDebugUnitTest        # Robolectric (SDK 36 sandbox; some suites 24 + 36) + jcardsim card sessions
+./gradlew lintDebug                # new findings only (lint-baseline.xml)
 ```
 
 ### impala-android-demo (reference app)

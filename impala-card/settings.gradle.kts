@@ -31,3 +31,5 @@ plugins {
 
 include(":sdk")
 include(":applet")
+include(":simulator")
+include(":tools:issue")

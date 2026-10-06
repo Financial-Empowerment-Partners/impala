@@ -8,6 +8,8 @@ import android.os.Bundle;
 import android.os.Parcelable;
 import android.util.Log;
 
+import androidx.core.content.IntentCompat;
+
 /**
  * Transient activity that handles NFC NDEF tag discovery events.
  *
@@ -55,7 +57,8 @@ public class NdefDispatchActivity extends Activity {
             return;
         }
 
-        Parcelable[] rawMessages = intent.getParcelableArrayExtra(NfcAdapter.EXTRA_NDEF_MESSAGES);
+        Parcelable[] rawMessages = IntentCompat.getParcelableArrayExtra(
+                intent, NfcAdapter.EXTRA_NDEF_MESSAGES, NdefMessage.class);
         if (rawMessages == null || rawMessages.length == 0) {
             Log.w(TAG, "No NDEF messages in intent");
             return;

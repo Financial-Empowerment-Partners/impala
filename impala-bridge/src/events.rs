@@ -302,6 +302,23 @@ pub enum AccountEvent {
         invariants_ok: bool,
         horizon_fresh: bool,
     },
+    /// The card program issuer key was generated (`account_id` = acting
+    /// admin). Public key fingerprint only; `replaced` = a previous key was
+    /// superseded (rotation).
+    CardIssuerKeyGenerated {
+        account_id: String,
+        version: i32,
+        fingerprint: String,
+        replaced: bool,
+    },
+    /// A card was certified by the issuer (`account_id` = acting admin;
+    /// `card_id` is public NFC data, already in `card.registered`).
+    CardCertified {
+        account_id: String,
+        card_id: String,
+        issuer_version: i32,
+        replaced: bool,
+    },
     /// A Payala sync batch was applied for `account_id` (counts only: no
     /// amounts, memos, ids or digests — the mirror is unverified data and
     /// the outbox must not become a second copy of it).
@@ -363,6 +380,8 @@ impl AccountEvent {
                 "reconciliation.snapshot_recorded"
             }
             AccountEvent::PayalaSyncBatchApplied { .. } => "payala.sync_batch_applied",
+            AccountEvent::CardIssuerKeyGenerated { .. } => "custody.issuer_key_generated",
+            AccountEvent::CardCertified { .. } => "custody.card_certified",
         }
     }
 
@@ -406,7 +425,9 @@ impl AccountEvent {
             | AccountEvent::CustodyIntentResolved { account_id, .. }
             | AccountEvent::ReserveDrift { account_id, .. }
             | AccountEvent::ReconciliationSnapshotRecorded { account_id, .. }
-            | AccountEvent::PayalaSyncBatchApplied { account_id, .. } => account_id,
+            | AccountEvent::PayalaSyncBatchApplied { account_id, .. }
+            | AccountEvent::CardIssuerKeyGenerated { account_id, .. }
+            | AccountEvent::CardCertified { account_id, .. } => account_id,
         }
     }
 
@@ -738,6 +759,26 @@ impl AccountEvent {
                 "applied_count": applied_count,
                 "duplicate_count": duplicate_count,
                 "conflicting_count": conflicting_count,
+            }),
+            AccountEvent::CardIssuerKeyGenerated {
+                version,
+                fingerprint,
+                replaced,
+                ..
+            } => json!({
+                "version": version,
+                "fingerprint": fingerprint,
+                "replaced": replaced,
+            }),
+            AccountEvent::CardCertified {
+                card_id,
+                issuer_version,
+                replaced,
+                ..
+            } => json!({
+                "card_id": card_id,
+                "issuer_version": issuer_version,
+                "replaced": replaced,
             }),
         }
     }
@@ -1209,5 +1250,33 @@ mod tests {
             sign(b"key", 1, "body"),
             hex::encode(mac.finalize().into_bytes())
         );
+    }
+
+    #[test]
+    fn card_issuer_payloads_carry_fingerprints_and_ids_only() {
+        let gen = AccountEvent::CardIssuerKeyGenerated {
+            account_id: "admin".into(),
+            version: 2,
+            fingerprint: "0123456789abcdef0123".into(),
+            replaced: true,
+        };
+        assert_eq!(gen.event_type(), "custody.issuer_key_generated");
+        let data = gen.data();
+        let obj = data.as_object().unwrap();
+        let mut keys: Vec<&String> = obj.keys().collect();
+        keys.sort();
+        assert_eq!(keys, ["fingerprint", "replaced", "version"]);
+
+        let cert = AccountEvent::CardCertified {
+            account_id: "admin".into(),
+            card_id: "00112233445566778899aabbccddeeff".into(),
+            issuer_version: 2,
+            replaced: false,
+        };
+        assert_eq!(cert.event_type(), "custody.card_certified");
+        let data = cert.data();
+        let mut keys: Vec<&String> = data.as_object().unwrap().keys().collect();
+        keys.sort();
+        assert_eq!(keys, ["card_id", "issuer_version", "replaced"]);
     }
 }

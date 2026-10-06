@@ -1270,6 +1270,47 @@ pub const FCM_ASSERTION_TTL_SECS: u64 = 3600;
 /// its expiry.
 pub const FCM_TOKEN_REFRESH_MARGIN_SECS: u64 = 300;
 
+// ── Card issuer / certified transfer protocol v1 (039; handoff lane C1) ──
+// Byte formats are the CARD's (impala-card/docs/transfer-protocol.md §2-3,
+// contract-addendum.md §A): the bridge adopts them verbatim, and the golden
+// vectors in handlers/card_auth.rs tests are the same literals the SDK's
+// TransferProtocolGoldenTest pins (scripts/check-shared-vectors.sh).
+
+/// ASCII "IMPALA-CERT:" — the issuer certifies `CERT = tag ‖ 0x01 ‖
+/// programId(16) ‖ accountId(16) ‖ currency(4) ‖ cardPubKey(65)` (114 bytes).
+pub const CARD_CERT_DOMAIN_PREFIX: &[u8; 12] = b"IMPALA-CERT:";
+/// ASCII "IMPALA-XFER:" — every transfer signature is over `XFER = tag ‖ 0x01
+/// ‖ programId(16) ‖ signable(60)` (89 bytes), never the bare signable.
+#[allow(dead_code)] // consumed by offline issuance/redemption (lane C2); pinned by tests now
+pub const CARD_XFER_DOMAIN_PREFIX: &[u8; 12] = b"IMPALA-XFER:";
+/// CERT message version byte.
+pub const CARD_CERT_VERSION: u8 = 0x01;
+/// XFER message version byte (`format_version = 1` means the tagged message).
+#[allow(dead_code)] // consumed by offline issuance/redemption (lane C2); pinned by tests now
+pub const CARD_TRANSFER_PROTOCOL_VERSION: u8 = 0x01;
+pub const CARD_PROGRAM_ID_LEN: usize = 16;
+#[allow(dead_code)] // consumed by offline issuance/redemption (lane C2); pinned by tests now
+pub const CARD_SIGNABLE_LEN: usize = 60;
+pub const CARD_CERT_MESSAGE_LEN: usize = 114;
+#[allow(dead_code)] // consumed by offline issuance/redemption (lane C2); pinned by tests now
+pub const CARD_XFER_MESSAGE_LEN: usize = 89;
+/// Largest forward jump a receiving card accepts over its last counter
+/// (card spec §6.1 `J`); shared by every bridge counter rule.
+#[allow(dead_code)] // consumed by offline issuance/redemption (lane C2); pinned by tests now
+pub const CARD_RECEIVE_COUNTER_MAX_JUMP: i32 = 1024;
+/// Bucket currency → the 4-byte tag a card carries (explicit, no truncation).
+pub const CARD_CURRENCY_TAGS: &[(&str, [u8; 4])] =
+    &[("XLM", *b"XLM\0"), ("USDC", *b"USDC"), ("USDT0", *b"UST0")];
+/// Bound-header magic sealed inside a card-issuer-key ciphertext, ahead of
+/// the version line and the PKCS#8 document.
+pub const ISSUER_KEY_HEADER_MAGIC: &str = "impala-issuer-v1";
+/// `card_issuer_key.state` vocabulary (mirrors `chk_cik_state`).
+#[allow(dead_code)] // consumed by offline issuance/redemption (lane C2); pinned by tests now
+pub const VALID_CARD_ISSUER_STATES: &[&str] = &["active", "superseded", "revoked"];
+/// Fingerprint kind/part for the issuer public key (`keys::fingerprint`).
+pub const CARD_ISSUER_FP_KIND: &str = "card_issuer";
+pub const CARD_ISSUER_FP_PART: &str = "public_key";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1318,5 +1359,65 @@ mod tests {
             CUSTODIAL_INTENT_OPEN_STATUSES.len() + 2,
             VALID_CUSTODIAL_INTENT_STATUSES.len()
         );
+    }
+
+    #[test]
+    fn card_domain_tags_differ_from_auth_only_in_their_last_four_bytes() {
+        // "IMPALA-" ‖ AUTH|CERT|XFER ‖ ":" — equal length, distinct domains.
+        for tag in [CARD_CERT_DOMAIN_PREFIX, CARD_XFER_DOMAIN_PREFIX] {
+            assert_eq!(&tag[..7], &CARD_AUTH_DOMAIN_PREFIX[..7]);
+            assert_eq!(tag[11], CARD_AUTH_DOMAIN_PREFIX[11]);
+            assert_ne!(&tag[7..11], &CARD_AUTH_DOMAIN_PREFIX[7..11]);
+        }
+        assert_ne!(CARD_CERT_DOMAIN_PREFIX, CARD_XFER_DOMAIN_PREFIX);
+        assert_eq!(
+            CARD_CERT_MESSAGE_LEN,
+            12 + 1 + CARD_PROGRAM_ID_LEN + 16 + 4 + 65
+        );
+        assert_eq!(
+            CARD_XFER_MESSAGE_LEN,
+            12 + 1 + CARD_PROGRAM_ID_LEN + CARD_SIGNABLE_LEN
+        );
+    }
+
+    #[test]
+    fn card_currency_tags_are_pinned() {
+        assert_eq!(
+            CARD_CURRENCY_TAGS,
+            &[
+                ("XLM", [0x58, 0x4C, 0x4D, 0x00]),
+                ("USDC", *b"USDC"),
+                ("USDT0", *b"UST0")
+            ]
+        );
+    }
+
+    #[test]
+    fn header_magics_are_pairwise_distinct_and_versioned() {
+        let magics = [
+            CREDENTIAL_HEADER_MAGIC,
+            SEED_HEADER_MAGIC,
+            ISSUER_KEY_HEADER_MAGIC,
+        ];
+        for (i, a) in magics.iter().enumerate() {
+            assert!(a.ends_with("-v1"), "{a} must be -v1 suffixed");
+            for b in &magics[i + 1..] {
+                assert!(!a.starts_with(b) && !b.starts_with(a), "{a} vs {b}");
+            }
+        }
+    }
+
+    #[test]
+    fn card_issuer_states_match_migration_039() {
+        let ddl = include_str!("../migrations/039_card_issuer.sql");
+        let quoted: Vec<String> = VALID_CARD_ISSUER_STATES
+            .iter()
+            .map(|s| format!("'{s}'"))
+            .collect();
+        assert!(ddl.contains(&format!("CHECK (state IN ({}))", quoted.join(", "))));
+        assert!(ddl.contains(&format!(
+            "CHECK (counter_max_jump BETWEEN 1 AND {})",
+            CARD_RECEIVE_COUNTER_MAX_JUMP
+        )));
     }
 }

@@ -40,6 +40,8 @@ class TokenManager internal constructor(
         private const val KEY_ACCOUNT_ID = "account_id"
         private const val KEY_AUTH_PROVIDER = "auth_provider"
         private const val KEY_DISPLAY_NAME = "display_name"
+        private const val KEY_CARD_ID = "card_id"
+        private const val KEY_CARD_ACCOUNT_ID = "card_account_id"
 
         /**
          * Safety margin for [isTemporalTokenExpired]: report the token as
@@ -153,6 +155,20 @@ class TokenManager internal constructor(
     }
 
     fun getDisplayName(): String? = prefs.getString(KEY_DISPLAY_NAME, null)
+
+    /** The `card_id` wire form (32 hex) of the card that signed this session in, if any. */
+    fun saveCardId(wireCardId: String) {
+        prefs.edit().putString(KEY_CARD_ID, wireCardId).apply()
+    }
+
+    fun getCardId(): String? = prefs.getString(KEY_CARD_ID, null)
+
+    /** The on-card account UUID of the card that signed this session in. */
+    fun saveCardAccountId(accountUuid: String) {
+        prefs.edit().putString(KEY_CARD_ACCOUNT_ID, accountUuid).apply()
+    }
+
+    fun getCardAccountId(): String? = prefs.getString(KEY_CARD_ACCOUNT_ID, null)
 
     /** Removes all stored tokens and session data (used on logout). */
     fun clearAll() {

@@ -18,6 +18,11 @@
 #   assemble            assembleTnetDebug + assembleLiveDebug for the demo
 #                       (two APKs uploaded as separate artifacts) and
 #                       assembleDebug for the lib (single AAR).
+#   card-e2e            (workflow_dispatch + nightly only) T1 lane: a real
+#                       impala-bridge built from this commit (Postgres, Redis,
+#                       OpenBao transit) + jcardsim cards issued by the
+#                       impala-card issuance ceremony with bridge certificates;
+#                       runs `:app:e2eTnetDebug` (app/src/e2e/README.md).
 #   instrumented-tests  Matrix on api-level [24, 36]. Runs the tnet flavor's
 #                       connectedTnetDebugAndroidTest (live flavor exercises
 #                       the same code paths and would just double emulator boot
@@ -44,6 +49,10 @@ on:
       - 'impala-card/**'
       - '.github/workflows/impala-android.yml'
   workflow_dispatch:
+  # card-e2e only (it is gated on these two events): nightly until the lane is
+  # stable, then it can move onto PRs touching the card paths.
+  schedule:
+    - cron: '17 6 * * *'
 
 concurrency:
   group: impala-android-${{ github.ref }}
@@ -58,6 +67,7 @@ jobs:
   # ===========================================================================
   unit-tests:
     name: JVM unit tests
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
 
     steps:
@@ -97,12 +107,16 @@ jobs:
           fi
 
       - name: impala-android-demo unit tests (tnet + live flavors)
+        # The demo composite-builds ../impala-card (SDK + jcardsim simulator for
+        # tests) and ../impala-lib, which is why both sit in the path filters.
         working-directory: impala-android-demo
         run: ./gradlew testTnetDebugUnitTest testLiveDebugUnitTest --no-daemon --stacktrace
 
       - name: impala-lib unit tests
         working-directory: impala-lib
-        run: ./gradlew testDebugUnitTest --no-daemon --stacktrace
+        # lintDebug reports only findings not in lint-baseline.xml (abortOnError
+        # stays false; new warnings are visible in this step's output).
+        run: ./gradlew testDebugUnitTest lintDebug --no-daemon --stacktrace
 
       - name: Upload test reports on failure
         if: failure()
@@ -122,6 +136,7 @@ jobs:
   # ===========================================================================
   assemble:
     name: Assemble debug
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
 
     steps:
@@ -173,7 +188,23 @@ jobs:
 
       - name: Assemble lib AAR
         working-directory: impala-lib
-        run: ./gradlew assembleDebug --no-daemon --stacktrace
+        run: ./gradlew assembleDebug assembleRelease --no-daemon --stacktrace
+
+      # TcpBibo / DebugCardTransport (the emulator's simulated-card transport)
+      # live in impala-lib's debug source set only. The demo's release APK is
+      # built from this release AAR, so checking the AAR by class name is exact
+      # (R8 would rename the class inside the APK and hide it from a grep).
+      - name: release build contains no TcpBibo
+        working-directory: impala-lib
+        run: |
+          unzip -p build/outputs/aar/impala-lib-release.aar classes.jar > "$RUNNER_TEMP/release-classes.jar"
+          if unzip -l "$RUNNER_TEMP/release-classes.jar" | grep -E 'TcpBibo|DebugCardTransport'; then
+            echo "::error::debug-only card transport leaked into the release AAR"
+            exit 1
+          fi
+          unzip -p build/outputs/aar/impala-lib-debug.aar classes.jar > "$RUNNER_TEMP/debug-classes.jar"
+          unzip -l "$RUNNER_TEMP/debug-classes.jar" | grep -q 'com/payala/impala/card/TcpBibo' \
+            || { echo "::error::debug AAR lost TcpBibo (check moved?)"; exit 1; }
 
       - name: Upload tnet demo APK
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -209,6 +240,7 @@ jobs:
   # ===========================================================================
   instrumented-tests:
     name: Instrumented (API ${{ matrix.api-level }})
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
 
     strategy:
@@ -308,3 +340,131 @@ jobs:
             impala-lib/**/build/outputs/androidTest-results/**
           if-no-files-found: ignore
           retention-days: 14
+
+  # ===========================================================================
+  # Card E2E (T1) — the app's card flows against a live bridge on jcardsim.
+  # ===========================================================================
+  card-e2e:
+    name: Card E2E (T1, live bridge)
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: password
+          POSTGRES_DB: impala
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 3s --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 5s --health-timeout 3s --health-retries 10
+    env:
+      DATABASE_URL: postgresql://postgres:password@127.0.0.1:5432/impala
+      REDIS_URL: redis://127.0.0.1:6379
+      # Throwaway values for an ephemeral CI bridge; nothing here is a secret.
+      JWT_SECRET: card-e2e-ci-only-jwt-secret-0123456789abcdef
+      BAO_TOKEN: card-e2e-dev-root
+      BRIDGE: http://127.0.0.1:8080
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      # OpenBao dev server (transit) = the seed protector the issuer key is
+      # sealed by. Dev mode: in-memory, auto-unsealed, CI only.
+      - name: Start OpenBao (transit)
+        run: |
+          docker run -d --name openbao --cap-add IPC_LOCK -p 8200:8200 \
+            -e BAO_DEV_ROOT_TOKEN_ID="$BAO_TOKEN" -e BAO_DEV_LISTEN_ADDRESS=0.0.0.0:8200 \
+            openbao/openbao:2.5.5
+          for i in $(seq 1 30); do docker exec -e BAO_ADDR=http://127.0.0.1:8200 openbao bao status >/dev/null 2>&1 && break; sleep 2; done
+          docker exec -e BAO_ADDR=http://127.0.0.1:8200 -e BAO_TOKEN="$BAO_TOKEN" openbao bao secrets enable transit
+          docker exec -e BAO_ADDR=http://127.0.0.1:8200 -e BAO_TOKEN="$BAO_TOKEN" openbao bao write -f transit/keys/impala-seeds
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: '1.96.0'
+
+      - name: Cache cargo registry + build
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            impala-bridge/target
+          key: ${{ runner.os }}-cargo-e2e-${{ hashFiles('impala-bridge/Cargo.lock') }}
+
+      - name: Build and migrate the bridge
+        working-directory: impala-bridge
+        run: |
+          cargo build --locked
+          RUN_MODE=migrate ./target/debug/impala-bridge
+
+      # The operator: an ADMIN_ACCOUNT_IDS account (ManageKeys) whose row is
+      # seeded directly — an unauthenticated caller cannot create one. Its
+      # password is minted per run and never leaves the runner.
+      - name: Start the bridge
+        working-directory: impala-bridge
+        run: |
+          OPERATOR_ID=$(cat /proc/sys/kernel/random/uuid)
+          head -c 24 /dev/urandom | base64 > "$RUNNER_TEMP/operator-password"
+          head -c 24 /dev/urandom | base64 > "$RUNNER_TEMP/holder-password"
+          psql "$DATABASE_URL" -c "INSERT INTO impala_account (stellar_account_id, payala_account_id, first_name, last_name) VALUES ('GCI0PERAT0R', '$OPERATOR_ID', 'E2E', 'Operator')"
+          echo "IMPALA_E2E_OPERATOR_ACCOUNT=$OPERATOR_ID" >> "$GITHUB_ENV"
+          # ALLOW_OPEN_REGISTRATION lets the holders the tests create register
+          # their own passwords. This bridge is ephemeral; never set it on a
+          # real deployment (docs/runbooks/deploy-local-stack.md).
+          env SERVICE_ADDRESS=127.0.0.1:8080 STELLAR_NETWORK=testnet \
+            SEED_PROTECTION_BACKEND=openbao BAO_ADDR=http://127.0.0.1:8200 BAO_TRANSIT_KEY=impala-seeds \
+            KEY_IMPORT_ENABLED=true ALLOW_OPEN_REGISTRATION=true ADMIN_ACCOUNT_IDS="$OPERATOR_ID" \
+            SESSION_COOKIE_SECURE=false \
+            nohup ./target/debug/impala-bridge > "$RUNNER_TEMP/bridge.log" 2>&1 &
+          for i in $(seq 1 60); do curl -sf "$BRIDGE/health" >/dev/null && break; sleep 2; done
+          curl -sf "$BRIDGE/health"
+          curl -sf -X POST "$BRIDGE/authenticate" -H 'Content-Type: application/json' \
+            -d "{\"account_id\":\"$OPERATOR_ID\",\"password\":\"$(cat "$RUNNER_TEMP/operator-password")\"}" | grep -q '"success":true'
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654 # v5.2.0
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@50e97c2cd7a37755bbfafc9c5b7cafaece252f6e # v6.1.0
+        with:
+          cache-read-only: true
+
+      - name: Provision placeholder google-services.json
+        run: |
+          f=impala-android-demo/app/google-services.json
+          [ -f "$f" ] || cp "$f.example" "$f"
+
+      - name: Card E2E (login; transfer tests skip until the bridge serves /offline)
+        working-directory: impala-android-demo
+        env:
+          IMPALA_E2E_BRIDGE_URL: http://127.0.0.1:8080
+          IMPALA_E2E_SLOW: '1'
+        run: |
+          IMPALA_E2E_OPERATOR_PASSWORD_FILE="$RUNNER_TEMP/operator-password" \
+          IMPALA_E2E_HOLDER_PASSWORD_FILE="$RUNNER_TEMP/holder-password" \
+          ./gradlew :app:e2eTnetDebug --no-daemon --stacktrace
+
+      - name: Upload e2e reports and bridge log on failure
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: card-e2e-${{ github.sha }}
+          path: |
+            impala-android-demo/app/build/reports/tests/**
+            impala-android-demo/app/build/test-results/**
+            ${{ runner.temp }}/bridge.log
+          if-no-files-found: ignore
+          retention-days: 14
+

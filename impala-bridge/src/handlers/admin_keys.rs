@@ -79,7 +79,7 @@ fn db_err(context: &'static str) -> impl FnOnce(sqlx::Error) -> AppError {
 /// `SeedProtector::backend()`, which reports an arbitrary value for the
 /// disabled `NoneProtector` and would let the whole feature switch on over a
 /// protector that fails every call.
-fn require_enabled(runtime: &KeyRuntime) -> Result<(), AppError> {
+pub(crate) fn require_enabled(runtime: &KeyRuntime) -> Result<(), AppError> {
     if !runtime.enabled {
         return Err(AppError::Forbidden);
     }

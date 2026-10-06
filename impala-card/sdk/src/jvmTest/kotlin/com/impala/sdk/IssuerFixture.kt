@@ -6,6 +6,7 @@ import com.impala.sdk.models.PersonalizationProtocol
 import com.impala.sdk.models.Signable
 import com.impala.sdk.models.TransferEnvelope
 import com.impala.sdk.models.TransferProtocol
+import com.impala.simulator.SimulatorBibo
 import java.math.BigInteger
 import java.security.AlgorithmParameters
 import java.security.KeyFactory

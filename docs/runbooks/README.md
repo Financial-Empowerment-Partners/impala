@@ -18,6 +18,7 @@ Start from the task you have, not from the document you think you want.
 | Drive the bridge from a terminal or a script | [`impalactl-operations.md`](./impalactl-operations.md) |
 | Onboard or offboard an operator; grant a role; fix lost MFA | [`accounts-and-roles.md`](./accounts-and-roles.md) |
 | Install or rotate a provider credential or custodial seed | [`import-keys.md`](./import-keys.md) |
+| Generate the card issuer key; certify cards for personalization | [`card-issuer.md`](./card-issuer.md) |
 | Rotate `JWT_SECRET`, database or delivery credentials | [`rotate-secrets.md`](./rotate-secrets.md) |
 | Enable, fund or operate the conversion reserve | [`conversion-reserve.md`](./conversion-reserve.md) |
 | Work out what an error, log line or failure means | [`triage.md`](./triage.md) |

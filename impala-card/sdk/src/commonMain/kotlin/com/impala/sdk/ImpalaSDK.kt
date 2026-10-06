@@ -466,10 +466,23 @@ class ImpalaSDK(
      * @param signable the 60-byte signable transaction data
      */
     @Throws(ImpalaException::class)
-    fun signTransferV2(userPin: String, signable: ByteArray): TransferEnvelope {
+    fun signTransferV2(userPin: String, signable: ByteArray): TransferEnvelope =
+        signTransferV2Digits(mapDigitsToByteArray(userPin), signable)
+
+    /**
+     * [signTransferV2] with the PIN as 4 raw digit values (`[1, 2, 3, 4]`), so a
+     * caller holding the PIN in a `CharArray` never materialises it as an
+     * immutable String. The command buffer is zeroed after transmission; the
+     * caller still owns (and should zero) [pinDigits].
+     */
+    @Throws(ImpalaException::class)
+    fun signTransferV2Digits(pinDigits: ByteArray, signable: ByteArray): TransferEnvelope {
+        require(pinDigits.size == 4 && pinDigits.all { it in 0..9 }) { "PIN must be 4 digit values" }
         require(signable.size == Constants.SIGNABLE_LENGTH.toInt()) { "Signable data must be ${Constants.SIGNABLE_LENGTH} bytes" }
-        val payload = mapDigitsToByteArray(userPin) + signable
-        val resp = tx(CommandAPDU(Constants.INS_SIGN_TRANSFER_V2, payload))
+        val payload = pinDigits + signable
+        val cmd = CommandAPDU(Constants.INS_SIGN_TRANSFER_V2, payload)
+        payload.fill(0)
+        val resp = try { tx(cmd) } finally { cmd.wipe() }
         val data = resp.data
         if (data.size != Constants.TRANSFER_RESPONSE_LENGTH.toInt()) {
             throw ImpalaException("Expected ${Constants.TRANSFER_RESPONSE_LENGTH} bytes for SIGN_TRANSFER_V2, got ${data.size}")

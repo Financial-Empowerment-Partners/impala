@@ -45,11 +45,19 @@ on:
     paths:
       - 'impala-card/**'
       - '.github/workflows/impala-card.yml'
+      # The shared-vector check also reads the bridge's and the demo's pins.
+      - 'scripts/check-shared-vectors.sh'
+      - 'impala-bridge/src/handlers/card_auth.rs'
+      - 'impala-android-demo/app/src/test/java/com/payala/impala/demo/WireFormatsTest.kt'
   pull_request:
     branches: [main]
     paths:
       - 'impala-card/**'
       - '.github/workflows/impala-card.yml'
+      # The shared-vector check also reads the bridge's and the demo's pins.
+      - 'scripts/check-shared-vectors.sh'
+      - 'impala-bridge/src/handlers/card_auth.rs'
+      - 'impala-android-demo/app/src/test/java/com/payala/impala/demo/WireFormatsTest.kt'
   workflow_dispatch:
 
 concurrency:
@@ -91,18 +99,13 @@ jobs:
           cache-read-only: ${{ github.ref != 'refs/heads/main' }}
 
       - name: SDK JVM tests
-        run: ./gradlew :sdk:jvmTest --no-daemon --stacktrace
+        run: ./gradlew :sdk:jvmTest :simulator:jvmTest :tools:issue:test --no-daemon --stacktrace
 
-      # Shared card/bridge golden vectors (spec §3.3): the script is created by the
-      # bridge lane; run it here when present so the card literals never drift from
-      # the bridge's. Skips cleanly until that lane lands, keeping card CI green.
+      # Shared card/bridge golden vectors (spec §3.3, contract addendum §A.11):
+      # the card literals must never drift from the bridge's.
       - name: Check shared card/bridge vectors
         run: |
-          if [ -f ../scripts/check-shared-vectors.sh ]; then
-            bash ../scripts/check-shared-vectors.sh
-          else
-            echo "scripts/check-shared-vectors.sh not present yet (created by the bridge lane) — skipping"
-          fi
+          bash ../scripts/check-shared-vectors.sh
 
       - name: Upload test reports
         if: always()

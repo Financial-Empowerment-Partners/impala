@@ -15,14 +15,15 @@ import com.payala.impala.demo.auth.GitHubAuthHelper
 import com.payala.impala.demo.auth.GitHubSignInResult
 import com.payala.impala.demo.auth.GoogleAuthHelper
 import com.payala.impala.demo.auth.GoogleSignInResult
-import com.payala.impala.demo.auth.NfcCardAuthHelper
-import com.payala.impala.demo.auth.NfcCardResult
 import com.payala.impala.demo.auth.OktaAuthHelper
 import com.payala.impala.demo.auth.OktaSignInResult
 import com.payala.impala.demo.databinding.ActivityLoginBinding
 import com.payala.impala.demo.ui.main.MainActivity
+import com.payala.impala.card.CardErrorMessages
+import com.payala.impala.card.CardReaderController
+import com.payala.impala.demo.card.DebugCards
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.runBlocking
 
 /**
  * Launcher activity presenting four authentication methods.
@@ -38,12 +39,13 @@ import kotlinx.coroutines.runBlocking
  * All auth logic is delegated to [LoginViewModel]; this activity only observes
  * [LoginViewModel.loginState] and updates the UI accordingly.
  *
- * NFC reader mode is enabled in [onResume] so that tapping an Impala card while
- * this activity is visible is read on a background thread (off the main thread);
- * the result is delivered to [handleCardResult] on the main thread. Taps are
- * only acted on while [awaitingCardTap] is set (after "Sign in with Card"), in
- * which case a bridge-issued challenge is fetched mid-read ([fetchCardChallenge])
- * and signed on-card for the `POST /auth/card` exchange.
+ * NFC reader mode ([CardReaderController], impala-lib) is enabled in [onResume].
+ * A tap is acted on only after "Sign in with Card" ([awaitingCardTap]) and only
+ * when no other card login is in flight ([LoginViewModel.tryBeginCardLogin]).
+ * On the NFC binder thread, with the card connected,
+ * [LoginViewModel.signInWithCardTap] gates on applet version and
+ * personalization, fetches the bridge challenge and has the card sign it; the
+ * `POST /auth/card` exchange then runs from the main thread.
  */
 class LoginActivity : AppCompatActivity() {
 
@@ -51,10 +53,14 @@ class LoginActivity : AppCompatActivity() {
     private val viewModel: LoginViewModel by viewModels()
     private lateinit var googleAuthHelper: GoogleAuthHelper
     private lateinit var gitHubAuthHelper: GitHubAuthHelper
-    private lateinit var nfcHelper: NfcCardAuthHelper
+    private lateinit var cardReader: CardReaderController
     private lateinit var oktaAuthHelper: OktaAuthHelper
 
-    /** True when the user has tapped "Sign in with Card" and is waiting for a tap. */
+    /**
+     * True when the user has tapped "Sign in with Card" and is waiting for a
+     * tap. Read on the NFC binder thread; cleared there when a tap claims it.
+     */
+    @Volatile
     private var awaitingCardTap = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -72,11 +78,12 @@ class LoginActivity : AppCompatActivity() {
 
         googleAuthHelper = GoogleAuthHelper(this)
         gitHubAuthHelper = GitHubAuthHelper(this)
-        nfcHelper = NfcCardAuthHelper(this)
+        cardReader = CardReaderController(this, aidHex = BuildConfig.CARD_APPLET_AID.ifEmpty { null })
         oktaAuthHelper = OktaAuthHelper(this)
 
-        // Hide NFC button if device lacks NFC hardware
-        if (!nfcHelper.isNfcAvailable) {
+        // Hide NFC button if device lacks NFC hardware (debug builds keep it
+        // when a simulated card is configured; see DebugCards)
+        if (!cardReader.isNfcAvailable && !DebugCards.isConfigured()) {
             binding.btnCard.visibility = View.GONE
         }
 
@@ -91,55 +98,29 @@ class LoginActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
-        if (::nfcHelper.isInitialized) {
-            // Reader mode: the card is read off the main thread; the callback is
-            // delivered on the main thread. Only act on a tap we asked for.
-            nfcHelper.enableReaderMode(challengeFetcher = ::fetchCardChallenge) { result ->
-                if (!awaitingCardTap) return@enableReaderMode
-                awaitingCardTap = false
-                handleCardResult(result)
-            }
-        }
-    }
-
-    /**
-     * Fetches a single-use card-auth challenge from the bridge. Runs on the
-     * NFC binder thread while IsoDep is still connected, so the blocking
-     * network call is safe here — and required: the challenge must be signed
-     * on-card before its 60-second TTL expires. Returns `null` (skipping the
-     * challenge exchange) when the user hasn't asked to sign in with a card.
-     */
-    private fun fetchCardChallenge(cardId: String): ByteArray? {
-        if (!awaitingCardTap) return null
+        if (!::cardReader.isInitialized) return
         val tokenManager = (application as ImpalaApp).tokenManager
         val api = ApiClient.getService(BuildConfig.BRIDGE_BASE_URL, tokenManager)
-        return runBlocking { viewModel.fetchCardChallenge(api, cardId) }
+        cardReader.enableReaderMode(
+            onTap = { session ->
+                // Binder thread. Only a tap we asked for, and only one at a time.
+                if (!awaitingCardTap || !viewModel.tryBeginCardLogin()) return@enableReaderMode null
+                awaitingCardTap = false
+                viewModel.signInWithCardTap(session, api)
+            },
+            onResult = { result ->
+                result.fold(
+                    onSuccess = { tap -> if (tap != null) viewModel.loginWithCard(api, tokenManager, tap) },
+                    onFailure = { e -> viewModel.cardTapFailed(e) }
+                )
+            }
+        )
     }
 
     override fun onPause() {
         super.onPause()
-        if (::nfcHelper.isInitialized) {
-            nfcHelper.disableReaderMode()
-        }
-    }
-
-    /** Handles a card read result on the main thread. */
-    private fun handleCardResult(result: NfcCardResult) {
-        val tokenManager = (application as ImpalaApp).tokenManager
-        val api = ApiClient.getService(BuildConfig.BRIDGE_BASE_URL, tokenManager)
-
-        when (result) {
-            is NfcCardResult.Success -> {
-                viewModel.loginWithCard(api, tokenManager, result)
-            }
-            is NfcCardResult.Error -> {
-                binding.tvError.text = result.message
-                binding.tvError.visibility = View.VISIBLE
-            }
-            is NfcCardResult.NfcNotAvailable -> {
-                binding.tvError.text = getString(R.string.nfc_not_available)
-                binding.tvError.visibility = View.VISIBLE
-            }
+        if (::cardReader.isInitialized) {
+            cardReader.disableReaderMode()
         }
     }
 
@@ -241,7 +222,14 @@ class LoginActivity : AppCompatActivity() {
         }
 
         binding.btnCard.setOnClickListener {
-            if (!nfcHelper.isNfcEnabled) {
+            if (DebugCards.isConfigured()) {
+                awaitingCardTap = true
+                lifecycleScope.launch(Dispatchers.IO) {
+                    DebugCards.openSession()?.let { cardReader.debugInjectTap(it) }
+                }
+                return@setOnClickListener
+            }
+            if (!cardReader.isNfcEnabled) {
                 binding.tvError.text = getString(R.string.nfc_disabled)
                 binding.tvError.visibility = View.VISIBLE
                 return@setOnClickListener
@@ -304,6 +292,11 @@ class LoginActivity : AppCompatActivity() {
             LoginViewModel.ErrorType.TIMEOUT -> getString(R.string.error_timeout)
             LoginViewModel.ErrorType.VALIDATION -> error.message
             LoginViewModel.ErrorType.UNKNOWN -> getString(R.string.error_unknown)
+            LoginViewModel.ErrorType.CARD -> error.cardError
+                ?.let { CardErrorMessages.message(this, it, includeStatusWord = BuildConfig.DEBUG) }
+                ?: getString(R.string.error_unknown)
+            LoginViewModel.ErrorType.CARD_REJECTED -> getString(R.string.error_card_rejected)
+            LoginViewModel.ErrorType.LOCKED_OUT -> getString(R.string.error_card_locked_out)
         }
     }
 

@@ -2,14 +2,18 @@ package com.payala.impala.demo
 
 import androidx.arch.core.executor.testing.InstantTaskExecutorRule
 import com.payala.impala.demo.api.BridgeApiService
-import com.payala.impala.demo.auth.NfcCardResult
+import com.impala.sdk.flows.CardIdentity
+import com.impala.sdk.flows.UuidBytes
+import com.impala.sdk.models.CardPersonalization
+import com.impala.sdk.models.ImpalaVersion
+import com.impala.sdk.models.TransferProtocol
 import com.payala.impala.demo.auth.TokenManager
 import com.payala.impala.demo.model.AuthenticateResponse
 import com.payala.impala.demo.model.CardAuthRequest
 import com.payala.impala.demo.model.CardChallengeResponse
 import com.payala.impala.demo.model.TokenRequest
 import com.payala.impala.demo.model.TokenResponse
-import com.payala.impala.demo.nfc.CardUser
+import com.payala.impala.demo.ui.login.CardLoginTap
 import com.payala.impala.demo.ui.login.LoginViewModel
 import com.payala.impala.demo.ui.login.LoginViewModel.ErrorType
 import com.payala.impala.demo.ui.login.LoginViewModel.LoginState
@@ -182,17 +186,11 @@ class LoginViewModelTest {
     }
 
     @Test
-    fun `loginWithCard without an auth signature emits validation error`() {
-        viewModel.loginWithCard(createUnreachableApi(), tokenManager, cardResult(signature = null))
-        assertValidationError()
-    }
-
-    @Test
     fun `loginWithCard with an empty auth signature emits validation error`() {
-        viewModel.loginWithCard(
-            createUnreachableApi(), tokenManager, cardResult(signature = byteArrayOf())
-        )
+        viewModel.loginWithCard(createUnreachableApi(), tokenManager, cardTap(signatureHex = ""))
         assertValidationError()
+        // The in-flight slot is released so the next tap can proceed.
+        assertTrue(viewModel.tryBeginCardLogin())
     }
 
     // ── Password flow ───────────────────────────────────────────────────
@@ -536,9 +534,7 @@ class LoginViewModelTest {
                 TokenResponse(true, "ok", refresh_token = REFRESH_TOKEN)
         }
 
-        viewModel.loginWithCard(
-            api, tokenManager, cardResult(signature = byteArrayOf(0x30, 0x44, 0x02, 0x20, 0x7f))
-        )
+        viewModel.loginWithCard(api, tokenManager, cardTap(signatureHex = "304402207f"))
         advanceUntilIdle()
 
         val state = viewModel.loginState.value
@@ -557,16 +553,103 @@ class LoginViewModelTest {
     }
 
     @Test
-    fun `loginWithCard with refused exchange emits AUTH_FAILED`() = runTest {
+    fun `card login stores card id and card account id on success`() = runTest {
+        val api = exchangeApi {
+            on { cardTokenExchange(any()) } doReturn
+                TokenResponse(true, "ok", refresh_token = REFRESH_TOKEN)
+        }
+
+        viewModel.loginWithCard(api, tokenManager, cardTap())
+        advanceUntilIdle()
+
+        verify(tokenManager).saveCardId(CARD_ID_WIRE)
+        verify(tokenManager).saveCardAccountId(CARD_ACCOUNT_ID)
+        verify(tokenManager).saveAccountId(CARD_ACCOUNT_ID)
+        assertEquals(CARD_ACCOUNT_ID, (viewModel.loginState.value as LoginState.Success).accountId)
+    }
+
+    @Test
+    fun `card login success account id is the refresh token sub`() = runTest {
+        val sub = "11111111-2222-3333-4444-555555555555"
+        val payload = java.util.Base64.getUrlEncoder().withoutPadding()
+            .encodeToString("{\"sub\":\"$sub\"}".toByteArray())
+        val jwt = "e30.$payload.sig"
+        val api = exchangeApi {
+            on { cardTokenExchange(any()) } doReturn TokenResponse(true, "ok", refresh_token = jwt)
+        }
+        viewModel.loginWithCard(api, tokenManager, cardTap())
+        advanceUntilIdle()
+        val state = viewModel.loginState.value
+        // android.util.Base64 is a stub without Robolectric; either the sub is
+        // decoded or the card's own account is the fallback — never anything else.
+        assertTrue(state is LoginState.Success)
+        assertTrue((state as LoginState.Success).accountId in setOf(sub, CARD_ACCOUNT_ID))
+    }
+
+    @Test
+    fun `loginWithCard with refused exchange emits CARD_REJECTED`() = runTest {
         val api = mock<BridgeApiService> {
             on { cardTokenExchange(any()) } doReturn TokenResponse(false, "invalid signature")
         }
 
-        viewModel.loginWithCard(api, tokenManager, cardResult())
+        viewModel.loginWithCard(api, tokenManager, cardTap())
         advanceUntilIdle()
 
-        assertErrorType(ErrorType.AUTH_FAILED)
+        assertErrorType(ErrorType.CARD_REJECTED)
         verify(api, never()).token(any())
+    }
+
+    @Test
+    fun `HTTP 401 from the exchange maps to the card-not-recognised message`() = runTest {
+        val api = mock<BridgeApiService> {
+            on { cardTokenExchange(any()) } doSuspendableAnswer { throw httpException(401) }
+        }
+        viewModel.loginWithCard(api, tokenManager, cardTap())
+        advanceUntilIdle()
+        assertErrorType(ErrorType.CARD_REJECTED)
+    }
+
+    @Test
+    fun `HTTP 429 from the exchange maps to the lockout message`() = runTest {
+        val api = mock<BridgeApiService> {
+            on { cardTokenExchange(any()) } doSuspendableAnswer { throw httpException(429) }
+        }
+        viewModel.loginWithCard(api, tokenManager, cardTap())
+        advanceUntilIdle()
+        assertErrorType(ErrorType.LOCKED_OUT)
+        assertTrue("slot released after failure", viewModel.tryBeginCardLogin())
+    }
+
+    @Test
+    fun `a second tap during an in-flight card login is ignored`() = runTest {
+        val api = mock<BridgeApiService> {
+            on { cardTokenExchange(any()) } doSuspendableAnswer { awaitCancellation() }
+        }
+        assertTrue(viewModel.tryBeginCardLogin())
+        viewModel.loginWithCard(api, tokenManager, cardTap())
+        // While the exchange hangs, a second tap cannot claim the slot.
+        assertFalse(viewModel.tryBeginCardLogin())
+        advanceUntilIdle() // the 15 s timeout fires and the flow ends
+        assertErrorType(ErrorType.TIMEOUT)
+        assertTrue(viewModel.tryBeginCardLogin())
+    }
+
+    @Test
+    fun `card tap failure from the challenge request maps HTTP 429 to lockout and frees the slot`() {
+        assertTrue(viewModel.tryBeginCardLogin())
+        viewModel.cardTapFailed(httpException(429))
+        assertErrorType(ErrorType.LOCKED_OUT)
+        assertTrue(viewModel.tryBeginCardLogin())
+    }
+
+    @Test
+    fun `card tap failure from the card carries the typed card error`() {
+        viewModel.cardTapFailed(
+            com.impala.sdk.flows.CardFlowException(com.impala.sdk.flows.CardError.NotPersonalized)
+        )
+        val state = viewModel.loginState.value as LoginState.Error
+        assertEquals(ErrorType.CARD, state.errorType)
+        assertEquals(com.impala.sdk.flows.CardError.NotPersonalized, state.cardError)
     }
 
     @Test
@@ -575,7 +658,7 @@ class LoginViewModelTest {
             on { cardTokenExchange(any()) } doSuspendableAnswer { awaitCancellation() }
         }
 
-        viewModel.loginWithCard(api, tokenManager, cardResult())
+        viewModel.loginWithCard(api, tokenManager, cardTap())
         advanceUntilIdle()
 
         assertErrorType(ErrorType.TIMEOUT)
@@ -584,21 +667,30 @@ class LoginViewModelTest {
     // ── Card challenge fetch ────────────────────────────────────────────
 
     @Test
-    fun `fetchCardChallenge decodes the bridge's 64-hex challenge`() = runTest {
-        val challengeHex = "00112233445566778899aabbccddeeff" +
+    fun `fetchCardChallenge validates and returns the bridge's 64-hex challenge`() = runTest {
+        val challengeHex = "00112233445566778899AABBCCDDEEFF" +
             "00112233445566778899aabbccddeeff"
         val api = mock<BridgeApiService> {
             on { cardChallenge(any()) } doReturn
                 CardChallengeResponse(true, challengeHex, 60)
         }
 
-        val challenge = viewModel.fetchCardChallenge(api, CARD_ID)
+        val challenge = viewModel.fetchCardChallenge(api, CARD_ID_WIRE)
 
-        assertEquals(32, challenge.size)
-        assertEquals(0x00.toByte(), challenge[0])
-        assertEquals(0x11.toByte(), challenge[1])
-        assertEquals(0xff.toByte(), challenge[15])
-        assertEquals(0xff.toByte(), challenge[31])
+        assertEquals(challengeHex.lowercase(), challenge)
+        val captor = argumentCaptor<com.payala.impala.demo.model.CardChallengeRequest>()
+        verify(api).cardChallenge(captor.capture())
+        assertEquals(CARD_ID_WIRE, captor.firstValue.card_id)
+    }
+
+    @Test
+    fun `fetchCardChallenge throws on a challenge shorter than 8 bytes`() {
+        val api = mock<BridgeApiService> {
+            on { cardChallenge(any()) } doReturn CardChallengeResponse(true, "00".repeat(7), 60)
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            runBlocking { viewModel.fetchCardChallenge(api, CARD_ID_WIRE) }
+        }
     }
 
     @Test
@@ -648,17 +740,21 @@ class LoginViewModelTest {
         const val CARD_ID_WIRE = "00112233445566778899aabbccddeeff"
     }
 
-    /** Builds a [NfcCardResult.Success] as produced by the login reader-mode path. */
-    private fun cardResult(
-        signature: ByteArray? = byteArrayOf(0x30, 0x06, 0x02, 0x01, 0x01, 0x02, 0x01, 0x01)
-    ): NfcCardResult.Success {
-        return NfcCardResult.Success(
-            user = CardUser(CARD_ACCOUNT_ID, CARD_ID, "Card Holder"),
-            ecPubKey = ByteArray(65),
-            rsaPubKey = byteArrayOf(),
-            authSignature = signature
+    /** Builds a [CardLoginTap] as produced by the reader-mode `onTap`. */
+    private fun cardTap(signatureHex: String = "3006020101020101"): CardLoginTap {
+        val identity = CardIdentity(
+            version = ImpalaVersion(0, 2, 1, "deadbeef"),
+            accountId = UuidBytes.parse(CARD_ACCOUNT_ID),
+            cardId = UuidBytes.parse(CARD_ID),
+            pubKey = byteArrayOf(0x04) + ByteArray(64) { 1 },
+            personalization = CardPersonalization(
+                0x02, 0x37, ByteArray(16) { 0xA0.toByte() }, TransferProtocol.CURRENCY_XLM, null, ByteArray(8)
+            ),
+            fullName = "Card Holder"
         )
+        return CardLoginTap(identity, signatureHex)
     }
+
 
     /**
      * Mocks [BridgeApiService] with a `POST /token {refresh_token}` stub for

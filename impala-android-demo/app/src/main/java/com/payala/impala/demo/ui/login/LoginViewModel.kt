@@ -6,7 +6,13 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.payala.impala.demo.BuildConfig
 import com.payala.impala.demo.api.BridgeApiService
-import com.payala.impala.demo.auth.NfcCardResult
+import com.impala.sdk.flows.CardAuthFlow
+import com.impala.sdk.flows.CardError
+import com.impala.sdk.flows.CardFlowException
+import com.impala.sdk.flows.CardIdentity
+import com.impala.sdk.flows.Hex
+import com.payala.impala.card.CardAuthenticator
+import com.payala.impala.card.ImpalaCardSession
 import com.payala.impala.demo.auth.TokenManager
 import com.payala.impala.demo.log.AppLogger
 import com.payala.impala.demo.model.AuthenticateRequest
@@ -17,10 +23,20 @@ import com.payala.impala.demo.model.GoogleTokenExchangeRequest
 import com.payala.impala.demo.model.OktaTokenExchangeRequest
 import com.payala.impala.demo.model.TokenRequest
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
 import retrofit2.HttpException
 import java.io.IOException
+import java.util.concurrent.atomic.AtomicBoolean
+
+/**
+ * What a card tap produced for login: the card's identity and its DER
+ * signature (lowercase hex) over the bridge challenge.
+ */
+data class CardLoginTap(val identity: CardIdentity, val signatureHex: String)
 
 /**
  * ViewModel managing the authentication state for [LoginActivity].
@@ -53,7 +69,13 @@ class LoginViewModel : ViewModel() {
 
     /** Classifies login errors for UI mapping to appropriate user-facing messages. */
     enum class ErrorType {
-        NETWORK, AUTH_FAILED, TOKEN_FAILED, SERVER_ERROR, VALIDATION, TIMEOUT, UNKNOWN
+        NETWORK, AUTH_FAILED, TOKEN_FAILED, SERVER_ERROR, VALIDATION, TIMEOUT, UNKNOWN,
+        /** The card refused or could not be read; see [LoginState.Error.cardError]. */
+        CARD,
+        /** `POST /auth/card` answered the generic 401 (unregistered card, bad or expired challenge). */
+        CARD_REJECTED,
+        /** HTTP 429: per-card / per-source budget or the 15-minute lockout. */
+        LOCKED_OUT
     }
 
     /** Represents the current state of the login flow. */
@@ -61,7 +83,11 @@ class LoginViewModel : ViewModel() {
         data object Idle : LoginState()
         data object Loading : LoginState()
         data class Success(val accountId: String) : LoginState()
-        data class Error(val message: String, val errorType: ErrorType = ErrorType.UNKNOWN) : LoginState()
+        data class Error(
+            val message: String,
+            val errorType: ErrorType = ErrorType.UNKNOWN,
+            val cardError: CardError? = null
+        ) : LoginState()
     }
 
     /** Input validation errors returned before making network calls. */
@@ -87,11 +113,13 @@ class LoginViewModel : ViewModel() {
     }
 
     /** Maps an exception to the appropriate [ErrorType]. */
-    private fun classifyError(e: Exception): ErrorType {
+    private fun classifyError(e: Exception, provider: String? = null): ErrorType {
         return when (e) {
             is IOException -> ErrorType.NETWORK
             is HttpException -> when (e.code()) {
-                401, 403 -> ErrorType.AUTH_FAILED
+                401 -> if (provider == "card") ErrorType.CARD_REJECTED else ErrorType.AUTH_FAILED
+                403 -> ErrorType.AUTH_FAILED
+                429 -> if (provider == "card") ErrorType.LOCKED_OUT else ErrorType.UNKNOWN
                 in 500..599 -> ErrorType.SERVER_ERROR
                 else -> ErrorType.UNKNOWN
             }
@@ -223,42 +251,86 @@ class LoginViewModel : ViewModel() {
         }
     }
 
+    /** Set while a card login (tap through token exchange) is running; a second tap is ignored. */
+    private val cardLoginInFlight = AtomicBoolean(false)
+
+    /** Claims the single card-login slot; false while another card login is in flight. */
+    fun tryBeginCardLogin(): Boolean = cardLoginInFlight.compareAndSet(false, true)
+
+    private fun endCardLogin() = cardLoginInFlight.set(false)
+
     /**
-     * Requests a single-use card-auth challenge from the bridge and hex-decodes
-     * it to the raw bytes the card signs. Invoked from the NFC reader-mode
-     * callback **while the card is still connected**, so the challenge can be
-     * signed on-card within its 60-second TTL.
+     * Requests a single-use card-auth challenge from the bridge and returns it
+     * as validated hex (8..64 bytes; the bridge issues 32). Invoked from the
+     * reader-mode `onTap` **while the card is still connected**, so the
+     * challenge is signed within its 60-second TTL.
      *
-     * @return the raw challenge bytes (32 for the bridge's 64-hex challenge)
      * @throws IllegalStateException if the bridge refuses to issue a challenge
-     * @throws IllegalArgumentException if the challenge is not valid hex
+     * @throws IllegalArgumentException if the challenge is not valid hex of a signable length
      */
-    suspend fun fetchCardChallenge(api: BridgeApiService, cardId: String): ByteArray {
+    suspend fun fetchCardChallenge(api: BridgeApiService, wireCardId: String): String {
         AppLogger.d("Auth", "Requesting card-auth challenge")
-        val response = api.cardChallenge(CardChallengeRequest(cardId))
+        val response = api.cardChallenge(CardChallengeRequest(wireCardId))
         val challengeHex = response.challenge
         if (!response.success || challengeHex.isNullOrEmpty()) {
             throw IllegalStateException("Bridge did not issue a card challenge")
         }
-        return decodeHex(challengeHex)
+        val bytes = Hex.decode(challengeHex)
+        require(bytes.size in CardAuthFlow.MIN_CHALLENGE_BYTES..CardAuthFlow.MAX_CHALLENGE_BYTES) {
+            "Challenge must be ${CardAuthFlow.MIN_CHALLENGE_BYTES}..${CardAuthFlow.MAX_CHALLENGE_BYTES} bytes"
+        }
+        return challengeHex.lowercase()
     }
 
     /**
-     * Authenticate via NFC smartcard challenge-response.
+     * The card half of card login, run in reader mode's `onTap` (NFC binder
+     * thread, card connected): read the identity — the applet-version and
+     * personalization gates run here, so an unissued card fails **before** a
+     * challenge is requested and never spends the card's challenge budget —
+     * then fetch the challenge (bounded by [LOGIN_TIMEOUT_MS], so a slow
+     * network aborts before signing) and have the card sign it.
      *
-     * The challenge was fetched ([fetchCardChallenge]) and signed on-card while
-     * the card was connected; here the DER signature is hex-encoded and
-     * exchanged at `POST /auth/card` for local JWT tokens. The card must
-     * already be registered with the bridge (Cards screen) — there is no
-     * auto-provisioning on this path.
+     * @throws CardFlowException for any card refusal (typed [CardError])
+     * @throws HttpException / IOException from the challenge request
+     */
+    fun signInWithCardTap(session: ImpalaCardSession, api: BridgeApiService): CardLoginTap {
+        val identity = session.identity.requirePersonalized()
+        val challengeHex = runBlocking {
+            withTimeout(LOGIN_TIMEOUT_MS) { fetchCardChallenge(api, identity.wireCardId) }
+        }
+        return CardLoginTap(identity, CardAuthenticator.signChallenge(session, challengeHex))
+    }
+
+    /** A card tap failed before the exchange; releases the in-flight slot and shows why. */
+    fun cardTapFailed(e: Throwable) {
+        endCardLogin()
+        _loginState.value = when (e) {
+            is CardFlowException -> {
+                AppLogger.w("Auth", "Card login refused by the card: ${e.error}")
+                LoginState.Error(e.error.userMessageKey, ErrorType.CARD, e.error)
+            }
+            is TimeoutCancellationException -> LoginState.Error("Login timed out", ErrorType.TIMEOUT)
+            is Exception -> {
+                AppLogger.w("Auth", "Card login failed before the exchange: ${e.javaClass.simpleName}")
+                LoginState.Error(e.message ?: "Card login failed", classifyError(e, "card"))
+            }
+            else -> LoginState.Error("Card login failed", ErrorType.UNKNOWN)
+        }
+    }
+
+    /**
+     * Authenticate via NFC smartcard challenge-response: exchanges the
+     * on-card signature at `POST /auth/card` for local JWT tokens. The card
+     * must already be registered with the bridge (Cards screen) — there is no
+     * auto-provisioning on this path. Releases the in-flight slot when done.
      */
     fun loginWithCard(
         api: BridgeApiService,
         tokenManager: TokenManager,
-        cardResult: NfcCardResult.Success
+        tap: CardLoginTap
     ) {
-        val signature = cardResult.authSignature
-        if (signature == null || signature.isEmpty()) {
+        if (tap.signatureHex.isEmpty()) {
+            endCardLogin()
             _loginState.value = LoginState.Error(
                 "Card did not sign the authentication challenge", ErrorType.VALIDATION
             )
@@ -267,26 +339,31 @@ class LoginViewModel : ViewModel() {
 
         viewModelScope.launch {
             _loginState.value = LoginState.Loading
-            runLogin("card", "Card login failed") {
-                val user = cardResult.user
-                AppLogger.i("Auth", "Card login attempt for card: ${user.cardId}")
-                val signatureHex = signature.joinToString("") { "%02x".format(it) }
+            try {
+                runLogin("card", "Card login failed") {
+                    val identity = tap.identity
+                    AppLogger.i("Auth", "Card login attempt for card: ${identity.wireCardId}")
 
-                val exchangeResponse = api.cardTokenExchange(
-                    CardAuthRequest(card_id = user.wireCardId, signature = signatureHex)
-                )
-                if (!exchangeResponse.success || exchangeResponse.refresh_token == null) {
-                    AppLogger.w("Auth", "Card token exchange failed: ${exchangeResponse.message}")
-                    _loginState.value = LoginState.Error(exchangeResponse.message, ErrorType.AUTH_FAILED)
-                    return@runLogin
+                    val exchangeResponse = api.cardTokenExchange(
+                        CardAuthRequest(card_id = identity.wireCardId, signature = tap.signatureHex)
+                    )
+                    if (!exchangeResponse.success || exchangeResponse.refresh_token == null) {
+                        AppLogger.w("Auth", "Card token exchange failed: ${exchangeResponse.message}")
+                        _loginState.value = LoginState.Error(exchangeResponse.message, ErrorType.CARD_REJECTED)
+                        return@runLogin
+                    }
+
+                    if (identity.fullName.isNotBlank()) tokenManager.saveDisplayName(identity.fullName)
+                    tokenManager.saveCardId(identity.wireCardId)
+                    tokenManager.saveCardAccountId(identity.accountUuid)
+
+                    val accountId = accountIdFromRefreshToken(
+                        exchangeResponse.refresh_token, identity.accountUuid
+                    )
+                    completeTokenFlow(api, tokenManager, exchangeResponse.refresh_token, accountId, "card")
                 }
-
-                tokenManager.saveDisplayName(user.fullName)
-
-                val accountId = accountIdFromRefreshToken(
-                    exchangeResponse.refresh_token, user.accountId
-                )
-                completeTokenFlow(api, tokenManager, exchangeResponse.refresh_token, accountId, "card")
+            } finally {
+                endCardLogin()
             }
         }
     }
@@ -344,7 +421,7 @@ class LoginViewModel : ViewModel() {
                 throw e
             } catch (e: Exception) {
                 AppLogger.e("Auth", "$provider login error: ${e.message}")
-                _loginState.value = LoginState.Error(e.message ?: fallbackMessage, classifyError(e))
+                _loginState.value = LoginState.Error(e.message ?: fallbackMessage, classifyError(e, provider))
             }
         }
         if (completed == null) {
@@ -406,17 +483,6 @@ class LoginViewModel : ViewModel() {
             json.optString("sub", fallback).ifEmpty { fallback }
         } catch (_: Exception) {
             fallback
-        }
-    }
-
-    /** Decodes a hex string (e.g. the bridge's 64-hex challenge) to raw bytes. */
-    private fun decodeHex(hex: String): ByteArray {
-        require(hex.length % 2 == 0) { "Malformed hex challenge (odd length)" }
-        return ByteArray(hex.length / 2) { i ->
-            val hi = Character.digit(hex[2 * i], 16)
-            val lo = Character.digit(hex[2 * i + 1], 16)
-            require(hi >= 0 && lo >= 0) { "Malformed hex challenge (invalid character)" }
-            ((hi shl 4) or lo).toByte()
         }
     }
 }

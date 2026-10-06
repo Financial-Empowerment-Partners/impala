@@ -1,14 +1,16 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.NFC" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <!-- API 34+: required to start NfcWatcherService with type connectedDevice
-         (the NFC permission above satisfies the connectedDevice prerequisite) -->
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+    <!-- ImpalaPushService posts FCM notifications (API 33+ runtime permission). -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- impala-lib declares location permissions for its geolocation feature,
+         which the demo does not use. -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" tools:node="remove" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" tools:node="remove" />
 
     <uses-feature android:name="android.hardware.nfc" android:required="false" />
 
@@ -50,29 +52,10 @@
             android:launchMode="singleTop"
             android:theme="@style/Theme.ImpalaDemo.NoActionBar" />
 
-        <!-- NFC system dispatch: catches tags when no foreground activity claims them -->
-        <activity
-            android:name=".nfc.NfcDispatchActivity"
-            android:exported="true"
-            android:launchMode="singleTask"
-            android:theme="@android:style/Theme.NoDisplay">
-            <intent-filter>
-                <action android:name="android.nfc.action.TECH_DISCOVERED" />
-            </intent-filter>
-            <intent-filter>
-                <action android:name="android.nfc.action.NDEF_DISCOVERED" />
-                <category android:name="android.intent.category.DEFAULT" />
-            </intent-filter>
-            <meta-data
-                android:name="android.nfc.action.TECH_DISCOVERED"
-                android:resource="@xml/nfc_tech_filter" />
-        </activity>
-
-        <!-- Background NFC event processing service -->
-        <service
-            android:name=".nfc.NfcWatcherService"
-            android:exported="false"
-            android:foregroundServiceType="connectedDevice" />
+        <!-- Card taps outside reader mode are handled by impala-lib's
+             NfcContactActivity (merged from the library manifest), which only
+             reads the card identity and forwards it to the CardTapListener
+             registered in ImpalaApp. Card flows run in reader mode only. -->
 
         <!-- Firebase Cloud Messaging service for push notifications -->
         <service

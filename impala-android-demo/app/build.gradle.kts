@@ -50,6 +50,9 @@ android {
             versionNameSuffix = "-testnet"
 
             buildConfigField("String", "STELLAR_NETWORK", "\"testnet\"")
+            // Applet-instance AID of the testnet CAP (impala-card/applet/build.xml applet.aid.app).
+            buildConfigField("String", "CARD_APPLET_AID",
+                "\"${localProperties.getProperty("TESTNET_CARD_APPLET_AID", "01020304050607080102")}\"")
             buildConfigField("String", "BRIDGE_BASE_URL",
                 "\"${localProperties.getProperty("TESTNET_BRIDGE_BASE_URL", "http://10.0.2.2:8080")}\"")
             buildConfigField("String", "GITHUB_CLIENT_ID",
@@ -71,6 +74,10 @@ android {
             dimension = "network"
 
             buildConfigField("String", "STELLAR_NETWORK", "\"pubnet\"")
+            // Live CAP instance AID (CI variable IMPALA_CARD_LIVE_AID_APP). Empty means
+            // no SELECT: the card's default-selected applet answers.
+            buildConfigField("String", "CARD_APPLET_AID",
+                "\"${localProperties.getProperty("LIVE_CARD_APPLET_AID", "")}\"")
             buildConfigField("String", "BRIDGE_BASE_URL",
                 "\"${localProperties.getProperty("LIVE_BRIDGE_BASE_URL", "https://api.impala.example.com")}\"")
             buildConfigField("String", "GITHUB_CLIENT_ID",
@@ -88,6 +95,21 @@ android {
             buildConfigField("String", "OKTA_REDIRECT_URI",
                 "\"${localProperties.getProperty("LIVE_OKTA_REDIRECT_URI", "impala://okta-callback")}\"")
         }
+    }
+
+    testOptions {
+        // Robolectric tests read the merged manifest and resources (ManifestTest,
+        // card error strings).
+        unitTests.isIncludeAndroidResources = true
+    }
+
+    // T1 end-to-end lane (src/e2e): JVM tests that drive the app's real flow
+    // classes against a LIVE bridge with a jcardsim card issued by the
+    // impala-card issuance tool. They compile with the unit tests and skip
+    // unless IMPALA_E2E_BRIDGE_URL is set; `./gradlew :app:e2eTnetDebug` runs
+    // only them.
+    sourceSets {
+        getByName("test") { kotlin.srcDir("src/e2e/java") }
     }
 
     buildFeatures {
@@ -119,6 +141,12 @@ kotlin {
 dependencies {
     // Backports java.time (and other java.util/java.io APIs) below API 26.
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.5")
+
+    // Card SDK (com.impala.sdk.flows: identity, auth, redemption, credit) and the
+    // Android card module (NFC reader mode, sessions). Both resolve to sibling
+    // builds via settings.gradle.kts.
+    implementation("com.impala:sdk:0.0.1-HEAD")
+    implementation("com.payala:impala-lib:0.0.1-HEAD")
 
     // AndroidX Core
     implementation("androidx.core:core-ktx:1.19.0")
@@ -174,6 +202,10 @@ dependencies {
 
     // Testing
     testImplementation("junit:junit:4.13.2")
+    // The real ImpalaApplet on jcardsim + a JCA test issuer (../impala-card :simulator).
+    testImplementation("com.impala:simulator:0.0.1-HEAD")
+    // The issuance ceremony (impala-card tools/issue) for the e2e lane.
+    testImplementation("com.impala:issue:0.0.1-HEAD")
     testImplementation("org.robolectric:robolectric:4.16.1")
     testImplementation("androidx.test:core:1.7.0")
     testImplementation("androidx.test.ext:junit:1.3.0")
@@ -183,4 +215,28 @@ dependencies {
     testImplementation("org.mockito.kotlin:mockito-kotlin:6.3.0")
     androidTestImplementation("androidx.test.ext:junit:1.3.0")
     androidTestImplementation("androidx.test.espresso:espresso-core:3.7.0")
+    // ActivityScenario + lifecycle monitor for the card UI lane (CardLoginUiTest).
+    androidTestImplementation("androidx.test:core:1.7.0")
+    androidTestImplementation("androidx.test:runner:1.7.0")
+}
+
+// `./gradlew :app:e2eTnetDebug` — the e2e lane only (needs IMPALA_E2E_BRIDGE_URL;
+// see app/src/e2e/README.md). Plain unit-test runs include these classes too,
+// where they skip.
+val e2eRequested = gradle.startParameter.taskNames.any { it.substringAfterLast(':') == "e2eTnetDebug" }
+tasks.withType<Test>().configureEach {
+    if (e2eRequested && name == "testTnetDebugUnitTest") {
+        filter.includeTestsMatching("com.payala.impala.demo.e2e.*")
+        outputs.upToDateWhen { false }
+        testLogging { events("passed", "skipped", "failed"); showStandardStreams = true }
+        listOf(
+            "IMPALA_E2E_BRIDGE_URL", "IMPALA_E2E_OPERATOR_TOKEN_FILE", "IMPALA_E2E_OPERATOR_ACCOUNT",
+            "IMPALA_E2E_OPERATOR_PASSWORD_FILE", "IMPALA_E2E_HOLDER_PASSWORD_FILE", "IMPALA_E2E_SLOW"
+        ).forEach { key -> System.getenv(key)?.let { environment(key, it) } }
+    }
+}
+tasks.register("e2eTnetDebug") {
+    group = "verification"
+    description = "Card login/transfer end-to-end tests against a live bridge (IMPALA_E2E_BRIDGE_URL)"
+    dependsOn("testTnetDebugUnitTest")
 }

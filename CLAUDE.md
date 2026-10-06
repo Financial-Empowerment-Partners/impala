@@ -46,9 +46,9 @@ cd impalactl && go test ./... && go build ./...
 ### Others
 ```bash
 cd impala-soroban/integration-test && cargo test          # in-process; testnet-tests/ needs stellar-cli
-cd impala-card && ./gradlew :sdk:jvmTest                  # SDK on jcardsim; :applet:buildJavacard for the CAP
+cd impala-card && ./gradlew :sdk:jvmTest :simulator:jvmTest :tools:issue:test   # SDK + simulator + issuance tool on jcardsim; :applet:buildJavacard for the CAP
 cd impala-lib && ./gradlew testDebugUnitTest              # Robolectric
-cd impala-android-demo && ./gradlew testTnetDebugUnitTest testLiveDebugUnitTest
+cd impala-android-demo && ./gradlew testTnetDebugUnitTest testLiveDebugUnitTest   # :app:e2eTnetDebug = live-bridge card lane (app/src/e2e/README.md)
 cd terraform && terraform fmt -check -recursive && terraform init -backend=false && terraform validate
 ```
 
@@ -73,7 +73,7 @@ cd terraform && terraform fmt -check -recursive && terraform init -backend=false
 
 **Reserve assets are issuer-pinned, in one place.** The reserve recognizes money by `(asset_code, issuer)` — never by code alone (codes are not unique on Stellar) and never by the `credit_alphanum4`/`credit_alphanum12` type tag. `ConversionReserve::stablecoins()` (`exchange/reserve.rs`) is THE list — USDC always, USDT0 when `RESERVE_USDT0_ISSUER` is set — and every asset decision (`bucket_for_asset`, `asset_for_bucket`, `is_asset_issuer`, trustline audit, admin balances) goes through it; adding a stablecoin means adding to that list plus a bucket seed migration, not a new `match`. Issuers are operator configuration validated with a strkey checksum (`validate_stellar_account_id_checksum`), never constants. Orders persist the stablecoin leg they were created with (`provider_payload.deposit_currency` / `hold_currency`) so config changes never re-interpret existing orders; provider tickers for USDT0 are operator-supplied (`RESERVE_USDT0_TICKERS`), never guessed. Trustlines on the generate-only reserve account can only be added through `POST /admin/exchange-reserve/trustlines` (the seed exists nowhere else).
 
-**Key custody:** provider credentials and custodial seeds are install-only via `/admin/keys*` (or safer, `impalactl keys import`); nothing returns secret bytes in any response, log, or event — payloads carry fingerprints only. The conversion-reserve seed is **generate-only** (an imported reserve seed would put the pool's signing key in a person's hands). Seed material at rest is envelope-protected (KMS/Vault/OpenBao, `seed_protect/`); there is deliberately no plaintext-at-rest path.
+**Key custody:** provider credentials and custodial seeds are install-only via `/admin/keys*` (or safer, `impalactl keys import`); nothing returns secret bytes in any response, log, or event — payloads carry fingerprints only. The conversion-reserve seed and the card program issuer key (`/admin/card-issuer/generate`, migration 039) are **generate-only** (an imported reserve seed would put the pool's signing key in a person's hands; an imported issuer key, mint authority over every card). Seed material at rest is envelope-protected (KMS/Vault/OpenBao, `seed_protect/`); there is deliberately no plaintext-at-rest path.
 
 **Machine-readable schemas are append-only contracts**: lumencli `--json`/`--csv`, the bridge event-outbox payloads (`events.rs`, no PII/secrets ever), and `openapi.yaml`. lumencli pins its exact output bytes with golden files (`testdata/`, `-update` flag) plus a recorded real-Horizon page; its fake-Horizon fixtures pass an "honesty gate" (round-trip through the SDK unmarshaller + required-wire-field lists) so tests can't certify JSON that never occurs on the wire.
 
@@ -85,7 +85,7 @@ cd terraform && terraform fmt -check -recursive && terraform init -backend=false
 
 - `ADMIN_ACCOUNT_IDS` overrides the stored DB role to admin at every token issuance — the accounts API/UI mark such accounts `allowlisted` ("effective admin"); treat the allowlist as break-glass, incompatible with granular scoping.
 - `JWT_SECRET` rotates with zero downtime via `JWT_SECRET_PREVIOUS` overlap (see `docs/runbooks/rotate-secrets.md`).
-- `cargo test` (875) runs with no Postgres/Redis (an opt-in DB lane, `RUN_DB_TESTS=1 DATABASE_URL=… cargo test --test db`, executes the pinned SQL against a real Postgres): SQL is pinned by string/tripwire tests only, so schema-vs-query drift is a runtime failure class — double-check migrations against every query touching changed tables.
+- `cargo test` (903) runs with no Postgres/Redis (an opt-in DB lane, `RUN_DB_TESTS=1 DATABASE_URL=… cargo test --test db`, executes the pinned SQL against a real Postgres): SQL is pinned by string/tripwire tests only, so schema-vs-query drift is a runtime failure class — double-check migrations against every query touching changed tables.
 - lumencli's `verify-linux` pins `--platform` on every `docker run`; a bare image tag silently resolves to whichever arch was pulled last.
 - Do not run `git checkout -- <file>` to "restore" during experiments on uncommitted work — it restores HEAD and destroys in-flight changes; mutate copies outside the repo instead.
 - CI workflows are path-filtered per sub-project; the workflow file itself belongs in its own path filter.

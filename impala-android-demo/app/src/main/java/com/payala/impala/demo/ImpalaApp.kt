@@ -1,14 +1,12 @@
 package com.payala.impala.demo
 
 import android.app.Application
-import android.nfc.NdefMessage
 import com.google.firebase.messaging.FirebaseMessaging
 import com.payala.impala.demo.api.ApiClient
 import com.payala.impala.demo.auth.TokenManager
 import com.payala.impala.demo.log.AppLogger
 import com.payala.impala.demo.model.RegisterDeviceTokenRequest
-import com.payala.impala.demo.nfc.CardUser
-import com.payala.impala.demo.nfc.NfcEventHandler
+import com.payala.impala.card.ImpalaCardTapHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -37,22 +35,12 @@ class ImpalaApp : Application() {
             registerFcmToken()
         }
 
-        // Register default NFC event listeners for background logging
-        NfcEventHandler.setApduEventListener(object : NfcEventHandler.ApduEventListener {
-            override fun onCardRead(user: CardUser, ecPubKey: ByteArray, tagId: ByteArray?) {
-                AppLogger.i("NfcBg", "Background card read: ${user.accountId} / ${user.cardId} (${user.fullName})")
-            }
-
-            override fun onCardError(message: String) {
-                AppLogger.w("NfcBg", "Background card error: $message")
-            }
-        })
-
-        NfcEventHandler.setNdefEventListener(object : NfcEventHandler.NdefEventListener {
-            override fun onNdefReceived(messages: Array<NdefMessage>) {
-                AppLogger.i("NfcBg", "Background NDEF received: ${messages.size} message(s)")
-            }
-        })
+        // Cards tapped outside reader mode (system NFC dispatch) reach
+        // impala-lib's NfcContactActivity, which reads only the identity. The
+        // app never acts on such taps; card flows run in reader mode.
+        ImpalaCardTapHandler.setCardTapListener { event ->
+            AppLogger.d("NfcBg", "Card tapped outside reader mode: ${event.identity.wireCardId}")
+        }
     }
 
     /**

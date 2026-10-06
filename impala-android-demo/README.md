@@ -88,8 +88,17 @@ com.payala.impala.demo
 ├── model/
 │   ├── AuthModels.kt             Authentication request/response DTOs
 │   ├── AccountModels.kt          Account CRUD DTOs
-│   ├── CardModels.kt             Card create/delete DTOs
+│   ├── CardModels.kt             Card create/delete DTOs (no rsa_pubkey)
+│   ├── OfflineModels.kt          Card issuer, issuance (load) and redemption DTOs
 │   └── TransferModels.kt         Transaction, version, sync, MFA DTOs
+├── card/
+│   ├── CardStore.kt              Per-account local record of registered cards (survives logout)
+│   └── DebugCards.kt             debug: simulated card over TCP (emulator lane); release: stub
+├── transfer/
+│   ├── Money.kt                  Integer minor-unit parsing/formatting (no floating point)
+│   ├── PendingTransferStore.kt   Durable in-flight redemptions/credits (written before the card signs)
+│   ├── RedemptionController.kt   Card → bridge: prepare, sign (PIN), submit, track; never re-sign
+│   └── IssuanceController.kt     Bridge → card: create, fund, await, apply credit, ack
 ├── auth/
 │   ├── TokenManager.kt           Encrypted token storage (EncryptedSharedPreferences)
 │   ├── GoogleAuthHelper.kt       Google Sign-In via Credential Manager API
@@ -97,14 +106,25 @@ com.payala.impala.demo
 │   └── GitHubRedirectActivity.kt Deep-link handler for impala://github-callback
 └── ui/
     ├── login/
-    │   ├── LoginActivity.kt      Launcher activity with 3 auth methods
-    │   └── LoginViewModel.kt     MVVM ViewModel managing auth state
+    │   ├── LoginActivity.kt      Launcher activity (password, Google, GitHub, Okta, card)
+    │   └── LoginViewModel.kt     MVVM ViewModel managing auth state (incl. the card tap)
     ├── main/
-    │   └── MainActivity.kt       Bottom navigation host (Cards, Transfers, Settings)
+    │   └── MainActivity.kt       Bottom navigation host; owns the one CardReaderController
+    ├── cards/CardsViewModel.kt   Registration checks + POST/DELETE /card
+    ├── transfer/TransfersViewModel.kt
+    ├── nfc/NfcDebugActivity.kt   NFC diagnostics on ImpalaCardSession (read-only commands)
     └── fragments/
-        ├── CardsFragment.kt      Registered cards list with delete
-        ├── TransfersFragment.kt  Transfer history list
+        ├── CardsFragment.kt      Registered cards (local record) with register/delete
+        ├── TransfersFragment.kt  Redeem from card / Load card
         └── SettingsFragment.kt   Account info, MFA, version, logout
+
+All card I/O goes through impala-lib (`CardReaderController`,
+`ImpalaCardSession`, `CardAuthenticator`, `CardTransfers`) and the card SDK's
+`com.impala.sdk.flows` (`CardIdentity`, `CardError`, `RedemptionFlow`,
+`CreditFlow`), consumed as composite builds (`settings.gradle.kts`). The app
+contains no APDU code: `NoRawApduInAppTest` fails the build if a source under
+`app/src/main` mentions `IsoDep`, `CommandAPDU`, `transceive(` or an `INS_`
+constant.
 ```
 
 ## Authentication Flows
@@ -134,6 +154,62 @@ com.payala.impala.demo
 
 > **Note:** OAuth password derivation (SHA-256 of the provider token) is a demo shortcut. A production app would add dedicated `/oauth/google` and `/oauth/github` bridge endpoints.
 
+### Card (NFC smartcard)
+Requires an **issued** card (applet 0.2, personalized with a bridge
+certificate — see `impala-card/README.md` → "Issuance tool") that is
+**registered** to the account (Cards screen).
+1. "Sign in with Card" arms reader mode; only that tap is acted on, and a
+   second tap while a login is in flight is ignored.
+2. On the NFC binder thread, **with the card still connected**: read the card
+   identity — `GET_VERSION` (a 0.1 applet is refused before any V2 command),
+   `GET_PERSONALIZATION` (an unissued card is refused **before** a challenge is
+   requested, so it never spends the card's challenge budget), `GET_USER_DATA`,
+   `GET_EC_PUB_KEY`.
+3. `POST /auth/card/challenge {card_id}` — `card_id` is the dash-stripped
+   32-hex card UUID; the 32-byte challenge lives 60 s and the fetch is bounded
+   by the login timeout so a slow network aborts before signing.
+4. `SIGN_AUTH`: the card signs `"IMPALA-AUTH:" ‖ accountId ‖ challenge`
+   (DER ECDSA-P256, lowercase hex on the wire).
+5. `POST /auth/card {card_id, signature}` → refresh token → `POST /token` →
+   temporal token. The card id and the on-card account UUID are stored with the
+   session. A 401 reads "Card not recognised or challenge expired — tap again";
+   429 is the lockout (5 bad signatures → 15 min per card and source).
+
+Card errors are typed (`CardError`) and shown with impala-lib's strings; the
+raw status word is appended in debug builds only.
+
+## Card transfers
+
+Both flows use integer **card minor units** (the card's `u32` amount; XLM cards
+use scale 7) — no floating point anywhere in the transfer code
+(`NoFloatingPointMoneyTest`). They need the bridge's offline
+issuance/redemption endpoints (`/card-issuer`, `/offline/*`); the bridge serves
+`/card-issuer` today, the `/offline/*` lane is not built yet.
+
+**Load card** (bridge → card): tap to read the card's receive counter →
+`POST /offline/issuances` → **Fund** = `POST /managed-account/sign` with the
+bridge's destination, amount, memo and idempotency key *verbatim* (202
+`ambiguous` = outcome unknown, only ever replayed with the same key; a new key
+only after a definite `payment_rejected`) → wait for `funded` →
+`GET …/credit` (persisted before the tap) → **Apply to card**
+(`VERIFY_TRANSFER_V2`) → `POST …/ack {applied, status_word}`. A torn apply is
+decided by the card's `GET_RECEIVE_STATE`: digest equal = already applied;
+counter behind = re-present; another credit on the counter = operator
+exception, never auto-credited.
+
+**Redeem from card** (card → bridge, PIN-authorized): `GET /card-issuer`
+(redemption identity) + `GET /offline/cards/{id}` (certified, last redeemed
+counter) → amount + 4-digit PIN (`0000` refused) → tap: the signable
+(`recipient = redemption_uuid`, `counter = last + 1`, send sequence
+`max(previous + 1, now)`) is **written to disk before** `SIGN_TRANSFER_V2`, the
+tuple right after → `POST /offline/redemptions` → poll every 5 s for up to 6
+min. **Never re-sign**: retries re-post the stored bytes (a 202 replay or 409
+`counter_consumed` means the bridge already has the debit); a tuple lost to a
+crash is rebuilt from the card's `GET_LAST_TRANSFER` ("Resume pending
+transfer"). `frozen` is shown as "outcome unknown — do not repeat" and blocks
+new redemptions from that card; a refused tuple is stranded (the card was
+debited) and shown as needing an operator.
+
 ## Screens
 
 ### Login
@@ -143,13 +219,18 @@ com.payala.impala.demo
 - Loading indicator and error display
 
 ### Cards (start destination)
-- RecyclerView of registered cards with EC public key fingerprint
-- Delete card with confirmation dialog
-- FAB to register a new NFC card (stub)
+- Cards registered from this device for the signed-in account (local record,
+  kept across logout; the bridge has no card-list endpoint)
+- FAB → tap → `POST /card {account_id, card_id, ec_pubkey}`; refused before
+  sending when the applet is older than 0.2, the card is not issued, or the card
+  was issued to a different account ("This card was issued to a different
+  account") — the bridge would accept that row but card login could never work
+- Tapping an unregistered card on this screen offers "Register this card?"
+- Delete removes the local record only after `DELETE /card` succeeds
 
 ### Transfers
-- RecyclerView of recent transfers with status chips
-- FAB to initiate a new transfer (stub)
+- In-flight and finished card transfers with their bridge state
+- FAB → **Redeem from card** or **Load card** (see "Card transfers")
 
 ### Settings
 - Account info (display name, Payala ID)

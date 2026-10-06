@@ -201,6 +201,23 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/NetworkInfoResponse' }
 
+  /card-issuer:
+    get:
+      tags: [health]
+      summary: The card program issuer key and identities terminals pin offline.
+      security: []
+      description: |
+        Public data: the active issuer public key and fingerprint, the
+        `program_id_hex` cards are personalized with, and the `redemption_uuid`
+        a card names as recipient when it signs a redemption. `{configured:
+        false}` until an issuer key is generated.
+      responses:
+        '200':
+          description: Issuer info.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CardIssuerInfo' }
+
   /authenticate:
     post:
       tags: [auth]
@@ -1075,6 +1092,90 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { description: Not an admin, or KEY_IMPORT_ENABLED is false. }
         '409': { description: The account already has a custodial seed. }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /admin/card-issuer:
+    get:
+      tags: [keys]
+      summary: List card program issuer key versions and the program identity (ReadKeys).
+      description: |
+        Public data only: every key version's uncompressed public key,
+        fingerprint and state (`active`, `superseded`, `revoked`), plus the
+        program's `program_id_hex` and `redemption_uuid`.
+      responses:
+        '200':
+          description: Issuer keys.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/IssuerKeyListResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { description: Role lacks the read_keys capability. }
+
+  /admin/card-issuer/generate:
+    post:
+      tags: [keys]
+      summary: Generate (or rotate) the card program issuer key (admin or key-custodian).
+      description: |
+        **Generate-only.** The P-256 issuer key is created inside the bridge and
+        sealed by the configured seed protector (KMS / Vault / OpenBao); there
+        is no import and no export, ever. Requires `KEY_IMPORT_ENABLED=true` and
+        a real protection backend.
+
+        The first generation also mints the program identity — a random
+        16-byte `program_id` (PERSONALIZE part A) and the `redemption_uuid`
+        cards name as recipient — which never changes on rotation. Rotating an
+        active key requires `confirm_supersede` = its fingerprint and
+        `confirm_phrase` = `replace card-issuer {network}`; the old version is
+        kept as a public key (`superseded`) so certificates it signed still
+        verify, but cards must be re-certified before new issuance.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/GenerateIssuerKeyRequest' }
+      responses:
+        '200':
+          description: Key generated.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GenerateIssuerKeyResponse' }
+        '400': { description: SEED_PROTECTION_BACKEND is none. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { description: Role lacks manage_keys, or KEY_IMPORT_ENABLED is false. }
+        '409': { description: A key is active and the rotation confirmation is missing or wrong, or a concurrent generation won. }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /admin/cards/{card_id}/certificate:
+    post:
+      tags: [keys]
+      summary: Certify a registered card's key with the active issuer key (admin or key-custodian).
+      description: |
+        Signs the 114-byte CERT message `"IMPALA-CERT:" ‖ 0x01 ‖ programId ‖
+        accountId ‖ currency tag ‖ cardPubKey` (impala-card
+        docs/transfer-protocol.md §2) over the ACTIVE card row: its account id
+        must be a UUID and its `ec_pubkey` a 65-byte uncompressed point.
+        Certificates are bridge-issued only; `POST /card` never accepts one.
+        Write-once unless `recertify` is true. The response carries what a
+        terminal installs: `program_id_hex` (PERSONALIZE A),
+        `issuer_public_key_hex` (B) and `issuer_cert_hex` (C).
+      parameters:
+        - { name: card_id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CertifyCardRequest' }
+      responses:
+        '200':
+          description: Card certified.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CertifyCardResponse' }
+        '400': { description: Invalid card_id, currency or card_minor_scale. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { description: Role lacks the manage_keys capability. }
+        '404': { description: No active card with this card_id. }
+        '409': { description: Already certified (no recertify), no issuer key, non-UUID account, compressed key, or a concurrent change. }
         '429': { $ref: '#/components/responses/RateLimited' }
 
   /admin/stellar-seeds/import:
@@ -3450,8 +3551,80 @@ components:
         account_id: { type: string }
         card_id: { type: string }
         ec_pubkey: { type: string }
-        rsa_pubkey: { type: string }
-      required: [account_id, card_id, ec_pubkey, rsa_pubkey]
+        rsa_pubkey:
+          type: string
+          nullable: true
+          description: Legacy and optional. Applet 0.2 has no RSA key; omit it, or send null or an empty string. A non-empty value must be 100-2048 Base64 characters and unique.
+      required: [account_id, card_id, ec_pubkey]
+
+    GenerateIssuerKeyRequest:
+      type: object
+      properties:
+        confirm_supersede: { type: string, description: Fingerprint of the active key (rotation only). }
+        confirm_phrase: { type: string, description: "`replace card-issuer {network}` (rotation only)." }
+
+    GenerateIssuerKeyResponse:
+      type: object
+      properties:
+        version: { type: integer }
+        public_key_hex: { type: string, description: 130-hex uncompressed P-256 point. }
+        fingerprint: { type: string }
+        redemption_uuid: { type: string, format: uuid }
+        program_id_hex: { type: string, description: 32 hex (16 bytes). }
+        replaced: { type: boolean }
+        note: { type: string }
+      required: [version, public_key_hex, fingerprint, redemption_uuid, program_id_hex, replaced, note]
+
+    IssuerKeyView:
+      type: object
+      properties:
+        version: { type: integer }
+        state: { type: string, enum: [active, superseded, revoked] }
+        public_key_hex: { type: string }
+        fingerprint: { type: string }
+        generated_by: { type: string }
+        generated_at: { type: string, format: date-time }
+        superseded_at: { type: string, format: date-time, nullable: true }
+
+    IssuerKeyListResponse:
+      type: object
+      properties:
+        keys: { type: array, items: { $ref: '#/components/schemas/IssuerKeyView' } }
+        redemption_uuid: { type: string, format: uuid, nullable: true }
+        program_id_hex: { type: string, nullable: true }
+
+    CertifyCardRequest:
+      type: object
+      properties:
+        currency: { type: string, enum: [XLM, USDC, USDT0], description: Must be XLM or a configured reserve stablecoin. }
+        card_minor_scale: { type: integer, minimum: 0, maximum: 7 }
+        recertify: { type: boolean, default: false }
+      required: [currency, card_minor_scale]
+
+    CertifyCardResponse:
+      type: object
+      properties:
+        card_id: { type: string }
+        issuer_version: { type: integer }
+        issuer_cert_hex: { type: string, description: DER ECDSA over the CERT message (PERSONALIZE part C). }
+        cert_message_hex: { type: string, description: The 114-byte CERT message. }
+        cert_id: { type: string, description: SHA-256 hex of the CERT message. }
+        issuer_public_key_hex: { type: string, description: PERSONALIZE part B. }
+        program_id_hex: { type: string, description: PERSONALIZE part A. }
+        currency: { type: string }
+        card_minor_scale: { type: integer }
+        replaced: { type: boolean }
+
+    CardIssuerInfo:
+      type: object
+      properties:
+        configured: { type: boolean }
+        version: { type: integer }
+        public_key_hex: { type: string }
+        fingerprint: { type: string }
+        redemption_uuid: { type: string, format: uuid }
+        program_id_hex: { type: string }
+      required: [configured]
 
     DeleteCardRequest:
       type: object

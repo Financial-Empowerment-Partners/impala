@@ -7,6 +7,7 @@ import com.impala.sdk.models.ImpalaPersonalizationException
 import com.impala.sdk.models.ImpalaPinException
 import com.impala.sdk.models.ImpalaSecurityException
 import com.impala.sdk.models.ImpalaWrongLengthException
+import com.impala.simulator.SimulatorBibo
 import okio.ByteString.Companion.toByteString
 import kotlin.test.Test
 import kotlin.test.assertContentEquals

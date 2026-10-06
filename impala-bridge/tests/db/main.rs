@@ -19,6 +19,7 @@
 //! prints a notice on stderr and returns), so `cargo test -- --ignored`
 //! stays safe on a developer machine with no database.
 
+mod card_issuer;
 mod custodial_intent;
 mod harness;
 mod reserve;
