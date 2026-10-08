@@ -28,6 +28,10 @@ Why 17 specifically (and not 21):
 
 17 is the single version satisfying all three, so the toolchain stays on 17.
 
+Moving to JDK 21 LTS is planned but not implemented: ant-javacard refuses
+JDK 21 with the vendored Java Card 3.1.0 kit (it needs kit v25.0+), so the kit
+upgrade comes first. See [`docs/jdk21-javacard-kit-upgrade.md`](docs/jdk21-javacard-kit-upgrade.md).
+
 ## Build and test
 
 ```bash
