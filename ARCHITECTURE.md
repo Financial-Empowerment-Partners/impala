@@ -269,6 +269,8 @@ Five authentication methods are supported across the platform:
 4. **Google Sign-In** — Credential Manager ID token exchanged server-side at `POST /auth/google`
 5. **GitHub OAuth** — Custom Chrome Tabs authorization code exchanged server-side at `POST /auth/github` (the bridge performs the code→token exchange, so the client secret never ships in the app)
 
+A sixth method — **SEP-10 web authentication** with Stellar Ed25519 keys, including Android Keystore device keys — is designed but **not implemented**; see [docs/sep10-authentication.md](docs/sep10-authentication.md). It would mint house tokens through the same issuance path (`issuance_role` → `encode_token_pair`) but in a restricted audience that only a pinned allow-list of read and card-redemption handlers accepts, resolve identity only through a proof-of-possession link table (never `impala_account.stellar_account_id`), and remain session authentication only: stored-value transfers stay authorized by the card's `SIGN_TRANSFER_V2`, and custodial payments or credential changes need a password, SSO or card session.
+
 ### Notification System
 
 When a notable event occurs (login, transfer, profile update), the bridge queries the `notification_subscription` and `notify` tables to determine which users have subscribed to that event type and through which delivery channels. It then publishes a `send_notification` job to an SNS topic. The worker process, running as a separate ECS task, polls the corresponding SQS queue and delivers notifications through the appropriate channel:

@@ -47,9 +47,15 @@ cd impala-card
 | Module | What it is |
 |---|---|
 | `:sdk` (`com.impala:sdk`, KMP: JVM, Android, iOS) | `ImpalaSDK` (one method per INS) and, in `com.impala.sdk.flows`, the client flows every app shares: `CardIdentity` (version + personalization gates), `CardAuthFlow`, `RedemptionFlow` (compose / sign with PIN / recover the last signed tuple — never re-sign), `CreditFlow` (apply a bridge credit, report the SW), the typed `CardError`, and the one `Hex`/`UuidBytes` codec. JVM-only: `PcscBibo` (PC/SC readers via `javax.smartcardio`). Every transport passes commands through `ApduTrace.mask` before its optional `debugTrace` hook, so PIN and key bytes are never observable. |
-| `:simulator` (`com.impala:simulator`, JVM, **tests and tools only**) | `SimulatorBibo` (the real applet on jcardsim; each simulated card gets its own key — jcardsim alone would give every card the same one), a JCA `TestIssuer`, `personalizedCard(...)`, and `SimulatorApduServer` (`./gradlew :simulator:serve --args="--port 9443"`: one simulated card over TCP for the Android emulator lane). impala-lib and the demo use it in their test source sets. |
+| `:simulator` (`com.impala:simulator`, JVM, **tests and tools only**) | `SimulatorBibo` (the real applet on jcardsim; each simulated card gets its own key — jcardsim alone would give every card the same one), a JCA `TestIssuer`, `personalizedCard(...)`, `SimulatorApduServer` (`./gradlew :simulator:serve --args="--port 9443"`: one simulated card over TCP for the Android emulator lane), and `VpcdSimulator` (`scripts/vpcd-sim.sh`: the same card over the vsmartcard protocol, so [scardutil](scardutil/README.md) can run its fleet sequences against the applet). impala-lib and the demo use it in their test source sets. |
 | `:tools:issue` (CLI + library) | The issuance ceremony — see "Issuance tool". |
 | `:applet` | The JavaCard applet (CAP via Ant). |
+
+## Fleet compatibility testing
+
+`scardutil/` holds the dispatch test sequence, simulator cfg and fleet example
+for running the CAP across physical card types (and the simulator) with
+scardutil — see [`scardutil/README.md`](scardutil/README.md).
 
 ## Issuance tool
 

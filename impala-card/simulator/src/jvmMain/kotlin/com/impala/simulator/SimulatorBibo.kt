@@ -96,6 +96,14 @@ class SimulatorBibo @JvmOverloads constructor(
 
     override fun close() {}
 
+    /** The simulated card's ATR (served to vpcd clients such as scardutil). */
+    val atr: ByteArray get() = simulator.atr
+
+    /** Card reset: clears transient state and the current selection, keeps the applet and its persistent state. */
+    fun reset() {
+        simulator.reset()
+    }
+
     companion object {
         /** Applet-instance AID (`applet.aid.app` in applet/build.xml). */
         const val APPLET_INSTANCE_AID = "01020304050607080102"

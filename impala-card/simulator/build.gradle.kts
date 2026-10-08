@@ -49,3 +49,22 @@ tasks.register<JavaExec>("serve") {
     mainClass.set("com.impala.simulator.SimulatorApduServerKt")
     dependsOn(main.compileTaskProvider)
 }
+
+// vpcd server for scardutil (--sim / --sim-cfg / fleet targets): hosts the real
+// ImpalaApplet on jcardsim over the vsmartcard protocol. scardutil launches it
+// through scripts/vpcd-sim.sh, which reads the classpath this task writes.
+//   ./gradlew :simulator:vpcdClasspath && scripts/vpcd-sim.sh <jcardsim.cfg>
+tasks.register("vpcdClasspath") {
+    group = "simulator"
+    description = "Write the runtime classpath for scripts/vpcd-sim.sh"
+    val jvm = kotlin.jvm()
+    val main = jvm.compilations.getByName("main")
+    val out = layout.buildDirectory.file("vpcd-classpath.txt")
+    dependsOn(main.compileTaskProvider)
+    inputs.files(main.output.allOutputs, main.runtimeDependencyFiles)
+    outputs.file(out)
+    doLast {
+        val cp = (main.output.allOutputs.files + main.runtimeDependencyFiles.files).joinToString(File.pathSeparator) { it.absolutePath }
+        out.get().asFile.writeText(cp)
+    }
+}
