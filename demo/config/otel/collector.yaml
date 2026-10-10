@@ -1,0 +1,23 @@
+# Minimal OTLP collector. Its only job is to exist: when OTEL_EXPORTER_OTLP_ENDPOINT is set the
+# bridge installs a tracing subscriber that also writes to its own stdout (without it, the bridge
+# logs to syslog, i.e. nothing readable in a container). Everything received is printed at "basic"
+# verbosity so `scripts/logs.sh otel-collector` shows traces and metrics arriving.
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+exporters:
+  debug:
+    verbosity: basic
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      exporters: [debug]
+    metrics:
+      receivers: [otlp]
+      exporters: [debug]
+    logs:
+      receivers: [otlp]
+      exporters: [debug]

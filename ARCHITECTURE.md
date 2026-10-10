@@ -909,6 +909,8 @@ sequenceDiagram
 
 ### Local Development (Docker Compose)
 
+For a scripted, verified walk through the whole system on Stellar testnet — the bridge stack in Docker or Podman (with the operator-run migration step and OpenBao sealing the seeds), the JavaCard applet on jcardsim issued by the issuance ceremony, the Android emulator driving the real login screen against that card, and custodial / self-custody testnet payments through `impalactl` and `lumencli` — use the demo kit in [`demo/`](demo/README.md) (`demo/scripts/run-all.sh`). The minimal developer stack below is what `just up` starts.
+
 ```mermaid
 graph TB
     subgraph DockerCompose["Docker Compose Stack"]

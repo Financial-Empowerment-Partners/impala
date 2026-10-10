@@ -87,6 +87,7 @@ cargo test
 - **[docs/runbooks/README.md](docs/runbooks/README.md)** — Operational runbooks, indexed by task: [local stack](docs/runbooks/deploy-local-stack.md), [deploy](docs/runbooks/deploy.md), [admin UI](docs/runbooks/deploy-admin-ui.md), [impalactl](docs/runbooks/impalactl-operations.md), [accounts & roles](docs/runbooks/accounts-and-roles.md), [triage](docs/runbooks/triage.md), [incident response](docs/runbooks/incident-response.md), [rotate secrets](docs/runbooks/rotate-secrets.md)
 - **[impala-card/docs/apdu.md](impala-card/docs/apdu.md)** — Smartcard APDU command reference (INS codes, response formats, auth requirements)
 - **[docs/sep10-authentication.md](docs/sep10-authentication.md)** — Design (not yet implemented) for SEP-10 web authentication with Android Keystore device keys, plus the worked pilot scenario: scardutil fleet compatibility → card issuance → card login → card-authorized transfer → SEP-10 sign-in with step-up to the card
+- **[demo/README.md](demo/README.md)** — The full-suite demo on Stellar testnet: the bridge stack in Docker or Podman, the JavaCard applet on jcardsim (issuance + card login), the Android emulator driving the real login screen, custodial and self-custody testnet payments through impalactl and lumencli, the Payala ↔ Impala relays against an in-repo Payala stub (the proprietary Payala API is not needed), all verified by scripts with every testnet transaction id logged (`demo/scripts/run-all.sh`)
 
 ## Typical End-to-End Flows
 

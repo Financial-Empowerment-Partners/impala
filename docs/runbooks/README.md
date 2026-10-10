@@ -9,6 +9,7 @@ Start from the task you have, not from the document you think you want.
 | Task | Go to |
 |---|---|
 | Run the whole stack on my laptop | [`deploy-local-stack.md`](./deploy-local-stack.md) |
+| Run the whole suite end to end on testnet — containers, the card simulator, the emulator, both CLIs — with every step verified | [`../../demo/README.md`](../../demo/README.md) |
 | Ship a normal code change to an existing bridge | [`deploy.md`](./deploy.md) |
 | Stand up a **staging** environment from nothing | [`deploy-staging-openbao-kms-cloudflare.md`](./deploy-staging-openbao-kms-cloudflare.md) |
 | Stand up a **production** environment from nothing | [`deploy-production-vault-kms-ldap.md`](./deploy-production-vault-kms-ldap.md) |

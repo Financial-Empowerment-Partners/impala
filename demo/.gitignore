@@ -1,0 +1,18 @@
+# Everything the kit generates locally; nothing here is ever committed (see README.md).
+# Secrets: .env (and prepare.sh's transient .env.tmp); .env.example is the committed template.
+.env
+.env.*
+!.env.example
+# Runtime state: keys, card state, relay tokens/cursors, scenario records, artifacts.
+state/
+# Rendered build context (bridge Containerfile, UI config, Payala stub seed).
+build/
+# Host-built lumencli / impalactl binaries.
+bin/
+# Logs and recordings (vhs/asciinema output, emulator captures).
+*.log
+*.tmp
+*.webm
+*.gif
+*.mp4
+*.cast

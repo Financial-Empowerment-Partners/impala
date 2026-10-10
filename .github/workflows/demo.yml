@@ -1,0 +1,83 @@
+# demo/ — lint the demo kit. The kit itself needs Stellar testnet, a container engine, a JDK and an
+# Android emulator, so CI only proves that the scripts parse, pass shellcheck, that the compose file
+# renders, that the generated Containerfile is the repo Dockerfile with fully-qualified FROM lines, and
+# that the Payala stub (demo/payala-stub, the in-repo stand-in for the proprietary Payala API) passes its
+# own tests. The real suite runs on a laptop: demo/scripts/run-all.sh.
+name: demo
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'demo/**'
+      - '.github/workflows/demo.yml'
+  pull_request:
+    paths:
+      - 'demo/**'
+      - '.github/workflows/demo.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: shellcheck + compose config + payala stub tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: bash -n and shellcheck
+        run: |
+          set -euo pipefail
+          for f in demo/scripts/*.sh demo/scripts/payala/*.sh demo/config/openbao/openbao-init.sh; do bash -n "$f"; done
+          # -P SCRIPTDIR: follow the `. "$(dirname "$0")/lib.sh"` sources (plain -x silently skips them)
+          shellcheck -S warning -x -P SCRIPTDIR demo/scripts/*.sh demo/scripts/payala/*.sh demo/config/openbao/openbao-init.sh
+
+      - name: scripts are executable and never carry secrets
+        run: |
+          set -euo pipefail
+          for f in demo/scripts/*.sh demo/scripts/payala/*.sh demo/config/openbao/openbao-init.sh; do [ -x "$f" ] || { echo "not executable: $f"; exit 1; }; done
+          # the only .env in git is the example, and it carries no values for the generated secrets
+          # (negative assertions as explicit if/exit: under set -e a `!` pipeline never fails the step)
+          if git ls-files demo | grep -qx 'demo/.env'; then echo 'demo/.env is committed'; exit 1; fi
+          grep -E '^(JWT_SECRET|POSTGRES_PASSWORD|REDIS_PASSWORD|IMPALA_[A-Z_]*PASSWORD|IMPALA_ISSUE_KMK)=$' demo/.env.example | wc -l | grep -q '^8$'
+          # the proprietary Payala API stays out: no Payala source path, image, Containerfile or source file in the kit
+          if grep -rn -E 'PAYALA_API_DIR|payala-admin-api|payala-user-api|payala-api\.Containerfile|payala-dev|app/transfer|order\.go' demo/ --exclude-dir=state --exclude-dir=build --exclude-dir=bin; then echo 'reference to the proprietary Payala API found'; exit 1; fi
+
+      - name: generated Containerfile is the repo Dockerfile with fully-qualified FROM lines
+        run: |
+          set -euo pipefail
+          sed -e '/^# syntax=/d' -e 's#^FROM rust:#FROM docker.io/library/rust:#' -e 's#^FROM debian:#FROM docker.io/library/debian:#' impala-bridge/Dockerfile > /tmp/Containerfile
+          grep -q '^FROM docker.io/library/rust:.*@sha256:' /tmp/Containerfile
+          grep -q '^FROM docker.io/library/debian:.*@sha256:' /tmp/Containerfile
+          grep -q '^target/' impala-bridge/.dockerignore
+
+      - name: payala stub (Node, no dependencies) — syntax, unit and HTTP tests
+        run: |
+          set -euo pipefail
+          node --version
+          node --check demo/payala-stub/server.mjs
+          node --test demo/payala-stub/server.test.mjs
+
+      - name: compose config renders (every service, incl. the payala-stub on a public image)
+        working-directory: demo
+        run: |
+          set -euo pipefail
+          # a throwaway .env with CI-only placeholder values; nothing here is a secret
+          sed -e 's|^JWT_SECRET=.*|JWT_SECRET=ci-only-0123456789abcdef0123456789abcdef|' \
+              -e 's|^POSTGRES_PASSWORD=.*|POSTGRES_PASSWORD=ci|' -e 's|^REDIS_PASSWORD=.*|REDIS_PASSWORD=ci|' \
+              -e 's|^IMPALA_ADMIN_PASSWORD=.*|IMPALA_ADMIN_PASSWORD=ci|' -e 's|^IMPALA_AGENT_PASSWORD=.*|IMPALA_AGENT_PASSWORD=ci|' \
+              -e 's|^IMPALA_BENEFICIARY_PASSWORD=.*|IMPALA_BENEFICIARY_PASSWORD=ci|' -e 's|^IMPALA_HOLDER_PASSWORD=.*|IMPALA_HOLDER_PASSWORD=ci|' \
+              -e 's|^IMPALA_ISSUE_KMK=.*|IMPALA_ISSUE_KMK=00112233445566778899aabbccddeeff|' .env.example > .env
+          docker compose -p impala-suite -f compose.yaml config --quiet
+          cfg="$(docker compose -p impala-suite -f compose.yaml config)"
+          # nine services, every image fully qualified (docker.io/… or the locally built bridge), the stub on the public node image
+          printf '%s\n' "$cfg" | grep -c '^    image: ' | grep -qx 9
+          bad="$(printf '%s\n' "$cfg" | grep -E '^    image: ' | grep -v -E 'image: (docker.io/|ghcr.io/|localhost/impala-suite/impala-bridge:dev)' || true)"
+          if [ -n "$bad" ]; then echo "unqualified image: $bad"; exit 1; fi
+          printf '%s\n' "$cfg" | grep -q 'image: docker.io/library/node:22-alpine'
+          rm -f .env

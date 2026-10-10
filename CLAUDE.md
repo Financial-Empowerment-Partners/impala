@@ -50,6 +50,7 @@ cd impala-card && ./gradlew :sdk:jvmTest :simulator:jvmTest :tools:issue:test   
 cd impala-lib && ./gradlew testDebugUnitTest              # Robolectric
 cd impala-android-demo && ./gradlew testTnetDebugUnitTest testLiveDebugUnitTest   # :app:e2eTnetDebug = live-bridge card lane (app/src/e2e/README.md)
 cd terraform && terraform fmt -check -recursive && terraform init -backend=false && terraform validate
+cd demo && scripts/doctor.sh && scripts/run-all.sh --smoke   # the full-suite testnet demo (containers + jcardsim + emulator + the Payala stub); scripts/run-all.sh --only <step>; shellcheck -S warning -x -P SCRIPTDIR scripts/*.sh scripts/payala/*.sh; node --test payala-stub/server.test.mjs
 ```
 
 ## Architecture — what you must know before editing
