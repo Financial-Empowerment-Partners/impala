@@ -19,7 +19,7 @@
 # is a whole-file finding that trivy reports with no line number, so an inline
 # `#trivy:ignore:` marker (the convention used in terraform/*.tf) has nothing to
 # attach to and is silently ineffective.
-FROM nginx:1.27-alpine
+FROM nginx:1.29-alpine
 
 COPY nginx.conf /etc/nginx/nginx.conf
 COPY html/ /usr/share/nginx/html/
