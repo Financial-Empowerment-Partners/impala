@@ -35,7 +35,7 @@ class CardReaderControllerTest {
     private val tag: Tag = mock(Tag::class.java)
 
     @Test
-    fun `enableReaderMode passes the NFC-A, NFC-B and SKIP_NDEF flags and the 250 ms presence delay`() {
+    fun `enableReaderMode passes the NFC-A, NFC-B and SKIP_NDEF flags and the 1 s presence delay`() {
         val adapter = mock(NfcAdapter::class.java)
         val controller = CardReaderController(activity, adapter)
         assertTrue(controller.enableReaderMode({ 1 }, { }))
@@ -43,7 +43,7 @@ class CardReaderControllerTest {
         verify(adapter).enableReaderMode(
             eq(activity), any(),
             eq(expected),
-            argThat { b: Bundle? -> b?.getInt(NfcAdapter.EXTRA_READER_PRESENCE_CHECK_DELAY) == 250 }
+            argThat { b: Bundle? -> b?.getInt(NfcAdapter.EXTRA_READER_PRESENCE_CHECK_DELAY) == 1000 }
         )
         controller.disableReaderMode()
         verify(adapter).disableReaderMode(activity)

@@ -84,7 +84,7 @@ ACTION_LOCATION_UPDATE broadcast
 | Class | Purpose |
 |-------|---------|
 | `card.ImpalaCardSession` | One connected card: `sdk`, lazily read `identity` (`CardIdentity`), idempotent `close()`. Refuses to open on the main thread. |
-| `card.CardReaderController` | Reader mode (NFC-A/B, NDEF check skipped, 250 ms presence check); `onTap` on the binder thread with the session open, `onResult` on the main thread |
+| `card.CardReaderController` | Reader mode (NFC-A/B, NDEF check skipped, 1 s presence check); `onTap` on the binder thread with the session open, `onResult` on the main thread |
 | `card.CardAuthenticator` | `signChallenge(session, challengeHex)` for `POST /auth/card` |
 | `card.CardTransfers` | `redeem` (zeroes the PIN `CharArray`), `recoverLastSigned`, `previousSendSequence`, `applyCredit` |
 | `card.CardErrorMessages` | String resource / message for each `CardError` (`card_error_*`, overridable by the app) |

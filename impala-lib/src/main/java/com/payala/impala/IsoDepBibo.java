@@ -21,7 +21,9 @@ import java.io.IOException;
 public class IsoDepBibo implements BIBO {
 
     private static final String TAG = "ImpalaIsoDepBibo";
-    private static final int DEFAULT_TIMEOUT_MS = 5000;
+    // Same as ImpalaCardSession.DEFAULT_TIMEOUT_MS: bounds a card that is in the field but slow to
+    // answer (signing, batch reads); a card that leaves the field still fails at once as tag loss.
+    private static final int DEFAULT_TIMEOUT_MS = 15000;
 
     private final IsoDep isoDep;
 

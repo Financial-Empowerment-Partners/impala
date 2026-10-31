@@ -35,7 +35,7 @@ class CardReaderController @JvmOverloads constructor(
     val isNfcEnabled: Boolean get() = adapter?.isEnabled == true
 
     /**
-     * Enables reader mode (NFC-A and NFC-B, NDEF check skipped, 250 ms
+     * Enables reader mode (NFC-A and NFC-B, NDEF check skipped, 1 s
      * presence check). Returns false when the device has no NFC adapter.
      */
     fun <R> enableReaderMode(onTap: (ImpalaCardSession) -> R, onResult: (Result<R>) -> Unit): Boolean {
@@ -75,7 +75,13 @@ class CardReaderController @JvmOverloads constructor(
     companion object {
         const val READER_FLAGS: Int =
             NfcAdapter.FLAG_READER_NFC_A or NfcAdapter.FLAG_READER_NFC_B or NfcAdapter.FLAG_READER_SKIP_NDEF_CHECK
-        const val PRESENCE_CHECK_DELAY_MS = 250
+        /**
+         * How often reader mode presence-checks an idle card (the platform default is ~125 ms).
+         * `onTap` runs with the session open, bridge round-trips included, and every check is an RF
+         * exchange that can get a card that never moved declared lost; the cost is that the next
+         * card after a removal is noticed up to this much later.
+         */
+        const val PRESENCE_CHECK_DELAY_MS = 1_000
 
         internal fun readerExtras(): Bundle =
             Bundle().apply { putInt(NfcAdapter.EXTRA_READER_PRESENCE_CHECK_DELAY, PRESENCE_CHECK_DELAY_MS) }

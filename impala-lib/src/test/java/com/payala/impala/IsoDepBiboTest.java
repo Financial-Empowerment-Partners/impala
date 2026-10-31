@@ -60,7 +60,7 @@ public class IsoDepBiboTest {
     @Test
     public void default_constructor_sets_timeout() {
         IsoDepBibo bibo = new IsoDepBibo(mockIsoDep);
-        verify(mockIsoDep).setTimeout(5000);
+        verify(mockIsoDep).setTimeout(15000);
     }
 
     @Test

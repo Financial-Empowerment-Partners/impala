@@ -56,7 +56,11 @@ class ImpalaCardSession private constructor(
         /** Applet-instance AID of the testnet CAP (`applet.aid.app` in impala-card/applet/build.xml). */
         const val TESTNET_APPLET_AID = "01020304050607080102"
 
-        const val DEFAULT_TIMEOUT_MS = 5000
+        /**
+         * Per-APDU IsoDep timeout. It only bounds a card that is in the field but slow to answer
+         * (signing, batch reads); a card that leaves the field still fails at once as [CardError.TagLost].
+         */
+        const val DEFAULT_TIMEOUT_MS = 15_000
 
         /**
          * Connects to [tag] over IsoDep and SELECTs the applet by [aidHex]
