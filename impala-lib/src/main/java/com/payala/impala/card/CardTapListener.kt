@@ -1,6 +1,5 @@
 package com.payala.impala.card
 
-import android.util.Log
 import com.impala.sdk.flows.CardIdentity
 import java.util.concurrent.atomic.AtomicReference
 
@@ -34,13 +33,13 @@ object ImpalaCardTapHandler {
     @JvmStatic
     fun readTap(session: ImpalaCardSession): CardTapEvent? {
         if (listenerRef.get() == null) {
-            Log.d(TAG, "Card tapped with no CardTapListener registered")
+            ImpalaLibLog.d(TAG, "Card tapped with no CardTapListener registered")
             return null
         }
         return try {
             CardTapEvent(session.identity)
         } catch (e: Exception) {
-            Log.d(TAG, "Card tap identity read failed: ${e.javaClass.simpleName}")
+            ImpalaLibLog.d(TAG, "Card tap identity read failed: ${e.javaClass.simpleName}")
             null
         }
     }
@@ -51,7 +50,7 @@ object ImpalaCardTapHandler {
         try {
             l.onCardTapped(event)
         } catch (e: Exception) {
-            Log.e(TAG, "CardTapListener threw ${e.javaClass.simpleName}")
+            ImpalaLibLog.e(TAG, "CardTapListener threw ${e.javaClass.simpleName}")
         }
     }
 }

@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Progress labels for a card tap, chosen from the APDU trace by
+     com.payala.impala.card.CardStepLabels. Apps may override any of them. -->
+<resources>
+    <string name="card_step_reading">Reading card</string>
+    <string name="card_step_signing_login">Card is signing the login challenge</string>
+    <string name="card_step_signing_transfer">Verifying PIN and signing on card</string>
+    <string name="card_step_applying_credit">Applying credit to card</string>
+</resources>

@@ -81,9 +81,15 @@ class TransfersViewModel : ViewModel() {
         }
     }
 
-    /** Prepare a redemption before asking for a tap; [then] runs on success. */
-    fun prepareRedemption(cardId: String, then: (RedemptionController.Prepared) -> Unit) = launchFlow {
-        then(redemptions.prepare(cardId))
+    /** Prepare a redemption before asking for a tap; [then] runs on success, [orElse] otherwise (e.g. to zero a PIN). */
+    fun prepareRedemption(cardId: String, orElse: () -> Unit = {}, then: (RedemptionController.Prepared) -> Unit) = launchFlow {
+        val prepared = try {
+            redemptions.prepare(cardId)
+        } catch (e: Throwable) {
+            orElse()
+            throw e
+        }
+        then(prepared)
     }
 
     /** After the card signed (or the tuple was recovered): submit and track until terminal. */

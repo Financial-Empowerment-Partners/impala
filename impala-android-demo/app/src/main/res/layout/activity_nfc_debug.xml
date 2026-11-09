@@ -1,129 +1,81 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+    Card Lab (ui.nfc.NfcDebugActivity): four tabs over one toolbar. The tabs
+    switch the visibility of four panes (no ViewPager). Colours come from
+    theme attributes only; Lab rows use MonoSmall (the 12 sp floor).
+-->
 <androidx.coordinatorlayout.widget.CoordinatorLayout xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:id="@+id/labRoot"
     android:layout_width="match_parent"
-    android:layout_height="match_parent">
+    android:layout_height="match_parent"
+    android:background="?attr/colorSurface">
 
     <com.google.android.material.appbar.AppBarLayout
+        android:id="@+id/appBar"
         android:layout_width="match_parent"
-        android:layout_height="wrap_content">
+        android:layout_height="wrap_content"
+        android:fitsSystemWindows="true">
 
         <com.google.android.material.appbar.MaterialToolbar
             android:id="@+id/toolbar"
             android:layout_width="match_parent"
             android:layout_height="?attr/actionBarSize"
-            app:title="@string/title_nfc_debug"
-            app:navigationIcon="?attr/homeAsUpIndicator" />
+            app:navigationIcon="?attr/homeAsUpIndicator"
+            app:title="@string/title_nfc_debug" />
+
+        <com.google.android.material.tabs.TabLayout
+            android:id="@+id/tabs"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            app:tabGravity="start"
+            app:tabMode="auto">
+
+            <com.google.android.material.tabs.TabItem
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/lab_tab_inspector" />
+
+            <com.google.android.material.tabs.TabItem
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/lab_tab_doctor" />
+
+            <com.google.android.material.tabs.TabItem
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/lab_tab_trace" />
+
+            <com.google.android.material.tabs.TabItem
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/lab_tab_device" />
+        </com.google.android.material.tabs.TabLayout>
     </com.google.android.material.appbar.AppBarLayout>
 
-    <androidx.core.widget.NestedScrollView
-        android:id="@+id/scrollView"
+    <FrameLayout
+        android:id="@+id/panes"
         android:layout_width="match_parent"
         android:layout_height="match_parent"
         app:layout_behavior="@string/appbar_scrolling_view_behavior">
 
+        <!-- Inspector -->
         <LinearLayout
+            android:id="@+id/paneInspector"
             android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="vertical"
-            android:padding="16dp">
+            android:layout_height="match_parent"
+            android:orientation="vertical">
 
-            <!-- Device NFC Capabilities -->
             <com.google.android.material.card.MaterialCardView
+                android:id="@+id/cardReader"
+                style="@style/Widget.ImpalaDemo.Card.Group"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginBottom="12dp"
-                app:cardElevation="1dp">
-
-                <LinearLayout
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:orientation="vertical"
-                    android:padding="16dp">
-
-                    <TextView
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:text="@string/nfc_debug_section_capabilities"
-                        android:textAppearance="?attr/textAppearanceTitleMedium"
-                        android:textColor="?colorPrimary" />
-
-                    <TextView
-                        android:id="@+id/tvNfcCapabilities"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="8dp"
-                        android:fontFamily="monospace"
-                        android:textAppearance="?attr/textAppearanceBodySmall"
-                        android:textSize="13sp" />
-
-                    <com.google.android.material.button.MaterialButton
-                        android:id="@+id/btnRefreshCapabilities"
-                        style="@style/Widget.Material3.Button.TonalButton"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="8dp"
-                        android:text="@string/nfc_debug_refresh" />
-                </LinearLayout>
-            </com.google.android.material.card.MaterialCardView>
-
-            <!-- Test NFC Tap -->
-            <com.google.android.material.card.MaterialCardView
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginBottom="12dp"
-                app:cardElevation="1dp">
-
-                <LinearLayout
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:orientation="vertical"
-                    android:padding="16dp">
-
-                    <TextView
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:text="@string/nfc_debug_section_test"
-                        android:textAppearance="?attr/textAppearanceTitleMedium"
-                        android:textColor="?colorPrimary" />
-
-                    <TextView
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="4dp"
-                        android:text="@string/nfc_debug_test_description"
-                        android:textAppearance="?attr/textAppearanceBodySmall"
-                        android:textColor="?colorOnSurfaceVariant" />
-
-                    <com.google.android.material.button.MaterialButton
-                        android:id="@+id/btnTestTap"
-                        style="@style/Widget.Material3.Button"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="12dp"
-                        android:text="@string/nfc_debug_start_test"
-                        app:icon="@drawable/ic_nfc"
-                        app:iconGravity="textStart"
-                        app:iconPadding="8dp" />
-
-                    <TextView
-                        android:id="@+id/tvTestResult"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="8dp"
-                        android:fontFamily="monospace"
-                        android:textAppearance="?attr/textAppearanceBodySmall"
-                        android:textSize="12sp"
-                        android:visibility="gone" />
-                </LinearLayout>
-            </com.google.android.material.card.MaterialCardView>
-
-            <!-- Live NFC Event Log -->
-            <com.google.android.material.card.MaterialCardView
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginBottom="12dp"
-                app:cardElevation="1dp">
+                android:layout_marginStart="16dp"
+                android:layout_marginTop="16dp"
+                android:layout_marginEnd="16dp"
+                android:layout_marginBottom="4dp">
 
                 <LinearLayout
                     android:layout_width="match_parent"
@@ -134,110 +86,274 @@
                     <LinearLayout
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:orientation="horizontal"
-                        android:gravity="center_vertical">
+                        android:gravity="center_vertical"
+                        android:orientation="horizontal">
 
-                        <TextView
+                        <FrameLayout
+                            android:layout_width="48dp"
+                            android:layout_height="48dp">
+
+                            <com.google.android.material.loadingindicator.LoadingIndicator
+                                android:id="@+id/readerProgress"
+                                android:layout_width="wrap_content"
+                                android:layout_height="wrap_content"
+                                android:layout_gravity="center" />
+
+                            <ImageView
+                                android:id="@+id/readerIcon"
+                                android:layout_width="32dp"
+                                android:layout_height="32dp"
+                                android:layout_gravity="center"
+                                android:importantForAccessibility="no"
+                                android:src="@drawable/ic_contactless"
+                                android:tint="?attr/colorPrimary"
+                                android:visibility="gone"
+                                tools:ignore="UseAppTint" />
+                        </FrameLayout>
+
+                        <LinearLayout
                             android:layout_width="0dp"
                             android:layout_height="wrap_content"
+                            android:layout_marginStart="16dp"
                             android:layout_weight="1"
-                            android:text="@string/nfc_debug_section_events"
-                            android:textAppearance="?attr/textAppearanceTitleMedium"
-                            android:textColor="?colorPrimary" />
+                            android:accessibilityLiveRegion="polite"
+                            android:orientation="vertical">
 
-                        <TextView
-                            android:id="@+id/tvEventCount"
-                            android:layout_width="wrap_content"
-                            android:layout_height="wrap_content"
-                            android:textAppearance="?attr/textAppearanceLabelSmall"
-                            android:textColor="?colorOnSurfaceVariant" />
+                            <TextView
+                                android:id="@+id/tvReaderTitle"
+                                android:layout_width="match_parent"
+                                android:layout_height="wrap_content"
+                                android:textAppearance="?attr/textAppearanceTitleMedium"
+                                android:textColor="?attr/colorOnSurface"
+                                tools:text="Hold a card to the back of the phone" />
+
+                            <TextView
+                                android:id="@+id/tvReaderDetail"
+                                android:layout_width="match_parent"
+                                android:layout_height="wrap_content"
+                                android:layout_marginTop="2dp"
+                                android:textAppearance="?attr/textAppearanceBodyMedium"
+                                android:textColor="?attr/colorOnSurfaceVariant"
+                                tools:text="Read-only: nothing on the card can change." />
+                        </LinearLayout>
                     </LinearLayout>
 
-                    <TextView
-                        android:id="@+id/tvEventLog"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="8dp"
-                        android:fontFamily="monospace"
-                        android:text="@string/nfc_debug_no_events"
-                        android:textAppearance="?attr/textAppearanceBodySmall"
-                        android:textSize="11sp"
-                        android:maxLines="200" />
-
                     <LinearLayout
+                        android:id="@+id/readerActions"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="8dp"
                         android:orientation="horizontal">
 
                         <com.google.android.material.button.MaterialButton
-                            android:id="@+id/btnClearEvents"
-                            style="@style/Widget.Material3.Button.OutlinedButton"
-                            android:layout_width="0dp"
+                            android:id="@+id/btnReadSimulated"
+                            style="@style/Widget.Material3.Button.TonalButton.Icon"
+                            android:layout_width="wrap_content"
                             android:layout_height="wrap_content"
-                            android:layout_weight="1"
-                            android:layout_marginEnd="4dp"
-                            android:text="@string/nfc_debug_clear_events" />
+                            android:layout_marginEnd="8dp"
+                            android:text="@string/lab_read_simulated"
+                            android:visibility="gone"
+                            app:icon="@drawable/ic_contactless" />
 
                         <com.google.android.material.button.MaterialButton
-                            android:id="@+id/btnCopyEvents"
-                            style="@style/Widget.Material3.Button.OutlinedButton"
-                            android:layout_width="0dp"
+                            android:id="@+id/btnOpenNfcSettings"
+                            style="@style/Widget.Material3.Button.TextButton"
+                            android:layout_width="wrap_content"
                             android:layout_height="wrap_content"
-                            android:layout_weight="1"
-                            android:layout_marginStart="4dp"
-                            android:text="@string/nfc_debug_copy_events" />
+                            android:text="@string/lab_open_nfc_settings"
+                            android:visibility="gone" />
                     </LinearLayout>
                 </LinearLayout>
             </com.google.android.material.card.MaterialCardView>
 
-            <!-- Developer Options Instructions -->
-            <com.google.android.material.card.MaterialCardView
+            <androidx.recyclerview.widget.RecyclerView
+                android:id="@+id/rvInspector"
+                android:layout_width="match_parent"
+                android:layout_height="0dp"
+                android:layout_weight="1"
+                android:clipToPadding="false"
+                android:paddingBottom="16dp" />
+        </LinearLayout>
+
+        <!-- Doctor -->
+        <LinearLayout
+            android:id="@+id/paneDoctor"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:orientation="vertical"
+            android:visibility="gone">
+
+            <TextView
+                android:id="@+id/tvDoctorSummary"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginBottom="12dp"
-                app:cardElevation="1dp"
-                app:cardBackgroundColor="?colorSurfaceVariant">
+                android:accessibilityLiveRegion="polite"
+                android:paddingStart="16dp"
+                android:paddingTop="16dp"
+                android:paddingEnd="16dp"
+                android:paddingBottom="8dp"
+                android:textAppearance="?attr/textAppearanceBodyMedium"
+                android:textColor="?attr/colorOnSurfaceVariant"
+                tools:text="Card, bridge, or me? Read a card to run every check." />
+
+            <!--
+                The Doctor's own read action (Cards → Inspect in Card Lab opens this tab):
+                the simulated card in debug builds, NFC settings when NFC is off. With NFC
+                on, holding the card to the phone reads it on any tab (the summary says so).
+            -->
+            <LinearLayout
+                android:id="@+id/doctorActions"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:paddingStart="16dp"
+                android:paddingEnd="16dp"
+                android:paddingBottom="8dp"
+                android:visibility="gone"
+                tools:visibility="visible">
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnDoctorRead"
+                    style="@style/Widget.Material3.Button.TonalButton.Icon"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginEnd="8dp"
+                    android:text="@string/lab_read_simulated"
+                    android:visibility="gone"
+                    app:icon="@drawable/ic_contactless"
+                    tools:visibility="visible" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnDoctorNfcSettings"
+                    style="@style/Widget.Material3.Button.TextButton"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="@string/lab_open_nfc_settings"
+                    android:visibility="gone" />
+            </LinearLayout>
+
+            <androidx.recyclerview.widget.RecyclerView
+                android:id="@+id/rvDoctor"
+                android:layout_width="match_parent"
+                android:layout_height="0dp"
+                android:layout_weight="1"
+                android:clipToPadding="false"
+                android:paddingBottom="16dp" />
+        </LinearLayout>
+
+        <!-- Trace -->
+        <androidx.recyclerview.widget.RecyclerView
+            android:id="@+id/rvTrace"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:clipToPadding="false"
+            android:paddingBottom="16dp"
+            android:visibility="gone" />
+
+        <!-- Device -->
+        <LinearLayout
+            android:id="@+id/paneDevice"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:orientation="vertical"
+            android:visibility="gone">
+
+            <com.google.android.material.card.MaterialCardView
+                android:id="@+id/bannerNetwork"
+                style="@style/Widget.Material3.CardView.Filled"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="16dp"
+                android:layout_marginTop="16dp"
+                android:layout_marginEnd="16dp"
+                android:accessibilityLiveRegion="assertive"
+                android:visibility="gone"
+                app:cardBackgroundColor="?attr/colorErrorContainer">
 
                 <LinearLayout
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:orientation="vertical"
+                    android:orientation="horizontal"
                     android:padding="16dp">
 
-                    <TextView
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:text="@string/nfc_debug_section_developer"
-                        android:textAppearance="?attr/textAppearanceTitleMedium"
-                        android:textColor="?colorPrimary" />
+                    <ImageView
+                        android:layout_width="24dp"
+                        android:layout_height="24dp"
+                        android:importantForAccessibility="no"
+                        android:src="@drawable/ic_warning"
+                        android:tint="?attr/colorOnErrorContainer"
+                        tools:ignore="UseAppTint" />
 
-                    <TextView
-                        android:layout_width="match_parent"
+                    <LinearLayout
+                        android:layout_width="0dp"
                         android:layout_height="wrap_content"
-                        android:layout_marginTop="8dp"
-                        android:text="@string/nfc_debug_developer_instructions"
-                        android:textAppearance="?attr/textAppearanceBodySmall"
-                        android:lineSpacingMultiplier="1.4" />
+                        android:layout_marginStart="12dp"
+                        android:layout_weight="1"
+                        android:orientation="vertical">
 
-                    <com.google.android.material.button.MaterialButton
-                        android:id="@+id/btnOpenNfcSettings"
-                        style="@style/Widget.Material3.Button.TonalButton"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="8dp"
-                        android:text="@string/nfc_debug_open_nfc_settings" />
+                        <TextView
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:text="@string/lab_network_mismatch_title"
+                            android:textAppearance="?attr/textAppearanceTitleSmall"
+                            android:textColor="?attr/colorOnErrorContainer" />
 
-                    <com.google.android.material.button.MaterialButton
-                        android:id="@+id/btnOpenDevSettings"
-                        style="@style/Widget.Material3.Button.TonalButton"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="4dp"
-                        android:text="@string/nfc_debug_open_dev_settings" />
+                        <TextView
+                            android:id="@+id/tvNetworkMismatch"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="2dp"
+                            android:textAppearance="?attr/textAppearanceBodyMedium"
+                            android:textColor="?attr/colorOnErrorContainer"
+                            tools:text="This build is for testnet, but the bridge reports pubnet." />
+                    </LinearLayout>
                 </LinearLayout>
             </com.google.android.material.card.MaterialCardView>
 
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center_vertical"
+                android:orientation="horizontal"
+                android:paddingStart="16dp"
+                android:paddingTop="12dp"
+                android:paddingEnd="16dp">
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnProbeBridge"
+                    style="@style/Widget.Material3.Button.TonalButton.Icon"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginEnd="8dp"
+                    android:text="@string/lab_probe_bridge"
+                    app:icon="@drawable/ic_refresh" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnProbeSimulator"
+                    style="@style/Widget.Material3.Button.TonalButton.Icon"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="@string/lab_probe_simulator"
+                    android:visibility="gone"
+                    app:icon="@drawable/ic_refresh" />
+
+                <com.google.android.material.progressindicator.CircularProgressIndicator
+                    android:id="@+id/probeProgress"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="8dp"
+                    android:indeterminate="true"
+                    android:visibility="gone"
+                    app:indicatorSize="24dp" />
+            </LinearLayout>
+
+            <androidx.recyclerview.widget.RecyclerView
+                android:id="@+id/rvDevice"
+                android:layout_width="match_parent"
+                android:layout_height="0dp"
+                android:layout_weight="1"
+                android:clipToPadding="false"
+                android:paddingBottom="16dp" />
         </LinearLayout>
-    </androidx.core.widget.NestedScrollView>
+    </FrameLayout>
 </androidx.coordinatorlayout.widget.CoordinatorLayout>

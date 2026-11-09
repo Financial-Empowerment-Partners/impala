@@ -8,6 +8,7 @@ import com.impala.sdk.models.CardPersonalization
 import com.impala.sdk.models.ImpalaVersion
 import com.impala.sdk.models.TransferProtocol
 import com.payala.impala.demo.auth.TokenManager
+import com.payala.impala.demo.log.AppLogger
 import com.payala.impala.demo.model.AuthenticateResponse
 import com.payala.impala.demo.model.CardAuthRequest
 import com.payala.impala.demo.model.CardChallengeResponse
@@ -725,6 +726,40 @@ class LoginViewModelTest {
         assertThrows(IllegalArgumentException::class.java) {
             runBlocking { viewModel.fetchCardChallenge(api, CARD_ID) }
         }
+    }
+
+    // ── Abandoned card taps and log hygiene ─────────────────────────────
+
+    @Test
+    fun `cardTapAbandoned releases the card-login slot without changing loginState`() {
+        assertTrue(viewModel.tryBeginCardLogin())
+        assertFalse("slot is held while the tap is in flight", viewModel.tryBeginCardLogin())
+        viewModel.cardTapAbandoned()
+        assertTrue("loginState is untouched", viewModel.loginState.value is LoginState.Idle)
+        assertTrue("a new tap can claim the slot", viewModel.tryBeginCardLogin())
+    }
+
+    @Test
+    fun `cardTapAbandoned keeps a visible error and is harmless when nothing is in flight`() {
+        viewModel.cardTapFailed(httpException(429))
+        viewModel.cardTapAbandoned()
+        assertErrorType(ErrorType.LOCKED_OUT)
+        assertTrue(viewModel.tryBeginCardLogin())
+    }
+
+    @Test
+    fun `Google login never writes the e-mail address to the log`() = runTest {
+        AppLogger.clear()
+        val api = exchangeApi {
+            on { googleTokenExchange(any()) } doReturn
+                TokenResponse(true, "ok", refresh_token = REFRESH_TOKEN)
+        }
+        viewModel.loginWithGoogle(api, tokenManager, "User@Example.com", "google-id-token", "User")
+        advanceUntilIdle()
+        assertTrue(viewModel.loginState.value is LoginState.Success)
+        val log = AppLogger.getLogText()
+        assertTrue("the attempt is still logged (provider only)", "Google login attempt" in log)
+        assertFalse("the e-mail reached the log:\n$log", log.contains("example.com", ignoreCase = true))
     }
 
     // ── Helpers ─────────────────────────────────────────────────────────

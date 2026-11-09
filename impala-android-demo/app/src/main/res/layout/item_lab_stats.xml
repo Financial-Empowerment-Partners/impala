@@ -1,0 +1,126 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    The Trace tab's field-quality block (ApduStats over one read): eight
+    figures in two rows of two pairs. At a large font scale (or a narrow
+    screen) TraceAdapter stacks each row's pairs, so the grid reflows from
+    four columns to two and no label breaks inside a word.
+-->
+<com.google.android.material.card.MaterialCardView xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
+    style="@style/Widget.ImpalaDemo.Card.Group"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:layout_marginStart="16dp"
+    android:layout_marginTop="4dp"
+    android:layout_marginEnd="16dp"
+    android:layout_marginBottom="8dp">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="16dp">
+
+        <LinearLayout
+            android:id="@+id/rowStatsTiming"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:baselineAligned="false"
+            android:orientation="horizontal">
+
+            <LinearLayout
+                android:id="@+id/pairStatsCount"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:baselineAligned="false"
+                android:orientation="horizontal">
+
+                <LinearLayout android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1" android:orientation="vertical">
+                    <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="@string/lab_stat_count" android:textAppearance="@style/TextAppearance.ImpalaDemo.Overline" />
+                    <TextView android:id="@+id/tvStatCount" android:layout_width="wrap_content" android:layout_height="wrap_content" android:textAppearance="@style/TextAppearance.ImpalaDemo.Mono" android:textColor="?attr/colorOnSurface" tools:text="9" />
+                </LinearLayout>
+
+                <LinearLayout android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1" android:orientation="vertical">
+                    <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="@string/lab_stat_total" android:textAppearance="@style/TextAppearance.ImpalaDemo.Overline" />
+                    <TextView android:id="@+id/tvStatTotal" android:layout_width="wrap_content" android:layout_height="wrap_content" android:textAppearance="@style/TextAppearance.ImpalaDemo.Mono" android:textColor="?attr/colorOnSurface" tools:text="84 ms" />
+                </LinearLayout>
+            </LinearLayout>
+
+            <LinearLayout
+                android:id="@+id/pairStatsTime"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:baselineAligned="false"
+                android:orientation="horizontal">
+
+                <LinearLayout android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1" android:orientation="vertical">
+                    <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="@string/lab_stat_avg" android:textAppearance="@style/TextAppearance.ImpalaDemo.Overline" />
+                    <TextView android:id="@+id/tvStatAvg" android:layout_width="wrap_content" android:layout_height="wrap_content" android:textAppearance="@style/TextAppearance.ImpalaDemo.Mono" android:textColor="?attr/colorOnSurface" tools:text="9 ms" />
+                </LinearLayout>
+
+                <LinearLayout android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1" android:orientation="vertical">
+                    <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="@string/lab_stat_max" android:textAppearance="@style/TextAppearance.ImpalaDemo.Overline" />
+                    <TextView android:id="@+id/tvStatMax" android:layout_width="wrap_content" android:layout_height="wrap_content" android:textAppearance="@style/TextAppearance.ImpalaDemo.Mono" android:textColor="?attr/colorOnSurface" tools:text="21 ms" />
+                </LinearLayout>
+            </LinearLayout>
+        </LinearLayout>
+
+        <LinearLayout
+            android:id="@+id/rowStatsOutcomes"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+        android:layout_marginTop="12dp"
+            android:baselineAligned="false"
+            android:orientation="horizontal">
+
+            <LinearLayout
+                android:id="@+id/pairStatsLink"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:baselineAligned="false"
+                android:orientation="horizontal">
+
+                <LinearLayout android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1" android:orientation="vertical">
+                    <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="@string/lab_stat_tag_losses" android:textAppearance="@style/TextAppearance.ImpalaDemo.Overline" />
+                    <TextView android:id="@+id/tvStatTagLoss" android:layout_width="wrap_content" android:layout_height="wrap_content" android:textAppearance="@style/TextAppearance.ImpalaDemo.Mono" android:textColor="?attr/colorOnSurface" tools:text="0" />
+                </LinearLayout>
+
+                <LinearLayout android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1" android:orientation="vertical">
+                    <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="@string/lab_stat_refused" android:textAppearance="@style/TextAppearance.ImpalaDemo.Overline" />
+                    <TextView android:id="@+id/tvStatRefused" android:layout_width="wrap_content" android:layout_height="wrap_content" android:textAppearance="@style/TextAppearance.ImpalaDemo.Mono" android:textColor="?attr/colorOnSurface" tools:text="0" />
+                </LinearLayout>
+            </LinearLayout>
+
+            <LinearLayout
+                android:id="@+id/pairStatsErrors"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:baselineAligned="false"
+                android:orientation="horizontal">
+
+                <LinearLayout android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1" android:orientation="vertical">
+                    <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="@string/lab_stat_transport" android:textAppearance="@style/TextAppearance.ImpalaDemo.Overline" />
+                    <TextView android:id="@+id/tvStatTransport" android:layout_width="wrap_content" android:layout_height="wrap_content" android:textAppearance="@style/TextAppearance.ImpalaDemo.Mono" android:textColor="?attr/colorOnSurface" tools:text="0" />
+                </LinearLayout>
+
+                <LinearLayout android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1" android:orientation="vertical">
+                    <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="@string/lab_stat_card_errors" android:textAppearance="@style/TextAppearance.ImpalaDemo.Overline" />
+                    <TextView android:id="@+id/tvStatCardErrors" android:layout_width="wrap_content" android:layout_height="wrap_content" android:textAppearance="@style/TextAppearance.ImpalaDemo.Mono" android:textColor="?attr/colorOnSurface" tools:text="0" />
+                </LinearLayout>
+            </LinearLayout>
+        </LinearLayout>
+
+        <TextView
+            android:id="@+id/tvStatSlowest"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:textAppearance="@style/TextAppearance.ImpalaDemo.MonoSmall"
+            android:textColor="?attr/colorOnSurfaceVariant"
+            tools:text="Slowest: GET_PERSONALIZATION 21 ms" />
+    </LinearLayout>
+</com.google.android.material.card.MaterialCardView>

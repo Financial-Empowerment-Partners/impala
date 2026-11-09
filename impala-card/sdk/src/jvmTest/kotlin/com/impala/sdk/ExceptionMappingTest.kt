@@ -261,4 +261,17 @@ class ExceptionMappingTest {
 
     @Test
     fun `incorrect P1P2 0x6A86 is a base ImpalaException carrying its hex`() = assertMapping(0x6A86, ImpalaException::class)
+
+    @Test
+    fun `full name too long 0x6C03 maps to ImpalaCardDataException`() = assertMapping(0x6C03, ImpalaCardDataException::class)
+
+    @Test
+    fun `gender too long 0x6C04 maps to ImpalaCardDataException`() = assertMapping(0x6C04, ImpalaCardDataException::class)
+
+    @Test
+    fun `fromStatusWord stamps the status word on every arm`() {
+        for (sw in listOf(0x6C03, 0x6C04, 0x6A83, 0x6D00, 0x69C2, 0xABCD)) {
+            assertEquals(sw, ImpalaException.fromStatusWord(sw).statusWord)
+        }
+    }
 }

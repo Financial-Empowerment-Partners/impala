@@ -4,7 +4,7 @@ Android library providing NFC smartcard communication and geolocation event disp
 
 ## Overview
 
-Impala-lib bridges Android NFC and location services with the [impala-card SDK](../impala-card/sdk). It handles two NFC protocols (NDEF data tags and IsoDep smartcard contact) and geolocation broadcast events, dispatching them to registered application listeners.
+Impala-lib bridges Android NFC and location services with the [impala-card SDK](../impala-card/sdk). It handles two NFC protocols (NDEF data tags and IsoDep smartcard contact) and geolocation broadcast events, dispatching them to registered application listeners, and owns every card byte and tag-layer fact: sessions, the read-only diagnostic inspector, and local certificate checks.
 
 ## Build
 
@@ -41,23 +41,46 @@ tested against the applet rather than mocks. It is a test-only dependency.
 
 ```
 CardReaderController.enableReaderMode(onTap, onResult)   (foreground activity)
-  → NFC binder thread: ImpalaCardSession.open(tag)  (IsoDep.connect, SELECT applet AID)
+  → NFC binder thread: ImpalaCardSession.open(tag, aidHex, trace, readOnly)
+                       (IsoDep.connect, then SELECT applet AID — traced and guarded)
     → onTap(session)     card stays connected: read identity, fetch the bridge
-                         challenge, CardAuthenticator / CardTransfers
+                         challenge, CardAuthenticator / CardTransfers / CardInspector
   → main thread: onResult(Result<R>)   card failures arrive as CardFlowException(CardError)
 ```
+
+Two optional session decorators come from the SDK (`com.impala.sdk.apdu4j`)
+and are applied **before** the SELECT, so the SELECT is traced and guarded too:
+
+- `trace: ApduExchangeHook?` receives one `ApduExchange` per command: CLA,
+  INS, P1, P2, Lc, SW, response length, elapsed time, outcome (`OK`,
+  `CARD_ERROR`, `TAG_LOST`, `REFUSED`, `TRANSPORT_FAILURE`) and sequence. The
+  record has **no byte and no text field** (an SDK tripwire pins this), so
+  PINs, challenges, signatures and credit tails never leave the transport. The
+  hook runs inside `try/catch(Throwable)` and can never replace the
+  transport's own exception.
+- `readOnly: Boolean` wraps the transport in `ReadOnlyBibo`, which refuses
+  everything except SELECT and the non-mutating Impala commands before a byte
+  is sent (`CardError.ReadOnlyRefused(command)`: "Read-only session refused
+  <command>. Nothing was sent to the card."). The order is
+  `TracingBibo(ReadOnlyBibo(transport))`, so a refusal shows in the trace as
+  `REFUSED`. A read-only session is always traced internally (its exchanges
+  feed `CardInspection.exchanges`).
+
+A SELECT that no applet answers (`6A82`, `6999`; also `6D00` anywhere) is
+`CardError.AppletNotFound(sw)` and closes the transport.
 
 **System dispatch (IsoDep tapped outside reader mode)** — identity only:
 
 ```
 ACTION_TECH_DISCOVERED intent
   → NfcContactActivity (finishes immediately)
-    → background thread: ImpalaCardSession.open(tag).identity
+    → background thread: ImpalaCardSession.open(tag, aidHex = CardAppletAid.forApp(context)).identity
                          (GET_VERSION, GET_PERSONALIZATION, GET_USER_DATA, GET_EC_PUB_KEY)
     → main thread: registered CardTapListener.onCardTapped(CardTapEvent)
 ```
 
-No state-changing command is ever sent from system dispatch.
+No state-changing command is ever sent from system dispatch. The AID comes
+from the consuming app's manifest (see "Consumer manifest").
 
 > **Platform note:** this IsoDep/NDEF NFC transport is **Android-only**. iOS has no native NFC transport yet — native iOS NFC is deferred. See [`docs/ios-nfc.md`](../docs/ios-nfc.md) for the rationale (Apple NFC & SE Platform constraints) and the recommended external-reader path.
 
@@ -83,18 +106,26 @@ ACTION_LOCATION_UPDATE broadcast
 
 | Class | Purpose |
 |-------|---------|
-| `card.ImpalaCardSession` | One connected card: `sdk`, lazily read `identity` (`CardIdentity`), idempotent `close()`. Refuses to open on the main thread. |
-| `card.CardReaderController` | Reader mode (NFC-A/B, NDEF check skipped, 1 s presence check); `onTap` on the binder thread with the session open, `onResult` on the main thread |
+| `card.ImpalaCardSession` | One connected card: `sdk`, lazily read `identity` (`CardIdentity`), idempotent `close()`, plus `transport` (`CardTransportFacts`, null for `fromBibo`), `aidHex` (the AID SELECTed; null = default selection) and `isReadOnly`. `open(tag, timeoutMs, aidHex, trace, readOnly)` and `fromBibo(bibo, aidHex, trace, readOnly)` are `@JvmOverloads`. Refuses to open on the main thread. |
+| `card.CardReaderController` | Reader mode (NFC-A/B, NDEF check skipped, 1 s presence check); `onTap` on the binder thread with the session open, `onResult` on the main thread. `trace: ApduExchangeHook?` (before `sessionFactory`, so positional Kotlin callers are unaffected) reaches the default factory. `debugInjectTapOrClose(session)` (emulator lane) returns false and closes the session when reader mode is off, instead of throwing like `debugInjectTap` |
+| `card.CardInspector` | `inspect(session)`: a structured read for diagnostics — GET_VERSION, GET_PERSONALIZATION, GET_USER_DATA, GET_EC_PUB_KEY, IS_CARD_ALIVE, GET_RECEIVE_STATE, GET_LAST_TRANSFER, GET_BALANCE, each recorded as an `InspectionStep`, so a blank or terminated card gives a partial result. Requires `session.isReadOnly` and a background thread (`IllegalStateException` otherwise); never throws for card refusals; stops after a tag loss, or when GET_VERSION fails (the answering applet is not Impala's, so later INS bytes would mean something else). Returns a `CardInspection` |
+| `card.CardInspection` | Not a `data` class; `toString()` is redacted. Version line (`0.2 · r17 · g1a2b3c4d`), state and flags, program id, currency, key fingerprints, certificate length, `cert_id`, `certVerifiedByCardIssuer` (local ECDSA), receive counter and digest, the exchanges, and `holderName` / `balanceMinor` / `lastTransfer` as `Masked`. Raw public key and certificate stay private behind `certificateVerifiesUnder(issuerPublicKeyHex)` |
+| `card.Masked<T>` | Wraps a personal value: `toString()` is `••••`, `reveal()` returns it. The caller decides when revealing is allowed |
+| `card.CardTransportFacts` | The only place tag-layer facts are read (UID, tech list, ISO 14443-4, max transceive length, extended length, timeout, historical bytes / higher-layer response, ATQA, SAK, NFC-B data). Never throws: an unreadable fact is null, 0 or false |
+| `card.CardCertificates` | `verify(issuerPub65, programId, accountId, currency, cardPub65, certDer)` — the card certificate under an issuer key, with `java.security` (API 24+); malformed input is false, nothing is logged. `fingerprint(pub65)` — first 10 bytes of SHA-256 as `ab:cd:…` |
+| `card.CardStepLabels` | `labelFor(exchange)`: a string id for a tap-progress label from the trace (`card_step_reading` for SELECT and every read command, `card_step_signing_login` for SIGN_AUTH, `card_step_signing_transfer` for SIGN_TRANSFER_V2, `card_step_applying_credit` for VERIFY_TRANSFER_V2); null otherwise (there is no VERIFY_PIN label: no flow sends it) |
+| `card.CardAppletAid` | `forApp(context)`: the AID from the app's `com.payala.impala.CARD_APPLET_AID` meta-data (see "Consumer manifest") |
+| `card.ImpalaLibLog` / `LibLogSink` | The library's log calls go to `android.util.Log` **and** to an optional `@Volatile` `sink` the app installs (the demo routes them into its Activity Log); a throwing sink is ignored. `LogHygieneTest` keeps secrets and personal values out of every call |
 | `card.CardAuthenticator` | `signChallenge(session, challengeHex)` for `POST /auth/card` |
 | `card.CardTransfers` | `redeem` (zeroes the PIN `CharArray`), `recoverLastSigned`, `previousSendSequence`, `applyCredit` |
-| `card.CardErrorMessages` | String resource / message for each `CardError` (`card_error_*`, overridable by the app) |
+| `card.CardErrorMessages` | String resource / message for each `CardError` (`card_error_*`, overridable by the app), including `card_error_applet_not_found` and `card_error_read_only_refused`; `message(context, error, includeStatusWord)` appends `(SW xxxx)` only when asked (the demo asks in debug builds) |
 | `card.ImpalaCardTapHandler` / `CardTapListener` | Static registry for system-dispatched taps |
 | `NfcContactActivity` | Transient activity for system-dispatched IsoDep taps; reads identity only |
 | `NdefDispatchActivity` | Transient activity handling NDEF message discovery |
 | `IsoDepBibo` | Adapter wrapping Android `IsoDep` to implement the SDK's `BIBO` interface |
 | `ImpalaNdefHandler` | Static listener registry for NDEF messages |
 | `ImpalaGeoHandler` | Static listener registry for geolocation updates |
-| `GeoUpdateReceiver` | BroadcastReceiver for `ACTION_LOCATION_UPDATE` intents |
+| `GeoUpdateReceiver` | BroadcastReceiver for `ACTION_LOCATION_UPDATE` intents (logs that an update arrived, never the coordinates) |
 
 ### Permissions
 
@@ -121,7 +152,8 @@ ImpalaGeoHandler.setGeoUpdateListener((lat, lng, accuracy, timestamp) -> {
 Card login from a foreground activity (Kotlin):
 
 ```kotlin
-val reader = CardReaderController(this)
+val reader = CardReaderController(this, aidHex = BuildConfig.CARD_APPLET_AID.ifEmpty { null },
+    trace = { exchange -> progress.onExchange(exchange) })   // optional: header-only, never bytes
 reader.enableReaderMode(
     onTap = { session ->                       // binder thread, card connected
         val identity = session.identity.requirePersonalized()
@@ -131,6 +163,56 @@ reader.enableReaderMode(
     onResult = { result -> /* main thread */ }
 )
 ```
+
+A read-only diagnostic read (what the demo's Card Lab does):
+
+```kotlin
+val lab = CardReaderController(this, aidHex = aid, sessionFactory = { tag ->
+    ImpalaCardSession.open(tag, aidHex = aid, readOnly = true)   // mutating commands are refused before the card
+})
+lab.enableReaderMode(onTap = { session -> CardInspector.inspect(session) }, onResult = { /* main thread */ })
+```
+
+### Consumer manifest
+
+`NfcContactActivity` SELECTs the AID the app declares as **application-level**
+meta-data whose value is a **string resource**:
+
+```xml
+<application …>
+    <meta-data android:name="com.payala.impala.CARD_APPLET_AID"
+               android:resource="@string/impala_card_applet_aid" />
+</application>
+```
+
+Use `android:resource`, not `android:value`: AAPT2 types an all-digit AID such
+as the testnet one as a float. `CardAppletAid.forApp` resolves it: an empty
+string means no SELECT (the card's default-selected applet answers); 10–32 hex
+digits are that AID; absent meta-data means `ImpalaCardSession.TESTNET_APPLET_AID`
+(the behaviour before the meta-data existed); anything unreadable or malformed
+falls back to the testnet AID with a warning. A plain-string `android:value` is
+accepted for consumers that cannot declare a resource. Activity-level
+meta-data is not read.
+
+### Resources
+
+The library ships only `values/card_strings.xml` (`card_error_*`),
+`values/card_step_strings.xml` (`card_step_*`) and `xml/nfc_tech_filter.xml`,
+all overridable by the app. The Android Studio template resources it used to
+carry (launcher `mipmap-*`, `drawable/ic_launcher_*`, `values/{themes,colors,strings}.xml`,
+`values-night/themes.xml`) are gone, and the manifest sets no icon, label or
+theme: a consuming app supplies its own `app_name`, launcher icons and theme.
+
+### Debug source set (emulator lane)
+
+`src/debug` (never in the release AAR) holds `TcpBibo` (a `BIBO` over TCP to
+impala-card's `SimulatorApduServer`) and `DebugCardTransport`: the
+`debug.impala.tcp_card` system property names the endpoint, `endpointText()`,
+`openConfiguredSession(trace, readOnly)`, `openSession(host, port, …)` (throws
+`SimulatorUnreachableException`, an `IOException` naming `host:port`, and
+closes the socket), and `probe(host, port)` / `probeConfigured()`, which send
+one NOP and report a `SimProbe` of READY, BUSY (another client holds the
+one-client simulator) or DOWN.
 
 The library's contract types (`CardIdentity`, `CardError`, `RedemptionFlow`,
 `CreditFlow`, `Hex`) come from the SDK's `com.impala.sdk.flows` package, so the

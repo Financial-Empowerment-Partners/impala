@@ -7,6 +7,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import androidx.annotation.VisibleForTesting
+import com.impala.sdk.apdu4j.ApduExchangeHook
 import com.impala.sdk.apdu4j.BIBOException
 import com.impala.sdk.flows.CardError
 import com.impala.sdk.flows.CardFlowException
@@ -21,14 +22,20 @@ import com.impala.sdk.flows.CardFlowException
  * delivered on the main thread. Card failures arrive as [CardFlowException]
  * (tag loss is [CardError.TagLost]); anything else `onTap` throws (an HTTP
  * error) is delivered unchanged.
+ *
+ * [trace], when given, receives one header-only exchange per command of every
+ * session the default factory opens (SELECT included), on the I/O thread; it
+ * must only record or post, never block.
  */
 class CardReaderController @JvmOverloads constructor(
     private val activity: Activity,
     private val adapter: NfcAdapter? = NfcAdapter.getDefaultAdapter(activity),
     private val aidHex: String? = ImpalaCardSession.TESTNET_APPLET_AID,
-    private val sessionFactory: (Tag) -> ImpalaCardSession = { ImpalaCardSession.open(it, aidHex = aidHex) },
+    private val trace: ApduExchangeHook? = null,
+    private val sessionFactory: (Tag) -> ImpalaCardSession = { ImpalaCardSession.open(it, aidHex = aidHex, trace = trace) },
     private val mainHandler: Handler = Handler(Looper.getMainLooper())
 ) {
+    @Volatile
     private var tapHandler: ((ImpalaCardSession) -> Unit)? = null
 
     val isNfcAvailable: Boolean get() = adapter != null
@@ -66,6 +73,22 @@ class CardReaderController @JvmOverloads constructor(
     fun debugInjectTap(session: ImpalaCardSession) {
         val handler = tapHandler ?: throw IllegalStateException("reader mode is not enabled")
         Thread({ handler(session) }, "impala-card-debug-tap").start()
+    }
+
+    /**
+     * [debugInjectTap] that never throws: when reader mode is off it closes
+     * [session] (so a simulated card's connection is released at once) and
+     * returns false; otherwise it starts the tap and returns true.
+     */
+    @VisibleForTesting
+    fun debugInjectTapOrClose(session: ImpalaCardSession): Boolean {
+        val handler = tapHandler
+        if (handler == null) {
+            session.close()
+            return false
+        }
+        Thread({ handler(session) }, "impala-card-debug-tap").start()
+        return true
     }
 
     private fun <R> deliver(result: Result<R>, onResult: (Result<R>) -> Unit) {

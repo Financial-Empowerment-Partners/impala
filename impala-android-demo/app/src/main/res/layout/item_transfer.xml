@@ -1,78 +1,134 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+    A card transfer row (TransfersFragment + TransferPresentation): what and
+    which card, the signed amount (Money.format, tabular figures), a tonal
+    status chip, an optional persistent banner (ambiguous or stranded
+    outcomes) and one explicit action. Chip and banner colours are resolved
+    from theme attributes at bind time.
+-->
 <com.google.android.material.card.MaterialCardView xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
+    xmlns:tools="http://schemas.android.com/tools"
+    style="@style/Widget.ImpalaDemo.Card.Group"
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
-    android:layout_marginBottom="8dp"
-    app:cardElevation="1dp">
+    android:layout_marginBottom="8dp">
 
-    <androidx.constraintlayout.widget.ConstraintLayout
+    <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
+        android:orientation="vertical"
         android:padding="@dimen/card_padding">
 
-        <ImageView
-            android:id="@+id/ivIcon"
-            android:layout_width="40dp"
-            android:layout_height="40dp"
-            android:src="@drawable/ic_transfers"
-            app:layout_constraintStart_toStartOf="parent"
-            app:layout_constraintTop_toTopOf="parent"
-            app:tint="?colorPrimary" />
-
-        <TextView
-            android:id="@+id/tvTxId"
-            android:layout_width="0dp"
+        <LinearLayout
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginStart="12dp"
-            android:fontFamily="monospace"
-            android:textAppearance="?attr/textAppearanceTitleSmall"
-            app:layout_constraintEnd_toStartOf="@id/chipStatus"
-            app:layout_constraintStart_toEndOf="@id/ivIcon"
-            app:layout_constraintTop_toTopOf="parent" />
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
 
-        <TextView
-            android:id="@+id/tvSourceAccount"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_marginStart="12dp"
-            android:textAppearance="?attr/textAppearanceBodySmall"
-            android:textColor="?colorOnSurfaceVariant"
-            app:layout_constraintEnd_toStartOf="@id/chipStatus"
-            app:layout_constraintStart_toEndOf="@id/ivIcon"
-            app:layout_constraintTop_toBottomOf="@id/tvTxId" />
+            <ImageView
+                android:id="@+id/ivIcon"
+                android:layout_width="24dp"
+                android:layout_height="24dp"
+                android:importantForAccessibility="no"
+                android:src="@drawable/ic_transfers"
+                android:tint="?attr/colorOnSurfaceVariant" />
+
+            <TextView
+                android:id="@+id/tvTxId"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="12dp"
+                android:layout_marginEnd="8dp"
+                android:layout_weight="1"
+                android:textAppearance="?attr/textAppearanceTitleSmall"
+                android:textColor="?attr/colorOnSurface"
+                tools:text="Redeem · card ····eeff" />
+
+            <com.google.android.material.chip.Chip
+                android:id="@+id/chipStatus"
+                style="@style/Widget.ImpalaDemo.Chip.Status"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                tools:text="Ready to send" />
+        </LinearLayout>
 
         <TextView
             android:id="@+id/tvAmount"
-            android:layout_width="0dp"
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginStart="12dp"
+            android:layout_marginStart="36dp"
             android:layout_marginTop="4dp"
-            android:textAppearance="?attr/textAppearanceBodyMedium"
-            android:textStyle="bold"
-            app:layout_constraintEnd_toStartOf="@id/chipStatus"
-            app:layout_constraintStart_toEndOf="@id/ivIcon"
-            app:layout_constraintTop_toBottomOf="@id/tvSourceAccount" />
+            android:textAppearance="@style/TextAppearance.ImpalaDemo.Amount"
+            android:textColor="?attr/colorOnSurface"
+            tools:text="-0.0012500 XLM" />
+
+        <TextView
+            android:id="@+id/tvSourceAccount"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="36dp"
+            android:layout_marginTop="2dp"
+            android:breakStrategy="simple"
+            android:textAppearance="@style/TextAppearance.ImpalaDemo.MonoSmall"
+            android:textColor="?attr/colorOnSurfaceVariant"
+            tools:text="00112233445566778899aabbccddeeff" />
 
         <TextView
             android:id="@+id/tvTimestamp"
-            android:layout_width="0dp"
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginStart="12dp"
+            android:layout_marginStart="36dp"
             android:layout_marginTop="2dp"
-            android:textAppearance="?attr/textAppearanceLabelSmall"
-            android:textColor="?colorOnSurfaceVariant"
-            app:layout_constraintEnd_toStartOf="@id/chipStatus"
-            app:layout_constraintStart_toEndOf="@id/ivIcon"
-            app:layout_constraintTop_toBottomOf="@id/tvAmount" />
+            android:textAppearance="?attr/textAppearanceBodySmall"
+            android:textColor="?attr/colorOnSurfaceVariant"
+            tools:text="11/9/26, 10:42 AM" />
 
-        <com.google.android.material.chip.Chip
-            android:id="@+id/chipStatus"
+        <!-- Persistent banner: frozen payout, ambiguous funding, refused tuple, credit exception, card refusal. -->
+        <com.google.android.material.card.MaterialCardView
+            android:id="@+id/banner"
+            style="@style/Widget.Material3.CardView.Filled"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:accessibilityLiveRegion="polite"
+            android:visibility="gone"
+            app:cardElevation="0dp">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:padding="12dp">
+
+                <ImageView
+                    android:id="@+id/ivBanner"
+                    android:layout_width="20dp"
+                    android:layout_height="20dp"
+                    android:importantForAccessibility="no"
+                    android:src="@drawable/ic_warning" />
+
+                <TextView
+                    android:id="@+id/tvBanner"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="12dp"
+                    android:layout_weight="1"
+                    android:textAppearance="?attr/textAppearanceBodyMedium"
+                    tools:text="Outcome unknown — do not repeat." />
+            </LinearLayout>
+        </com.google.android.material.card.MaterialCardView>
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btnAction"
+            style="@style/Widget.Material3.Button.TonalButton"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            app:chipMinHeight="24dp"
-            app:layout_constraintEnd_toEndOf="parent"
-            app:layout_constraintTop_toTopOf="parent" />
-
-    </androidx.constraintlayout.widget.ConstraintLayout>
+            android:layout_gravity="end"
+            android:layout_marginTop="8dp"
+            android:minHeight="@dimen/touch_target"
+            android:visibility="gone"
+            tools:text="Send"
+            tools:visibility="visible" />
+    </LinearLayout>
 </com.google.android.material.card.MaterialCardView>

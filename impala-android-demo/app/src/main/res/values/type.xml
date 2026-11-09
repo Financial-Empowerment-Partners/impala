@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Text appearances. System Roboto only (no font files). Nothing goes below
+    BodySmall / LabelSmall (12 sp / 11 sp is reserved for M3's own labels);
+    identifiers use the monospace styles with tabular figures, no extra letter
+    spacing, and wrap (breakStrategy simple, no hyphenation, break points at
+    their own separators: ui.common.Identifiers) rather than ellipsize.
+-->
+<resources>
+    <!-- Transfer amounts: Money.format output, tabular figures so columns align. -->
+    <style name="TextAppearance.ImpalaDemo.Amount" parent="TextAppearance.Material3.HeadlineSmall">
+        <item name="android:fontFeatureSettings">tnum</item>
+    </style>
+
+    <!-- Identifiers: account and card ids, program ids, fingerprints, SW codes. -->
+    <style name="TextAppearance.ImpalaDemo.Mono" parent="TextAppearance.Material3.BodyMedium">
+        <item name="android:fontFamily">monospace</item>
+        <item name="fontFamily">monospace</item>
+        <item name="android:fontFeatureSettings">tnum</item>
+    </style>
+
+    <!-- Card Lab rows (the 12 sp floor). -->
+    <style name="TextAppearance.ImpalaDemo.MonoSmall" parent="TextAppearance.Material3.BodySmall">
+        <item name="android:fontFamily">monospace</item>
+        <item name="fontFamily">monospace</item>
+        <item name="android:fontFeatureSettings">tnum</item>
+    </style>
+
+    <!-- Card Lab prose values ("None: …", "Verified under …"): the body face at the Lab rows' size. -->
+    <style name="TextAppearance.ImpalaDemo.LabValue" parent="TextAppearance.Material3.BodyMedium" />
+
+    <!-- Section headers: onSurface, not primary (primary is for actions). -->
+    <style name="TextAppearance.ImpalaDemo.SectionTitle" parent="TextAppearance.Material3.TitleMedium">
+        <item name="android:textColor">?attr/colorOnSurface</item>
+    </style>
+
+    <!-- Group labels above a value. -->
+    <style name="TextAppearance.ImpalaDemo.Overline" parent="TextAppearance.Material3.LabelMedium">
+        <item name="android:textColor">?attr/colorOnSurfaceVariant</item>
+        <item name="android:letterSpacing">0.1</item>
+    </style>
+
+    <!-- The full 32-hex card id on the card face, eight groups of four. -->
+    <style name="TextAppearance.ImpalaDemo.CardNumber" parent="TextAppearance.Material3.TitleMedium">
+        <item name="android:fontFamily">monospace</item>
+        <item name="fontFamily">monospace</item>
+        <item name="android:fontFeatureSettings">tnum</item>
+    </style>
+
+    <!-- Login wordmark. A concrete parent style, never a theme attribute. -->
+    <style name="TextAppearance.ImpalaDemo.Wordmark" parent="TextAppearance.Material3.DisplayMedium">
+        <item name="android:textStyle">bold</item>
+        <item name="android:letterSpacing">-0.01</item>
+    </style>
+</resources>

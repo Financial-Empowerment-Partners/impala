@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    The tap sheet's Done mark: a success-container disc and a check stroke
+    drawn over 350 ms. CardTapSheet shows the static end frame instead
+    (ic_check_circle) when animations are off.
+-->
+<animated-vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt">
+    <aapt:attr name="android:drawable">
+        <vector
+            android:width="72dp"
+            android:height="72dp"
+            android:viewportWidth="48"
+            android:viewportHeight="48">
+            <path
+                android:fillColor="?attr/colorStatusSuccessContainer"
+                android:pathData="M24,2A22,22 0,1 1,23.99 2Z" />
+            <path
+                android:name="check"
+                android:pathData="M14,24.5L21,31.5L34.5,18"
+                android:strokeWidth="4"
+                android:strokeColor="?attr/colorOnStatusSuccessContainer"
+                android:strokeLineCap="round"
+                android:strokeLineJoin="round"
+                android:trimPathEnd="0" />
+        </vector>
+    </aapt:attr>
+    <target android:name="check">
+        <aapt:attr name="android:animation">
+            <objectAnimator
+                android:duration="350"
+                android:interpolator="@android:interpolator/fast_out_slow_in"
+                android:propertyName="trimPathEnd"
+                android:valueFrom="0"
+                android:valueTo="1"
+                android:valueType="floatType" />
+        </aapt:attr>
+    </target>
+</animated-vector>

@@ -1,0 +1,102 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Widget styles. Colours come only from theme attributes. -->
+<resources>
+    <!--
+        The FAB sits on colorPrimary / colorOnPrimary instead of M3's default
+        primaryContainer (1.1:1 against the bottom bar's surfaceContainer).
+        ThemeGeneratorTest pins primary >= 3:1 against surfaceContainer and
+        onPrimary >= 4.5:1 on primary. The overlay keeps MDC's state
+        selectors (disabled, ripple) working off the new container colour.
+    -->
+    <style name="ThemeOverlay.ImpalaDemo.Fab" parent="">
+        <item name="colorContainer">?attr/colorPrimary</item>
+        <item name="colorOnContainer">?attr/colorOnPrimary</item>
+    </style>
+
+    <style name="Widget.ImpalaDemo.Fab" parent="Widget.Material3.FloatingActionButton.Primary">
+        <item name="materialThemeOverlay">@style/ThemeOverlay.ImpalaDemo.Fab</item>
+    </style>
+
+    <!--
+        Status chips (labels, not actions): never clickable or checkable. The
+        base is neutral; the tone variants use the generated status families.
+        Pending is outlined (tertiary), danger uses the error container.
+    -->
+    <style name="Widget.ImpalaDemo.Chip.Status" parent="Widget.Material3.Chip.Assist">
+        <item name="android:clickable">false</item>
+        <item name="android:focusable">false</item>
+        <item name="android:checkable">false</item>
+        <item name="ensureMinTouchTargetSize">false</item>
+        <item name="chipMinHeight">28dp</item>
+        <item name="chipStrokeWidth">0dp</item>
+        <item name="chipBackgroundColor">?attr/colorSurfaceContainerHighest</item>
+        <item name="android:textColor">?attr/colorOnSurfaceVariant</item>
+        <item name="chipIconTint">?attr/colorOnSurfaceVariant</item>
+        <item name="android:textAppearance">?attr/textAppearanceLabelMedium</item>
+        <item name="shapeAppearance">@style/ShapeAppearance.ImpalaDemo.Chip</item>
+    </style>
+
+    <style name="Widget.ImpalaDemo.Chip.Status.Success">
+        <item name="chipBackgroundColor">?attr/colorStatusSuccessContainer</item>
+        <item name="android:textColor">?attr/colorOnStatusSuccessContainer</item>
+        <item name="chipIconTint">?attr/colorOnStatusSuccessContainer</item>
+    </style>
+
+    <style name="Widget.ImpalaDemo.Chip.Status.Warning">
+        <item name="chipBackgroundColor">?attr/colorStatusWarningContainer</item>
+        <item name="android:textColor">?attr/colorOnStatusWarningContainer</item>
+        <item name="chipIconTint">?attr/colorOnStatusWarningContainer</item>
+    </style>
+
+    <style name="Widget.ImpalaDemo.Chip.Status.Info">
+        <item name="chipBackgroundColor">?attr/colorStatusInfoContainer</item>
+        <item name="android:textColor">?attr/colorOnStatusInfoContainer</item>
+        <item name="chipIconTint">?attr/colorOnStatusInfoContainer</item>
+    </style>
+
+    <style name="Widget.ImpalaDemo.Chip.Status.Pending">
+        <item name="chipBackgroundColor">@android:color/transparent</item>
+        <item name="chipStrokeWidth">1dp</item>
+        <item name="chipStrokeColor">?attr/colorTertiary</item>
+        <item name="android:textColor">?attr/colorTertiary</item>
+        <item name="chipIconTint">?attr/colorTertiary</item>
+    </style>
+
+    <style name="Widget.ImpalaDemo.Chip.Status.Danger">
+        <item name="chipBackgroundColor">?attr/colorErrorContainer</item>
+        <item name="android:textColor">?attr/colorOnErrorContainer</item>
+        <item name="chipIconTint">?attr/colorOnErrorContainer</item>
+    </style>
+
+    <!-- Grouped settings / content cards: flat, low surface container. -->
+    <style name="Widget.ImpalaDemo.Card.Group" parent="Widget.Material3.CardView.Filled">
+        <item name="cardBackgroundColor">?attr/colorSurfaceContainerLow</item>
+    </style>
+
+    <!-- Persistent in-screen banners (e.g. Transfers' bannerIssuer). -->
+    <style name="Widget.ImpalaDemo.Card.Banner" parent="Widget.Material3.CardView.Filled">
+        <item name="cardBackgroundColor">?attr/colorStatusInfoContainer</item>
+    </style>
+
+    <!-- OAuth buttons: outlined, with the brand mark drawn untinted. -->
+    <style name="Widget.ImpalaDemo.Button.OAuth" parent="Widget.Material3.Button.OutlinedButton.Icon">
+        <item name="iconTint">@null</item>
+        <item name="iconGravity">textStart</item>
+        <item name="iconPadding">12dp</item>
+    </style>
+
+    <!-- A quiet secondary text action (the login "Card Lab" link). -->
+    <style name="Widget.ImpalaDemo.Button.Quiet" parent="Widget.Material3.Button.TextButton.Icon">
+        <item name="android:textColor">?attr/colorOnSurfaceVariant</item>
+        <item name="iconTint">?attr/colorOnSurfaceVariant</item>
+        <item name="rippleColor">?attr/colorControlHighlight</item>
+    </style>
+
+    <!-- Destructive outlined action (Settings: Log Out). -->
+    <style name="Widget.ImpalaDemo.Button.Destructive" parent="Widget.Material3.Button.OutlinedButton.Icon">
+        <item name="android:textColor">?attr/colorError</item>
+        <item name="iconTint">?attr/colorError</item>
+        <item name="strokeColor">?attr/colorError</item>
+        <item name="rippleColor">?attr/colorControlHighlight</item>
+    </style>
+</resources>

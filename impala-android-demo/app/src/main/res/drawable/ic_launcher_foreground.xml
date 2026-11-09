@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Adaptive launcher icon foreground (108 dp canvas; the artwork stays inside
+    the 66 dp safe zone, 21..87). A card tile with a chip and contactless arcs.
+    Literal colours: launcher layers are drawn outside the app theme. The teal
+    values are the generated brand tones (primary #00696B, primaryFixedDim
+    #80D4D6, see colors_m3.xml).
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M33,37H75A5,5 0 0,1 80,42V66A5,5 0 0,1 75,71H33A5,5 0 0,1 28,66V42A5,5 0 0,1 33,37Z" />
+    <path
+        android:fillColor="#FF80D4D6"
+        android:pathData="M36,46H43A2,2 0 0,1 45,48V54A2,2 0 0,1 43,56H36A2,2 0 0,1 34,54V48A2,2 0 0,1 36,46Z" />
+    <path
+        android:pathData="M55.89,50.11A5.5,5.5 0 0,1 55.89,57.89M59.42,46.58A10.5,10.5 0 0,1 59.42,61.42M62.96,43.04A15.5,15.5 0 0,1 62.96,64.96"
+        android:strokeWidth="3.2"
+        android:strokeColor="#FF00696B"
+        android:strokeLineCap="round" />
+</vector>

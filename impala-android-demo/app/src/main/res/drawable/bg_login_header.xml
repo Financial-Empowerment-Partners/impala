@@ -1,11 +1,16 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+    Login header: the generated brand-header gradient (dark primary tones in
+    both modes, so the forced light status-bar icons and the white wordmark
+    stay legible; ThemeGeneratorTest pins >= 4.5:1 on both stops).
+-->
 <shape xmlns:android="http://schemas.android.com/apk/res/android">
     <gradient
-        android:angle="135"
-        android:startColor="@color/gradient_start"
-        android:endColor="@color/gradient_end"
+        android:angle="315"
+        android:endColor="?attr/colorBrandHeaderEnd"
+        android:startColor="?attr/colorBrandHeaderStart"
         android:type="linear" />
     <corners
-        android:bottomLeftRadius="32dp"
-        android:bottomRightRadius="32dp" />
+        android:bottomLeftRadius="28dp"
+        android:bottomRightRadius="28dp" />
 </shape>

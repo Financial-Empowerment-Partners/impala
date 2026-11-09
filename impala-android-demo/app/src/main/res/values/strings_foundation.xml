@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Strings owned by the app-foundation lane (login, Cards / Transfers empty
+    states and banner, Settings, navigation). Other lanes add theirs to their
+    own strings_<lane>.xml; never redefine a name from this file.
+-->
+<resources>
+    <!-- Login -->
+    <string name="login_card_lab">Card Lab</string>
+
+    <!-- Cards -->
+    <string name="cards_add">Add card</string>
+    <string name="cards_empty_hint">Tap your Impala card, or press Add card</string>
+
+    <!-- Transfers -->
+    <string name="transfers_empty_hint">Redeem from a card or load one with the + button</string>
+    <string name="transfers_offline_disabled_title">Offline transfers aren\'t enabled on this bridge</string>
+    <string name="transfers_offline_disabled_body">The bridge has no card issuer configured, so cards cannot sign or receive transfers here. Sign-in with a card still works.</string>
+
+    <!-- Settings -->
+    <string name="settings_section_notifications">Notifications</string>
+    <string name="settings_notifications_loading">Loading…</string>
+    <string name="settings_notifications_none">No subscriptions configured</string>
+    <plurals name="settings_notifications_active">
+        <item quantity="one">%d active subscription</item>
+        <item quantity="other">%d active subscriptions</item>
+    </plurals>
+    <string name="settings_notifications_unavailable">Unable to load</string>
+    <string name="settings_manage_notifications">Manage</string>
+    <string name="settings_mfa_totp">TOTP (authenticator app)</string>
+    <string name="settings_mfa_sms">SMS</string>
+    <string name="settings_mfa_enrolled">Enrolled: %1$s</string>
+    <string name="settings_server_read_only">Set when the app is built</string>
+    <string name="settings_network_testnet">Testnet</string>
+    <string name="settings_network_pubnet">Public network</string>
+    <string name="settings_label_app">App</string>
+    <string name="settings_label_bridge">Bridge</string>
+    <string name="settings_app_version">Impala Demo %1$s (build\u00A0%2$d)</string>
+    <string name="settings_bridge_version">%1$s v%2$s\nBuilt %3$s · schema %4$s</string>
+    <string name="settings_bridge_offline">Bridge offline</string>
+    <string name="settings_logout_confirm_title">Log out?</string>
+    <string name="settings_logout_confirm_message">You will need to sign in again to use your cards and transfers on this device.</string>
+
+    <!-- Navigation -->
+    <string name="nav_notifications">Notifications</string>
+</resources>

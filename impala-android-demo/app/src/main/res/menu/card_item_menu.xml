@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- A card face's overflow (CardsFragment). -->
+<menu xmlns:android="http://schemas.android.com/apk/res/android">
+    <item
+        android:id="@+id/action_copy_card_id"
+        android:title="@string/cards_menu_copy_id" />
+    <item
+        android:id="@+id/action_inspect_card"
+        android:title="@string/cards_menu_inspect" />
+    <item
+        android:id="@+id/action_remove_card"
+        android:title="@string/cards_menu_remove" />
+</menu>

@@ -4,6 +4,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.os.Build
 import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
 import com.google.firebase.messaging.FirebaseMessagingService
 import com.google.firebase.messaging.RemoteMessage
 import com.payala.impala.demo.BuildConfig
@@ -61,7 +62,10 @@ class ImpalaPushService : FirebaseMessagingService() {
         }
 
         val notification = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setSmallIcon(R.mipmap.ic_launcher)
+            // A white silhouette: the status bar uses only the small icon's alpha,
+            // so the full-colour launcher icon would render as a white square.
+            .setSmallIcon(R.drawable.ic_stat_impala)
+            .setColor(ContextCompat.getColor(this, R.color.launcher_background))
             .setContentTitle(title)
             .setContentText(body)
             .setStyle(NotificationCompat.BigTextStyle().bigText(body))

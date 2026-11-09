@@ -1,7 +1,9 @@
 package com.impala.sdk.flows
 
+import com.impala.sdk.apdu4j.ApduNames
 import com.impala.sdk.apdu4j.BIBOException
 import com.impala.sdk.apdu4j.BIBOTagLostException
+import com.impala.sdk.apdu4j.ReadOnlyViolationException
 import com.impala.sdk.models.ImpalaException
 import com.impala.sdk.models.ImpalaPinException
 
@@ -25,6 +27,17 @@ sealed class CardError(val userMessageKey: String, val statusWord: Int? = null) 
     object TagLost : CardError("card_error_tag_lost")
     /** A request the flow refuses before any card command (zero amount, self recipient, …). */
     class InvalidRequest(val reason: String) : CardError("card_error_invalid_request")
+    /**
+     * No Impala applet for this network answered: SELECT found no applet under
+     * the AID (`6A82`), applet selection failed (`6999`), or the selected
+     * applet does not know the command (`6D00`: another applet, or an
+     * unsupported applet version).
+     */
+    class AppletNotFound(sw: Int) : CardError("card_error_applet_not_found", sw)
+    /** A read-only session refused [command] (an instruction name) before anything reached the card. */
+    class ReadOnlyRefused(val command: String) : CardError("card_error_read_only_refused") {
+        override fun toString(): String = "ReadOnlyRefused($command)"
+    }
     /** Any other card status word, or a transport failure when [sw] is null. */
     class Other(val sw: Int?) : CardError("card_error_other", sw)
 
@@ -40,7 +53,7 @@ sealed class CardError(val userMessageKey: String, val statusWord: Int? = null) 
             "card_error_wrong_pin", "card_error_pin_blocked", "card_error_insufficient_funds",
             "card_error_counter_invalid", "card_error_counter_jump", "card_error_send_sequence_invalid",
             "card_error_wrong_protocol_version", "card_error_tag_lost", "card_error_invalid_request",
-            "card_error_other"
+            "card_error_other", "card_error_applet_not_found", "card_error_read_only_refused"
         )
 
         /** Maps a card status word to its case. */
@@ -54,16 +67,22 @@ sealed class CardError(val userMessageKey: String, val statusWord: Int? = null) 
             0x6233 -> CounterInvalid
             0x623A -> CounterJump
             0x6238 -> SendSequenceInvalid
-            0x6D00 -> WrongProtocolVersion("unknown (INS not supported)")
+            0x6A82, 0x6999, 0x6D00 -> AppletNotFound(sw)
             else -> Other(sw)
         }
 
         /**
          * Maps anything a card flow can throw. Walks the cause chain so a
-         * tag loss wrapped by `ImpalaSDK.tx` is still [TagLost].
+         * read-only refusal or a tag loss wrapped by `ImpalaSDK.tx` is still
+         * [ReadOnlyRefused] or [TagLost] (a refusal wins: nothing was sent).
          */
         fun from(t: Throwable): CardError {
             if (t is CardFlowException) return t.error
+            var r: Throwable? = t
+            while (r != null) {
+                if (r is ReadOnlyViolationException) return ReadOnlyRefused(if (r.ins < 0) "a malformed command" else ApduNames.ins(r.cla, r.ins))
+                r = r.cause
+            }
             var c: Throwable? = t
             while (c != null) {
                 if (c is BIBOTagLostException) return TagLost

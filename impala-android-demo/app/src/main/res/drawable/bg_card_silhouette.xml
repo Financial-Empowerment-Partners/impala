@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Cards empty state: a dashed card outline (the card-face corner radius). -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+    <solid android:color="@android:color/transparent" />
+    <stroke
+        android:width="2dp"
+        android:color="?attr/colorOutline"
+        android:dashWidth="8dp"
+        android:dashGap="6dp" />
+    <corners android:radius="16dp" />
+</shape>

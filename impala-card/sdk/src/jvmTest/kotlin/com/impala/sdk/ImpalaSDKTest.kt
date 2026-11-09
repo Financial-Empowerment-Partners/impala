@@ -463,6 +463,20 @@ class ImpalaSDKTest {
     }
 
     @Test
+    fun `getLastTransfer decides record-not-found by status word, not by message text`() {
+        // An exception whose message mentions 6A83 but which carries no status word is not "never sent".
+        val lying = object : BIBO {
+            override fun transceive(bytes: ByteArray?): ByteArray? = throw ImpalaCardDataException("Record not found (0x6A83)")
+            override fun close() {}
+        }
+        assertFailsWith<ImpalaCardDataException> { ImpalaSDK(lying).getLastTransfer() }
+        // Any other card refusal still propagates.
+        val mock = MockBIBO()
+        mock.respondWithSW(0x6A80)
+        assertFailsWith<ImpalaCardDataException> { ImpalaSDK(mock).getLastTransfer() }
+    }
+
+    @Test
     fun `requireCertifiedProtocol rejects 0_1 and accepts 0_2 and 1_0`() {
         fun versionBytes(major: Int, minor: Int) =
             byteArrayOf(0, major.toByte(), 0, minor.toByte(), 0, 0, 0, 0, 0, 0)

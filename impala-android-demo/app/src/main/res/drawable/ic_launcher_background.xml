@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Adaptive launcher icon background: the generated launcher_background (the
+    brand header's deep teal, colors_m3.xml) with a faint highlight. Flat
+    paths only, no gradient attributes older launchers mis-render.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="@color/launcher_background"
+        android:pathData="M0,0h108v108h-108z" />
+    <path
+        android:fillAlpha="0.06"
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M30,30m-48,0a48,48 0 1,0 96,0a48,48 0 1,0 -96,0" />
+</vector>

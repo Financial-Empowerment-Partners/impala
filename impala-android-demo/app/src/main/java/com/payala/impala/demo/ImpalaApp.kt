@@ -1,12 +1,15 @@
 package com.payala.impala.demo
 
 import android.app.Application
+import android.util.Log
 import com.google.firebase.messaging.FirebaseMessaging
 import com.payala.impala.demo.api.ApiClient
 import com.payala.impala.demo.auth.TokenManager
 import com.payala.impala.demo.log.AppLogger
 import com.payala.impala.demo.model.RegisterDeviceTokenRequest
 import com.payala.impala.card.ImpalaCardTapHandler
+import com.payala.impala.card.ImpalaLibLog
+import com.payala.impala.card.LibLogSink
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -28,6 +31,15 @@ class ImpalaApp : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        // impala-lib's log lines join the in-app Activity Log, tagged "lib.<tag>".
+        ImpalaLibLog.sink = LibLogSink { priority, tag, message ->
+            when {
+                priority >= Log.ERROR -> AppLogger.e("lib.$tag", message)
+                priority == Log.WARN -> AppLogger.w("lib.$tag", message)
+                priority == Log.INFO -> AppLogger.i("lib.$tag", message)
+                else -> AppLogger.d("lib.$tag", message)
+            }
+        }
         tokenManager = TokenManager(this)
         AppLogger.i("App", "Impala Demo v${BuildConfig.VERSION_NAME} started")
         if (tokenManager.hasValidSession()) {

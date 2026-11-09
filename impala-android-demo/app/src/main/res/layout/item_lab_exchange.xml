@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- One header-only exchange: sequence, instruction name, then Lc, status word, response length and time. -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:focusable="true"
+    android:gravity="center_vertical"
+    android:minHeight="48dp"
+    android:orientation="horizontal"
+    android:paddingStart="16dp"
+    android:paddingTop="4dp"
+    android:paddingEnd="16dp"
+    android:paddingBottom="4dp">
+
+    <TextView
+        android:id="@+id/tvSeq"
+        android:layout_width="36dp"
+        android:layout_height="wrap_content"
+        android:importantForAccessibility="no"
+        android:textAppearance="@style/TextAppearance.ImpalaDemo.MonoSmall"
+        android:textColor="?attr/colorOnSurfaceVariant"
+        tools:text="#3" />
+
+    <View
+        android:id="@+id/outcomeDot"
+        android:layout_width="8dp"
+        android:layout_height="8dp"
+        android:layout_marginEnd="10dp"
+        android:importantForAccessibility="no" />
+
+    <LinearLayout
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_weight="1"
+        android:importantForAccessibility="noHideDescendants"
+        android:orientation="vertical">
+
+        <TextView
+            android:id="@+id/tvIns"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:textAppearance="@style/TextAppearance.ImpalaDemo.Mono"
+            android:textColor="?attr/colorOnSurface"
+            tools:text="GET_PERSONALIZATION" />
+
+        <TextView
+            android:id="@+id/tvDetail"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:textAppearance="@style/TextAppearance.ImpalaDemo.MonoSmall"
+            android:textColor="?attr/colorOnSurfaceVariant"
+            tools:text="Lc 0 → 9000 OK · 159 B · 11 ms" />
+    </LinearLayout>
+</LinearLayout>

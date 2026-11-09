@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    The login progress bar's track over the brand header: the header's
+    on-colour at 30 %, so the bar reads as a bar even with animations off
+    (an indeterminate indicator then draws only its track).
+-->
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:alpha="0.3" android:color="?attr/colorOnBrandHeader" />
+</selector>

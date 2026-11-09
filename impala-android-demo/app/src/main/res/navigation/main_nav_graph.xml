@@ -18,14 +18,19 @@
         android:id="@+id/nav_settings"
         android:name="com.payala.impala.demo.ui.fragments.SettingsFragment"
         android:label="@string/nav_settings">
+        <!-- Shared-axis X in both directions, so back (and predictive back) animates too. -->
         <action
             android:id="@+id/action_settings_to_notifications"
-            app:destination="@id/nav_notification_preferences" />
+            app:destination="@id/nav_notification_preferences"
+            app:enterAnim="@anim/shared_axis_x_in"
+            app:exitAnim="@anim/shared_axis_x_out"
+            app:popEnterAnim="@anim/shared_axis_x_pop_in"
+            app:popExitAnim="@anim/shared_axis_x_pop_out" />
     </fragment>
 
     <fragment
         android:id="@+id/nav_notification_preferences"
         android:name="com.payala.impala.demo.ui.fragments.NotificationPreferencesFragment"
-        android:label="Notifications" />
+        android:label="@string/nav_notifications" />
 
 </navigation>

@@ -1,68 +1,135 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+    A card face on the Cards list. ID-1 proportions as a MINIMUM (the ratio
+    space sets the floor; content may grow it at large font scales). Fill:
+    bg_card_face (colorCardFaceStart -> colorCardFaceEnd); every text and
+    glyph uses ?attr/colorOnCardFace. Identifiers only: the full card id, the
+    applet, currency and registration date. Never the holder name or balance.
+-->
 <com.google.android.material.card.MaterialCardView xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:id="@+id/cardFace"
+    style="@style/Widget.Material3.CardView.Filled"
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
-    android:layout_marginBottom="8dp"
-    app:cardElevation="1dp">
+    android:layout_marginBottom="12dp"
+    app:cardBackgroundColor="?attr/colorCardFaceStart"
+    app:cardElevation="0dp"
+    app:shapeAppearance="@style/ShapeAppearance.ImpalaDemo.CardFace"
+    app:strokeWidth="0dp">
 
     <androidx.constraintlayout.widget.ConstraintLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:padding="@dimen/card_padding">
+        android:background="@drawable/bg_card_face"
+        android:paddingStart="20dp"
+        android:paddingTop="12dp"
+        android:paddingEnd="8dp"
+        android:paddingBottom="16dp">
+
+        <!-- The 1.586:1 floor. -->
+        <Space
+            android:id="@+id/ratioFloor"
+            android:layout_width="0dp"
+            android:layout_height="0dp"
+            app:layout_constraintDimensionRatio="H,1.586:1"
+            app:layout_constraintEnd_toEndOf="parent"
+            app:layout_constraintStart_toStartOf="parent"
+            app:layout_constraintTop_toTopOf="parent" />
+
+        <TextView
+            android:id="@+id/tvWordmark"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:importantForAccessibility="no"
+            android:letterSpacing="0.2"
+            android:text="@string/cards_face_wordmark"
+            android:textAppearance="?attr/textAppearanceTitleSmall"
+            android:textColor="?attr/colorOnCardFace"
+            android:textStyle="bold"
+            app:layout_constraintStart_toStartOf="parent"
+            app:layout_constraintTop_toTopOf="parent" />
+
+        <ImageButton
+            android:id="@+id/btnOverflow"
+            android:layout_width="@dimen/touch_target"
+            android:layout_height="@dimen/touch_target"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:src="@drawable/ic_more_vert"
+            android:tint="?attr/colorOnCardFace"
+            app:layout_constraintEnd_toEndOf="parent"
+            app:layout_constraintTop_toTopOf="parent"
+            tools:contentDescription="More actions for card ····eeff" />
 
         <ImageView
-            android:id="@+id/ivCardIcon"
-            android:layout_width="40dp"
-            android:layout_height="40dp"
-            android:src="@drawable/ic_cards"
-            app:layout_constraintStart_toStartOf="parent"
-            app:layout_constraintTop_toTopOf="parent"
-            app:tint="?colorPrimary" />
+            android:id="@+id/ivContactless"
+            android:layout_width="28dp"
+            android:layout_height="28dp"
+            android:importantForAccessibility="no"
+            android:src="@drawable/ic_contactless"
+            android:tint="?attr/colorOnCardFace"
+            app:layout_constraintBottom_toBottomOf="@id/btnOverflow"
+            app:layout_constraintEnd_toStartOf="@id/btnOverflow"
+            app:layout_constraintTop_toTopOf="@id/btnOverflow" />
 
+        <!-- The full 32-hex id, eight groups of four on two lines; wrapped, never ellipsized. -->
         <TextView
             android:id="@+id/tvCardId"
             android:layout_width="0dp"
             android:layout_height="wrap_content"
-            android:layout_marginStart="12dp"
-            android:textAppearance="?attr/textAppearanceTitleSmall"
-            app:layout_constraintEnd_toStartOf="@id/btnDelete"
-            app:layout_constraintStart_toEndOf="@id/ivCardIcon"
-            app:layout_constraintTop_toTopOf="parent" />
-
-        <TextView
-            android:id="@+id/tvPubkeyFingerprint"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_marginStart="12dp"
-            android:fontFamily="monospace"
-            android:textAppearance="?attr/textAppearanceBodySmall"
-            android:textColor="?colorOnSurfaceVariant"
-            app:layout_constraintEnd_toStartOf="@id/btnDelete"
-            app:layout_constraintStart_toEndOf="@id/ivCardIcon"
-            app:layout_constraintTop_toBottomOf="@id/tvCardId" />
-
-        <TextView
-            android:id="@+id/tvDate"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_marginStart="12dp"
-            android:layout_marginTop="4dp"
-            android:textAppearance="?attr/textAppearanceLabelSmall"
-            android:textColor="?colorOnSurfaceVariant"
-            app:layout_constraintEnd_toStartOf="@id/btnDelete"
-            app:layout_constraintStart_toEndOf="@id/ivCardIcon"
-            app:layout_constraintTop_toBottomOf="@id/tvPubkeyFingerprint" />
-
-        <ImageButton
-            android:id="@+id/btnDelete"
-            android:layout_width="40dp"
-            android:layout_height="40dp"
-            android:background="?selectableItemBackgroundBorderless"
-            android:contentDescription="@string/dialog_delete_card_title"
-            android:src="@android:drawable/ic_menu_delete"
+            android:layout_marginTop="16dp"
+            android:layout_marginEnd="12dp"
+            android:breakStrategy="simple"
+            android:textAppearance="@style/TextAppearance.ImpalaDemo.CardNumber"
+            android:textColor="?attr/colorOnCardFace"
+            android:textIsSelectable="false"
             app:layout_constraintEnd_toEndOf="parent"
-            app:layout_constraintTop_toTopOf="parent" />
+            app:layout_constraintStart_toStartOf="parent"
+            app:layout_constraintTop_toBottomOf="@id/btnOverflow"
+            tools:text="0011 2233 4455 6677\n8899 aabb ccdd eeff" />
 
+        <LinearLayout
+            android:id="@+id/bottomGroup"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:layout_marginEnd="12dp"
+            android:orientation="vertical"
+            app:layout_constraintBottom_toBottomOf="parent"
+            app:layout_constraintEnd_toEndOf="parent"
+            app:layout_constraintStart_toStartOf="parent"
+            app:layout_constraintTop_toBottomOf="@id/tvCardId"
+            app:layout_constraintVertical_bias="1">
+
+            <com.google.android.material.chip.Chip
+                android:id="@+id/chipRegistered"
+                style="@style/Widget.ImpalaDemo.Chip.Status.Success"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/cards_chip_registered"
+                app:chipIcon="@drawable/ic_check_circle"
+                app:chipIconSize="16dp" />
+
+            <com.google.android.material.chip.Chip
+                android:id="@+id/chipMismatch"
+                style="@style/Widget.ImpalaDemo.Chip.Status.Warning"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/cards_chip_program_mismatch"
+                android:visibility="gone"
+                app:chipIcon="@drawable/ic_warning"
+                app:chipIconSize="16dp" />
+
+            <TextView
+                android:id="@+id/tvCardLine"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
+                android:textAppearance="?attr/textAppearanceBodySmall"
+                android:textColor="?attr/colorOnCardFace"
+                tools:text="applet 0.2 · XLM · registered 2026-11-09" />
+        </LinearLayout>
     </androidx.constraintlayout.widget.ConstraintLayout>
 </com.google.android.material.card.MaterialCardView>

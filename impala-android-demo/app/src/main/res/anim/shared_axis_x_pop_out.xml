@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Material shared axis X (exiting, back). The set ends on its final frame, so disabled animations show a correct static state. -->
+<set xmlns:android="http://schemas.android.com/apk/res/android"
+    android:interpolator="@android:interpolator/fast_out_slow_in"
+    android:shareInterpolator="false">
+    <translate
+        android:duration="300"
+        android:fromXDelta="0%"
+        android:interpolator="@android:interpolator/fast_out_slow_in"
+        android:toXDelta="30%" />
+    <alpha
+        android:duration="90"
+        android:fillAfter="true"
+        android:fromAlpha="1.0"
+        android:interpolator="@android:interpolator/linear"
+        android:startOffset="0"
+        android:toAlpha="0.0" />
+</set>

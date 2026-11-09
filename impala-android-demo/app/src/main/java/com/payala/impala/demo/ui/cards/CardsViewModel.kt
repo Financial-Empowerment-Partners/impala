@@ -14,11 +14,14 @@ import com.payala.impala.demo.log.AppLogger
 import com.payala.impala.demo.model.CreateCardRequest
 import com.payala.impala.demo.model.DeleteCardRequest
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
 import retrofit2.HttpException
 
 /**
  * Cards screen state: the locally recorded cards of the signed-in account,
+ * the bridge's card program ([issuer], from the public `GET /card-issuer`),
  * registration (`POST /card`) and deletion (`DELETE /card`).
  *
  * Registration is refused client-side, before anything is sent, when the card
@@ -26,10 +29,34 @@ import retrofit2.HttpException
  * personalized, or a card issued to a different account than the session's
  * (the bridge would accept the row, but `POST /auth/card` would then fail with
  * a generic 401 forever, because the card signs with its on-card account).
+ *
+ * A card issued by a different program than the bridge's (a `--test-issuer`
+ * card, say) can sign in but can never load or redeem. What happens is the
+ * caller's [ProgramMismatchPolicy], passed explicitly so the rule does not
+ * depend on the build flavour: [ProgramMismatchPolicy.WARN] asks first
+ * ([Event.ProgramMismatch], then `register(…, acknowledged = true)`),
+ * [ProgramMismatchPolicy.REFUSE] refuses ([Refusal.WRONG_PROGRAM]). When the
+ * program cannot be checked (the issuer endpoint is unreachable), WARN asks
+ * ([Event.IssuerUnknown]) and REFUSE refuses the same way (fail closed).
  */
 class CardsViewModel : ViewModel() {
 
-    enum class Refusal { WRONG_VERSION, NOT_PERSONALIZED, ACCOUNT_MISMATCH, NO_SESSION }
+    enum class Refusal { WRONG_VERSION, NOT_PERSONALIZED, ACCOUNT_MISMATCH, NO_SESSION, WRONG_PROGRAM }
+
+    /** What to do when the card's program differs from the bridge's. */
+    enum class ProgramMismatchPolicy { WARN, REFUSE }
+
+    /** The bridge's card program, as far as this screen knows. */
+    sealed class IssuerState {
+        /** Not fetched yet. */
+        object Unknown : IssuerState()
+        /** `configured: false`, or the endpoint does not exist (404): the bridge has no card program. */
+        object Unconfigured : IssuerState()
+        /** The bridge's program id and issuer public key (public values). */
+        class Known(val programIdHex: String?, val publicKeyHex: String?) : IssuerState()
+        /** The endpoint could not be reached (network, 5xx): nothing can be concluded. */
+        object Unreachable : IssuerState()
+    }
 
     sealed class Event {
         data class Registered(val card: StoredCard) : Event()
@@ -39,6 +66,10 @@ class CardsViewModel : ViewModel() {
         data class Failed(val message: String) : Event()
         data class Deleted(val cardId: String) : Event()
         data class DeleteFailed(val cardId: String, val message: String) : Event()
+        /** WARN policy: the card's program differs from the bridge's; nothing was posted. Confirm with `acknowledged = true`. */
+        class ProgramMismatch(val identity: CardIdentity, val bridgeProgramIdHex: String) : Event()
+        /** The bridge's program could not be checked; nothing was posted. [canAcknowledge] under the WARN policy only. */
+        class IssuerUnknown(val identity: CardIdentity, val canAcknowledge: Boolean) : Event()
     }
 
     private val _cards = MutableLiveData<List<StoredCard>>(emptyList())
@@ -47,11 +78,58 @@ class CardsViewModel : ViewModel() {
     private val _events = MutableLiveData<Event?>()
     val events: LiveData<Event?> = _events
 
+    private val _issuer = MutableLiveData<IssuerState>(IssuerState.Unknown)
+    val issuer: LiveData<IssuerState> = _issuer
+
+    private var issuerFetch: Deferred<IssuerState>? = null
+
     fun load(store: CardStore, accountId: String?) {
         _cards.value = if (accountId == null) emptyList() else store.list(accountId)
     }
 
-    fun register(api: BridgeApiService, store: CardStore, sessionAccountId: String?, identity: CardIdentity) {
+    /** Starts the issuer fetch unless one is known or running (an Unreachable result is retried). */
+    fun loadIssuer(api: BridgeApiService) {
+        viewModelScope.launch { awaitIssuer(api) }
+    }
+
+    /** The issuer state, fetching it first when it is Unknown or Unreachable. Concurrent callers share one fetch. */
+    suspend fun awaitIssuer(api: BridgeApiService): IssuerState {
+        val known = _issuer.value
+        if (known is IssuerState.Known || known is IssuerState.Unconfigured) return known
+        val fetch = issuerFetch?.takeIf { it.isActive } ?: viewModelScope.async { fetchIssuer(api) }.also { issuerFetch = it }
+        val state = fetch.await()
+        _issuer.value = state
+        return state
+    }
+
+    private suspend fun fetchIssuer(api: BridgeApiService): IssuerState = try {
+        val info = api.cardIssuer()
+        if (info.configured == false || info.public_key_hex.isNullOrBlank()) IssuerState.Unconfigured
+        else IssuerState.Known(info.program_id_hex?.takeIf { it.isNotBlank() }, info.public_key_hex)
+    } catch (e: CancellationException) {
+        throw e
+    } catch (e: HttpException) {
+        if (e.code() == 404) IssuerState.Unconfigured else IssuerState.Unreachable.also {
+            AppLogger.w("Cards", "Card issuer unreachable: HTTP ${e.code()}")
+        }
+    } catch (e: Exception) {
+        AppLogger.w("Cards", "Card issuer unreachable: ${e.javaClass.simpleName}")
+        IssuerState.Unreachable
+    }
+
+    /**
+     * Registers [identity] for [sessionAccountId] after the client-side checks
+     * and the program check (which awaits the issuer fetch). [acknowledged]:
+     * the user confirmed "Register anyway?" (honoured under WARN only).
+     */
+    fun register(
+        api: BridgeApiService,
+        store: CardStore,
+        sessionAccountId: String?,
+        identity: CardIdentity,
+        programMismatchPolicy: ProgramMismatchPolicy,
+        acknowledged: Boolean = false
+    ) {
         val refusal = checkRegistrable(identity, sessionAccountId)
         if (refusal != null) {
             AppLogger.w("Cards", "Registration refused client-side: $refusal")
@@ -60,29 +138,60 @@ class CardsViewModel : ViewModel() {
         }
         val accountId = sessionAccountId!!
         viewModelScope.launch {
-            try {
-                val response = api.createCard(
-                    CreateCardRequest(account_id = accountId, card_id = identity.wireCardId, ec_pubkey = identity.pubKeyHex)
-                )
-                if (response.success) {
-                    val card = StoredCard.from(identity)
-                    store.save(accountId, card)
-                    _cards.value = store.list(accountId)
-                    AppLogger.i("Cards", "Card registered: ${identity.wireCardId}")
-                    _events.value = Event.Registered(card)
-                } else {
-                    _events.value = Event.BridgeRefused(response.message)
+            val warn = programMismatchPolicy == ProgramMismatchPolicy.WARN
+            when (val issuer = awaitIssuer(api)) {
+                is IssuerState.Known -> {
+                    val bridgeProgram = issuer.programIdHex
+                    if (bridgeProgram != null && !sameProgram(identity.programIdHex, bridgeProgram)) {
+                        when {
+                            !warn -> {
+                                AppLogger.w("Cards", "Registration refused: card program differs from the bridge's")
+                                _events.value = Event.Refused(Refusal.WRONG_PROGRAM)
+                                return@launch
+                            }
+                            !acknowledged -> {
+                                _events.value = Event.ProgramMismatch(identity, bridgeProgram)
+                                return@launch
+                            }
+                            else -> AppLogger.i("Cards", "Registering a card of another program (acknowledged)")
+                        }
+                    }
                 }
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: HttpException) {
-                val message = BridgeErrors.parse(e)?.message ?: "HTTP ${e.code()}"
-                AppLogger.w("Cards", "Card registration refused by the bridge: HTTP ${e.code()}")
-                _events.value = if (e.code() == 400 || e.code() == 409) Event.BridgeRefused(message) else Event.Failed(message)
-            } catch (e: Exception) {
-                AppLogger.e("Cards", "Card registration failed: ${e.javaClass.simpleName}")
-                _events.value = Event.Failed(e.message ?: e.javaClass.simpleName)
+                IssuerState.Unreachable, IssuerState.Unknown -> {
+                    if (!warn || !acknowledged) {
+                        _events.value = Event.IssuerUnknown(identity, canAcknowledge = warn)
+                        return@launch
+                    }
+                }
+                IssuerState.Unconfigured -> Unit
             }
+            post(api, store, accountId, identity)
+        }
+    }
+
+    private suspend fun post(api: BridgeApiService, store: CardStore, accountId: String, identity: CardIdentity) {
+        try {
+            val response = api.createCard(
+                CreateCardRequest(account_id = accountId, card_id = identity.wireCardId, ec_pubkey = identity.pubKeyHex)
+            )
+            if (response.success) {
+                val card = StoredCard.from(identity)
+                store.save(accountId, card)
+                _cards.value = store.list(accountId)
+                AppLogger.i("Cards", "Card registered: ${identity.wireCardId}")
+                _events.value = Event.Registered(card)
+            } else {
+                _events.value = Event.BridgeRefused(response.message)
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: HttpException) {
+            val message = BridgeErrors.parse(e)?.message ?: "HTTP ${e.code()}"
+            AppLogger.w("Cards", "Card registration refused by the bridge: HTTP ${e.code()}")
+            _events.value = if (e.code() == 400 || e.code() == 409) Event.BridgeRefused(message) else Event.Failed(message)
+        } catch (e: Exception) {
+            AppLogger.e("Cards", "Card registration failed: ${e.javaClass.simpleName}")
+            _events.value = Event.Failed(e.message ?: e.javaClass.simpleName)
         }
     }
 
@@ -121,5 +230,8 @@ class CardsViewModel : ViewModel() {
             if (!UuidBytes.same(identity.accountUuid, sessionAccountId)) return Refusal.ACCOUNT_MISMATCH
             return null
         }
+
+        /** Program ids compare as hex, ignoring case. */
+        fun sameProgram(a: String, b: String): Boolean = a.equals(b, ignoreCase = true)
     }
 }

@@ -42,21 +42,7 @@ object ApiClient {
                 return service!!
             }
 
-            val logging = HttpLoggingInterceptor { message ->
-                // Redact Authorization header values in logs
-                val redacted = if (message.startsWith("Authorization:")) {
-                    "Authorization: [REDACTED]"
-                } else {
-                    message
-                }
-                HttpLoggingInterceptor.Logger.DEFAULT.log(redacted)
-            }.apply {
-                level = if (BuildConfig.DEBUG) {
-                    HttpLoggingInterceptor.Level.HEADERS
-                } else {
-                    HttpLoggingInterceptor.Level.NONE
-                }
-            }
+            val logging = buildLoggingInterceptor(BuildConfig.DEBUG)
 
             // Refreshes the temporal token via POST /token using the current
             // service instance (resolved lazily, only on refresh, so there is
@@ -91,6 +77,28 @@ object ApiClient {
             currentBaseUrl = normalizedUrl
             return service!!
         }
+    }
+
+    /** Headers whose values never reach a log line (OkHttp prints them as "██"). */
+    internal val REDACTED_HEADERS = listOf("Authorization", "Proxy-Authorization", "Cookie", "Set-Cookie")
+
+    /** Query parameters whose values never reach a log line (account identifiers). */
+    internal val REDACTED_QUERY_PARAMS = listOf("account_id", "stellar_account_id")
+
+    /**
+     * The HTTP logging policy, pinned by HttpLoggingPolicyTest: request and
+     * response HEADERS in debug builds only (never BODY: bodies carry
+     * passwords, refresh tokens, card signatures and challenges), nothing in
+     * release, credentials and session headers redacted, and account ids
+     * redacted from logged URLs.
+     */
+    internal fun buildLoggingInterceptor(
+        debug: Boolean,
+        sink: HttpLoggingInterceptor.Logger = HttpLoggingInterceptor.Logger.DEFAULT
+    ): HttpLoggingInterceptor = HttpLoggingInterceptor(sink).apply {
+        level = if (debug) HttpLoggingInterceptor.Level.HEADERS else HttpLoggingInterceptor.Level.NONE
+        REDACTED_HEADERS.forEach(::redactHeader)
+        redactQueryParams(*REDACTED_QUERY_PARAMS.toTypedArray())
     }
 
     /** Discards the cached service instance, forcing re-creation on next call. */

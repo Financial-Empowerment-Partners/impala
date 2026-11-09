@@ -21,6 +21,8 @@ object CardErrorMessages {
         "card_error_wrong_protocol_version" -> R.string.card_error_wrong_protocol_version
         "card_error_tag_lost" -> R.string.card_error_tag_lost
         "card_error_invalid_request" -> R.string.card_error_invalid_request
+        "card_error_applet_not_found" -> R.string.card_error_applet_not_found
+        "card_error_read_only_refused" -> R.string.card_error_read_only_refused
         else -> R.string.card_error_other
     }
 
@@ -35,6 +37,7 @@ object CardErrorMessages {
             is CardError.WrongPin -> context.getString(resId(error.userMessageKey), error.triesLeft)
             is CardError.WrongProtocolVersion -> context.getString(resId(error.userMessageKey), error.found)
             is CardError.InvalidRequest -> context.getString(resId(error.userMessageKey), error.reason)
+            is CardError.ReadOnlyRefused -> context.getString(resId(error.userMessageKey), error.command)
             else -> context.getString(resId(error.userMessageKey))
         }
         val sw = error.statusWordHex

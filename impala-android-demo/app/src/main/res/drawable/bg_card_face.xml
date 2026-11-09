@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    The Cards list card face: a gradient inside the primary-container tone
+    band (colorCardFaceStart -> colorCardFaceEnd). Text on it uses
+    ?attr/colorOnCardFace, which ThemeGeneratorTest pins at >= 4.5:1 against
+    both stops in both modes.
+-->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+    <corners android:radius="16dp" />
+    <gradient
+        android:angle="315"
+        android:endColor="?attr/colorCardFaceEnd"
+        android:startColor="?attr/colorCardFaceStart"
+        android:type="linear" />
+</shape>

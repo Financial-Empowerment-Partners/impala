@@ -51,8 +51,13 @@ android {
 
             buildConfigField("String", "STELLAR_NETWORK", "\"testnet\"")
             // Applet-instance AID of the testnet CAP (impala-card/applet/build.xml applet.aid.app).
-            buildConfigField("String", "CARD_APPLET_AID",
-                "\"${localProperties.getProperty("TESTNET_CARD_APPLET_AID", "01020304050607080102")}\"")
+            val cardAppletAid = localProperties.getProperty("TESTNET_CARD_APPLET_AID", "01020304050607080102")
+            buildConfigField("String", "CARD_APPLET_AID", "\"$cardAppletAid\"")
+            // The same AID as a string resource for the manifest meta-data that
+            // impala-lib's NfcContactActivity reads (android:resource, so AAPT2
+            // never types the 20-digit hex as a float). ManifestTest pins
+            // resource == BuildConfig.CARD_APPLET_AID in both flavours.
+            resValue("string", "impala_card_applet_aid", cardAppletAid)
             buildConfigField("String", "BRIDGE_BASE_URL",
                 "\"${localProperties.getProperty("TESTNET_BRIDGE_BASE_URL", "http://10.0.2.2:8080")}\"")
             buildConfigField("String", "GITHUB_CLIENT_ID",
@@ -76,8 +81,10 @@ android {
             buildConfigField("String", "STELLAR_NETWORK", "\"pubnet\"")
             // Live CAP instance AID (CI variable IMPALA_CARD_LIVE_AID_APP). Empty means
             // no SELECT: the card's default-selected applet answers.
-            buildConfigField("String", "CARD_APPLET_AID",
-                "\"${localProperties.getProperty("LIVE_CARD_APPLET_AID", "")}\"")
+            val cardAppletAid = localProperties.getProperty("LIVE_CARD_APPLET_AID", "")
+            buildConfigField("String", "CARD_APPLET_AID", "\"$cardAppletAid\"")
+            // See the tnet block: the manifest meta-data reads this resource.
+            resValue("string", "impala_card_applet_aid", cardAppletAid)
             buildConfigField("String", "BRIDGE_BASE_URL",
                 "\"${localProperties.getProperty("LIVE_BRIDGE_BASE_URL", "https://api.impala.example.com")}\"")
             buildConfigField("String", "GITHUB_CLIENT_ID",
@@ -115,6 +122,8 @@ android {
     buildFeatures {
         viewBinding = true
         buildConfig = true
+        // AGP 9 defaults resValues off; the per-flavour impala_card_applet_aid needs it.
+        resValues = true
     }
 
     compileOptions {
@@ -225,6 +234,14 @@ dependencies {
 // where they skip.
 val e2eRequested = gradle.startParameter.taskNames.any { it.substringAfterLast(':') == "e2eTnetDebug" }
 tasks.withType<Test>().configureEach {
+    // ThemeGeneratorTest regenerates res/values{,-night}/{colors_m3,themes_roles}.xml
+    // from the brand seed when IMPALA_THEME_WRITE=1 (otherwise it asserts the
+    // committed files are byte-equal to the generator output). Forwarded
+    // explicitly so the switch reaches the test JVM, and never cached.
+    System.getenv("IMPALA_THEME_WRITE")?.let { value ->
+        environment("IMPALA_THEME_WRITE", value)
+        outputs.upToDateWhen { false }
+    }
     if (e2eRequested && name == "testTnetDebugUnitTest") {
         filter.includeTestsMatching("com.payala.impala.demo.e2e.*")
         outputs.upToDateWhen { false }

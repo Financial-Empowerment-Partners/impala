@@ -52,7 +52,7 @@ open class ImpalaException : BIBOException {
         /**
          * Maps a 2-byte status word to the appropriate ImpalaException subclass.
          * Every row of the status-word table in `docs/apdu.md` has an arm here
-         * (pinned by `ExceptionMappingTest`); the message always carries the hex
+         * (pinned by `ExceptionMappingTest` and `ApduNamesDocTest`); the message always carries the hex
          * status word so callers can match on it.
          *
          * @param sw the status word from the card response (e.g. 0x9000, 0x69C3)
@@ -125,6 +125,8 @@ open class ImpalaException : BIBOException {
                 // Set failures
                 0x6C01 -> ImpalaCardDataException("Set account ID failed (0x6C01)")
                 0x6C02 -> ImpalaCardDataException("Set balance failed (0x6C02)")
+                0x6C03 -> ImpalaCardDataException("Full name too long (0x6C03)")
+                0x6C04 -> ImpalaCardDataException("Gender too long (0x6C04)")
 
                 // Already initialized / key already set
                 0x6685 -> ImpalaSecurityException("Public key already set (0x6685)")

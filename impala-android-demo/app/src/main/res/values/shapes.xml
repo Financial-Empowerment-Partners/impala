@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Shapes: Material 3 defaults everywhere except the card face. -->
+<resources>
+    <!-- The Cards list card face (ID-1 proportions, 16 dp corners). -->
+    <style name="ShapeAppearance.ImpalaDemo.CardFace" parent="ShapeAppearance.Material3.Corner.Large">
+        <item name="cornerFamily">rounded</item>
+        <item name="cornerSize">16dp</item>
+    </style>
+
+    <!-- Status chips. -->
+    <style name="ShapeAppearance.ImpalaDemo.Chip" parent="ShapeAppearance.Material3.Corner.Small" />
+
+    <!-- Circular avatar in Settings. -->
+    <style name="ShapeAppearance.ImpalaDemo.Circle" parent="">
+        <item name="cornerFamily">rounded</item>
+        <item name="cornerSize">50%</item>
+    </style>
+</resources>

@@ -39,8 +39,8 @@ public class GeoUpdateReceiver extends BroadcastReceiver {
             Location location =
                     IntentCompat.getParcelableExtra(intent, EXTRA_LOCATION, Location.class);
             if (location != null) {
-                Log.d(TAG, "Location update: lat=" + location.getLatitude()
-                        + ", lon=" + location.getLongitude());
+                // Never log the coordinates: the app's log is exportable.
+                Log.d(TAG, "Location update received");
                 ImpalaGeoHandler.handle_geo_update(context, location);
             } else {
                 Log.w(TAG, "Received null location update");

@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- A Card Lab row: either a group header (tvHeader) or a labelled value with an optional copy button. -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="vertical">
+
+    <TextView
+        android:id="@+id/tvHeader"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:accessibilityHeading="true"
+        android:paddingStart="16dp"
+        android:paddingTop="20dp"
+        android:paddingEnd="16dp"
+        android:paddingBottom="4dp"
+        android:textAppearance="@style/TextAppearance.ImpalaDemo.SectionTitle"
+        android:visibility="gone"
+        tools:targetApi="p"
+        tools:text="Identity" />
+
+    <LinearLayout
+        android:id="@+id/rowBody"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:gravity="center_vertical"
+        android:minHeight="48dp"
+        android:orientation="horizontal"
+        android:paddingStart="16dp"
+        android:paddingEnd="4dp">
+
+        <LinearLayout
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:orientation="vertical"
+            android:paddingTop="6dp"
+            android:paddingBottom="6dp">
+
+            <TextView
+                android:id="@+id/tvLabel"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:textAppearance="@style/TextAppearance.ImpalaDemo.Overline"
+                tools:text="Card ID" />
+
+            <TextView
+                android:id="@+id/tvValue"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="2dp"
+                android:breakStrategy="simple"
+                android:hyphenationFrequency="none"
+                android:textAppearance="@style/TextAppearance.ImpalaDemo.MonoSmall"
+                android:textColor="?attr/colorOnSurface"
+                tools:text="8d7d0a6c41e24f0f9a2b7f1e3c5d9a10" />
+        </LinearLayout>
+
+        <ImageButton
+            android:id="@+id/btnCopy"
+            android:layout_width="48dp"
+            android:layout_height="48dp"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:scaleType="center"
+            android:src="@drawable/ic_content_copy"
+            android:tint="?attr/colorOnSurfaceVariant"
+            android:visibility="gone"
+            tools:ignore="UseAppTint"
+            tools:visibility="visible" />
+    </LinearLayout>
+</LinearLayout>

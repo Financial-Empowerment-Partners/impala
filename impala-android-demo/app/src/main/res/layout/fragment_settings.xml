@@ -1,220 +1,358 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+    Settings. The account id is shown once (tvPayalaId); the avatar shows the
+    display name's initial, or a person glyph when there is none. The bridge
+    URL is a read-only row (it is fixed at build time). Log Out asks first.
+-->
 <androidx.core.widget.NestedScrollView xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:id="@+id/scrollSettings"
     android:layout_width="match_parent"
-    android:layout_height="match_parent">
+    android:layout_height="match_parent"
+    android:clipToPadding="false">
 
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:orientation="vertical"
-        android:padding="@dimen/section_spacing">
+        android:paddingStart="@dimen/section_spacing"
+        android:paddingTop="@dimen/section_spacing"
+        android:paddingEnd="@dimen/section_spacing"
+        android:paddingBottom="@dimen/settings_bottom_padding">
 
-        <!-- Account Info -->
+        <!-- Account -->
         <com.google.android.material.card.MaterialCardView
+            style="@style/Widget.ImpalaDemo.Card.Group"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginBottom="@dimen/section_spacing"
-            app:cardElevation="1dp">
+            android:layout_marginBottom="@dimen/section_spacing">
 
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:orientation="vertical"
+                android:gravity="center_vertical"
+                android:orientation="horizontal"
                 android:padding="@dimen/card_padding">
 
-                <TextView
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="@string/section_account"
-                    android:textAppearance="?attr/textAppearanceTitleMedium"
-                    android:textColor="?colorPrimary" />
+                <com.google.android.material.card.MaterialCardView
+                    android:id="@+id/avatar"
+                    style="@style/Widget.Material3.CardView.Filled"
+                    android:layout_width="@dimen/avatar_size"
+                    android:layout_height="@dimen/avatar_size"
+                    android:importantForAccessibility="no"
+                    app:cardBackgroundColor="?attr/colorPrimaryContainer"
+                    app:shapeAppearance="@style/ShapeAppearance.ImpalaDemo.Circle">
 
-                <TextView
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="12dp"
-                    android:text="@string/label_name"
-                    android:textAppearance="?attr/textAppearanceLabelSmall"
-                    android:textColor="?colorOnSurfaceVariant" />
+                    <ImageView
+                        android:id="@+id/ivAvatarGlyph"
+                        android:layout_width="24dp"
+                        android:layout_height="24dp"
+                        android:layout_gravity="center"
+                        android:importantForAccessibility="no"
+                        android:src="@drawable/ic_person"
+                        android:tint="?attr/colorOnPrimaryContainer" />
 
-                <TextView
-                    android:id="@+id/tvAccountName"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="@string/not_available"
-                    android:textAppearance="?attr/textAppearanceBodyLarge" />
+                    <TextView
+                        android:id="@+id/tvAvatarInitial"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_gravity="center"
+                        android:importantForAccessibility="no"
+                        android:textAppearance="?attr/textAppearanceTitleLarge"
+                        android:textColor="?attr/colorOnPrimaryContainer"
+                        android:visibility="gone" />
+                </com.google.android.material.card.MaterialCardView>
 
-                <TextView
-                    android:layout_width="wrap_content"
+                <LinearLayout
+                    android:layout_width="0dp"
                     android:layout_height="wrap_content"
-                    android:layout_marginTop="8dp"
-                    android:text="@string/label_payala_id"
-                    android:textAppearance="?attr/textAppearanceLabelSmall"
-                    android:textColor="?colorOnSurfaceVariant" />
+                    android:layout_marginStart="16dp"
+                    android:layout_weight="1"
+                    android:orientation="vertical">
 
-                <TextView
-                    android:id="@+id/tvPayalaId"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="@string/not_available"
-                    android:textAppearance="?attr/textAppearanceBodyMedium"
-                    android:fontFamily="monospace" />
+                    <TextView
+                        android:id="@+id/tvAccountName"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginBottom="4dp"
+                        android:textAppearance="?attr/textAppearanceTitleMedium"
+                        android:textColor="?attr/colorOnSurface"
+                        android:visibility="gone" />
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="@string/label_payala_id"
+                        android:textAppearance="@style/TextAppearance.ImpalaDemo.Overline" />
+
+                    <TextView
+                        android:id="@+id/tvPayalaId"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:background="?attr/selectableItemBackground"
+                        android:breakStrategy="simple"
+                        android:hyphenationFrequency="none"
+                        android:text="@string/not_available"
+                        android:textAppearance="@style/TextAppearance.ImpalaDemo.MonoSmall"
+                        android:textColor="?attr/colorOnSurface" />
+                </LinearLayout>
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
 
         <!-- MFA -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="4dp"
+            android:layout_marginBottom="8dp"
+            android:accessibilityHeading="true"
+            android:text="@string/section_mfa"
+            android:textAppearance="@style/TextAppearance.ImpalaDemo.SectionTitle" />
+
         <com.google.android.material.card.MaterialCardView
+            style="@style/Widget.ImpalaDemo.Card.Group"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginBottom="@dimen/section_spacing"
-            app:cardElevation="1dp">
+            android:layout_marginBottom="@dimen/section_spacing">
 
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:orientation="vertical"
+                android:gravity="center_vertical"
+                android:orientation="horizontal"
                 android:padding="@dimen/card_padding">
 
-                <TextView
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="@string/section_mfa"
-                    android:textAppearance="?attr/textAppearanceTitleMedium"
-                    android:textColor="?colorPrimary" />
+                <ImageView
+                    android:layout_width="24dp"
+                    android:layout_height="24dp"
+                    android:importantForAccessibility="no"
+                    android:src="@drawable/ic_shield"
+                    android:tint="?attr/colorOnSurfaceVariant" />
 
                 <TextView
                     android:id="@+id/tvMfaStatus"
-                    android:layout_width="wrap_content"
+                    android:layout_width="0dp"
                     android:layout_height="wrap_content"
-                    android:layout_marginTop="8dp"
+                    android:layout_marginStart="16dp"
+                    android:layout_weight="1"
                     android:text="@string/mfa_not_enrolled"
-                    android:textAppearance="?attr/textAppearanceBodyMedium" />
+                    android:textAppearance="?attr/textAppearanceBodyLarge"
+                    android:textColor="?attr/colorOnSurface" />
 
                 <com.google.android.material.button.MaterialButton
                     android:id="@+id/btnManageMfa"
                     style="@style/Widget.Material3.Button.TonalButton"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:layout_marginTop="8dp"
+                    android:layout_marginStart="8dp"
                     android:text="@string/btn_manage_mfa" />
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
 
         <!-- Notifications -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="4dp"
+            android:layout_marginBottom="8dp"
+            android:accessibilityHeading="true"
+            android:text="@string/settings_section_notifications"
+            android:textAppearance="@style/TextAppearance.ImpalaDemo.SectionTitle" />
+
         <com.google.android.material.card.MaterialCardView
+            style="@style/Widget.ImpalaDemo.Card.Group"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginBottom="@dimen/section_spacing"
-            app:cardElevation="1dp">
+            android:layout_marginBottom="@dimen/section_spacing">
 
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:orientation="vertical"
+                android:gravity="center_vertical"
+                android:orientation="horizontal"
                 android:padding="@dimen/card_padding">
 
-                <TextView
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="Notifications"
-                    android:textAppearance="?attr/textAppearanceTitleMedium"
-                    android:textColor="?colorPrimary" />
+                <ImageView
+                    android:layout_width="24dp"
+                    android:layout_height="24dp"
+                    android:importantForAccessibility="no"
+                    android:src="@drawable/ic_notifications"
+                    android:tint="?attr/colorOnSurfaceVariant" />
 
                 <TextView
                     android:id="@+id/tvNotificationStatus"
-                    android:layout_width="wrap_content"
+                    android:layout_width="0dp"
                     android:layout_height="wrap_content"
-                    android:layout_marginTop="8dp"
-                    android:text="Loading..."
-                    android:textAppearance="?attr/textAppearanceBodyMedium" />
+                    android:layout_marginStart="16dp"
+                    android:layout_weight="1"
+                    android:text="@string/settings_notifications_loading"
+                    android:textAppearance="?attr/textAppearanceBodyLarge"
+                    android:textColor="?attr/colorOnSurface" />
 
                 <com.google.android.material.button.MaterialButton
                     android:id="@+id/btnManageNotifications"
                     style="@style/Widget.Material3.Button.TonalButton"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:layout_marginTop="8dp"
-                    android:text="Manage Notifications" />
+                    android:layout_marginStart="8dp"
+                    android:text="@string/settings_manage_notifications" />
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
 
-        <!-- Server -->
+        <!-- Server (read-only: fixed at build time) -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="4dp"
+            android:layout_marginBottom="8dp"
+            android:accessibilityHeading="true"
+            android:text="@string/section_server"
+            android:textAppearance="@style/TextAppearance.ImpalaDemo.SectionTitle" />
+
         <com.google.android.material.card.MaterialCardView
+            style="@style/Widget.ImpalaDemo.Card.Group"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginBottom="@dimen/section_spacing"
-            app:cardElevation="1dp">
+            android:layout_marginBottom="@dimen/section_spacing">
 
             <LinearLayout
+                android:id="@+id/rowServer"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:orientation="vertical"
+                android:focusable="true"
+                android:gravity="center_vertical"
+                android:orientation="horizontal"
                 android:padding="@dimen/card_padding">
 
-                <TextView
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="@string/section_server"
-                    android:textAppearance="?attr/textAppearanceTitleMedium"
-                    android:textColor="?colorPrimary" />
+                <ImageView
+                    android:layout_width="24dp"
+                    android:layout_height="24dp"
+                    android:importantForAccessibility="no"
+                    android:src="@drawable/ic_dns"
+                    android:tint="?attr/colorOnSurfaceVariant" />
 
-                <com.google.android.material.textfield.TextInputLayout
-                    android:layout_width="match_parent"
+                <LinearLayout
+                    android:layout_width="0dp"
                     android:layout_height="wrap_content"
-                    android:layout_marginTop="8dp"
-                    style="@style/Widget.Material3.TextInputLayout.OutlinedBox">
+                    android:layout_marginStart="16dp"
+                    android:layout_weight="1"
+                    android:orientation="vertical">
 
-                    <com.google.android.material.textfield.TextInputEditText
-                        android:id="@+id/etServerUrl"
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="@string/hint_server_url"
+                        android:textAppearance="@style/TextAppearance.ImpalaDemo.Overline" />
+
+                    <TextView
+                        android:id="@+id/tvServerUrl"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:hint="@string/hint_server_url"
-                        android:inputType="textUri"
-                        android:maxLines="1" />
-                </com.google.android.material.textfield.TextInputLayout>
+                        android:background="?attr/selectableItemBackground"
+                        android:breakStrategy="simple"
+                        android:hyphenationFrequency="none"
+                        android:text="@string/not_available"
+                        android:textAppearance="@style/TextAppearance.ImpalaDemo.Mono"
+                        android:textColor="?attr/colorOnSurface" />
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="2dp"
+                        android:text="@string/settings_server_read_only"
+                        android:textAppearance="?attr/textAppearanceBodySmall"
+                        android:textColor="?attr/colorOnSurfaceVariant" />
+                </LinearLayout>
+
+                <com.google.android.material.chip.Chip
+                    android:id="@+id/chipNetwork"
+                    style="@style/Widget.ImpalaDemo.Chip.Status"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="8dp"
+                    android:text="@string/settings_network_testnet" />
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
 
         <!-- About -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="4dp"
+            android:layout_marginBottom="8dp"
+            android:accessibilityHeading="true"
+            android:text="@string/section_about"
+            android:textAppearance="@style/TextAppearance.ImpalaDemo.SectionTitle" />
+
         <com.google.android.material.card.MaterialCardView
+            style="@style/Widget.ImpalaDemo.Card.Group"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginBottom="@dimen/section_spacing"
-            app:cardElevation="1dp">
+            android:layout_marginBottom="@dimen/section_spacing">
 
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:orientation="vertical"
+                android:orientation="horizontal"
                 android:padding="@dimen/card_padding">
 
-                <TextView
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="@string/section_about"
-                    android:textAppearance="?attr/textAppearanceTitleMedium"
-                    android:textColor="?colorPrimary" />
+                <ImageView
+                    android:layout_width="24dp"
+                    android:layout_height="24dp"
+                    android:importantForAccessibility="no"
+                    android:src="@drawable/ic_info"
+                    android:tint="?attr/colorOnSurfaceVariant" />
 
-                <TextView
-                    android:id="@+id/tvVersion"
-                    android:layout_width="wrap_content"
+                <LinearLayout
+                    android:layout_width="0dp"
                     android:layout_height="wrap_content"
-                    android:layout_marginTop="8dp"
-                    android:text="@string/not_available"
-                    android:textAppearance="?attr/textAppearanceBodyMedium" />
+                    android:layout_marginStart="16dp"
+                    android:layout_weight="1"
+                    android:orientation="vertical">
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="@string/settings_label_app"
+                        android:textAppearance="@style/TextAppearance.ImpalaDemo.Overline" />
+
+                    <TextView
+                        android:id="@+id/tvAppVersion"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="@string/not_available"
+                        android:textAppearance="?attr/textAppearanceBodyLarge"
+                        android:textColor="?attr/colorOnSurface" />
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="12dp"
+                        android:text="@string/settings_label_bridge"
+                        android:textAppearance="@style/TextAppearance.ImpalaDemo.Overline" />
+
+                    <TextView
+                        android:id="@+id/tvVersion"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="@string/not_available"
+                        android:textAppearance="?attr/textAppearanceBodyMedium"
+                        android:textColor="?attr/colorOnSurface" />
+                </LinearLayout>
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
 
-        <!-- Logout -->
+        <!-- Log Out (asks for confirmation) -->
         <com.google.android.material.button.MaterialButton
             android:id="@+id/btnLogout"
-            style="@style/Widget.Material3.Button.OutlinedButton"
+            style="@style/Widget.ImpalaDemo.Button.Destructive"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:minHeight="@dimen/touch_target"
             android:text="@string/btn_logout"
-            android:textColor="?colorError"
-            app:strokeColor="?colorError" />
+            app:icon="@drawable/ic_logout"
+            app:iconGravity="textStart" />
 
     </LinearLayout>
 </androidx.core.widget.NestedScrollView>

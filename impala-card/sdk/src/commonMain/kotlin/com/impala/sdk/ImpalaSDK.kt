@@ -9,7 +9,6 @@ import com.impala.sdk.apdu4j.CommandAPDU.Companion.decodeHexString_imp
 import com.impala.sdk.apdu4j.CommandAPDU.Companion.encodeHexString_imp
 import com.impala.sdk.apdu4j.ResponseAPDU
 import com.impala.sdk.models.CardPersonalization
-import com.impala.sdk.models.ImpalaCardDataException
 import com.impala.sdk.models.ImpalaCardUser
 import com.impala.sdk.models.ImpalaException
 import com.impala.sdk.models.ImpalaUser
@@ -445,8 +444,8 @@ class ImpalaSDK(
     fun getLastTransfer(): Pair<ByteArray, ByteArray>? {
         val resp = try {
             tx(CommandAPDU(Constants.INS_GET_LAST_TRANSFER))
-        } catch (e: ImpalaCardDataException) {
-            if (e.message?.contains("6A83") == true) return null
+        } catch (e: ImpalaException) {
+            if (e.statusWord == 0x6A83) return null
             throw e
         }
         val data = resp.data

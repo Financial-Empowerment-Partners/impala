@@ -1,0 +1,138 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Lane L3 strings: the tap sheet, the Cards face and the Transfers rows.
+    Never redefine a name from strings.xml or strings_foundation.xml (aapt2
+    rejects duplicates). Card copy says "card", never transport class names.
+-->
+<resources>
+    <!-- Tap sheet: titles per prompt -->
+    <string name="tap_title_register">Register a card</string>
+    <string name="tap_title_sign_in">Sign in with your card</string>
+    <string name="tap_title_read">Read your card</string>
+    <string name="tap_title_read_card">Read card ····%1$s</string>
+    <string name="tap_title_sign">Sign the transfer on card ····%1$s</string>
+    <string name="tap_title_apply">Apply the credit to card ····%1$s</string>
+
+    <!-- Tap sheet: Waiting -->
+    <string name="tap_hint_waiting_card">Hold card ····%1$s to the back of the device</string>
+    <string name="tap_hint_simulated">Simulated card · %1$s</string>
+    <string name="tap_hint_simulated_no_endpoint">Simulated card</string>
+
+    <!-- Tap sheet: Busy -->
+    <string name="tap_hint_keep_still">Keep the card still</string>
+    <string name="tap_hint_simulated_busy">Talking to the simulated card</string>
+    <string name="tap_step_contacting_bridge">Contacting the bridge…</string>
+    <string name="tap_slow">Still working…</string>
+    <string name="tap_closable">The operation continues; the outcome will appear in Transfers and the Activity Log.</string>
+    <string name="tap_finishing_register">Registering with the bridge…</string>
+    <string name="tap_finishing_login">Signing you in…</string>
+    <string name="tap_finishing_send">Sending the signed transfer to the bridge…</string>
+    <string name="tap_finishing_ack">Reporting the credit to the bridge…</string>
+    <string name="tap_finishing_load">Creating the load with the bridge…</string>
+    <string name="tap_finishing_check">Checking the card\'s program with the bridge…</string>
+
+    <!-- Tap sheet: Done (only after the real outcome) -->
+    <string name="tap_done_registered">Card registered</string>
+    <string name="tap_done_signed_in">Signed in</string>
+    <string name="tap_done_sent">Transfer sent to the bridge</string>
+    <string name="tap_done_loaded">Credit applied to the card</string>
+    <string name="tap_done_load_created">Load created. Fund it to continue.</string>
+    <string name="tap_done_nothing_signed">The card never signed this transfer. Nothing was debited.</string>
+    <!-- Done: the line under the title says what happens next (never the prompt again). -->
+    <string name="tap_done_detail_registered">It is listed under Cards. You can sign in with it.</string>
+    <string name="tap_done_detail_signed_in">Opening your account…</string>
+    <string name="tap_done_detail_transfers">Follow it in Transfers.</string>
+    <string name="tap_done_detail_loaded">The new balance is on the card.</string>
+    <string name="tap_done_detail_nothing_signed">You can close this.</string>
+
+    <!-- Tap sheet: Failed -->
+    <!-- Failed: the title keeps the flow it belongs to. -->
+    <string name="tap_failed_title_register">Couldn\'t register the card</string>
+    <string name="tap_failed_title_sign_in">Couldn\'t sign in with the card</string>
+    <string name="tap_failed_title_read">Couldn\'t read the card</string>
+    <string name="tap_failed_title_read_card">Couldn\'t read card ····%1$s</string>
+    <string name="tap_failed_title_sign">Couldn\'t sign on card ····%1$s</string>
+    <string name="tap_failed_title_apply">Couldn\'t apply the credit to card ····%1$s</string>
+    <string name="tap_failed_warning_title">Outcome unknown — do not repeat</string>
+    <string name="tap_sw">SW %1$s</string>
+    <string name="tap_reader_off">The card reader was not active. Try again.</string>
+    <string name="tap_simulator_missing">No simulated card is configured.</string>
+    <string name="tap_failed_unknown">The card operation failed.</string>
+
+    <!-- Tap sheet: buttons -->
+    <string name="tap_action_cancel">Cancel</string>
+    <string name="tap_action_close">Close</string>
+    <string name="tap_action_done">Done</string>
+    <string name="tap_action_try_again">Try again</string>
+    <string name="tap_action_resume">Resume</string>
+    <string name="tap_action_open_nfc_settings">Open NFC settings</string>
+    <string name="tap_glyph_description">Contactless card</string>
+
+    <!-- Cards: the card face -->
+    <string name="cards_face_wordmark">IMPALA</string>
+    <string name="cards_face_line">applet %1$s · %2$s · registered %3$s</string>
+    <string name="cards_face_description">Impala card %1$s</string>
+    <string name="cards_chip_registered">Registered</string>
+    <string name="cards_chip_program_mismatch">Not this bridge\'s program</string>
+    <string name="cards_more_actions">More actions for card ····%1$s</string>
+    <string name="cards_menu_copy_id">Copy ID</string>
+    <string name="cards_menu_inspect">Inspect in Card Lab</string>
+    <string name="cards_menu_remove">Remove</string>
+    <string name="cards_id_copied">Card ID copied</string>
+    <string name="cards_clip_label">Card ID</string>
+    <string name="cards_remove_confirm">Remove</string>
+    <string name="cards_removed">Card ····%1$s removed</string>
+    <string name="cards_remove_failed">Remove failed: %1$s</string>
+
+    <!-- Cards: program check at registration -->
+    <string name="cards_mismatch_title">A different program\'s card</string>
+    <string name="cards_mismatch_message">This card was issued by a different program than this bridge\'s (%1$s). It can sign in, but it cannot load or redeem here. Register anyway?</string>
+    <string name="cards_mismatch_register">Register anyway</string>
+    <string name="cards_not_registered">Nothing was registered.</string>
+    <string name="cards_issuer_unknown_title">Program not checked</string>
+    <string name="cards_issuer_unknown_message">The bridge\'s card issuer could not be reached, so this card\'s program was not checked. Register anyway?</string>
+    <string name="cards_issuer_unknown_refused">The bridge\'s card issuer could not be reached, so this card\'s program could not be checked. Try again when the bridge is reachable.</string>
+    <string name="card_refused_wrong_program">This card was issued by a different program than this bridge\'s. It cannot be registered here.</string>
+
+    <!-- Transfers: rows -->
+    <string name="transfer_row_title_redeem">Redeem · card ····%1$s</string>
+    <string name="transfer_row_title_load">Load · card ····%1$s</string>
+    <string name="transfer_row_amount">%1$s %2$s</string>
+    <string name="transfer_label_signing">Signing</string>
+    <string name="transfer_label_ready_to_send">Ready to send</string>
+    <string name="transfer_label_sent">Sent to bridge</string>
+    <string name="transfer_label_paid">Paid</string>
+    <string name="transfer_label_failed">Failed</string>
+    <string name="transfer_label_cancelled">Cancelled</string>
+    <string name="transfer_label_held">Held for operator</string>
+    <string name="transfer_label_outcome_unknown">Outcome unknown</string>
+    <string name="transfer_label_needs_funding">Needs funding</string>
+    <string name="transfer_label_funding">Funding…</string>
+    <string name="transfer_label_funding_unknown">Funding unknown</string>
+    <string name="transfer_label_waiting_bridge">Waiting for the bridge</string>
+    <string name="transfer_label_funded">Funded</string>
+    <string name="transfer_label_ready_to_apply">Ready to apply</string>
+    <string name="transfer_label_loaded">Loaded</string>
+    <string name="transfer_label_card_refused">Card refused</string>
+    <string name="transfer_label_needs_operator">Needs operator</string>
+    <string name="transfer_label_expired">Expired</string>
+    <string name="transfer_label_reversed">Reversed</string>
+    <string name="transfer_label_other">Status: %1$s</string>
+    <string name="transfer_row_action_send">Send</string>
+    <string name="transfer_row_action_fund">Fund</string>
+    <string name="transfer_row_action_apply">Apply</string>
+    <string name="transfer_row_action_details">Details</string>
+
+    <!-- Transfers: details dialog -->
+    <string name="transfer_details_title">Transfer details</string>
+    <string name="transfer_details_card">Card %1$s</string>
+    <string name="transfer_details_status">Status %1$s</string>
+    <string name="transfer_details_redemption">Redemption %1$s</string>
+    <string name="transfer_details_btxid">Bridge transaction %1$s</string>
+    <string name="transfer_details_reason">Reason %1$s</string>
+    <string name="transfer_details_issuance">Issuance %1$s</string>
+    <string name="transfer_details_funding">Funding %1$s</string>
+    <string name="transfer_details_sw">Card status word %1$s</string>
+    <string name="transfer_details_check_status">Check status</string>
+    <string name="transfer_details_report">Report to bridge</string>
+</resources>

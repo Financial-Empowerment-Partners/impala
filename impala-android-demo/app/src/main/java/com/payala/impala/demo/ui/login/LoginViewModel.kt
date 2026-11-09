@@ -14,6 +14,8 @@ import com.impala.sdk.flows.Hex
 import com.payala.impala.card.CardAuthenticator
 import com.payala.impala.card.ImpalaCardSession
 import com.payala.impala.demo.auth.TokenManager
+import com.payala.impala.demo.card.TapProgress
+import com.payala.impala.demo.card.TapStep
 import com.payala.impala.demo.log.AppLogger
 import com.payala.impala.demo.model.AuthenticateRequest
 import com.payala.impala.demo.model.CardAuthRequest
@@ -143,7 +145,7 @@ class LoginViewModel : ViewModel() {
         viewModelScope.launch {
             _loginState.value = LoginState.Loading
             runLogin("password", "Network error") {
-                AppLogger.i("Auth", "Password login attempt for: $accountId")
+                AppLogger.i("Auth", "Password login attempt")
                 val authResponse = api.authenticate(AuthenticateRequest(accountId, password))
                 if (!authResponse.success) {
                     AppLogger.w("Auth", "Password login failed: ${authResponse.message}")
@@ -151,7 +153,7 @@ class LoginViewModel : ViewModel() {
                     return@runLogin
                 }
 
-                AppLogger.d("Auth", "Requesting refresh token for: $accountId")
+                AppLogger.d("Auth", "Requesting refresh token")
                 val tokenResponse = api.token(TokenRequest(username = accountId, password = password))
                 if (!tokenResponse.success || tokenResponse.refresh_token == null) {
                     AppLogger.w("Auth", "Token request failed: ${tokenResponse.message}")
@@ -184,7 +186,8 @@ class LoginViewModel : ViewModel() {
         viewModelScope.launch {
             _loginState.value = LoginState.Loading
             runLogin("google", "Google login failed") {
-                AppLogger.i("Auth", "Google login attempt for: $email")
+                // Provider only: the e-mail address is PII and never enters the log.
+                AppLogger.i("Auth", "Google login attempt")
                 val exchangeResponse = api.googleTokenExchange(GoogleTokenExchangeRequest(idToken))
                 if (!exchangeResponse.success || exchangeResponse.refresh_token == null) {
                     AppLogger.w("Auth", "Google token exchange failed: ${exchangeResponse.message}")
@@ -260,6 +263,16 @@ class LoginViewModel : ViewModel() {
     private fun endCardLogin() = cardLoginInFlight.set(false)
 
     /**
+     * The user cancelled a card login whose card half had not finished (the
+     * tap sheet's Cancel while the bridge is being contacted). Releases the
+     * card-login slot so a new tap can start, without touching [loginState];
+     * the abandoned tap's late result is ignored by the caller.
+     */
+    fun cardTapAbandoned() {
+        if (cardLoginInFlight.getAndSet(false)) AppLogger.i("Auth", "Card login abandoned by the user")
+    }
+
+    /**
      * Requests a single-use card-auth challenge from the bridge and returns it
      * as validated hex (8..64 bytes; the bridge issues 32). Invoked from the
      * reader-mode `onTap` **while the card is still connected**, so the
@@ -295,6 +308,7 @@ class LoginViewModel : ViewModel() {
      */
     fun signInWithCardTap(session: ImpalaCardSession, api: BridgeApiService): CardLoginTap {
         val identity = session.identity.requirePersonalized()
+        TapProgress.report(TapStep.CONTACTING_BRIDGE)
         val challengeHex = runBlocking {
             withTimeout(LOGIN_TIMEOUT_MS) { fetchCardChallenge(api, identity.wireCardId) }
         }
@@ -467,7 +481,8 @@ class LoginViewModel : ViewModel() {
             }
         }
 
-        AppLogger.i("Auth", "Login successful via $provider for: $accountId")
+        // No account id here: for OAuth providers it can fall back to an e-mail address.
+        AppLogger.i("Auth", "Login successful via $provider")
         _loginState.value = LoginState.Success(accountId)
     }
 

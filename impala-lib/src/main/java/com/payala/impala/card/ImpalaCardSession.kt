@@ -5,14 +5,19 @@ import android.nfc.TagLostException
 import android.nfc.tech.IsoDep
 import androidx.annotation.VisibleForTesting
 import com.impala.sdk.ImpalaSDK
+import com.impala.sdk.apdu4j.ApduExchange
+import com.impala.sdk.apdu4j.ApduExchangeHook
 import com.impala.sdk.apdu4j.BIBO
 import com.impala.sdk.apdu4j.BIBOException
+import com.impala.sdk.apdu4j.ReadOnlyBibo
+import com.impala.sdk.apdu4j.TracingBibo
 import com.impala.sdk.flows.CardError
 import com.impala.sdk.flows.CardFlowException
 import com.impala.sdk.flows.CardIdentity
 import com.payala.impala.IsoDepBibo
 import java.io.Closeable
 import java.io.IOException
+import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
@@ -23,13 +28,29 @@ import java.util.concurrent.atomic.AtomicBoolean
  * Sessions are opened off the main thread only ([open] throws
  * [IllegalStateException] on the main thread), so no caller can ANR on card
  * I/O.
+ *
+ * Optional decoration, applied to the transport **before** the SELECT so the
+ * SELECT is traced and guarded too: `trace` receives one header-only
+ * [ApduExchange] per command, and `readOnly` refuses every command outside
+ * the read-only allow-list before any byte is sent (it surfaces as
+ * [CardError.ReadOnlyRefused]). The order is `TracingBibo(ReadOnlyBibo(t))`, so
+ * a refusal shows in the trace.
  */
 class ImpalaCardSession private constructor(
     private val bibo: BIBO,
     /** The NFC tag this session was opened on (UID, tech list for diagnostics); null for injected transports. */
-    val tag: Tag? = null
+    val tag: Tag?,
+    /** Tag-layer facts read when the session opened; null for injected transports. */
+    val transport: CardTransportFacts?,
+    aidHex: String?,
+    /** True when every command outside the read-only allow-list is refused before it reaches the card. */
+    val isReadOnly: Boolean,
+    private val listeners: CopyOnWriteArrayList<ApduExchangeHook>
 ) : Closeable {
     private val closed = AtomicBoolean(false)
+
+    /** The AID this session SELECTed, or null when it relied on the card's default selection. */
+    val aidHex: String? = aidHex?.takeIf { it.isNotEmpty() }
 
     /** The SDK bound to this session's transport (no SCP03 keys: client sessions never open a secure channel). */
     val sdk: ImpalaSDK = ImpalaSDK(bibo, null)
@@ -52,6 +73,22 @@ class ImpalaCardSession private constructor(
         if (closed.compareAndSet(false, true)) bibo.close()
     }
 
+    /**
+     * Runs [block] and returns its value with the exchanges it caused. Only a
+     * traced session (a `trace` or `readOnly` one) records exchanges; on any
+     * other session the list is empty.
+     */
+    internal fun <T> recordingExchanges(block: () -> T): Pair<T, List<ApduExchange>> {
+        val seen = CopyOnWriteArrayList<ApduExchange>()
+        val hook = ApduExchangeHook { seen += it }
+        listeners += hook
+        try {
+            return block() to seen.toList()
+        } finally {
+            listeners -= hook
+        }
+    }
+
     companion object {
         /** Applet-instance AID of the testnet CAP (`applet.aid.app` in impala-card/applet/build.xml). */
         const val TESTNET_APPLET_AID = "01020304050607080102"
@@ -63,18 +100,27 @@ class ImpalaCardSession private constructor(
         const val DEFAULT_TIMEOUT_MS = 15_000
 
         /**
-         * Connects to [tag] over IsoDep and SELECTs the applet by [aidHex]
-         * (skipped when null, relying on the card's default selection).
+         * Connects to [tag] over ISO 14443-4 and SELECTs the applet by [aidHex]
+         * (skipped when null or empty, relying on the card's default selection).
          *
+         * @param trace receives one header-only exchange per command (SELECT included)
+         * @param readOnly refuse every command outside the read-only allow-list
          * @throws IllegalStateException on the main thread
-         * @throws CardFlowException ([CardError.TagLost] when the card left the field)
+         * @throws CardFlowException ([CardError.TagLost] when the card left the field,
+         *   [CardError.AppletNotFound] when no applet answers the AID)
          */
         @JvmStatic
         @JvmOverloads
-        fun open(tag: Tag, timeoutMs: Int = DEFAULT_TIMEOUT_MS, aidHex: String? = TESTNET_APPLET_AID): ImpalaCardSession {
+        fun open(
+            tag: Tag,
+            timeoutMs: Int = DEFAULT_TIMEOUT_MS,
+            aidHex: String? = TESTNET_APPLET_AID,
+            trace: ApduExchangeHook? = null,
+            readOnly: Boolean = false
+        ): ImpalaCardSession {
             requireBackgroundThread("Opening a card session")
             val isoDep = IsoDep.get(tag)
-                ?: throw CardFlowException(CardError.InvalidRequest("tag is not an ISO 14443-4 (IsoDep) card"))
+                ?: throw CardFlowException(CardError.InvalidRequest("tag is not an ISO 14443-4 card"))
             try {
                 isoDep.connect()
             } catch (e: TagLostException) {
@@ -82,7 +128,13 @@ class ImpalaCardSession private constructor(
             } catch (e: IOException) {
                 throw CardFlowException(CardError.Other(null), e)
             }
-            return withSelect(ImpalaCardSession(IsoDepBibo(isoDep, timeoutMs), tag), aidHex)
+            val transport = IsoDepBibo(isoDep, timeoutMs)
+            val facts = try {
+                CardTransportFacts.of(tag, isoDep)
+            } catch (_: Exception) {
+                null
+            }
+            return build(transport, tag, facts, aidHex, trace, readOnly)
         }
 
         /**
@@ -91,8 +143,30 @@ class ImpalaCardSession private constructor(
          */
         @JvmStatic
         @VisibleForTesting
-        fun fromBibo(bibo: BIBO, aidHex: String? = null): ImpalaCardSession =
-            withSelect(ImpalaCardSession(bibo), aidHex)
+        @JvmOverloads
+        fun fromBibo(
+            bibo: BIBO,
+            aidHex: String? = null,
+            trace: ApduExchangeHook? = null,
+            readOnly: Boolean = false
+        ): ImpalaCardSession = build(bibo, null, null, aidHex, trace, readOnly)
+
+        private fun build(
+            raw: BIBO, tag: Tag?, facts: CardTransportFacts?, aidHex: String?,
+            trace: ApduExchangeHook?, readOnly: Boolean
+        ): ImpalaCardSession {
+            val listeners = CopyOnWriteArrayList<ApduExchangeHook>()
+            var bibo: BIBO = raw
+            if (readOnly) bibo = ReadOnlyBibo(bibo)
+            if (trace != null || readOnly) {
+                bibo = TracingBibo(bibo, ApduExchangeHook { e ->
+                    // Each consumer is isolated: one failing hook never starves the others.
+                    if (trace != null) try { trace.onExchange(e) } catch (_: Throwable) {}
+                    for (l in listeners) try { l.onExchange(e) } catch (_: Throwable) {}
+                })
+            }
+            return withSelect(ImpalaCardSession(bibo, tag, facts, aidHex, readOnly, listeners), aidHex)
+        }
 
         private fun withSelect(session: ImpalaCardSession, aidHex: String?): ImpalaCardSession {
             if (!aidHex.isNullOrEmpty()) {
@@ -116,8 +190,8 @@ class ImpalaCardSession private constructor(
             } ?: throw CardFlowException(CardError.Other(null))
             val sw = if (resp.size >= 2) ((resp[resp.size - 2].toInt() and 0xFF) shl 8) or (resp[resp.size - 1].toInt() and 0xFF) else -1
             if (sw != 0x9000) {
-                // 6A82 "file not found": not an Impala card (or the other network's CAP).
-                throw CardFlowException(CardError.Other(if (sw < 0) null else sw))
+                // 6A82 / 6999: no applet under this AID (not an Impala card, or the other network's CAP).
+                throw CardFlowException(if (sw < 0) CardError.Other(null) else CardError.fromStatusWord(sw))
             }
         }
     }

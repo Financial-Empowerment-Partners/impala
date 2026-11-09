@@ -15,4 +15,6 @@
     <string name="card_error_tag_lost">The card moved away. Hold it still against the phone and tap again.</string>
     <string name="card_error_invalid_request">The request could not be sent to the card: %1$s</string>
     <string name="card_error_other">The card operation failed.</string>
+    <string name="card_error_applet_not_found">No Impala applet for this network answered. This may be a card for another network, not an Impala card, or an unsupported applet version.</string>
+    <string name="card_error_read_only_refused">Read-only session refused %1$s. Nothing was sent to the card.</string>
 </resources>

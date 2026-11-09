@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Legacy launcher icon (API 24-25, no adaptive icons): a rounded square of
+    the launcher background with the adaptive foreground on top. Insets are in
+    the 108 dp foreground's units, so the square fills about 85 % of the icon.
+    anydpi outranks impala-lib's density-bucket template icons.
+-->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item
+        android:bottom="8dp"
+        android:left="8dp"
+        android:right="8dp"
+        android:top="8dp">
+        <shape android:shape="rectangle">
+            <solid android:color="@color/launcher_background" />
+            <corners android:radius="22dp" />
+        </shape>
+    </item>
+    <item android:drawable="@drawable/ic_launcher_foreground" />
+</layer-list>

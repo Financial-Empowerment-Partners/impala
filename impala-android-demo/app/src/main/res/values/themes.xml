@@ -1,22 +1,35 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+    App themes. Colour roles live in Base.Theme.ImpalaDemo.Roles
+    (themes_roles.xml, generated in values/ and values-night/ by
+    ThemeGeneratorTest from the brand seed #00696B, SchemeTonalSpot).
+
+    Dynamic colour (wallpaper-derived palettes, DynamicColors) is deliberately
+    NOT applied: the brand keeps its seed, and the login header and card face
+    gradients are contrast-pinned against generated tones only.
+
+    This file is identical in values/ and values-night/ (ThemeWiringTest pins
+    the parity): only the parent's colour roles differ between modes.
+-->
 <resources>
-    <style name="Theme.ImpalaDemo" parent="Theme.Material3.DayNight">
-        <item name="colorPrimary">@color/md_theme_primary</item>
-        <item name="colorOnPrimary">@color/md_theme_onPrimary</item>
-        <item name="colorPrimaryContainer">@color/md_theme_primaryContainer</item>
-        <item name="colorSecondary">@color/md_theme_secondary</item>
-        <item name="colorOnSecondary">@color/md_theme_onSecondary</item>
-        <item name="colorError">@color/md_theme_error</item>
-        <item name="colorOnError">@color/md_theme_onError</item>
-        <item name="android:colorBackground">@color/md_theme_background</item>
-        <item name="colorSurface">@color/md_theme_surface</item>
-        <item name="colorOnBackground">@color/md_theme_onBackground</item>
-        <item name="colorOnSurface">@color/md_theme_onSurface</item>
-        <item name="colorOutline">@color/md_theme_outline</item>
+    <style name="Theme.ImpalaDemo" parent="Base.Theme.ImpalaDemo.Roles">
+        <item name="android:windowBackground">?android:attr/colorBackground</item>
     </style>
 
     <style name="Theme.ImpalaDemo.NoActionBar">
         <item name="windowActionBar">false</item>
         <item name="windowNoTitle">true</item>
+    </style>
+
+    <!-- The OAuth redirect activities: no content, no window, no animation. -->
+    <style name="Theme.ImpalaDemo.Translucent">
+        <item name="windowActionBar">false</item>
+        <item name="windowNoTitle">true</item>
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:windowContentOverlay">@null</item>
+        <item name="android:windowAnimationStyle">@null</item>
+        <item name="android:windowDisablePreview">true</item>
+        <item name="android:backgroundDimEnabled">false</item>
     </style>
 </resources>

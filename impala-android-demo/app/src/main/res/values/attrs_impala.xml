@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Custom colour roles of the Impala demo theme. Every attribute here is set
+    in Base.Theme.ImpalaDemo.Roles (values/ and values-night/themes_roles.xml),
+    which ThemeGeneratorTest generates from the brand seed; ThemeWiringTest
+    fails if one is declared here but not set there.
+
+    Consume them only as ?attr/...: never reference the generated
+    @color/m3_* values from a layout.
+
+    - Status families (success / warning / info): the M3 custom-colour rule,
+      harmonized toward the seed. Pending uses the tertiary roles and danger
+      uses the error roles, so they have no attributes of their own.
+    - Brand header: the login header gradient (dark primary tones in both
+      modes) and the text and icons drawn on it.
+    - Card face: the Cards list card face gradient (a primary-container band)
+      and the text drawn on it.
+-->
+<resources>
+    <attr name="colorStatusSuccess" format="color" />
+    <attr name="colorOnStatusSuccess" format="color" />
+    <attr name="colorStatusSuccessContainer" format="color" />
+    <attr name="colorOnStatusSuccessContainer" format="color" />
+
+    <attr name="colorStatusWarning" format="color" />
+    <attr name="colorOnStatusWarning" format="color" />
+    <attr name="colorStatusWarningContainer" format="color" />
+    <attr name="colorOnStatusWarningContainer" format="color" />
+
+    <attr name="colorStatusInfo" format="color" />
+    <attr name="colorOnStatusInfo" format="color" />
+    <attr name="colorStatusInfoContainer" format="color" />
+    <attr name="colorOnStatusInfoContainer" format="color" />
+
+    <attr name="colorBrandHeaderStart" format="color" />
+    <attr name="colorBrandHeaderEnd" format="color" />
+    <attr name="colorOnBrandHeader" format="color" />
+
+    <attr name="colorCardFaceStart" format="color" />
+    <attr name="colorCardFaceEnd" format="color" />
+    <attr name="colorOnCardFace" format="color" />
+</resources>

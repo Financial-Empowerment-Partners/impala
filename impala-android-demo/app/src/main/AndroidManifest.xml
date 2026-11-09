@@ -24,11 +24,25 @@
         android:theme="@style/Theme.ImpalaDemo"
         android:networkSecurityConfig="@xml/network_security_config">
 
+        <!-- The flavour's applet AID for impala-lib's NfcContactActivity (system
+             dispatch outside reader mode). android:resource, not android:value:
+             AAPT2 would type a 20-digit hex value as a float. The string comes
+             from a per-flavour resValue (app/build.gradle.kts); "" means no
+             SELECT (the card's default-selected applet answers). -->
+        <meta-data
+            android:name="com.payala.impala.CARD_APPLET_AID"
+            android:resource="@string/impala_card_applet_aid" />
+
+        <!-- Every activity declares android:exported explicitly; only the
+             launcher and the two OAuth redirect targets are exported
+             (ManifestTest pins this). -->
+
         <activity
             android:name=".ui.login.LoginActivity"
             android:exported="true"
             android:launchMode="singleTop"
-            android:theme="@style/Theme.ImpalaDemo.NoActionBar">
+            android:theme="@style/Theme.ImpalaDemo.NoActionBar"
+            android:windowSoftInputMode="adjustResize">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
@@ -69,7 +83,8 @@
         <activity
             android:name=".auth.GitHubRedirectActivity"
             android:exported="true"
-            android:launchMode="singleTask">
+            android:launchMode="singleTask"
+            android:theme="@style/Theme.ImpalaDemo.Translucent">
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
@@ -83,7 +98,8 @@
         <activity
             android:name=".auth.OktaRedirectActivity"
             android:exported="true"
-            android:launchMode="singleTask">
+            android:launchMode="singleTask"
+            android:theme="@style/Theme.ImpalaDemo.Translucent">
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />

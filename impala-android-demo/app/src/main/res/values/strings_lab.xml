@@ -1,0 +1,271 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Card Lab (ui.nfc.NfcDebugActivity) and Activity Log strings (lane L4).
+    Instruction names shown in the Lab come from the SDK at runtime; none is
+    spelled here. Write "ISO 14443-4" for the card protocol.
+-->
+<resources>
+    <!-- Tabs -->
+    <string name="lab_tab_inspector">Inspector</string>
+    <string name="lab_tab_doctor">Doctor</string>
+    <string name="lab_tab_trace">Trace</string>
+    <string name="lab_tab_device">Device</string>
+
+    <!-- Inspector: reader card -->
+    <string name="lab_reader_waiting">Hold a card to the back of the phone</string>
+    <string name="lab_reader_read_only">Read-only: the Lab never changes, signs with or unlocks the card.</string>
+    <string name="lab_reader_expected">Waiting for card %1$s</string>
+    <string name="lab_reader_reading">Reading card…</string>
+    <string name="lab_reader_hold_still">Keep the card still until the read finishes.</string>
+    <string name="lab_reader_done">Card read at %1$s</string>
+    <string name="lab_reader_again">Hold another card to read it, or check the Doctor tab.</string>
+    <string name="lab_reader_failed">The card could not be read</string>
+    <string name="lab_reader_nfc_off">NFC is off</string>
+    <string name="lab_reader_nfc_off_detail">Turn NFC on to read a card.</string>
+    <string name="lab_reader_no_nfc">This device has no NFC reader</string>
+    <string name="lab_reader_no_nfc_detail">Card facts need a phone with NFC.</string>
+    <string name="lab_reader_simulated">Simulated card available</string>
+    <string name="lab_read_simulated">Read simulated card</string>
+    <string name="lab_open_nfc_settings">Open NFC settings</string>
+
+    <!-- Inspector: groups and rows -->
+    <string name="lab_group_transport">Transport</string>
+    <string name="lab_group_applet">Applet</string>
+    <string name="lab_group_identity">Identity</string>
+    <string name="lab_group_personalization">Personalization</string>
+    <string name="lab_group_certificate">Certificate</string>
+    <string name="lab_group_counters">Counters</string>
+    <string name="lab_group_balance">Balance</string>
+    <string name="lab_group_last_transfer">Last transfer</string>
+    <string name="lab_group_steps">Read steps</string>
+    <string name="lab_row_link">Link</string>
+    <string name="lab_link_simulated">Simulated card (no radio)</string>
+    <string name="lab_row_endpoint">Simulator endpoint</string>
+    <string name="lab_row_iso">ISO 14443-4</string>
+    <string name="lab_row_uid">UID</string>
+    <string name="lab_row_techs">Technologies</string>
+    <string name="lab_row_max_transceive">Largest command</string>
+    <string name="lab_row_extended_length">Extended length</string>
+    <string name="lab_row_timeout">Command timeout</string>
+    <string name="lab_row_historical">Historical bytes</string>
+    <string name="lab_row_hi_layer">Higher-layer response</string>
+    <string name="lab_row_atqa">ATQA</string>
+    <string name="lab_row_sak">SAK</string>
+    <string name="lab_row_nfcb_app">NFC-B application data</string>
+    <string name="lab_row_nfcb_protocol">NFC-B protocol info</string>
+    <string name="lab_row_aid">AID</string>
+    <string name="lab_row_version">Applet version</string>
+    <string name="lab_row_alive">Card alive</string>
+    <string name="lab_row_card_id">Card ID</string>
+    <string name="lab_row_account">Account</string>
+    <string name="lab_row_holder">Holder name</string>
+    <string name="lab_row_card_key">Card key fingerprint</string>
+    <string name="lab_row_state">State</string>
+    <string name="lab_row_flags">Flags</string>
+    <string name="lab_row_program">Program ID</string>
+    <string name="lab_row_currency">Currency</string>
+    <string name="lab_row_issuer_key">Issuer key fingerprint</string>
+    <string name="lab_row_cert_length">Certificate</string>
+    <string name="lab_row_cert_id">cert_id</string>
+    <string name="lab_row_cert_verified">Certificate check</string>
+    <string name="lab_row_receive_counter">Receive counter</string>
+    <string name="lab_row_receive_digest">Receive digest</string>
+    <string name="lab_row_balance">Balance</string>
+    <string name="lab_row_last_transfer">Last signed transfer</string>
+    <string name="lab_row_steps">Steps</string>
+    <string name="lab_pii_hint">Sign in as this card\'s account to show</string>
+    <string name="lab_holder_blank">(blank)</string>
+    <string name="lab_minor_units">%1$s minor units %2$s</string>
+    <!-- A balance in a currency whose card scale is known: the formatted amount, then the raw minor units. -->
+    <string name="lab_amount_with_minor">%1$s %2$s · %3$s minor units</string>
+    <string name="lab_last_transfer_none">None: this card has not signed a transfer</string>
+    <string name="lab_last_transfer_value">%1$s · counter %2$d · sequence %3$s · to %4$s</string>
+    <string name="lab_cert_verified">Verified under the card\'s issuer key</string>
+    <string name="lab_cert_not_verified">Does not verify under the card\'s issuer key</string>
+    <string name="lab_steps_value">%1$d of %2$d steps succeeded</string>
+    <string name="lab_default_selection">Default selection (no SELECT)</string>
+    <string name="lab_not_read">Not read</string>
+    <string name="lab_not_checked">Not checked yet</string>
+    <string name="lab_none">None</string>
+    <string name="lab_failed">Failed</string>
+    <string name="lab_yes">Yes</string>
+    <string name="lab_no">No</string>
+    <!-- Units are joined to their number with a no-break space (no "15 / ms" wrap). -->
+    <string name="lab_bytes">%1$d\u00A0B</string>
+    <string name="lab_ms">%1$s\u00A0ms</string>
+    <string name="lab_copy_description">Copy %1$s %2$s</string>
+    <string name="lab_copied">%1$s copied</string>
+
+    <!-- Doctor -->
+    <string name="lab_doctor_intro">Is it the card, the bridge, or this phone? Read a card to run every check.</string>
+    <string name="lab_doctor_intro_nfc">Is it the card, the bridge, or this phone? Hold the card to the back of the phone to run every check.</string>
+    <string name="lab_doctor_intro_simulated">Is it the card, the bridge, or this phone? Read the simulated card to run every check.</string>
+    <string name="lab_doctor_intro_expected">Hold card %1$s to the back of the phone to run every check.</string>
+    <!-- "passed", "failed" and "skipped" do not inflect in English; the warning count does. -->
+    <string name="lab_doctor_summary">%1$d passed · %2$d failed · %3$s · %4$d skipped</string>
+    <plurals name="lab_doctor_warnings">
+        <item quantity="one">%d warning</item>
+        <item quantity="other">%d warnings</item>
+    </plurals>
+    <string name="lab_status_pass">Passed</string>
+    <string name="lab_status_fail">Failed</string>
+    <string name="lab_status_warn">Warning</string>
+    <string name="lab_status_skip">Skipped</string>
+    <string name="lab_status_info">Info</string>
+    <string name="lab_check_description">%1$s: %2$s. %3$s</string>
+    <string name="lab_doc_title_reader">Reader</string>
+    <string name="lab_doc_title_iso">ISO 14443-4 card</string>
+    <string name="lab_doc_title_applet">Applet selected</string>
+    <string name="lab_doc_title_version">Applet version 0.2 or newer</string>
+    <string name="lab_doc_title_personalized">Personalized, not terminated</string>
+    <string name="lab_doc_title_cert_card_issuer">Certificate verifies under the card\'s issuer key</string>
+    <string name="lab_doc_title_issuer">Issuer matches this bridge</string>
+    <string name="lab_doc_title_cert_bridge">Certificate verifies under this bridge\'s key</string>
+    <string name="lab_doc_title_bridge_card">Bridge knows this card</string>
+    <string name="lab_doc_title_local_record">Recorded on this phone</string>
+    <string name="lab_doc_title_account">Card account is the signed-in account</string>
+    <string name="lab_doc_title_selected">The card you chose to inspect</string>
+    <string name="lab_doc_title_field">Field quality</string>
+    <string name="lab_doc_no_card_yet">No card read yet.</string>
+    <string name="lab_doc_read_incomplete">The read stopped before this could be checked.</string>
+    <string name="lab_doc_skip_no_applet">Skipped: no Impala applet answered.</string>
+    <string name="lab_doc_no_identity">The card\'s identity could not be read.</string>
+    <string name="lab_doc_no_certificate">The card carries no certificate to check.</string>
+    <string name="lab_doc_no_session">Not signed in.</string>
+    <string name="lab_doc_session_expired">The bridge refused the session (HTTP %1$s): it may have expired. Sign in again.</string>
+    <string name="lab_doc_bridge_not_checked">The bridge has not been asked yet.</string>
+    <string name="lab_doc_bridge_unconfigured">This bridge has no card issuer configured.</string>
+    <string name="lab_doc_bridge_unreachable">Could not reach the bridge (%1$s).</string>
+    <string name="lab_doc_bridge_no_program">The bridge did not report a program ID.</string>
+    <string name="lab_doc_bridge_no_key">The bridge did not report its issuer key.</string>
+    <string name="lab_doc_reader_enabled">NFC is on.</string>
+    <string name="lab_doc_reader_simulated">Simulated card (debug build).</string>
+    <string name="lab_doc_reader_disabled">NFC is off.</string>
+    <string name="lab_doc_reader_disabled_fix">Turn NFC on in Settings, then hold the card again.</string>
+    <string name="lab_doc_reader_absent">This device has no NFC reader.</string>
+    <string name="lab_doc_iso_pass">The card speaks ISO 14443-4 (%1$s).</string>
+    <string name="lab_doc_iso_simulated">Simulated card: no radio layer to check.</string>
+    <string name="lab_doc_iso_unknown">The phone did not report the card\'s radio facts.</string>
+    <string name="lab_doc_iso_fail">This is not an ISO 14443-4 card.</string>
+    <string name="lab_doc_iso_fail_fix">Impala cards are contactless smart cards; this looks like a tag or another kind of card.</string>
+    <string name="lab_doc_applet_selected">The applet answered SELECT for %1$s.</string>
+    <string name="lab_doc_applet_default">The card\'s default applet answered (no SELECT).</string>
+    <string name="lab_doc_applet_not_found">No Impala applet for this network answered (SW %1$s).</string>
+    <string name="lab_doc_applet_not_found_fix">This may be a card for another network, not an Impala card, or an unsupported applet version.</string>
+    <string name="lab_doc_version_ok">Applet %1$s.</string>
+    <string name="lab_doc_version_old">Applet %1$s is older than 0.2.</string>
+    <string name="lab_doc_version_old_fix">Reissue the card with a current applet.</string>
+    <string name="lab_doc_personalized">State %1$s.</string>
+    <string name="lab_doc_not_personalized">State %1$s: the card has not been issued.</string>
+    <string name="lab_doc_not_personalized_fix">Issue (personalize) the card before using it.</string>
+    <string name="lab_doc_terminated">State %1$s: the card is terminated.</string>
+    <string name="lab_doc_terminated_fix">A terminated card cannot be used again; issue a new one.</string>
+    <string name="lab_doc_cert_card_ok">Checked on this phone (ECDSA P-256).</string>
+    <string name="lab_doc_cert_card_bad">The certificate does not match the card\'s key, account or program.</string>
+    <string name="lab_doc_cert_bad_fix">The card was personalized incorrectly; reissue it.</string>
+    <string name="lab_doc_issuer_match">Program %1$s.</string>
+    <string name="lab_doc_issuer_mismatch">Card program %1$s is not this bridge\'s program %2$s.</string>
+    <string name="lab_doc_issuer_mismatch_fix">A login-only card (for example one issued with a test issuer): it can sign in, but this bridge will not redeem or credit it.</string>
+    <string name="lab_doc_cert_bridge_ok">Checked on this phone against the bridge\'s public key.</string>
+    <string name="lab_doc_cert_bridge_bad">The bridge\'s key did not certify this card.</string>
+    <string name="lab_doc_bridge_card_certified">The bridge has this card and holds its certificate.</string>
+    <string name="lab_doc_bridge_card_known">The bridge has this card.</string>
+    <string name="lab_doc_bridge_card_missing">The bridge answered HTTP %1$s: the card is not registered, or the offline lane is not deployed.</string>
+    <string name="lab_doc_bridge_card_missing_fix">Register the card from the Cards tab; if it is registered, ask the operator about the offline lane.</string>
+    <string name="lab_doc_bridge_card_no_offline_record">The bridge\'s offline lane has no record of this card (HTTP %1$s); the offline lane may not be deployed.</string>
+    <string name="lab_doc_local_present">This phone registered this card for the signed-in account.</string>
+    <string name="lab_doc_local_absent">This phone has no record of registering this card.</string>
+    <string name="lab_doc_local_absent_fix">Register it from the Cards tab.</string>
+    <string name="lab_doc_account_match">The card was issued to the signed-in account.</string>
+    <string name="lab_doc_account_mismatch">The card was issued to account %1$s.</string>
+    <string name="lab_doc_account_mismatch_fix">Sign in as that account to use this card.</string>
+    <string name="lab_doc_selected_match">This is the card you chose.</string>
+    <string name="lab_doc_selected_other">This is not the card you chose (%1$s).</string>
+    <string name="lab_doc_field">%1$s commands, %2$s tag losses; slowest %3$s at %4$s ms.</string>
+    <string name="lab_doc_field_none">No card commands recorded yet.</string>
+
+    <!-- Trace -->
+    <string name="lab_trace_lab_reads">Last Lab read</string>
+    <string name="lab_trace_none">No card read yet. Headers only: no command or response bytes are ever recorded.</string>
+    <string name="lab_trace_read_subtitle">%1$s · %2$d commands · headers only</string>
+    <string name="lab_trace_production">Recent app taps (debug build)</string>
+    <string name="lab_trace_production_none">No taps recorded yet. Sign-ins, registrations and transfers appear here.</string>
+    <string name="lab_trace_production_note">Newest first; the last 20 taps, headers only.</string>
+    <string name="lab_trace_tap_title">%1$s · %2$s</string>
+    <string name="lab_trace_tap_subtitle">%1$s · %2$d commands</string>
+    <string name="lab_seq">#%1$d</string>
+    <string name="lab_exchange_detail">Lc\u00A0%1$d → %2$s · %3$d\u00A0B · %4$s\u00A0ms</string>
+    <string name="lab_stat_count">Commands</string>
+    <string name="lab_stat_total">Total</string>
+    <string name="lab_stat_avg">Average</string>
+    <string name="lab_stat_max">Slowest</string>
+    <string name="lab_stat_tag_losses">Tag losses</string>
+    <string name="lab_stat_refused">Refused</string>
+    <string name="lab_stat_transport">Transport</string>
+    <string name="lab_stat_card_errors">Card errors</string>
+    <string name="lab_stat_slowest_value">Slowest: %1$s %2$s\u00A0ms</string>
+
+    <!-- Device -->
+    <string name="lab_group_bridge">Bridge</string>
+    <string name="lab_group_build">Build and device</string>
+    <string name="lab_group_simulator">Simulated card</string>
+    <string name="lab_probe_bridge">Probe bridge</string>
+    <string name="lab_probe_simulator">Probe simulator</string>
+    <string name="lab_probe_cooldown">Probed just now; try again in %1$d s.</string>
+    <string name="lab_probe_ok">%1$s · %2$s\u00A0ms</string>
+    <string name="lab_probe_failed">%1$s · %2$s\u00A0ms</string>
+    <string name="lab_row_bridge_status">Status</string>
+    <string name="lab_row_bridge_network">Stellar network</string>
+    <string name="lab_network_value">%1$s (this build: %2$s)</string>
+    <string name="lab_row_schema">Schema version</string>
+    <string name="lab_row_bridge_program">Bridge program ID</string>
+    <string name="lab_row_bridge_issuer_fp">Bridge issuer key fingerprint</string>
+    <string name="lab_row_bridge_operator_fp">Operator fingerprint</string>
+    <string name="lab_issuer_configured">configured</string>
+    <string name="lab_issuer_unconfigured">not configured</string>
+    <string name="lab_row_sim_state">Simulator state</string>
+    <string name="lab_sim_state_value">%1$s · %2$s\u00A0ms</string>
+    <string name="lab_network_mismatch_title">Wrong Stellar network</string>
+    <string name="lab_network_mismatch_body">This build is for %1$s, but the bridge reports %2$s. Do not move money until they match.</string>
+    <string name="lab_build_version">App version</string>
+    <string name="lab_build_flavor">Flavor</string>
+    <string name="lab_build_type">Build type</string>
+    <string name="lab_build_application_id">Application ID</string>
+    <string name="lab_build_network">Stellar network</string>
+    <string name="lab_build_bridge_url">Bridge URL</string>
+    <string name="lab_build_aid">Applet AID</string>
+    <string name="lab_build_sdk">SDK</string>
+    <string name="lab_build_sdk_value">min %1$d · target %2$d</string>
+    <string name="lab_build_device">Device</string>
+    <string name="lab_build_android">Android</string>
+    <string name="lab_build_android_value">%1$s (API %2$d) · patch %3$s</string>
+    <string name="lab_build_locale">Locale</string>
+    <string name="lab_build_locale_value">%1$s · UTC%2$s</string>
+    <string name="lab_build_nfc">NFC</string>
+    <string name="lab_nfc_enabled">Enabled</string>
+    <string name="lab_nfc_disabled">Disabled</string>
+    <string name="lab_nfc_absent">Not present</string>
+    <string name="lab_nfc_simulated">Simulated card</string>
+
+    <!-- Report -->
+    <string name="lab_share_report">Share report</string>
+    <string name="lab_report_subject">Impala Card Lab report %1$s</string>
+
+    <!-- Activity Log -->
+    <string name="logview_search_hint">Search tag or message</string>
+    <string name="logview_level_debug">Debug</string>
+    <string name="logview_level_info">Info</string>
+    <string name="logview_level_warn">Warn</string>
+    <string name="logview_level_error">Error</string>
+    <string name="logview_follow">Follow</string>
+    <string name="logview_count">%1$d of %2$d entries</string>
+    <string name="logview_no_match">No entries match the filter</string>
+    <string name="logview_copy_entry">Copy</string>
+    <string name="logview_entry_copied">Entry copied</string>
+    <string name="logview_share">Share</string>
+    <string name="logview_share_subject">Impala Demo log %1$s</string>
+    <string name="logview_copy_all">Copy all</string>
+    <string name="logview_clear">Clear</string>
+    <string name="logview_clear_title">Clear the Activity Log?</string>
+    <string name="logview_clear_message">Every entry is removed from this phone. This cannot be undone.</string>
+</resources>
