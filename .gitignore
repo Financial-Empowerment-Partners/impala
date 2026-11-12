@@ -29,6 +29,8 @@ nbproject/private/
 tmp/
 temp/
 *.bak
+# Dated copies made before editing a local file (local.properties.bak-20261109, .env.bak-…).
+*.bak-*
 *.tmp
 
 # ── Claude Code / local tool settings ────────────────────────
@@ -133,3 +135,13 @@ secrets/
 
 # ── Firebase (impala-android-demo) ────────────────────────────
 impala-android-demo/app/google-services.json
+
+# ── Vendored JavaCard kits: committed in full (KEEP THIS LAST) ─
+# impala-card/applet/libs/sdks/ holds the Oracle kits the CAP build converts with. Their export
+# files (*.exp, *.jca) and sample keystores match the build-output patterns above, but there they
+# are inputs: without them the converter fails ("export file lang.exp of package java.lang not
+# found"). A negation only wins when it comes after the pattern it overrides, so this block stays at
+# the end of the file. Without it, adding or updating a kit (the JDK 21 plan vendors
+# jc320v26.0_kit) would leave those files out of the commit without a word, and the CAP would stop
+# converting in CI and in every other checkout. The kits' own .gitignore still drops .DS_Store.
+!impala-card/applet/libs/sdks/**

@@ -586,6 +586,43 @@ pub async fn claim_refresh_rotation(
     Ok(claimed.is_some())
 }
 
+/// Atomically claim a SEP-10 challenge as used: `SET
+/// impala:sep10:claim:{tx_hash} 1 NX EX ttl`. `true` for the single winner;
+/// `false` means the challenge already minted a session (a replay). The key
+/// is the transaction hash, which excludes signatures, so a re-encoded or
+/// malleated signature set cannot mint twice. Fail-closed: the claim must
+/// succeed before any token is minted.
+pub async fn claim_sep10_challenge(
+    pool: &RedisPool,
+    tx_hash_hex: &str,
+    ttl_secs: u64,
+) -> Result<bool, AppError> {
+    let mut conn = pool.get().await.map_err(|e| {
+        error!(
+            "claim_sep10_challenge: failed to get Redis connection: {}",
+            e
+        );
+        AppError::InternalError("Service temporarily unavailable".to_string())
+    })?;
+    let key = format!("impala:sep10:claim:{tx_hash_hex}");
+    let claimed: Option<String> = redis::cmd("SET")
+        .arg(&key)
+        .arg("1")
+        .arg("NX")
+        .arg("EX")
+        .arg(ttl_secs.max(1))
+        .query_async(&mut *conn)
+        .await
+        .map_err(|e| {
+            warn!(
+                "claim_sep10_challenge: Redis SET NX failed for {}: {}",
+                key, e
+            );
+            AppError::InternalError("Service temporarily unavailable".to_string())
+        })?;
+    Ok(claimed.is_some())
+}
+
 /// Atomically claim a one-time MFA code as consumed. Returns `true` if this
 /// call was the first to present `code` (accept it), `false` if it was
 /// already consumed (a replay — reject). The marker keys on a hash of the

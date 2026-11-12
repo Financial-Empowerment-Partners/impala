@@ -5,6 +5,10 @@
 # CardLoginUiTest taps "Sign in with Card" and lands on MainActivity as the holder; CardRedeemUiTest is run
 # too so its honest skip (the offline lane is not deployed) shows in the report. (SmokeTest is not run: it
 # asserts the base package name and the tnet flavor installs as com.payala.impala.demo.testnet.)
+# With SEP-10 on (DEMO_SEP10, the default) that card login IS a SEP-10 sign-in: the phone fetches
+# http://10.0.2.2:$BRIDGE_PORT/.well-known/stellar.toml and the challenge, the card signs it (SIGN_SEP10), and
+# the bridge mints the session. The test asserts the mechanism from the app's Activity Log and the scenario
+# finds the same sign-in in the bridge's log. With DEMO_SEP10=false it asserts the legacy challenge instead.
 # Artifacts: screenshots, a screen recording and the JUnit XML under state/artifacts/android/.
 set -euo pipefail
 . "$(dirname "$0")/lib.sh"
@@ -23,12 +27,31 @@ hr "scenario 07: Android emulator (card login UI test against $BRIDGE_URL)"
 wait_bridge 10
 
 info "1/5 the simulated card must be issued (scenario 05) and the emulator booted"
-if ! "$DEMO_DIR/scripts/simulator.sh" status >/dev/null 2>&1 || [ ! -f "$RECORDS_DIR/scenario-05-card-issue.json" ]; then
-  log "  no issued card in a running simulator: running scenario 05 first"
+SIM_HW="$("$DEMO_DIR/scripts/simulator.sh" hardware 2>/dev/null | cut -f1 || true)"
+if ! "$DEMO_DIR/scripts/simulator.sh" status >/dev/null 2>&1 || [ ! -f "$RECORDS_DIR/scenario-05-card-issue.json" ] || [ "$SIM_HW" != "$DEMO_CARD_PLATFORM" ]; then
+  log "  no issued card of $DEMO_CARD_PLATFORM hardware in a running simulator: running scenario 05 first"
   "$DEMO_DIR/scripts/scenario-05-card-issue.sh" >/dev/null
 fi
 CARD_ID="$(record_get scenario-05-card-issue .card_id)"
+CARD_HW="$(record_get scenario-05-card-issue .card_platform)"; CARD_ENGINE="$(record_get scenario-05-card-issue .card_engine)"
+log "  the card the phone will tap: the ${CARD_ENGINE:-?} engine on ${CARD_HW:-?} hardware (JavaCard $(record_get scenario-05-card-issue .card_javacard))"
 check "an issued card is available on the simulator ($CARD_ID)" sh -c "[ -n '$CARD_ID' ] && '$DEMO_DIR/scripts/simulator.sh' status >/dev/null 2>&1"
+CARD_G="$(record_get scenario-05-card-issue .stellar_address)"
+# The app is built for ONE bridge address (impala-android-demo/local.properties, default http://10.0.2.2:8080),
+# and its SEP-10 home domain is that address's host:port unless TESTNET_SEP10_HOME_DOMAIN overrides it.
+prop() { sed -n "s/^$1=//p" "$APP/local.properties" 2>/dev/null | tail -n1 | sed 's/\\\([:=]\)/\1/g'; }
+APP_BRIDGE="$(prop TESTNET_BRIDGE_BASE_URL)"; [ -n "$APP_BRIDGE" ] || APP_BRIDGE="http://10.0.2.2:8080"
+check "the app is built for this bridge (TESTNET_BRIDGE_BASE_URL=$APP_BRIDGE in impala-android-demo/local.properties; this stack is http://10.0.2.2:$BRIDGE_PORT)" [ "${APP_BRIDGE%/}" = "http://10.0.2.2:$BRIDGE_PORT" ]
+MECH=legacy
+if sep10_enabled; then
+  if grep -q '^TESTNET_SEP10_HOME_DOMAIN=' "$APP/local.properties" 2>/dev/null && [ "$(prop TESTNET_SEP10_HOME_DOMAIN)" != "$SEP10_HOME_DOMAIN" ]; then
+    warn "impala-android-demo/local.properties sets TESTNET_SEP10_HOME_DOMAIN='$(prop TESTNET_SEP10_HOME_DOMAIN)' (this bridge is $SEP10_HOME_DOMAIN): the app will not use this bridge's SEP-10; expecting the legacy challenge"
+  else
+    info "waiting for the bridge's SEP-10 signing key (seed.sh activated it; it takes over after the activation delay)"
+    if sep10_wait_active "$(admin_jwt)" 240 >/dev/null; then MECH=sep10; else warn "SEP-10 is not in service: the card login will fall back to the legacy challenge"; fi
+  fi
+fi
+log "  expected card sign-in mechanism: $MECH"
 "$DEMO_DIR/scripts/emulator.sh" up
 check "emulator booted (API $(adb shell getprop ro.build.version.sdk | tr -d '\r'))" sh -c "[ \"\$('$ADB' -s $SERIAL shell getprop sys.boot_completed | tr -d '\r')\" = 1 ]"
 
@@ -61,7 +84,8 @@ WATCH_PID=$!
 set +e
 ( cd "$APP" && JAVA_HOME="$(jdk17_home)" ANDROID_SERIAL="$SERIAL" ./gradlew -q :app:connectedTnetDebugAndroidTest --console=plain \
     -Pandroid.testInstrumentationRunnerArguments.class=com.payala.impala.demo.CardLoginUiTest,com.payala.impala.demo.CardRedeemUiTest \
-    -Pandroid.testInstrumentationRunnerArguments.cardAccount="$DEMO_HOLDER_ID" ) > "$STATE_DIR/android-connected.log" 2>&1
+    -Pandroid.testInstrumentationRunnerArguments.cardAccount="$DEMO_HOLDER_ID" \
+    -Pandroid.testInstrumentationRunnerArguments.cardMechanism="$MECH" ) > "$STATE_DIR/android-connected.log" 2>&1
 rc=$?
 set -e
 tail -n 12 "$STATE_DIR/android-connected.log" | sed 's/^/  /' >&2
@@ -91,7 +115,12 @@ EOF
 printf '%s' "$summary" | jq -r '.cases[] | "  \(.status)\t\(.class | split(".") | last).\(.name)"' | column -t -s "$(printf '\t')" >&2
 check "gradle connectedTnetDebugAndroidTest exited 0" [ "$rc" -eq 0 ]
 check "the connected run produced a JUnit report for the tnet app on this AVD" sh -c "ls '$ART'/*.xml >/dev/null 2>&1"
-check_jq "CardLoginUiTest: Sign in with Card landed on MainActivity as the holder" '[.cases[] | select((.class | endswith("CardLoginUiTest")) and .status=="passed")] | length >= 1' "$summary"
+check_jq "CardLoginUiTest: Sign in with Card landed on MainActivity as the holder, and the app's Activity Log says the card signed in with $MECH" '[.cases[] | select((.class | endswith("CardLoginUiTest")) and .status=="passed")] | length >= 1' "$summary"
+if [ "$MECH" = sep10 ]; then
+  # The bridge's side of the same sign-in: its log names the card's Stellar key and the holder's account.
+  check_eval "bridge log: the phone's tap was a SEP-10 sign-in by the card's Stellar key ($CARD_G) for the holder" \
+    "compose logs --no-color --tail=4000 impala-bridge 2>/dev/null | grep -q 'sep10: card key $CARD_G signed in; tokens issued for account_id=$DEMO_HOLDER_ID'"
+fi
 check_jq "CardRedeemUiTest reports skipped (offline lane not deployed), not failed" '[.cases[] | select((.class | endswith("CardRedeemUiTest")) and .status=="failed")] | length == 0' "$summary"
 # connectedAndroidTest uninstalls the app afterwards; the stills were taken by the activity watcher during the run.
 if command -v ffprobe >/dev/null 2>&1 && [ -s "$ART/card-login-ui-test.mp4" ]; then
@@ -103,4 +132,4 @@ check "stills captured (login screen, main after card login)" sh -c "[ -s '$ART/
 
 info "5/5 done"
 log "  artifacts: state/artifacts/android/ (junit xml, mp4, png)"
-finish_scenario scenario-07-android-emulator "$(printf '%s' "$summary" | jq -c --arg rep "$ART" --argjson rc "$rc" --arg c "$CARD_ID" --arg pkg "$PKG" '. + {report:$rep, gradle_exit:$rc, card_id:$c, package:$pkg}')" "$t0"
+finish_scenario scenario-07-android-emulator "$(printf '%s' "$summary" | jq -c --arg rep "$ART" --argjson rc "$rc" --arg c "$CARD_ID" --arg g "$CARD_G" --arg m "$MECH" --arg pkg "$PKG" --arg hw "${CARD_HW:-}" --arg eng "${CARD_ENGINE:-}" '. + {report:$rep, gradle_exit:$rc, card_id:$c, stellar_address:$g, card_sign_in:$m, card_platform:$hw, card_engine:$eng, package:$pkg}')" "$t0"

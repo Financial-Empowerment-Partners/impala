@@ -570,6 +570,37 @@ class LoginViewModelTest {
     }
 
     @Test
+    fun `card login after a completed SEP-10 exchange takes its tokens and never calls auth card`() = runTest {
+        val api = exchangeApi { }
+        val tokens = "{\"token\":\"temporal\",\"success\":true,\"message\":\"ok\"," +
+            "\"refresh_token\":\"$REFRESH_TOKEN\",\"temporal_token\":\"temporal\"}"
+
+        viewModel.loginWithCard(api, tokenManager, cardTap(signatureHex = "").copy(sep10TokenJson = tokens))
+        advanceUntilIdle()
+
+        verify(api, never()).cardTokenExchange(any())
+        verify(tokenManager).saveRefreshToken(REFRESH_TOKEN)
+        verify(tokenManager).saveCardId(CARD_ID_WIRE)
+        verify(tokenManager).saveAuthProvider("card")
+        assertEquals(CARD_ACCOUNT_ID, (viewModel.loginState.value as LoginState.Success).accountId)
+    }
+
+    @Test
+    fun `a SEP-10 token response without tokens is a failed card login, never a session`() = runTest {
+        val api = exchangeApi { }
+        viewModel.loginWithCard(api, tokenManager, cardTap(signatureHex = "").copy(sep10TokenJson = "{\"token\":\"only-a-jwt\"}"))
+        advanceUntilIdle()
+        assertErrorType(ErrorType.CARD_REJECTED)
+
+        viewModel.loginWithCard(api, tokenManager, cardTap(signatureHex = "").copy(sep10TokenJson = "<html>"))
+        advanceUntilIdle()
+        assertErrorType(ErrorType.TOKEN_FAILED)
+        verify(tokenManager, never()).saveRefreshToken(any())
+        verify(api, never()).cardTokenExchange(any())
+        verify(api, never()).token(any())
+    }
+
+    @Test
     fun `card login success account id is the refresh token sub`() = runTest {
         val sub = "11111111-2222-3333-4444-555555555555"
         val payload = java.util.Base64.getUrlEncoder().withoutPadding()

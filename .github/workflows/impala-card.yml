@@ -48,6 +48,8 @@ on:
       # The shared-vector check also reads the bridge's and the demo's pins.
       - 'scripts/check-shared-vectors.sh'
       - 'impala-bridge/src/handlers/card_auth.rs'
+      - 'impala-bridge/src/sep10/card_vectors.rs'
+      - 'impala-bridge/src/sep10/binding.rs'
       - 'impala-android-demo/app/src/test/java/com/payala/impala/demo/WireFormatsTest.kt'
   pull_request:
     branches: [main]
@@ -57,6 +59,8 @@ on:
       # The shared-vector check also reads the bridge's and the demo's pins.
       - 'scripts/check-shared-vectors.sh'
       - 'impala-bridge/src/handlers/card_auth.rs'
+      - 'impala-bridge/src/sep10/card_vectors.rs'
+      - 'impala-bridge/src/sep10/binding.rs'
       - 'impala-android-demo/app/src/test/java/com/payala/impala/demo/WireFormatsTest.kt'
   workflow_dispatch:
 
@@ -98,8 +102,11 @@ jobs:
         with:
           cache-read-only: ${{ github.ref != 'refs/heads/main' }}
 
+      # :applet:jvmTest holds the applet-level unit tests (the Ed25519 engines
+      # against RFC 8032 and the JDK, the on-card SEP-10 validator against an
+      # independent parser, the JavaCard 3.1 layer over jcardsim).
       - name: SDK JVM tests
-        run: ./gradlew :sdk:jvmTest :simulator:jvmTest :tools:issue:test --no-daemon --stacktrace
+        run: ./gradlew :applet:jvmTest :sdk:jvmTest :simulator:jvmTest :tools:issue:test --no-daemon --stacktrace
 
       # Shared card/bridge golden vectors (spec §3.3, contract addendum §A.11):
       # the card literals must never drift from the bridge's.
@@ -150,8 +157,28 @@ jobs:
         with:
           cache-read-only: ${{ github.ref != 'refs/heads/main' }}
 
+      # The other two Ed25519 variants must keep converting and passing the
+      # off-card verifier too: native is the JavaCard 3.1 EdDSA engine (its own
+      # sources and API level), none is the legacy card. Built first so the
+      # default CAP below is the last one staged. Not uploaded: the released
+      # artifact is the default (JavaCard 3.0.5) CAP.
+      - name: Build applet CAP variants (native, none)
+        run: |
+          ./gradlew :applet:buildJavacard -Papplet.ed25519=native --no-daemon --stacktrace
+          ./gradlew :applet:buildJavacard -Papplet.ed25519=none --no-daemon --stacktrace
+          test -s applet/build/ImpalaApplet-native.cap
+          test -s applet/build/ImpalaApplet-none.cap
+
       - name: Build applet CAP (testnet defaults)
         run: ./gradlew :applet:buildJavacard --no-daemon --stacktrace
+
+      # What each CAP imports decides which cards load it: soft and none from
+      # JavaCard 3.0.5 on, native from 3.1 on (and all three on 3.2). The
+      # simulator refuses a CAP on hardware that would not load it by the same
+      # table (CapVariant); this reads the three files just built and fails if
+      # a build change moved one to another API level without anyone deciding to.
+      - name: CAP load matrix (which JavaCard levels load each CAP)
+        run: ./gradlew :simulator:capMatrix --no-daemon --stacktrace
 
       - name: Upload testnet CAP
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

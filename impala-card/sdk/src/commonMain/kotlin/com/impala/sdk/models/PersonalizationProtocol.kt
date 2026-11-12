@@ -1,7 +1,7 @@
 package com.impala.sdk.models
 
 /**
- * Pure builders/parsers for the card personalization ceremony (applet 0.2):
+ * Pure builders/parsers for the card personalization ceremony (applet 0.2+):
  * the install-parameter TLV (`gp --params`), PERSONALIZE part A, and the
  * GET_PERSONALIZATION read-back. No crypto, no I/O.
  */
@@ -106,6 +106,9 @@ class CardPersonalization(
     val pinProvisioned: Boolean get() = flags.toInt() and 0x10 != 0
     val provisioningEnforced: Boolean get() = flags.toInt() and 0x20 != 0
     val terminated: Boolean get() = flags.toInt() and 0x40 != 0
+
+    /** The card holds a Stellar (Ed25519) key and can sign in with SEP-10 (applet 0.3+). */
+    val stellarKey: Boolean get() = flags.toInt() and 0x80 != 0
 
     override fun toString(): String =
         "CardPersonalization(state=0x${hex2(state)}, flags=0x${hex2(flags)}, programBound=$programBound, " +

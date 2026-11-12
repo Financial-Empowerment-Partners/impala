@@ -18,8 +18,9 @@ import kotlin.test.fail
  *
  * Adapted from the provided drift guard to the applet-0.2 tree: transfer INS
  * 0x30/0x31/0x34/0x35/0x36 dispatched, SCP03 chain 0x70/0x71/0x72/0x73, and a
- * separate "Retired" table for the removed 0x06/0x14 (apdu-app-ins=20,
- * apdu-scp03-ins=6, apdu-undispatched=5).
+ * separate "Retired" table for the removed 0x06/0x14. Applet 0.3 adds the
+ * Stellar key INS 0x37/0x38 (apdu-app-ins=22, apdu-scp03-ins=6,
+ * apdu-undispatched=5).
  */
 class ApduDocDriftTest {
     private val root: File = resolveRoot()

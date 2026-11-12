@@ -44,6 +44,29 @@
                             </label>
                         </div>
                     </div>
+                    <fieldset class="field-group">
+                        <legend>Stellar key (SEP-10) <span class="text-muted">(optional: all three or none)</span></legend>
+                        <p class="text-muted">For a card that holds a Stellar key (applet 0.3 and later), read from the card&rsquo;s <code>GET_STELLAR_KEY</code> response after personalization; the Android demo&rsquo;s Card Lab shows them. The bridge verifies both cross-signatures against this account id, card id and EC public key. With these, the card can sign in through SEP-10.</p>
+                        <p class="callout warning"><strong>Never fund a card&rsquo;s Stellar address.</strong> The card signs only SEP-10 challenges, so nothing can sign a transaction that spends from it: anything sent there is lost.</p>
+                        <div class="grid-x grid-margin-x">
+                            <div class="cell medium-12">
+                                <label>Stellar address (G&hellip;, 56 characters)
+                                    <input type="text" id="reg-stellar-address" autocomplete="off" spellcheck="false">
+                                </label>
+                            </div>
+                            <div class="cell medium-6">
+                                <label>Binding signature (hex, trimmed DER, 16&ndash;144 characters)
+                                    <input type="text" id="reg-stellar-binding" autocomplete="off" spellcheck="false">
+                                </label>
+                            </div>
+                            <div class="cell medium-6">
+                                <label>Proof signature (hex, 128 characters)
+                                    <input type="text" id="reg-stellar-proof" autocomplete="off" spellcheck="false">
+                                </label>
+                            </div>
+                        </div>
+                    </fieldset>
+                    <p class="text-muted">The bridge registers a card only under the account you are signed in as.</p>
                     <button type="submit" class="button">Register Card</button>
                 </form>
             </div>
@@ -97,6 +120,7 @@
     <script src="js/roles.js"></script>
     <script src="js/auth.js"></script>
     <script src="js/validate.js"></script>
+    <script src="js/cards-view.js"></script>
     <script src="js/net-config.js"></script>
     <script src="js/net.js"></script>
     <script src="js/session-timer.js"></script>

@@ -85,6 +85,10 @@ interface BridgeApiService {
     @POST("card")
     suspend fun createCard(@Body request: CreateCardRequest): CardResponse
 
+    /** Attach a card's Stellar key (for SEP-10 sign-in) to its existing registration. */
+    @PUT("card/stellar-key")
+    suspend fun setCardStellarKey(@Body request: SetCardStellarKeyRequest): CardResponse
+
     /** Remove a registered card by its ID. Uses `@HTTP` because DELETE with a body is non-standard. */
     @HTTP(method = "DELETE", path = "card", hasBody = true)
     suspend fun deleteCard(@Body request: DeleteCardRequest): CardResponse

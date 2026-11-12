@@ -60,9 +60,27 @@ cd ../testnet-tests && cargo test                       # end-to-end, needs stel
 ### impala-card (JavaCard applet + KMP SDK)
 ```bash
 cd impala-card
+./gradlew :applet:jvmTest         # applet unit tests (Ed25519 engines, the on-card SEP-10 validator)
 ./gradlew :sdk:jvmTest            # SDK tests on JVM (jcardsim simulator)
-./gradlew :applet:buildJavacard   # build the CAP file
+./gradlew :applet:buildJavacard   # build the CAP file (-Papplet.ed25519=soft|native|none, see impala-card/README.md)
 ```
+
+The three CAPs differ in what they need from a card: `soft` and `none` are
+converted for JavaCard 3.0.5, `native` for JavaCard 3.1 (its own EdDSA).
+Which API packages each imports, the optional algorithms each engine asks the
+card for, and why nothing is built for JavaCard 3.2: [`impala-card/README.md`](impala-card/README.md),
+"Platform dependencies: JavaCard 3.0.5, 3.1 and 3.2". Everything the build
+needs beyond JDK 17 (the Oracle kits, ant-javacard, jcardsim) is vendored or
+resolved by Gradle.
+
+The simulator stands in for both kinds of hardware. A simulated card is a CAP
+on a card model (`SimulatorBibo(platform = CardPlatform.JC305)` or
+`CardPlatform.JC32`, `./gradlew :simulator:serve --args="--platform jc32"`,
+`impala.platform=` in a vpcd cfg, `DEMO_CARD_PLATFORM` in the demo): a
+JavaCard 3.0.5, 3.1 or 3.2 card with or without each optional algorithm.
+`./gradlew :simulator:capMatrix` checks which levels load each built CAP.
+See the card README, "Simulated hardware".
+
 iOS NFC: see [`impala-card/docs/IOS_NFC.md`](impala-card/docs/IOS_NFC.md)
 (requires macOS/Xcode + a physical device to verify).
 

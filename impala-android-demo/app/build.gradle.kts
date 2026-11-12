@@ -1,3 +1,5 @@
+import java.net.URI
+import java.net.URISyntaxException
 import java.util.Properties
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
@@ -12,6 +14,15 @@ val localProperties = Properties()
 val localPropertiesFile = rootProject.file("local.properties")
 if (localPropertiesFile.exists()) {
     localProperties.load(localPropertiesFile.inputStream())
+}
+
+/** `host[:port]` of [url], lowercase: the default SEP-10 home domain is the bridge's own authority. */
+fun urlAuthority(url: String): String = try {
+    val uri = URI(url.trim())
+    val host = uri.host?.lowercase() ?: ""
+    if (host.isEmpty()) "" else if (uri.port >= 0) "$host:${uri.port}" else host
+} catch (_: URISyntaxException) {
+    ""
 }
 
 android {
@@ -58,8 +69,16 @@ android {
             // never types the 20-digit hex as a float). ManifestTest pins
             // resource == BuildConfig.CARD_APPLET_AID in both flavours.
             resValue("string", "impala_card_applet_aid", cardAppletAid)
-            buildConfigField("String", "BRIDGE_BASE_URL",
-                "\"${localProperties.getProperty("TESTNET_BRIDGE_BASE_URL", "http://10.0.2.2:8080")}\"")
+            val bridgeBaseUrl = localProperties.getProperty("TESTNET_BRIDGE_BASE_URL", "http://10.0.2.2:8080")
+            buildConfigField("String", "BRIDGE_BASE_URL", "\"$bridgeBaseUrl\"")
+            // SEP-10 card sign-in (docs/sep10-card-keys.md §7): the home domain whose
+            // /.well-known/stellar.toml names the web-auth endpoint. Defaults to the
+            // bridge's own host[:port]; set TESTNET_SEP10_HOME_DOMAIN= (empty) to turn
+            // SEP-10 off for this build. A card without a Stellar key, and a server
+            // that does not offer SEP-10, use the legacy card challenge either way.
+            buildConfigField("String", "SEP10_HOME_DOMAIN",
+                "\"${localProperties.getProperty("TESTNET_SEP10_HOME_DOMAIN", urlAuthority(bridgeBaseUrl))}\"")
+            buildConfigField("String", "STELLAR_NETWORK_PASSPHRASE", "\"Test SDF Network ; September 2015\"")
             buildConfigField("String", "GITHUB_CLIENT_ID",
                 "\"${localProperties.getProperty("TESTNET_GITHUB_CLIENT_ID", "YOUR_GITHUB_CLIENT_ID")}\"")
             // No GitHub client-secret field: the bridge performs the OAuth code→token
@@ -85,8 +104,12 @@ android {
             buildConfigField("String", "CARD_APPLET_AID", "\"$cardAppletAid\"")
             // See the tnet block: the manifest meta-data reads this resource.
             resValue("string", "impala_card_applet_aid", cardAppletAid)
-            buildConfigField("String", "BRIDGE_BASE_URL",
-                "\"${localProperties.getProperty("LIVE_BRIDGE_BASE_URL", "https://api.impala.example.com")}\"")
+            val bridgeBaseUrl = localProperties.getProperty("LIVE_BRIDGE_BASE_URL", "https://api.impala.example.com")
+            buildConfigField("String", "BRIDGE_BASE_URL", "\"$bridgeBaseUrl\"")
+            // See the tnet block. LIVE_SEP10_HOME_DOMAIN= (empty) turns SEP-10 off.
+            buildConfigField("String", "SEP10_HOME_DOMAIN",
+                "\"${localProperties.getProperty("LIVE_SEP10_HOME_DOMAIN", urlAuthority(bridgeBaseUrl))}\"")
+            buildConfigField("String", "STELLAR_NETWORK_PASSPHRASE", "\"Public Global Stellar Network ; September 2015\"")
             buildConfigField("String", "GITHUB_CLIENT_ID",
                 "\"${localProperties.getProperty("LIVE_GITHUB_CLIENT_ID", "YOUR_GITHUB_CLIENT_ID")}\"")
             // No GitHub client-secret field: the bridge performs the OAuth code→token
@@ -231,8 +254,14 @@ dependencies {
 
 // `./gradlew :app:e2eTnetDebug` — the e2e lane only (needs IMPALA_E2E_BRIDGE_URL;
 // see app/src/e2e/README.md). Plain unit-test runs include these classes too,
-// where they skip.
+// where they skip. `-Pe2e.tests=<class>[,<class>…]` narrows the lane to the
+// named test classes (the demo kit runs each of its scenarios that way); every
+// class still skips when the environment it needs is not set.
 val e2eRequested = gradle.startParameter.taskNames.any { it.substringAfterLast(':') == "e2eTnetDebug" }
+val e2eTests: List<String> = (findProperty("e2e.tests") as String?)
+    ?.split(',')?.map { it.trim() }?.filter { it.isNotEmpty() }
+    ?.map { if ('.' in it) it else "com.payala.impala.demo.e2e.$it" }
+    ?: listOf("com.payala.impala.demo.e2e.*")
 tasks.withType<Test>().configureEach {
     // ThemeGeneratorTest regenerates res/values{,-night}/{colors_m3,themes_roles}.xml
     // from the brand seed when IMPALA_THEME_WRITE=1 (otherwise it asserts the
@@ -243,12 +272,16 @@ tasks.withType<Test>().configureEach {
         outputs.upToDateWhen { false }
     }
     if (e2eRequested && name == "testTnetDebugUnitTest") {
-        filter.includeTestsMatching("com.payala.impala.demo.e2e.*")
+        e2eTests.forEach { filter.includeTestsMatching(it) }
         outputs.upToDateWhen { false }
         testLogging { events("passed", "skipped", "failed"); showStandardStreams = true }
         listOf(
             "IMPALA_E2E_BRIDGE_URL", "IMPALA_E2E_OPERATOR_TOKEN_FILE", "IMPALA_E2E_OPERATOR_ACCOUNT",
-            "IMPALA_E2E_OPERATOR_PASSWORD_FILE", "IMPALA_E2E_HOLDER_PASSWORD_FILE", "IMPALA_E2E_SLOW"
+            "IMPALA_E2E_OPERATOR_PASSWORD_FILE", "IMPALA_E2E_HOLDER_PASSWORD_FILE", "IMPALA_E2E_SLOW",
+            // SEP-10: the bridge's home domain, third-party servers, and where to leave reports.
+            "IMPALA_E2E_SEP10_HOME_DOMAIN", "IMPALA_E2E_SEP10_THIRD_PARTY", "IMPALA_E2E_REPORT_DIR",
+            // host:port of an issued card served by impala-card's SimulatorApduServer (the third-party lane).
+            "IMPALA_E2E_CARD_TCP"
         ).forEach { key -> System.getenv(key)?.let { environment(key, it) } }
     }
 }

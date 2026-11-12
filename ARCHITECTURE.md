@@ -219,6 +219,9 @@ graph LR
 | `/auth/sso/{provider}` | POST | Exchange a validated OIDC token (Okta / Auth0 / Duo / …) for Impala JWT tokens. Auto-creates account on first login. Body `{ token }` (access token; legacy alias `okta_token`) or `{ id_token }` for `token_kind=id` providers |
 | `/auth/sso/{provider}/config` | GET | Returns the provider's OIDC configuration (provider, issuer, client ID, audience, endpoints, scopes) for the client-side flow, or `{ enabled: false }` |
 | `/auth/providers` | GET | List the names of all configured SSO providers |
+| `/.well-known/stellar.toml` | GET | SEP-1 discovery for SEP-10: `NETWORK_PASSPHRASE`, `SIGNING_KEY`, `WEB_AUTH_ENDPOINT`. Mounted only with `SEP10_ENABLED=true`, like the two rows below (own sub-router: wildcard CORS, 16 KiB bodies, 10 s timeout); 503 until a signing key is active |
+| `/auth/sep10` | GET | SEP-10 challenge for `?account=G…`: a sequence-0 transaction with a MAC-bound nonce, signed by the server key. Issued without any lookup, so it does not say whether the account is known |
+| `/auth/sep10` | POST | Exchange the challenge, signed by the Stellar key of a registered **card**, for the same tokens `POST /auth/card` mints for that card's account. Strict decode (400), issued-challenge check and single-use claim (401), lockout counted only for a bad signature over a live challenge (429). See [docs/sep10-card-keys.md](docs/sep10-card-keys.md) |
 
 #### Client API (JWT Protected)
 
@@ -229,6 +232,7 @@ graph LR
 | `/account` | PUT | Update account profile fields. Validates Stellar account ID format (56 chars, Base32) |
 | `/card` | POST | Register a smartcard by storing its card ID, EC public key (secp256r1), and RSA public key. Validates key formats before INSERT |
 | `/card` | DELETE | Soft-delete a card registration (sets `is_delete = TRUE` and `deleted_at` timestamp) |
+| `/card/stellar-key` | PUT | Attach a Stellar key to the caller's own, already registered card (a card is registered before it is personalized when the issuer certifies it; its cross-signatures exist only afterwards). Both signatures are verified against the account and the EC key stored on the row; a card's key is set once and never replaced |
 | `/transaction` | POST | Create a dual-chain transaction record with Stellar and Payala transaction IDs, hashes, fees, memo, and signatures. Non-admin callers may only supply a `source_account` they own |
 | `/sync/payala` | POST | Ingest a batch of offline Payala transactions (owner-only, atomic, idempotent per `(account, payala_tx_id)`). Applied per the account's `sync_mode`: `reserve` nets each batch into per-currency reserve balances; `mirror` inserts each fresh item 1:1 into `transaction` (`origin = 'payala_sync'`) |
 | `/reserves/:account_id` | GET | Read an account's per-currency Payala reserve balances and current `sync_mode` (owner or admin) |
@@ -253,6 +257,9 @@ graph LR
 | `/subscribe` | POST | Initiate a network event stream — Stellar SSE from Horizon `/ledgers` or Payala TCP listener |
 | `/sync` | POST | Trigger cross-ledger transaction reconciliation against Soroban RPC `getTransactions` |
 | `/admin/accounts/:account_id/sync-mode` | PUT | Set an account's Payala sync mode (`reserve`/`mirror`). Forward-only — history is not migrated; leaving reserve mode with a nonzero balance requires `force: true` |
+| `/admin/sep10/signing-keys` | GET | SEP-10 status for operators (`ReadKeys`): enabled or not, home domain and endpoint, network, challenge lifetime, number of registered card keys, and every signing-key version with its state, public address and fingerprint, plus what the answering instance can serve right now (`key_ring_live`, per-key `opened`). Never key material |
+| `/admin/sep10/signing-keys/generate`, `…/{version}/activate`, `…/{version}/revoke` | POST | The SEP-10 signing key lifecycle (`ManageKeys`): generate a `pending` key (generate-only, sealed by the seed protector), schedule it to become `active` (typed confirm phrase; the previous key is `superseded` and honoured for in-flight challenges), revoke a version (material scrubbed). Always mounted, so the key can exist before the endpoint is enabled |
+| `/admin/accounts/:account_id/cards` | GET | An account's cards for the accounts page (`ReadAccounts`): card id, active or deleted, timestamps and the card's Stellar address, if it has one |
 
 ### Authentication and Authorization
 
@@ -265,11 +272,13 @@ Account ownership is enforced by `require_owner()`, which verifies that `user.ac
 Five authentication methods are supported across the platform:
 1. **Username/password** — direct registration and login with Argon2 password hashing
 2. **Okta SSO** — OIDC token exchange with JWKS validation and background key refresh
-3. **NFC smartcard** — the bridge issues a single-use challenge (`POST /auth/card/challenge`); the card signs it on-device with ECDSA-SHA256 and the signature is exchanged for JWTs at `POST /auth/card`
+3. **NFC smartcard** — the bridge issues a single-use challenge (`POST /auth/card/challenge`); the card signs it on-device with ECDSA-SHA256 and the signature is exchanged for JWTs at `POST /auth/card`. A card with a Stellar key (applet 0.3) uses SEP-10 instead where the bridge offers it (below); both end in the same session
 4. **Google Sign-In** — Credential Manager ID token exchanged server-side at `POST /auth/google`
 5. **GitHub OAuth** — Custom Chrome Tabs authorization code exchanged server-side at `POST /auth/github` (the bridge performs the code→token exchange, so the client secret never ships in the app)
 
-A sixth method — **SEP-10 web authentication** with Stellar Ed25519 keys, including Android Keystore device keys — is designed but **not implemented**; see [docs/sep10-authentication.md](docs/sep10-authentication.md). It would mint house tokens through the same issuance path (`issuance_role` → `encode_token_pair`) but in a restricted audience that only a pinned allow-list of read and card-redemption handlers accepts, resolve identity only through a proof-of-possession link table (never `impala_account.stellar_account_id`), and remain session authentication only: stored-value transfers stay authorized by the card's `SIGN_TRANSFER_V2`, and custodial payments or credential changes need a password, SSO or card session.
+**SEP-10 web authentication** (Stellar Web Authentication) is implemented for one kind of key: the Ed25519 **Stellar key held on an Impala card** ([docs/sep10-card-keys.md](docs/sep10-card-keys.md)). The bridge serves `/.well-known/stellar.toml` and `GET`/`POST /auth/sep10` when `SEP10_ENABLED=true`; the identity is the active `card` row whose `stellar_address` is the signing key, registered only after the bridge verified two cross-signatures the card made at personalization (the card's P-256 key vouching for the Stellar key, and the Stellar key's proof of possession bound to the account and card). The session is exactly the one `POST /auth/card` mints, with one exception: an account whose role holds any capability (admin, treasurer, key-custodian, auditor) is refused with the generic 401, so this public, wildcard-CORS route never issues privileged authority and such a card keeps the legacy login. Registering a card's Stellar key emits `card.stellar_key_registered`. The server's own signing key is generate-only and sealed by the seed protector, with a `pending → active → superseded / revoked` lifecycle driven from `/admin/sep10/signing-keys*` (`ManageKeys`) and an activation fence so every instance switches together; challenges are stateless (the nonce carries an HMAC under a key sealed beside the signing key) and single-use (claimed in Redis by transaction hash). There is no Horizon lookup: a card key can never sign a ledger transaction, so the on-ledger signer rule SEP-10 otherwise needs has nothing to protect. In this phase the endpoint boots on testnet only. The API for clients and operators, and the dashboard screens built on it, are described in [docs/sep10-api-and-admin-ui.md](docs/sep10-api-and-admin-ui.md); the demo signs a card in end to end, at the bridge and at a third-party SEP-10 server ([demo/README.md](demo/README.md), scenarios 07, 12 and 13).
+
+Still design only ([docs/sep10-authentication.md](docs/sep10-authentication.md)): SEP-10 for phone and wallet keys, including Android Keystore device keys. That would mint house tokens through the same issuance path (`issuance_role` → `encode_token_pair`) but in a restricted audience that only a pinned allow-list of read and card-redemption handlers accepts, resolve identity only through a proof-of-possession link table (never `impala_account.stellar_account_id`), and remain session authentication only: stored-value transfers stay authorized by the card's `SIGN_TRANSFER_V2`, and custodial payments or credential changes need a password, SSO or card session.
 
 ### Notification System
 
@@ -389,6 +398,7 @@ The applet implements GlobalPlatform 2.3 Amendment D Secure Channel Protocol 03 
 
 - **Elliptic Curve**: secp256r1 (NIST P-256), 256-bit private key, 65-byte uncompressed public key
 - **Signature**: ECDSA with SHA-256 (used for `SIGN_AUTH` and `SIGN_TRANSFER`)
+- **Stellar key (applet 0.3)**: a second, Ed25519 key generated on the card, used only by `SIGN_SEP10`. The card parses the transaction it is given and signs only a SEP-10 challenge for its own key (sequence number 0, manage-data operations only), hashing the bytes it validated. Two build-time engines produce the same RFC 8032 signatures: on JavaCard 3.0.5 the scalar multiplication runs in the card's ECDH engine on the Weierstrass form of Curve25519 and the rest is applet arithmetic; on JavaCard 3.1 the platform's EdDSA is used. A third build has no Stellar key. See `impala-card/README.md`
 - **Hash**: SHA-256 (32-byte output)
 - **Random**: Hardware RNG for card ID generation (16 bytes) and nonce generation (4 bytes)
 
@@ -471,6 +481,7 @@ This Android library (package `com.payala.impala`, min SDK 30) provides two comm
 - `NfcContactActivity` manages foreground dispatch to intercept NFC tag discoveries
 - `IsoDepBibo` adapts Android's `IsoDep` API to the `BIBO` transceive interface expected by the Impala SDK
 - Once connected, all 23 APDU commands from the JavaCard applet are available through the SDK's typed methods
+- `card.CardSignIn` signs a card in with whichever mechanism the card and the server share: SEP-10 for a card with a Stellar key (`com.payala.impala.stellar` holds the client: `stellar.toml`, challenge checks, an Ed25519 verifier for API 24+), the legacy `SIGN_AUTH` challenge otherwise, with the fallback decided in one place and never taken because a check failed
 
 **NFC via NDEF (data tags)**:
 - `NdefDispatchActivity` handles NDEF message discovery

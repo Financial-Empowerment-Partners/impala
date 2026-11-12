@@ -35,6 +35,7 @@
     <string name="lab_group_personalization">Personalization</string>
     <string name="lab_group_certificate">Certificate</string>
     <string name="lab_group_counters">Counters</string>
+    <string name="lab_group_stellar">Stellar key</string>
     <string name="lab_group_balance">Balance</string>
     <string name="lab_group_last_transfer">Last transfer</string>
     <string name="lab_group_steps">Read steps</string>
@@ -82,6 +83,15 @@
     <string name="lab_last_transfer_value">%1$s · counter %2$d · sequence %3$s · to %4$s</string>
     <string name="lab_cert_verified">Verified under the card\'s issuer key</string>
     <string name="lab_cert_not_verified">Does not verify under the card\'s issuer key</string>
+    <string name="lab_row_stellar_address">Stellar address</string>
+    <string name="lab_row_stellar_engine">Ed25519 engine</string>
+    <string name="lab_row_stellar_binding">Vouched for by the card key</string>
+    <string name="lab_row_stellar_proof">Proof of possession</string>
+    <string name="lab_stellar_verified">Verified for this card and account</string>
+    <string name="lab_stellar_not_verified">Does not verify for this card and account</string>
+    <string name="lab_stellar_unbound">Not made yet: the card is not personalized</string>
+    <string name="lab_stellar_engine_soft">soft · JavaCard 3.0.5, through the card\'s ECDH engine</string>
+    <string name="lab_stellar_engine_native">native · JavaCard 3.1 EdDSA</string>
     <string name="lab_steps_value">%1$d of %2$d steps succeeded</string>
     <string name="lab_default_selection">Default selection (no SELECT)</string>
     <string name="lab_not_read">Not read</string>

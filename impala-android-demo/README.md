@@ -58,6 +58,8 @@ placeholder values before testing:
 |-------|---------|-------------|
 | `BRIDGE_BASE_URL` | `http://10.0.2.2:8080` (tnet), `https://api.impala.example.com` (live) | Bridge API URL (`10.0.2.2` is the emulator's loopback to the host machine) |
 | `STELLAR_NETWORK` | `testnet` (tnet), `pubnet` (live) | Fixed per flavor, not read from `local.properties`. The Card Lab compares it with the bridge's `/health` `stellar_network` and raises a danger banner when they differ |
+| `SEP10_HOME_DOMAIN` | the host and port of `BRIDGE_BASE_URL` | The SEP-10 home domain for card sign-in (`TESTNET_SEP10_HOME_DOMAIN` / `LIVE_SEP10_HOME_DOMAIN`): the app fetches `/.well-known/stellar.toml` from it and it must equal the authority of the bridge's `SEP10_WEB_AUTH_ENDPOINT`. Set the property to an empty value to turn SEP-10 off for the build; a value that is not a host name turns it off too. Plain `http` is used only for `localhost`, `127.0.0.1` and `10.0.2.2` |
+| `STELLAR_NETWORK_PASSPHRASE` | the testnet (tnet) or pubnet (live) passphrase | Fixed per flavor. A `stellar.toml` or a challenge for another network is refused |
 | `CARD_APPLET_AID` | `01020304050607080102` (tnet), empty (live) | The applet AID every card session SELECTs (`TESTNET_CARD_APPLET_AID` / `LIVE_CARD_APPLET_AID`). Empty means no SELECT: the card's default-selected applet answers. The same value also feeds the `impala_card_applet_aid` string resource (`resValue`), which the manifest hands to impala-lib (see below) |
 | `GITHUB_CLIENT_ID` | `YOUR_GITHUB_CLIENT_ID` | GitHub OAuth App client ID |
 | `GITHUB_REDIRECT_URI` | `impala://github-callback` | GitHub OAuth redirect URI (must match the OAuth App settings) |
@@ -91,7 +93,12 @@ as the testnet one as a float. `ManifestTest` pins the resource to
 every card request in a debug build is served by impala-card's
 `SimulatorApduServer` (`./gradlew :simulator:serve --args="--port 9443"` in
 `../impala-card`; issue the card with the issuance tool, see
-`impala-card/README.md`). Clear it with `setprop debug.impala.tcp_card ""`.
+`impala-card/README.md`). The served card is a CAP on simulated hardware:
+without more it is the default CAP on a JavaCard 3.0.5 card (the software
+Ed25519 engine); `--platform jc32` serves a JavaCard 3.2 card with the native
+CAP (the platform's EdDSA), and `--help` lists the other card models. The app
+behaves the same on both; the Card Lab shows which engine made the card's
+Stellar key. Clear it with `setprop debug.impala.tcp_card ""`.
 Release builds compile a stub that is never configured; there is no UI switch.
 
 ### Running with impala-bridge
@@ -209,9 +216,36 @@ transport out of every source set a release APK compiles.
 > **Note:** OAuth password derivation (SHA-256 of the provider token) is a demo shortcut. A production app would add dedicated `/oauth/google` and `/oauth/github` bridge endpoints.
 
 ### Card (NFC smartcard)
-Requires an **issued** card (applet 0.2, personalized with a bridge
+Requires an **issued** card (applet 0.2 or later, personalized with a bridge
 certificate — see `impala-card/README.md` → "Issuance tool") that is
 **registered** to the account (Cards screen).
+
+A card signs in with one of two mechanisms, chosen per card and per server by
+impala-lib's `CardSignIn`; the steps below are the legacy one, which every
+card supports. **A card with a Stellar key (applet 0.3) signs in with SEP-10
+by default**: after step 2 the app reads the card's Stellar key
+(`GET_STELLAR_KEY`), fetches `stellar.toml` and a challenge transaction from
+`GET /auth/sep10`, checks the challenge (signing key, network, domain, time
+bounds), has the card sign it (`SIGN_SEP10`: the card parses the transaction
+itself and signs only a SEP-10 challenge for its own key) and posts the signed
+envelope to `POST /auth/sep10`, all while the card is held to the phone. The
+bridge answers with the same tokens as `POST /auth/card`, and the session is
+stored the same way (provider `card`).
+
+The app falls back to the legacy steps **in the same tap** in exactly three
+cases: the build has no `SEP10_HOME_DOMAIN`; the server does not offer SEP-10
+(no `stellar.toml`, no web-auth endpoint in it, or a 404 / 503); or the server
+answers 401 to the signed challenge because it does not know the card's
+Stellar key (or because the account holds a privileged role: the bridge never
+gives an operator's session to SEP-10, and that card keeps the legacy login).
+A 429 is the lockout and is shown as such; a challenge that fails
+a check stops the login with "The server's sign-in challenge could not be
+verified". Neither is ever turned into a fallback. Which mechanism a login
+used, and why a fallback happened, is in the Activity Log. Registering a card
+(Cards screen) sends its Stellar key along, so the bridge knows it from then
+on; a card issued with the issuance tool has its key registered by the tool;
+and a card whose key the bridge still does not know has it registered right
+after its next legacy login.
 1. "Sign in with Card" opens the tap sheet and arms reader mode; only that tap
    is acted on, and a second tap while a login is in flight is ignored (logged
    as a stray tap).
@@ -405,8 +439,12 @@ inspect").
   account, holder name, card key fingerprint), Personalization (state, flags,
   program id, currency, issuer key fingerprint), Certificate (length,
   `cert_id`, "Verified under the card's issuer key" — a local ECDSA P-256
-  check), Counters (receive counter and digest), Balance, Last transfer, and
-  Read steps. A blank or terminated card still gives a partial read with the
+  check), Stellar key (only for a card that has one: the `G…` address, the
+  Ed25519 engine — `soft` for the JavaCard 3.0.5 build, `native` for JavaCard
+  3.1 — and two local checks, "Vouched for by the card key" and "Proof of
+  possession", each "Verified for this card and account" or not; before
+  personalization both read "Not made yet"), Counters (receive counter and
+  digest), Balance, Last transfer, and Read steps. A blank or terminated card still gives a partial read with the
   failing step named. Identifier rows (ids, AID, fingerprints, program id,
   `cert_id`, digest) are set in monospace, wrap only at their own separators,
   and have a copy button (it copies the value itself); prose values use the
@@ -568,6 +606,32 @@ tokens, PINs, signatures, challenges, e-mail addresses or holder names
    - A challenge that expired (it lives 60 s) gives the same 401: tap again.
 5. **"Too many failed card sign-ins" (HTTP 429)**: five bad signatures lock the
    card out for 15 minutes per card and source; wait.
+   - **A card with a Stellar key that keeps using the legacy sign-in.** The
+     Activity Log says why after each login: `Card login used the legacy
+     challenge (SEP-10: …)`. `NOT_CONFIGURED`: this build has no
+     `SEP10_HOME_DOMAIN`. `NOT_OFFERED`: the bridge has SEP-10 off
+     (`SEP10_ENABLED`), no active signing key yet, or `SEP10_HOME_DOMAIN` is
+     not the authority of its `SEP10_WEB_AUTH_ENDPOINT`.
+     `NOT_REGISTERED`: the bridge does not know this card's Stellar key; the
+     card was registered without it. The app repairs this itself: after the
+     legacy login succeeds it registers the key (`PUT /card/stellar-key`) and
+     logs `The card's Stellar key is registered; its next login uses SEP-10`.
+     If that line is a refusal instead, re-run the issuance tool on the card
+     (it registers the key and changes nothing else). The same fallback on
+     every login of one account, with the key registered, means that account
+     holds a privileged role (admin, treasurer, key-custodian, auditor): the
+     bridge refuses those on SEP-10 by design, and the legacy login is the
+     answer.
+   - **"The server's sign-in challenge could not be verified".** The bridge's
+     SEP-10 challenge failed one of the app's checks, and the app did not fall
+     back on purpose. Usual causes: `SEP10_HOME_DOMAIN` names another host
+     than the bridge's web-auth endpoint, the build and the bridge are on
+     different Stellar networks, or the phone's clock is more than a few
+     minutes off.
+   - **The Inspector's Stellar key rows** show whether the card has a key at
+     all (no rows: a 0.2 card, or a card built without an Ed25519 engine) and
+     whether its two signatures verify; a failed check means the card was
+     personalized incorrectly and the bridge will refuse its key.
 6. **Trace tab**: which command failed and with which SW; *Field quality* in
    the Doctor counts tag losses and the slowest command. Repeated tag losses
    mean the card moved or the antenna spot is wrong: hold it still, flat, at the

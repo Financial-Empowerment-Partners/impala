@@ -5,7 +5,10 @@ import androidx.lifecycle.MutableLiveData
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.impala.sdk.flows.CardIdentity
+import com.impala.sdk.flows.Hex
 import com.impala.sdk.flows.UuidBytes
+import com.impala.sdk.models.StellarCardKey
+import com.payala.impala.card.CardStellarKeys
 import com.payala.impala.demo.api.BridgeApiService
 import com.payala.impala.demo.api.BridgeErrors
 import com.payala.impala.demo.card.CardStore
@@ -38,6 +41,12 @@ import retrofit2.HttpException
  * [ProgramMismatchPolicy.REFUSE] refuses ([Refusal.WRONG_PROGRAM]). When the
  * program cannot be checked (the issuer endpoint is unreachable), WARN asks
  * ([Event.IssuerUnknown]) and REFUSE refuses the same way (fail closed).
+ *
+ * A card with a Stellar key (applet 0.3) is registered with it, so it can sign
+ * in with SEP-10: the address and the card's two cross-signatures go in the
+ * same `POST /card`. They are checked here first, and left out (the card then
+ * registers for the legacy sign-in only) when they do not verify for this
+ * card and account; the bridge makes the decision that counts.
  */
 class CardsViewModel : ViewModel() {
 
@@ -128,7 +137,8 @@ class CardsViewModel : ViewModel() {
         sessionAccountId: String?,
         identity: CardIdentity,
         programMismatchPolicy: ProgramMismatchPolicy,
-        acknowledged: Boolean = false
+        acknowledged: Boolean = false,
+        stellarKey: StellarCardKey? = null
     ) {
         val refusal = checkRegistrable(identity, sessionAccountId)
         if (refusal != null) {
@@ -165,15 +175,36 @@ class CardsViewModel : ViewModel() {
                 }
                 IssuerState.Unconfigured -> Unit
             }
-            post(api, store, accountId, identity)
+            post(api, store, accountId, identity, stellarKey)
         }
     }
 
-    private suspend fun post(api: BridgeApiService, store: CardStore, accountId: String, identity: CardIdentity) {
+    /**
+     * The registration request for [identity]: with the three Stellar fields
+     * when [stellarKey] is bound and both cross-signatures verify for this
+     * card, without them otherwise.
+     */
+    internal fun registrationRequest(accountId: String, identity: CardIdentity, stellarKey: StellarCardKey?): CreateCardRequest {
+        val plain = CreateCardRequest(account_id = accountId, card_id = identity.wireCardId, ec_pubkey = identity.pubKeyHex)
+        if (stellarKey == null || !stellarKey.isBound) return plain
+        val verifies = CardStellarKeys.bindingVerifies(identity.pubKey, identity.accountId, identity.cardId, stellarKey) &&
+            CardStellarKeys.proofVerifies(identity.pubKey, identity.accountId, identity.cardId, stellarKey)
+        if (!verifies) {
+            AppLogger.w("Cards", "The card's Stellar key signatures do not verify; registering for the legacy sign-in only")
+            return plain
+        }
+        return plain.copy(
+            stellar_address = stellarKey.address,
+            stellar_binding_sig = Hex.encode(stellarKey.bindingSignature!!),
+            stellar_proof_sig = Hex.encode(stellarKey.proofSignature!!)
+        )
+    }
+
+    private suspend fun post(
+        api: BridgeApiService, store: CardStore, accountId: String, identity: CardIdentity, stellarKey: StellarCardKey?
+    ) {
         try {
-            val response = api.createCard(
-                CreateCardRequest(account_id = accountId, card_id = identity.wireCardId, ec_pubkey = identity.pubKeyHex)
-            )
+            val response = api.createCard(registrationRequest(accountId, identity, stellarKey))
             if (response.success) {
                 val card = StoredCard.from(identity)
                 store.save(accountId, card)

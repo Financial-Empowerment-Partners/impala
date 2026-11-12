@@ -242,6 +242,17 @@ class ExceptionMappingTest {
     fun `program already bound 0x623B maps to ImpalaPersonalizationException`() = assertMapping(0x623B, ImpalaPersonalizationException::class)
 
     @Test
+    fun `Stellar key missing 0x623C maps to ImpalaCryptoException`() = assertMapping(0x623C, ImpalaCryptoException::class)
+
+    @Test
+    fun `every SEP-10 refusal 0x6240 to 0x6245 maps to ImpalaChallengeException`() {
+        for (sw in 0x6240..0x6245) assertMapping(sw, ImpalaChallengeException::class)
+        // the words next to the range are not refusals of a challenge
+        assertTrue(ImpalaException.fromStatusWord(0x623F) !is ImpalaChallengeException)
+        assertTrue(ImpalaException.fromStatusWord(0x6246) !is ImpalaChallengeException)
+    }
+
+    @Test
     fun `wrong data 0x6A80 maps to ImpalaCardDataException`() = assertMapping(0x6A80, ImpalaCardDataException::class)
 
     @Test

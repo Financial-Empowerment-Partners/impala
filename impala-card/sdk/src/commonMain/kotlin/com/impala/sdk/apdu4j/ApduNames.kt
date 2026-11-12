@@ -17,18 +17,18 @@ object ApduNames {
      * Instructions that never change card state, consume a PIN try or produce a
      * signature (card-audit §4): NOP, GET_BALANCE, GET_ACCOUNT_ID, GET_USER_DATA,
      * GET_FULL_NAME, GET_GENDER, GET_EC_PUB_KEY, IS_CARD_ALIVE,
-     * GET_PERSONALIZATION, GET_RECEIVE_STATE, GET_LAST_TRANSFER, GET_VERSION.
-     * Valid at CLA 0x00 only.
+     * GET_PERSONALIZATION, GET_RECEIVE_STATE, GET_LAST_TRANSFER,
+     * GET_STELLAR_KEY, GET_VERSION. Valid at CLA 0x00 only.
      */
-    val READ_ONLY_INS: Set<Int> = setOf(0x02, 0x04, 0x16, 0x1E, 0x20, 0x21, 0x24, 0x2E, 0x34, 0x35, 0x36, 0x64)
+    val READ_ONLY_INS: Set<Int> = setOf(0x02, 0x04, 0x16, 0x1E, 0x20, 0x21, 0x24, 0x2E, 0x34, 0x35, 0x36, 0x37, 0x64)
 
     /**
      * Dispatched application instructions that change card state, consume a PIN
      * try or produce a signature: VERIFY_PIN, UPDATE_USER_PIN, SET_FULL_NAME,
-     * SET_GENDER, SIGN_AUTH, INITIALIZE, SIGN_TRANSFER_V2, VERIFY_TRANSFER_V2.
-     * Disjoint from [READ_ONLY_INS].
+     * SET_GENDER, SIGN_AUTH, INITIALIZE, SIGN_TRANSFER_V2, VERIFY_TRANSFER_V2,
+     * SIGN_SEP10. Disjoint from [READ_ONLY_INS].
      */
-    val MUTATING_INS: Set<Int> = setOf(0x18, 0x19, 0x1F, 0x22, 0x25, 0x2C, 0x30, 0x31)
+    val MUTATING_INS: Set<Int> = setOf(0x18, 0x19, 0x1F, 0x22, 0x25, 0x2C, 0x30, 0x31, 0x38)
 
     /**
      * Status words from the card platform rather than the applet: `6A82` (the
@@ -57,6 +57,8 @@ object ApduNames {
         0x34 to "GET_PERSONALIZATION",
         0x35 to "GET_RECEIVE_STATE",
         0x36 to "GET_LAST_TRANSFER",
+        0x37 to "GET_STELLAR_KEY",
+        0x38 to "SIGN_SEP10",
         0x64 to "GET_VERSION",
         // Declared but not dispatched (the applet answers 6D00).
         0x07 to "GET_RSA_PUB_KEY",
@@ -101,6 +103,13 @@ object ApduNames {
         0x6239 to "ZERO_AMOUNT",
         0x623A to "COUNTER_JUMP",
         0x623B to "PROGRAM_BOUND",
+        0x623C to "STELLAR_KEY_MISSING",
+        0x6240 to "SEP10_MALFORMED",
+        0x6241 to "SEP10_SEQUENCE_NOT_ZERO",
+        0x6242 to "SEP10_NOT_MANAGE_DATA",
+        0x6243 to "SEP10_WRONG_ACCOUNT",
+        0x6244 to "SEP10_NOT_AUTH_CHALLENGE",
+        0x6245 to "SEP10_NO_TIME_BOUNDS",
         0x6300 to "SCP03_AUTH_FAILED",
         0x6677 to "CERT_SELF_CHECK_FAILED",
         0x6678 to "NONCE_INVALID",
@@ -154,14 +163,27 @@ object ApduNames {
     /** `6A83` RECORD_NOT_FOUND. */
     private const val SW_RECORD_NOT_FOUND: Int = 0x6A83
 
+    /** GET_STELLAR_KEY (`0x37`): answers [SW_STELLAR_KEY_MISSING] on a card without a Stellar key. */
+    private const val GET_STELLAR_KEY_INS: Int = 0x37
+
+    /** `623C` STELLAR_KEY_MISSING. */
+    private const val SW_STELLAR_KEY_MISSING: Int = 0x623C
+
     /**
      * True when [sw] is the documented normal answer of a read rather than a
-     * failure: today only GET_LAST_TRANSFER's `6A83` on a card that has never
-     * signed a transfer (`docs/apdu.md`). Traces and stats show such an
-     * exchange as an expected answer, not as a card error.
+     * failure (`docs/apdu.md`): GET_LAST_TRANSFER's `6A83` on a card that has
+     * never signed a transfer, and GET_STELLAR_KEY's `623C` on a card without
+     * a Stellar key. Traces and stats show such an exchange as an expected
+     * answer, not as a card error.
      */
-    fun isExpectedStatus(cla: Int, ins: Int, sw: Int?): Boolean =
-        sw != null && (cla and 0xFF) == 0x00 && (ins and 0xFF) == GET_LAST_TRANSFER_INS && (sw and 0xFFFF) == SW_RECORD_NOT_FOUND
+    fun isExpectedStatus(cla: Int, ins: Int, sw: Int?): Boolean {
+        if (sw == null || (cla and 0xFF) != 0x00) return false
+        return when (ins and 0xFF) {
+            GET_LAST_TRANSFER_INS -> (sw and 0xFFFF) == SW_RECORD_NOT_FOUND
+            GET_STELLAR_KEY_INS -> (sw and 0xFFFF) == SW_STELLAR_KEY_MISSING
+            else -> false
+        }
+    }
 
     /** True only for SELECT and [READ_ONLY_INS] at CLA 0x00 (the read-only session allow-list). */
     fun isReadOnly(cla: Int, ins: Int): Boolean =

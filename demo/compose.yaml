@@ -33,6 +33,13 @@ x-bridge-env: &bridge-env
   OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector:4317"
   OTEL_SERVICE_NAME: "impala-bridge"
   OTEL_ENVIRONMENT: "demo"
+  # SEP-10 sign-in with a card's Stellar key (docs/runbooks/sep10.md; testnet only). The home domain is the
+  # authority of the endpoint: 10.0.2.2 is the Android emulator's name for this host, because the phone is
+  # the SEP-10 client. Host lanes reach the same listener at 127.0.0.1 and keep the name (lib.sh sep10_curl).
+  # DEMO_SEP10=false in .env turns it off: the public routes are then not mounted (404) and every card
+  # login is the legacy challenge.
+  SEP10_ENABLED: "${DEMO_SEP10:-true}"
+  SEP10_WEB_AUTH_ENDPOINT: "http://10.0.2.2:${BRIDGE_PORT}/auth/sep10"
 
 services:
   # ---------------------------------------------------------------- Impala bridge stack

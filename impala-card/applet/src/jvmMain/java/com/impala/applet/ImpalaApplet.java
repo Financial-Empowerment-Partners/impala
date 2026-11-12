@@ -6,6 +6,7 @@ import javacard.framework.ISO7816;
 import javacard.framework.ISOException;
 import javacard.framework.JCSystem;
 import javacard.framework.OwnerPIN;
+import javacard.framework.SystemException;
 import javacard.framework.Util;
 import javacard.security.CryptoException;
 import javacard.security.ECPrivateKey;
@@ -25,6 +26,8 @@ import static com.impala.applet.Constants.CERT_MESSAGE_LENGTH;
 import static com.impala.applet.Constants.CERT_VERSION;
 import static com.impala.applet.Constants.CURRENCY_LENGTH;
 import static com.impala.applet.Constants.DOMAIN_TAG_LENGTH;
+import static com.impala.applet.Constants.ED25519_PUB_KEY_LENGTH;
+import static com.impala.applet.Constants.ED25519_SIG_LENGTH;
 import static com.impala.applet.Constants.HASH_LENGTH;
 import static com.impala.applet.Constants.INS_GET_ACCOUNT_ID;
 import static com.impala.applet.Constants.INS_GET_BALANCE;
@@ -34,6 +37,7 @@ import static com.impala.applet.Constants.INS_GET_GENDER;
 import static com.impala.applet.Constants.INS_GET_LAST_TRANSFER;
 import static com.impala.applet.Constants.INS_GET_PERSONALIZATION;
 import static com.impala.applet.Constants.INS_GET_RECEIVE_STATE;
+import static com.impala.applet.Constants.INS_GET_STELLAR_KEY;
 import static com.impala.applet.Constants.INS_GET_USER_DATA;
 import static com.impala.applet.Constants.INS_GET_VERSION;
 import static com.impala.applet.Constants.INS_INITIALIZE;
@@ -46,6 +50,7 @@ import static com.impala.applet.Constants.INS_SCP03_TERMINATE;
 import static com.impala.applet.Constants.INS_SET_FULL_NAME;
 import static com.impala.applet.Constants.INS_SET_GENDER;
 import static com.impala.applet.Constants.INS_SIGN_AUTH;
+import static com.impala.applet.Constants.INS_SIGN_SEP10;
 import static com.impala.applet.Constants.INS_SIGN_TRANSFER_V2;
 import static com.impala.applet.Constants.INS_UPDATE_USER_PIN;
 import static com.impala.applet.Constants.INS_VERIFY_PIN;
@@ -56,9 +61,13 @@ import static com.impala.applet.Constants.LAST_TRANSFER_LENGTH;
 import static com.impala.applet.Constants.MAX_COUNTER_JUMP;
 import static com.impala.applet.Constants.MAX_SIG_LENGTH;
 import static com.impala.applet.Constants.MIN_DER_SIG_LENGTH;
+import static com.impala.applet.Constants.NETWORK_ID_LENGTH;
 import static com.impala.applet.Constants.P1_PERSONALIZE_CERTIFICATE;
 import static com.impala.applet.Constants.P1_PERSONALIZE_IDENTITY;
 import static com.impala.applet.Constants.P1_PERSONALIZE_ISSUER_KEY;
+import static com.impala.applet.Constants.P1_SEP10_BEGIN;
+import static com.impala.applet.Constants.P1_SEP10_CONTINUE;
+import static com.impala.applet.Constants.P1_SEP10_FINISH;
 import static com.impala.applet.Constants.P2_MASTER_PIN;
 import static com.impala.applet.Constants.P2_USER_PIN;
 import static com.impala.applet.Constants.PERSONALIZATION_LENGTH;
@@ -74,12 +83,19 @@ import static com.impala.applet.Constants.PFLAG_PIN_PROVISIONED;
 import static com.impala.applet.Constants.PFLAG_PROGRAM_BOUND;
 import static com.impala.applet.Constants.PFLAG_PROVISIONING_ENFORCED;
 import static com.impala.applet.Constants.PFLAG_SCP03_KEYS_DEFAULT;
+import static com.impala.applet.Constants.PFLAG_STELLAR_KEY;
 import static com.impala.applet.Constants.PFLAG_TERMINATED;
 import static com.impala.applet.Constants.PROGRAM_BLOCK_LENGTH;
 import static com.impala.applet.Constants.PROGRAM_ID_LENGTH;
 import static com.impala.applet.Constants.PUB_KEY_LENGTH;
 import static com.impala.applet.Constants.RECEIVE_STATE_LENGTH;
+import static com.impala.applet.Constants.SEP10_MAX_TX_LENGTH;
 import static com.impala.applet.Constants.SIGNABLE_LENGTH;
+import static com.impala.applet.Constants.SKEY_BINDING_MESSAGE_LENGTH;
+import static com.impala.applet.Constants.SKEY_BINDING_VERSION;
+import static com.impala.applet.Constants.SKEY_PROOF_MESSAGE_LENGTH;
+import static com.impala.applet.Constants.SKEY_PROOF_VERSION;
+import static com.impala.applet.Constants.STELLAR_KEY_RESPONSE_LENGTH;
 import static com.impala.applet.Constants.SW_ERROR_ALREADY_PERSONALIZED;
 import static com.impala.applet.Constants.SW_ERROR_CRYPTO_EXCEPTION;
 import static com.impala.applet.Constants.SW_ERROR_DEFAULT_SCP03_KEYS;
@@ -89,6 +105,7 @@ import static com.impala.applet.Constants.SW_ERROR_NOT_PERSONALIZED;
 import static com.impala.applet.Constants.SW_ERROR_PERSONALIZE_SEQUENCE;
 import static com.impala.applet.Constants.SW_ERROR_PROGRAM_ALREADY_BOUND;
 import static com.impala.applet.Constants.SW_ERROR_SEND_SEQUENCE_INVALID;
+import static com.impala.applet.Constants.SW_ERROR_STELLAR_KEY_MISSING;
 import static com.impala.applet.Constants.SW_ERROR_TRANSFER_COUNTER_INVALID;
 import static com.impala.applet.Constants.SW_ERROR_TRANSFER_COUNTER_JUMP;
 import static com.impala.applet.Constants.SW_ERROR_ZERO_AMOUNT;
@@ -100,18 +117,27 @@ import static com.impala.applet.Constants.XFER_MESSAGE_LENGTH;
 import static com.impala.applet.Constants.ZERO;
 
 /**
- * Main JavaCard applet for the Impala payment card (applet 0.2, transfer
- * protocol v1).
+ * Main JavaCard applet for the Impala payment card (applet 0.3: transfer
+ * protocol v1 and the Stellar key).
  *
  * <p>Handles APDU commands for account management, PIN verification, the
  * issuer-certified offline transfer protocol (SIGN_TRANSFER_V2 /
- * VERIFY_TRANSFER_V2), personalization over SCP03, and card lifecycle.</p>
+ * VERIFY_TRANSFER_V2), sign-in with either the card's P-256 key (SIGN_AUTH)
+ * or its Stellar key (SIGN_SEP10), personalization over SCP03, and card
+ * lifecycle.</p>
  *
  * <p>Target property: after personalization, a card signs nothing without an
  * issuer-certified identity, credits nothing that is not signed by an
  * issuer-certified key of the same program bound to the signable's sender and
  * currency, and no command reachable with card-management (SCP03) keys can
  * alter that trust root.</p>
+ *
+ * <p>The Stellar key (docs/sep10-card-keys.md) signs exactly two things: once,
+ * at personalization, a fixed proof-of-possession message; and, on request,
+ * the hash of a transaction the card has parsed itself and found to be a
+ * SEP-10 challenge (sequence number zero, manage-data operations only,
+ * addressed to this key). It never signs a hash or message supplied by the
+ * host, so it cannot authorize a ledger transaction.</p>
  */
 public class ImpalaApplet extends Applet {
     // --- Status word constants for APDU error responses (applet-local names;
@@ -169,7 +195,29 @@ public class ImpalaApplet extends Applet {
             (byte) 0x4C, (byte) 0x41, (byte) 0x2D, (byte) 0x43, // "LA-C"
             (byte) 0x45, (byte) 0x52, (byte) 0x54, (byte) 0x3A  // "ERT:"
     };
+    // ASCII "IMPALA-SKEY:" — the two cross-signatures that bind the card's P-256
+    // key and its Stellar key to each other, to the account and to the card
+    // (docs/sep10-card-keys.md, section 3.2):
+    //   SKEY_DOMAIN_TAG || 0x01 || accountId(16) || cardId(16) || ed25519Pub(32), ECDSA by the P-256 key
+    //   SKEY_DOMAIN_TAG || 0x02 || accountId(16) || cardId(16) || ecPub(65), Ed25519 by the Stellar key
+    private static final byte[] SKEY_DOMAIN_TAG = {
+            (byte) 0x49, (byte) 0x4D, (byte) 0x50, (byte) 0x41, // "IMPA"
+            (byte) 0x4C, (byte) 0x41, (byte) 0x2D, (byte) 0x53, // "LA-S"
+            (byte) 0x4B, (byte) 0x45, (byte) 0x59, (byte) 0x3A  // "KEY:"
+    };
+    // The EnvelopeType a Stellar transaction signature covers: ENVELOPE_TYPE_TX = 2.
+    private static final byte[] ENVELOPE_TYPE_TX = {
+            (byte) 0x00, (byte) 0x00, (byte) 0x00, (byte) 0x02
+    };
     private static final short AUTH_DOMAIN_TAG_LENGTH = 12;
+    // sep10Stage: networkId(32) then the transaction; sep10State: [0] 1 while a
+    // BEGIN is staged, [1] the number of transaction bytes staged so far.
+    private static final short SEP10_STAGE_LENGTH = (short) (NETWORK_ID_LENGTH + SEP10_MAX_TX_LENGTH);
+    private static final short SEP10_STATE_ACTIVE = 0;
+    private static final short SEP10_STATE_LENGTH = 1;
+    // Where the proof signature is produced in the scratchpad during PERSONALIZE
+    // part C (the SKEY message occupies the first 110 bytes).
+    private static final short OFFSET_PROOF_SCRATCH = 128;
     private static final short MIN_AUTH_CHALLENGE_LENGTH = 8;
     private static final short MAX_AUTH_CHALLENGE_LENGTH = 64;
 
@@ -240,6 +288,11 @@ public class ImpalaApplet extends Applet {
     private ECPrivateKey cardECPrivateKey;   // Card's EC private key (secp256r1) for signing
     private ECPublicKey cardECPublicKey;     // Card's EC public key (secp256r1)
 
+    // --- Stellar key (SEP-10 sign-in) ---
+    private Ed25519 stellarKey;              // null: this build or platform has no Ed25519 engine (legacy card)
+    private byte[] stellarBindingSig;        // 72-byte slot: the P-256 key's DER signature over SKEY message 0x01
+    private byte[] stellarProofSig;          // 64 bytes: the Stellar key's signature over SKEY message 0x02
+
     // --- Cardholder data ---
     private byte[] fullName;
     private short fullNameLength;
@@ -267,6 +320,8 @@ public class ImpalaApplet extends Applet {
     private byte[] personalizeStage;   // PERSONALIZE parts A(40)@0 and B(65)@40, staged across APDUs (CLEAR_ON_DESELECT)
     private byte[] stageState;         // bit0 = part A received, bit1 = part B received (CLEAR_ON_DESELECT)
     private byte[] verifyStage;        // 1 after a successful VERIFY_TRANSFER_V2 P1=0x00 (CLEAR_ON_DESELECT)
+    private byte[] sep10Stage;         // SIGN_SEP10: networkId(32) ‖ transaction, staged across APDUs (CLEAR_ON_DESELECT)
+    private short[] sep10State;        // SIGN_SEP10: [0] staged flag, [1] staged transaction length (CLEAR_ON_DESELECT)
 
     // --- SCP03 secure channel ---
     private SCP03 scp03;
@@ -341,6 +396,26 @@ public class ImpalaApplet extends Applet {
         scp03.setDiversificationSource(cardId);
         scp03.setStaticKeys(DEFAULT_SCP03_KEY, ZERO, DEFAULT_SCP03_KEY, ZERO, DEFAULT_SCP03_KEY, ZERO);
 
+        // The Stellar key is optional by construction: a build without an engine,
+        // a platform that lacks one of its primitives, or a card without the
+        // memory for the challenge stage installs as a legacy card. It is the
+        // LAST thing allocated: everything the card needs without it (the
+        // buffers above, the secure channel) already has its memory, so running
+        // out here can only cost the Stellar key, never the install. Nothing
+        // allocated in a constructor can be given back, so a card that fits the
+        // engine but not the stage keeps the engine's work area unused.
+        stellarKey = Ed25519Provider.create();
+        if (stellarKey != null) {
+            try {
+                stellarBindingSig = new byte[MAX_SIG_LENGTH];
+                stellarProofSig = new byte[ED25519_SIG_LENGTH];
+                sep10Stage = JCSystem.makeTransientByteArray(SEP10_STAGE_LENGTH, JCSystem.CLEAR_ON_DESELECT);
+                sep10State = JCSystem.makeTransientShortArray((short) 2, JCSystem.CLEAR_ON_DESELECT);
+            } catch (SystemException e) {
+                stellarKey = null;
+            }
+        }
+
         // Install parameters may override the SCP03 keys / PINs, bind the program
         // and enable the provisioning gate. Throws on malformed input, failing the
         // install cleanly before register() — never with partially-applied state.
@@ -392,17 +467,19 @@ public class ImpalaApplet extends Applet {
      *       INS_GET_VERSION (0x64), INS_GET_EC_PUB_KEY (0x24, 0x6230 before INITIALIZE),
      *       INS_GET_FULL_NAME (0x20), INS_GET_GENDER (0x21), INS_GET_USER_DATA (0x1E),
      *       INS_GET_PERSONALIZATION (0x34), INS_GET_RECEIVE_STATE (0x35),
-     *       INS_GET_LAST_TRANSFER (0x36) — readable in every state, TERMINATED included</li>
+     *       INS_GET_LAST_TRANSFER (0x36), INS_GET_STELLAR_KEY (0x37, 0x623C without a
+     *       Stellar key) — readable in every state, TERMINATED included</li>
      *   <li><b>Card must not be terminated:</b>
      *       INS_INITIALIZE (0x2C), INS_VERIFY_PIN (0x18), INS_SET_FULL_NAME (0x1F),
-     *       INS_SET_GENDER (0x22), INS_SIGN_AUTH (0x25), INS_SIGN_TRANSFER_V2 (0x30),
-     *       INS_VERIFY_TRANSFER_V2 (0x31), INS_UPDATE_USER_PIN (0x19), INS_IS_CARD_ALIVE (0x2E),
-     *       and every SCP03 command</li>
+     *       INS_SET_GENDER (0x22), INS_SIGN_AUTH (0x25), INS_SIGN_SEP10 (0x38),
+     *       INS_SIGN_TRANSFER_V2 (0x30), INS_VERIFY_TRANSFER_V2 (0x31),
+     *       INS_UPDATE_USER_PIN (0x19), INS_IS_CARD_ALIVE (0x2E), and every SCP03 command</li>
      *   <li><b>Card must be personalized (0x6234 otherwise):</b>
-     *       INS_SIGN_AUTH, INS_SIGN_TRANSFER_V2, INS_VERIFY_TRANSFER_V2</li>
+     *       INS_SIGN_AUTH, INS_SIGN_SEP10, INS_SIGN_TRANSFER_V2, INS_VERIFY_TRANSFER_V2</li>
      *   <li><b>CLA 0x00 only (0x6E00 when secured):</b>
      *       INS_SIGN_TRANSFER_V2, INS_VERIFY_TRANSFER_V2, INS_GET_PERSONALIZATION,
-     *       INS_GET_LAST_TRANSFER — their payloads do not fit the SCP03 wrap</li>
+     *       INS_GET_LAST_TRANSFER, INS_GET_STELLAR_KEY, INS_SIGN_SEP10 — their payloads
+     *       do not fit the SCP03 wrap</li>
      *   <li><b>Master PIN required:</b>
      *       INS_UPDATE_USER_PIN (0x19) — masterPIN.isValidated()</li>
      *   <li><b>User PIN required (or PIN-less within limits):</b>
@@ -415,8 +492,11 @@ public class ImpalaApplet extends Applet {
      *       PERSONALIZE / TERMINATE (and PROVISION_PIN under ENFORCE) are refused
      *       over the GP default keys (0x6236)</li>
      *   <li><b>Provisioning gate (install-time FLAG_INSTALL_ENFORCE):</b>
-     *       INS_SIGN_TRANSFER_V2 (0x30), INS_SIGN_AUTH (0x25) answer 0x6985 until
-     *       a user PIN has been provisioned</li>
+     *       INS_SIGN_TRANSFER_V2 (0x30), INS_SIGN_AUTH (0x25), INS_SIGN_SEP10 (0x38)
+     *       answer 0x6985 until a user PIN has been provisioned</li>
+     *   <li><b>No PIN (parity with INS_SIGN_AUTH):</b>
+     *       INS_SIGN_SEP10 — the card signs only what its own parser accepts as a
+     *       SEP-10 challenge for its key; see {@link Sep10}</li>
      * </ul>
      *
      * @param apdu the incoming APDU
@@ -434,6 +514,18 @@ public class ImpalaApplet extends Applet {
 
             byte[] buffer = apdu.getBuffer();
             short dataLength = (short) (buffer[ISO7816.OFFSET_LC] & 0xff);
+
+            // A staged SEP-10 challenge survives exactly one thing: the next
+            // SIGN_SEP10 part being accepted. It is taken out of service here,
+            // before any check can refuse this command, and only a BEGIN or
+            // CONTINUE that succeeds puts it back. Every other command, every
+            // refusal (wrong CLA, a short data field, a guard) and every error
+            // therefore leaves nothing staged.
+            short sep10Pending = ZERO;
+            if (sep10State != null) {
+                sep10Pending = sep10State[SEP10_STATE_ACTIVE];
+                sep10State[SEP10_STATE_ACTIVE] = 0;
+            }
 
             // --- SCP03 dispatch (CLA 0x80 = GP plain, CLA 0x84 = GP secured) ---
             byte cla = buffer[ISO7816.OFFSET_CLA];
@@ -527,6 +619,7 @@ public class ImpalaApplet extends Applet {
                         randomData.generateData(cardId, ZERO, UUID_LENGTH);
 
                         createECKeypair();
+                        createStellarKey();
 
                         initialized = true;
                     } else {
@@ -643,6 +736,32 @@ public class ImpalaApplet extends Applet {
                     sendBytes(apdu, scratchpad, ZERO, PUB_KEY_LENGTH);
                     break;
                 }
+                case INS_GET_STELLAR_KEY: {
+                    failIfSecured();
+                    failIfNoStellarKey();
+                    Util.arrayFillNonAtomic(scratchpad, ZERO, STELLAR_KEY_RESPONSE_LENGTH, (byte) 0);
+                    scratchpad[0] = stellarKey.engineId();
+                    stellarKey.getPublicKey(scratchpad, (short) 1);
+                    // The two slots mean something only once PERSONALIZE part C has
+                    // committed (see signStellarBinding); until then both read as zero.
+                    if (personalized) {
+                        Util.arrayCopyNonAtomic(stellarBindingSig, ZERO, scratchpad,
+                                (short) (1 + ED25519_PUB_KEY_LENGTH), MAX_SIG_LENGTH);
+                        Util.arrayCopyNonAtomic(stellarProofSig, ZERO, scratchpad,
+                                (short) (1 + ED25519_PUB_KEY_LENGTH + MAX_SIG_LENGTH), ED25519_SIG_LENGTH);
+                    }
+                    sendBytes(apdu, scratchpad, ZERO, STELLAR_KEY_RESPONSE_LENGTH);
+                    break;
+                }
+                case INS_SIGN_SEP10: {
+                    failIfSecured();
+                    failIfCardIsTerminated();
+                    failIfProvisioningRequired();
+                    failIfNotPersonalized();
+                    failIfNoStellarKey();
+                    signSep10(apdu, buffer, dataLength, sep10Pending == (short) 1);
+                    break;
+                }
                 case INS_GET_FULL_NAME: {
                     sendBytes(apdu, fullName, ZERO, fullNameLength);
                     break;
@@ -735,6 +854,13 @@ public class ImpalaApplet extends Applet {
     private void failIfNotPersonalized() {
         if (!personalized) {
             ISOException.throwIt(SW_ERROR_NOT_PERSONALIZED);
+        }
+    }
+
+    /** Throws 0x623C on a card without a Stellar key (legacy build, or a platform without the primitives). */
+    private void failIfNoStellarKey() {
+        if (stellarKey == null || !stellarKey.hasPublicKey()) {
+            ISOException.throwIt(SW_ERROR_STELLAR_KEY_MISSING);
         }
     }
 
@@ -992,7 +1118,9 @@ public class ImpalaApplet extends Applet {
      *   <li>P1=0x02 B issuer key: issuerPubKey(65) — omitted when program-bound at install</li>
      *   <li>P1=0x03 C certificate: DER ECDSA signature (8..72) over the CERT message,
      *       verified under the issuer key; commits everything in one transaction with
-     *       {@code personalized} as the last write</li>
+     *       {@code personalized} as the last write. A card with a Stellar key first
+     *       makes its two cross-signatures over the identity being committed
+     *       (see signStellarBinding)</li>
      * </ul>
      * Any failure of a part clears the stage: the ceremony restarts from part A.
      */
@@ -1102,6 +1230,18 @@ public class ImpalaApplet extends Applet {
             ISOException.throwIt(Constants.SW_ERROR_CARD_DATA_SIGNATURE_INVALID); // 0x6677
         }
 
+        // Cross-signatures of the two card keys over the identity about to be
+        // committed, made and stored BEFORE the transaction: signing is slow, and
+        // the two slots stay out of the commit buffer. They are not part of the
+        // atomic commit and do not need to be: GET_STELLAR_KEY reports them only
+        // once `personalized` is set, part C cannot run again after that, and a
+        // ceremony that fails or tears here leaves slots the next one overwrites.
+        // A signing failure fails part C (0x6683): the card is never personalized
+        // with a Stellar key it cannot prove.
+        if (stellarKey != null && stellarKey.isKeyReady()) {
+            signStellarBinding();
+        }
+
         JCSystem.beginTransaction();
         Util.arrayCopy(personalizeStage, ZERO, accountId, ZERO, UUID_LENGTH);
         Util.arrayCopy(personalizeStage, UUID_LENGTH, currency, ZERO, CURRENCY_LENGTH);
@@ -1126,8 +1266,9 @@ public class ImpalaApplet extends Applet {
     /**
      * TERMINATE (CLA 0x84, INS 0x73, C-DEC required): irreversibly disables the
      * card. The 16-byte payload must equal the card's accountId (binds the
-     * operator to the card in the reader). The signing key is cleared so signing
-     * is impossible even if a guard were missed; public reads stay available.
+     * operator to the card in the reader). Both signing keys (P-256 and
+     * Stellar) are cleared so signing is impossible even if a guard were missed;
+     * public reads stay available.
      */
     private void processTerminate(byte[] buffer, short dataLength) {
         failIfNoCdec();                                                    // 0x6982
@@ -1143,6 +1284,9 @@ public class ImpalaApplet extends Applet {
         JCSystem.commitTransaction();
         if (cardECPrivateKey != null) {
             cardECPrivateKey.clearKey();
+        }
+        if (stellarKey != null) {
+            stellarKey.clearKey();
         }
     }
 
@@ -1220,6 +1364,105 @@ public class ImpalaApplet extends Applet {
         short sigLength = signWithMyKey(scratchpad, ZERO,
                 (short) (AUTH_DOMAIN_TAG_LENGTH + UUID_LENGTH + dataLength));
         sendBytes(apdu, sigBuffer, ZERO, sigLength);
+    }
+
+    /**
+     * SIGN_SEP10 (CLA 0x00, INS 0x38): signs a SEP-10 challenge transaction with
+     * the card's Stellar key. The transaction arrives in parts because it does
+     * not fit one APDU:
+     * <ul>
+     *   <li>P1=0x00 BEGIN: networkId(32) ‖ first transaction bytes; discards any
+     *       earlier stage</li>
+     *   <li>P1=0x01 CONTINUE: more transaction bytes</li>
+     *   <li>P1=0x02 FINISH: the last bytes (may be none); validates the whole
+     *       transaction ({@link Sep10#validate}), computes
+     *       SHA-256(networkId ‖ ENVELOPE_TYPE_TX ‖ transaction) and returns the
+     *       64-byte Ed25519 signature of that hash</li>
+     * </ul>
+     * 0x6985 for CONTINUE / FINISH without BEGIN; 0x6700 for a BEGIN without a
+     * full network id or more than 640 transaction bytes; 0x6A86 for another P1
+     * or a non-zero P2. The card hashes what it validated: the host never
+     * supplies the value that is signed. Any failure discards the stage, and a
+     * signature consumes it.
+     */
+    private void signSep10(APDU apdu, byte[] buffer, short dataLength, boolean staging) {
+        // process() has already taken the stage out of service (`staging` says
+        // whether one was in progress): whatever this method throws, nothing
+        // stays staged. Only the two successful returns below put it back.
+        byte p1 = buffer[ISO7816.OFFSET_P1];
+        if (buffer[ISO7816.OFFSET_P2] != (byte) 0x00
+                || (p1 != P1_SEP10_BEGIN && p1 != P1_SEP10_CONTINUE && p1 != P1_SEP10_FINISH)) {
+            ISOException.throwIt(ISO7816.SW_INCORRECT_P1P2);              // 0x6A86
+        }
+        short staged;
+        if (p1 == P1_SEP10_BEGIN) {
+            if (dataLength <= NETWORK_ID_LENGTH) {
+                ISOException.throwIt(ISO7816.SW_WRONG_LENGTH);            // 0x6700
+            }
+            // One APDU carries at most 255 bytes: this cannot exceed the stage
+            Util.arrayCopyNonAtomic(buffer, ISO7816.OFFSET_CDATA, sep10Stage, ZERO, dataLength);
+            sep10State[SEP10_STATE_LENGTH] = (short) (dataLength - NETWORK_ID_LENGTH);
+            sep10State[SEP10_STATE_ACTIVE] = 1;
+            return;
+        }
+        if (!staging) {
+            ISOException.throwIt(ISO7816.SW_CONDITIONS_NOT_SATISFIED);     // 0x6985: no BEGIN
+        }
+        staged = sep10State[SEP10_STATE_LENGTH];
+        if (dataLength > (short) (SEP10_MAX_TX_LENGTH - staged)) {
+            ISOException.throwIt(ISO7816.SW_WRONG_LENGTH);                // 0x6700
+        }
+        Util.arrayCopyNonAtomic(buffer, ISO7816.OFFSET_CDATA, sep10Stage,
+                (short) (NETWORK_ID_LENGTH + staged), dataLength);
+        staged += dataLength;
+        if (p1 == P1_SEP10_CONTINUE) {
+            sep10State[SEP10_STATE_LENGTH] = staged;
+            sep10State[SEP10_STATE_ACTIVE] = 1;
+            return;
+        }
+
+        // FINISH: the card's own verdict on the bytes, then its own hash of them.
+        // The stage is not put back: one challenge, at most one signature.
+        stellarKey.getPublicKey(scratchpad, ZERO);
+        Sep10.validate(sep10Stage, NETWORK_ID_LENGTH, staged, scratchpad, ZERO);
+        messageDigest.reset();
+        messageDigest.update(sep10Stage, ZERO, NETWORK_ID_LENGTH);
+        messageDigest.update(ENVELOPE_TYPE_TX, ZERO, (short) 4);
+        messageDigest.doFinal(sep10Stage, NETWORK_ID_LENGTH, staged, hashBuffer, ZERO);
+        stellarKey.sign(hashBuffer, ZERO, HASH_LENGTH, scratchpad, ZERO);
+        sendBytes(apdu, scratchpad, ZERO, ED25519_SIG_LENGTH);
+    }
+
+    /**
+     * Makes and stores the two cross-signatures over the identity staged by
+     * PERSONALIZE part A (the account id about to be committed) and this card's
+     * id and keys: stellarProofSig is the Stellar key's signature over SKEY
+     * message 0x02, and stellarBindingSig the P-256 key's DER signature over
+     * SKEY message 0x01 in a zero-padded 72-byte slot. The second says "this
+     * card vouches for this Stellar key"; the first is proof of possession of
+     * the Stellar key, bound to the account and the card, so the address
+     * cannot be registered under another account or card.
+     */
+    private void signStellarBinding() {
+        buildSkeyHeader(SKEY_PROOF_VERSION);
+        cardECPublicKey.getW(scratchpad, (short) (DOMAIN_TAG_LENGTH + 1 + UUID_LENGTH + UUID_LENGTH));
+        stellarKey.sign(scratchpad, ZERO, SKEY_PROOF_MESSAGE_LENGTH, scratchpad, OFFSET_PROOF_SCRATCH);
+        Util.arrayCopyNonAtomic(scratchpad, OFFSET_PROOF_SCRATCH, stellarProofSig, ZERO, ED25519_SIG_LENGTH);
+
+        buildSkeyHeader(SKEY_BINDING_VERSION);
+        stellarKey.getPublicKey(scratchpad, (short) (DOMAIN_TAG_LENGTH + 1 + UUID_LENGTH + UUID_LENGTH));
+        Util.arrayFillNonAtomic(sigBuffer, ZERO, MAX_SIG_LENGTH, (byte) 0);
+        signWithMyKey(scratchpad, ZERO, SKEY_BINDING_MESSAGE_LENGTH);
+        Util.arrayCopyNonAtomic(sigBuffer, ZERO, stellarBindingSig, ZERO, MAX_SIG_LENGTH);
+    }
+
+    /** scratchpad[0..45) := SKEY_DOMAIN_TAG ‖ version ‖ staged accountId ‖ cardId. */
+    private void buildSkeyHeader(byte version) {
+        Util.arrayCopyNonAtomic(SKEY_DOMAIN_TAG, ZERO, scratchpad, ZERO, DOMAIN_TAG_LENGTH);
+        scratchpad[DOMAIN_TAG_LENGTH] = version;
+        Util.arrayCopyNonAtomic(personalizeStage, ZERO, scratchpad, (short) (DOMAIN_TAG_LENGTH + 1), UUID_LENGTH);
+        Util.arrayCopyNonAtomic(cardId, ZERO, scratchpad,
+                (short) (DOMAIN_TAG_LENGTH + 1 + UUID_LENGTH), UUID_LENGTH);
     }
 
     /**
@@ -1532,6 +1775,9 @@ public class ImpalaApplet extends Applet {
         if (terminated) {
             f |= PFLAG_TERMINATED;
         }
+        if (stellarKey != null && stellarKey.hasPublicKey()) {
+            f |= PFLAG_STELLAR_KEY;
+        }
         return f;
     }
 
@@ -1628,6 +1874,29 @@ public class ImpalaApplet extends Applet {
 
         cardECPrivateKey = (ECPrivateKey) keyPair.getPrivate();
         cardECPublicKey = (ECPublicKey) keyPair.getPublic();
+    }
+
+    /**
+     * Generates the card's Stellar (Ed25519) key where the build and the
+     * platform provide an engine. Like the P-256 key it is generated on the
+     * card from the platform's own randomness and can be neither loaded nor
+     * read. A platform that refuses any step leaves the card without a Stellar
+     * key (flag 0x80 clear, 0x623C): INITIALIZE still succeeds and the card
+     * works as a legacy card.
+     */
+    private void createStellarKey() {
+        if (stellarKey == null) {
+            return;
+        }
+        boolean generated = false;
+        try {
+            generated = stellarKey.generateKeyPair();
+        } catch (Exception e) {
+            generated = false;
+        }
+        if (!generated) {
+            stellarKey = null;
+        }
     }
 
     /** Signs data with the card's EC private key (ECDSA-SHA256). Returns signature length. */

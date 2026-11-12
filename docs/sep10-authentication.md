@@ -8,6 +8,18 @@
 > uncommitted card lane (card login, issuance tool, scardutil fleet files).
 > Part B is a worked pilot scenario; every command in it that is not marked
 > *(physical card)* or *(this design)* was run while writing.
+>
+> **Update, 2026-11: one key kind is implemented.** The public endpoint
+> (`/.well-known/stellar.toml`, `GET`/`POST /auth/sep10`), the generate-only
+> signing key with its admin lifecycle, and sign-in with a Stellar key held on
+> the **Impala card** now exist: see [`sep10-card-keys.md`](sep10-card-keys.md),
+> which is the contract for that work and wins where the two documents
+> disagree about card keys. What is still design only here: phone and wallet
+> login keys and their enrollment (the `stellar_login_key` tables, link
+> challenges, the ledger rule), restricted-audience sessions and the Android
+> Keystore device key. The Secure Element analysis below predates the card's
+> Stellar key; a JavaCard applet can hold an Ed25519 key after all, by the
+> two routes that document describes.
 
 **In one paragraph.** The bridge gains a standards-compliant
 [SEP-10 v3.4.1](https://github.com/stellar/stellar-protocol/blob/master/ecosystem/sep-0010.md)
@@ -997,16 +1009,19 @@ The checks and the behaviour they pin:
 
 | Step | APDU | Expect | What it proves |
 |---|---|---|---|
-| GET_VERSION | `00 64 00 00 00` | `9000`, data contains `00000002` | applet 0.2 |
+| GET_VERSION | `00 64 00 00 00` | `9000`, data contains `00000003` | applet 0.3 |
 | GET_PERSONALIZATION | `00 34 00 00 00` | `9000`, data starts `00 08` | blank state, SCP03 keys default |
 | GET_EC_PUB_KEY before INITIALIZE | `00 24 00 00 00` | `6230` | no key yet |
 | SIGN_AUTH before INITIALIZE | `00 25 00 00 08 …` | `6234` | personalization guard fires first |
+| GET_STELLAR_KEY, SIGN_SEP10 before INITIALIZE | `00 37 …`, `00 38 …` | `623C`, `6234` | no Stellar key yet; signing needs a personalized card |
 | retired INS 06 / 14 | `00 06 …`, `00 14 …` | `6D00` | v0 transfer INS stay burned |
 | non-SCP03 INS at CLA 80 | `80 30 …` | `6D00` | CLA 80 carries only SCP03 |
 | transfer / read at CLA 84, no session | `84 30 …`, `84 34 …` | `6985` | secured CLA needs an open channel (not `6E00`: `SCP03.unwrapCommand` refuses before any INS is dispatched) |
 | INITIALIZE, then again | `00 2C 00 00 04 …` ×2 | `9000`, then `6686` | one-shot key generation |
 | GET_EC_PUB_KEY, GET_USER_DATA | `00 24 …`, `00 1E …` | `9000` | 65-byte `04‖X‖Y`, 32+ bytes of identity |
 | SIGN_AUTH, initialized but unissued | `00 25 …` | `6234` | login impossible before PERSONALIZE |
+| GET_PERSONALIZATION, GET_STELLAR_KEY after INITIALIZE | `00 34 …`, `00 37 …` | `9000` data starts `01 89`; `9000` | the card made its Stellar key: this card OS runs the CAP's Ed25519 engine (`01 09` and `623C` instead mean a legacy card, see `impala-dispatch.md`) |
+| SIGN_SEP10, initialized but unissued | `00 38 …` | `6234` | SEP-10 login impossible before PERSONALIZE |
 | GET_RECEIVE_STATE, GET_LAST_TRANSFER | `00 35 …`, `00 36 …` | `9000`, `6A83` | counter 0, nothing signed |
 
 **1c. Run it on the simulator target.** jcardsim's own `VSmartCard` only
@@ -1019,15 +1034,17 @@ protocol scardutil expects:
 ```
 $ scardutil test-sequence impala-dispatch.json --sim-cfg scardutil/impala-sim.cfg \
       --jcardsim "bash scripts/vpcd-sim.sh" --no-cap-info
-Sequence: Impala applet 0.2 plaintext dispatch
+Sequence: Impala applet 0.3 plaintext dispatch
   [SKIP] delete 0102030405060708  needs a card-management backend … skipped on a raw transport
   [SKIP] install ImpalaApplet.cap  needs a card-management backend … skipped on a raw transport
   [PASS] apdu 0064000000 -> 9000 (Success -- command completed normally)
-         data: 00000002000000000000
+         data: 00000003000000000000
   [PASS] apdu 0034000000 -> 9000 (Success -- command completed normally)
-         data: 0008000000…
+         data: 00080000000000000000000000000000000000000000000000000000000000000000000000…
   [PASS] apdu 0024000000 -> 6230 (Warning -- non-volatile memory unchanged)
   [PASS] apdu 00250000080102030405060708 -> 6234 (Warning -- non-volatile memory unchanged)
+  [PASS] apdu 0037000000 -> 623C (Warning -- non-volatile memory unchanged)
+  [PASS] apdu 0038000000 -> 6234 (Warning -- non-volatile memory unchanged)
   [PASS] apdu 0006000000 -> 6D00 (Instruction (INS) not supported or invalid)
   [PASS] apdu 0014000000 -> 6D00 (Instruction (INS) not supported or invalid)
   [PASS] apdu 8030000000 -> 6D00 (Instruction (INS) not supported or invalid)
@@ -1036,15 +1053,20 @@ Sequence: Impala applet 0.2 plaintext dispatch
   [PASS] apdu 002C00000400112233 -> 9000 (Success -- command completed normally)
   [PASS] apdu 002C00000400112233 -> 6686 (Security-related error)
   [PASS] apdu 0024000000 -> 9000 (Success -- command completed normally)
-         data: 045BBD69B59B2EC33377CB62B8237D55CE8352A391DB7204DD445CB60BB5110D0DD75F5B78…
+         data: 045092C6B299F785534EF0EB5587AE874CC3D0218030C641E2C213A4E66D232BD559162779…
   [PASS] apdu 001E000000 -> 9000 (Success -- command completed normally)
          data: 0000000000000000000000000000000051D6342CFE534643FADA84D54BF179EC
   [PASS] apdu 00250000080102030405060708 -> 6234 (Warning -- non-volatile memory unchanged)
+  [PASS] apdu 0034000000 -> 9000 (Success -- command completed normally)
+         data: 01890000000000000000000000000000000000000000000000000000000000000000000000…
+  [PASS] apdu 0037000000 -> 9000 (Success -- command completed normally)
+         data: 015B6388ECA6EDF1F24E8BAA057E52426F11F90390FE4B4060F785A7F64471C8F100000000…
+  [PASS] apdu 0038000000 -> 6234 (Warning -- non-volatile memory unchanged)
   [PASS] apdu 0035000000 -> 9000 (Success -- command completed normally)
-         data: 0000000000000000…
+         data: 000000000000000000000000000000000000000000000000000000000000000000000000
   [PASS] apdu 0036000000 -> 6A83 (Record not found)
   [SKIP] delete 0102030405060708  needs a card-management backend … skipped on a raw transport
-19 steps: 16 passed, 0 failed, 3 skipped
+24 steps: 21 passed, 0 failed, 3 skipped
 ```
 
 Two readings of that output matter later: `GET_USER_DATA` shows the all-zero
@@ -1053,28 +1075,65 @@ account UUID of an unissued card followed by its random card UUID (the
 `SIGN_AUTH` is refused until PERSONALIZE part C has landed — which is exactly
 why the app checks personalization before it spends a login challenge.
 
-**1d. The fleet.** `scardutil/fleet.example.json` declares the simulator plus
-two readers; `"wait": 60` per reader turns one reader into a stack-of-cards
-workflow (insert the next card when prompted). `evaluate` opens each target
-once, runs the sequence for every CAP in the directory, and prints the matrix;
-when targets disagree, its **Divergence** section lists the candidate and the
-targets that differ, which is the compatibility finding the run exists to
-produce.
+**1d. The fleet.** `scardutil/fleet.example.json` declares two simulated
+cards, one per hardware class, plus two readers; `"wait": 60` per reader turns
+one reader into a stack-of-cards workflow (insert the next card when
+prompted). `evaluate` opens each target once, runs the sequence for every CAP
+in the directory, and prints the matrix; when targets disagree, its
+**Divergence** section lists the candidate and the targets that differ, which
+is the compatibility finding the run exists to produce.
+
+The two simulated cards are what the fleet is expected to look like before any
+real card is in a reader: `sim-jc305` is the default CAP on a JavaCard 3.0.5
+card (the software Ed25519 engine), `sim-jc32` the native CAP on a JavaCard
+3.2 card (the platform's own EdDSA). Each cfg names its hardware with
+`impala.platform`, a card model of the simulator (`impala-card/README.md`,
+"Simulated hardware").
 
 ```
-$ cd scardutil && scardutil evaluate ../applet/build --targets fleet.example.json \
+$ cd scardutil && mkdir -p ../build/candidates && cp ../applet/build/ImpalaApplet.cap ../build/candidates/
+$ scardutil evaluate ../build/candidates --targets fleet.example.json \
       --sequence impala-dispatch.json --cleanup --report-dir ../build/fleet-reports/
-CAP evaluation matrix: …/impala-card/applet/build
+CAP evaluation matrix: …/impala-card/build/candidates
 
-                  jcardsim
-ImpalaApplet.cap      PASS
+                  sim-jc305  sim-jc32
+ImpalaApplet.cap       PASS      PASS
 
-== jcardsim  (simulator: managed, cfg …/scardutil/impala-sim.cfg)  [PASS]
+== sim-jc305  (simulator: managed, cfg impala-sim-jc305.cfg)  [PASS]
    [PASS] ImpalaApplet.cap   (impala-dispatch.json)
    1/1 CAP file(s) passed
 
-1/1 target(s) passed
+== sim-jc32  (simulator: managed, cfg impala-sim-jc32.cfg)  [PASS]
+   [PASS] ImpalaApplet.cap   (impala-dispatch.json)
+   1/1 CAP file(s) passed
+
+2/2 target(s) passed
 ```
+
+The matrix above was recorded on 2026-11-12 with the two simulator targets
+only (no reader attached) and one CAP in the candidates directory. Both
+targets pass the same 21 checks; the one answer that differs is the first
+data byte of `GET_STELLAR_KEY` after INITIALIZE, the engine behind the card's
+Stellar key: `01` on `sim-jc305`, `02` on `sim-jc32`.
+
+Three things to know when reading a fleet matrix:
+
+- The build writes three CAPs (`ImpalaApplet.cap`, `ImpalaApplet-native.cap`,
+  `ImpalaApplet-none.cap`, one per Ed25519 engine). On physical cards two
+  differences between them are by design, not findings:
+  `ImpalaApplet-none.cap` answers `01 09` and `623C` at the two Stellar steps
+  after INITIALIZE, and `ImpalaApplet-native.cap` loads only on a JavaCard 3.1
+  or 3.2 card.
+- A card whose OS cannot run the engine of `ImpalaApplet.cap` gives those same
+  two answers with the default CAP. That *is* a finding: the card is a legacy
+  card. The simulator can show what it looks like
+  (`impala.platform=jc305-no-xy`: step 19 fails with "expected data containing
+  0189").
+- A simulator target is a card that already has its CAP: scardutil skips
+  install and delete there, so the candidate's file is not what runs, and the
+  simulated card stays as the previous candidate left it. Evaluate one CAP at
+  a time when the fleet has simulator targets, as above
+  (`impala-card/scardutil/README.md`, "Simulated hardware").
 
 *(physical card)* With readers present the same invocation adds a column per
 card. Per card, also capture

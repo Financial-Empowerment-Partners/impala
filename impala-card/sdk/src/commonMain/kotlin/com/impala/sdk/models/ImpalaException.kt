@@ -95,6 +95,15 @@ open class ImpalaException : BIBOException {
                 0x0023 -> ImpalaCryptoException("Signature verification failed (0x0023)")
                 0x6227 -> ImpalaCryptoException("Error initializing signer (0x6227)")
                 0x6230 -> ImpalaCryptoException("EC card key missing (0x6230)")
+                0x623C -> ImpalaCryptoException("Stellar key missing (0x623C)")
+
+                // SEP-10: the card's own parser refused the challenge transaction
+                0x6240 -> ImpalaChallengeException("SEP-10 challenge malformed (0x6240)")
+                0x6241 -> ImpalaChallengeException("SEP-10 challenge sequence number is not zero (0x6241)")
+                0x6242 -> ImpalaChallengeException("SEP-10 challenge has an operation that is not manage data (0x6242)")
+                0x6243 -> ImpalaChallengeException("SEP-10 challenge is not addressed to this card (0x6243)")
+                0x6244 -> ImpalaChallengeException("SEP-10 challenge has no auth entry (0x6244)")
+                0x6245 -> ImpalaChallengeException("SEP-10 challenge has no time bounds (0x6245)")
 
                 // Transfer errors
                 0x6231 -> ImpalaTransferException("Wrong sender (0x6231)")
@@ -187,6 +196,13 @@ class ImpalaTransferException(message: String) : ImpalaException(message)
 
 /** Card data is corrupt or could not be read/written correctly. */
 class ImpalaCardDataException(message: String) : ImpalaException(message)
+
+/**
+ * The card refused to sign a transaction with its Stellar key: its own parser
+ * did not find a SEP-10 challenge addressed to this card (applet 0.3, status
+ * words 0x6240..0x6245). The card signs nothing else with that key.
+ */
+class ImpalaChallengeException(message: String) : ImpalaException(message)
 
 /** Communication with the card was lost (NFC tag removed). */
 class ImpalaTagLostException(message: String) : ImpalaException(message)

@@ -49,6 +49,13 @@ class CardIdentity(
     /** The issuer certificate (trimmed DER), or null before PERSONALIZE part C. */
     val certificate: ByteArray? get() = personalization.certificate
 
+    /**
+     * True when the card advertises a Stellar key (GET_PERSONALIZATION flag
+     * `0x80`, applet 0.3+): it can sign in with SEP-10. Read the key itself
+     * with `ImpalaSDK.getStellarKey`.
+     */
+    val hasStellarKey: Boolean get() = personalization.stellarKey
+
     /** Fails with the typed error unless the card can sign (personalized, not terminated). */
     fun requirePersonalized(): CardIdentity {
         if (state == STATE_TERMINATED || personalization.terminated) throw CardFlowException(CardError.Terminated)

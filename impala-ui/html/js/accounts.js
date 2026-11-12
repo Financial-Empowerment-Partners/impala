@@ -5,7 +5,8 @@
  * (GET /account) showing the full profile, a role-grant control
  * (PUT /admin/accounts/:id/role), directory force-sync
  * (POST /admin/accounts/:id/sync-profile) and on-chain details
- * (GET /account/onchain). Create / edit use a modal against the real bridge
+ * (GET /account/onchain) and the account's cards with their SEP-10 Stellar
+ * addresses (GET /admin/accounts/:id/cards, view_accounts_list). Create / edit use a modal against the real bridge
  * fields; delete uses a confirm modal against DELETE /admin/accounts/:id.
  *
  * All actions are permission-gated: view_accounts (view), manage_accounts
@@ -213,6 +214,14 @@
             '<button class="button ghost" id="drawer-onchain-btn">Refresh on-chain details</button>' +
             '</div>';
 
+        // Cards: GET /admin/accounts/:id/cards is Privileged<ReadAccounts>,
+        // mirrored in the UI as view_accounts_list.
+        if (Roles.currentUserHasPermission('view_accounts_list')) {
+            html += '<div class="detail-section"><h6>Cards</h6>' +
+                '<div id="cards-panel"><p class="text-muted">Loading&hellip;</p></div>' +
+                '</div>';
+        }
+
         drawer.setBody(html);
 
         wireDrawer(acct, drawer);
@@ -275,6 +284,66 @@
                     .then(function () { API.setButtonLoading(onchainBtn, false); });
             });
         }
+
+        var cardsPanel = drawer.body.querySelector('#cards-panel');
+        if (cardsPanel) loadCards(acct, cardsPanel);
+    }
+
+    function loadCards(acct, panel) {
+        if (!acct.payala_account_id) {
+            panel.innerHTML = '<p class="text-muted">This account has no Payala ID, so its cards cannot be listed.</p>';
+            return;
+        }
+        API.get('/admin/accounts/' + encodeURIComponent(acct.payala_account_id) + '/cards')
+            .then(function (res) {
+                // The drawer may have been closed or reopened on another account.
+                if (!panel.isConnected) return;
+                panel.innerHTML = renderCards(CardsView.normalizeCardList(res),
+                    CardsView.sep10RefusedFor(acct.role, acct.allowlisted));
+            })
+            .catch(function (err) {
+                if (!panel.isConnected) return;
+                var c = CardsView.classifyCardListError(err);
+                panel.innerHTML = c.kind === 'error'
+                    ? '<div class="callout alert">' + escapeHtml(c.message) + '</div>'
+                    : '<p class="text-muted">' + escapeHtml(c.message) + '</p>';
+            });
+    }
+
+    function renderCards(list, sep10Refused) {
+        if (list.malformed) {
+            return '<p class="text-muted">The bridge returned no readable card list.</p>';
+        }
+        if (list.cards.length === 0) {
+            return '<p class="text-muted">No cards are registered for this account.</p>';
+        }
+        var html = '<div class="table-wrap"><table><thead><tr>' +
+            '<th>Card ID</th><th>Status</th><th>Created</th><th>Stellar address</th>' +
+            '</tr></thead><tbody>';
+        list.cards.forEach(function (c) {
+            // Badge classes come from CardsView's fixed set; values are
+            // escaped and rendered as element content only.
+            html += '<tr>' +
+                '<td><code class="ident">' + escapeHtml(c.cardId || '') + '</code></td>' +
+                '<td><span class="badge ' + c.status.cls + '">' + escapeHtml(c.status.label) + '</span>' +
+                (c.deletedAt ? '<br><small class="text-muted">' + escapeHtml(formatDate(c.deletedAt)) + '</small>' : '') +
+                '</td>' +
+                '<td class="nowrap">' + escapeHtml(formatDate(c.createdAt)) + '</td>' +
+                '<td>' + (c.stellarAddress
+                    ? '<code class="ident">' + escapeHtml(c.stellarAddress) + '</code>' +
+                      (c.sep10 ? ' <span class="badge info">SEP-10</span>' : '')
+                    : '<span class="text-muted">none</span>') +
+                '</td>' +
+                '</tr>';
+        });
+        html += '</tbody></table></div>' +
+            '<p class="text-muted">Newest first, at most 100. A card&rsquo;s Stellar address is a ' +
+            'sign-in key only: never fund it.</p>';
+        if (sep10Refused && list.cards.some(function (c) { return c.sep10; })) {
+            html += '<p class="text-muted">This account holds a privileged role, so the bridge ' +
+                'refuses SEP-10 sign-in for it. Its cards sign in with the legacy card challenge.</p>';
+        }
+        return html;
     }
 
     function renderOnchain(data) {

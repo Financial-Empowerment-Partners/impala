@@ -103,6 +103,14 @@ pub struct AppMetrics {
     pub reconciliation_drift_minor: Gauge<i64>,
     /// Snapshots recorded, by `kind`, `complete` and `invariants_ok`.
     pub reconciliation_snapshots: Counter<u64>,
+
+    // SEP-10 (040). Never an address label.
+    /// Challenges issued, by `purpose` (login).
+    pub sep10_challenges: Counter<u64>,
+    /// Refused POSTs by `reason` (malformed, not_issued, expired, mac,
+    /// server_signature, bad_master_signature, unknown_signer, ineligible,
+    /// replay).
+    pub sep10_rejections: Counter<u64>,
 }
 
 impl AppMetrics {
@@ -316,13 +324,34 @@ impl AppMetrics {
                     "Reconciliation snapshots recorded, by kind/complete/invariants_ok",
                 )
                 .build(),
+
+            sep10_challenges: meter
+                .u64_counter("sep10.challenges")
+                .with_description("SEP-10 challenges issued, by purpose")
+                .build(),
+            sep10_rejections: meter
+                .u64_counter("sep10.rejections")
+                .with_description("SEP-10 token requests refused, by reason")
+                .build(),
         }
     }
 }
 
 impl AppMetrics {
+    /// A SEP-10 challenge was issued (`purpose` = login).
+    pub fn record_sep10_challenge(&self, purpose: &'static str) {
+        self.sep10_challenges
+            .add(1, &[KeyValue::new("purpose", purpose)]);
+    }
+
+    /// A SEP-10 token request was refused for `reason` (a fixed label).
+    pub fn record_sep10_rejection(&self, reason: &'static str) {
+        self.sep10_rejections
+            .add(1, &[KeyValue::new("reason", reason)]);
+    }
+
     /// Record a token-exchange attempt on the `auth.token_exchange` counter
-    /// (`provider` = okta|google|github|card, `outcome` from
+    /// (`provider` = okta|google|github|card|sep10, `outcome` from
     /// [`token_exchange_outcome`]).
     pub fn record_token_exchange(&self, provider: &'static str, outcome: &'static str) {
         self.token_exchanges.add(

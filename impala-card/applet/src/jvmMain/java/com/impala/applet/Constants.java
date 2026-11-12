@@ -5,8 +5,8 @@ package com.impala.applet;
  * Constants shared across the applet: APDU instruction codes, PIN type identifiers,
  * data size definitions, and status word error codes.
  *
- * This is the number registry for the card protocol (applet 0.2, transfer
- * protocol v1). Every INS / SW / length here is mirrored byte-for-byte in the
+ * This is the number registry for the card protocol (applet 0.3: transfer
+ * protocol v1 and the Stellar key). Every INS / SW / length here is mirrored byte-for-byte in the
  * SDK's Constants.kt and documented in docs/apdu.md; ApduDocDriftTest pins the
  * three together.
  */
@@ -49,6 +49,15 @@ public class Constants {
     public static final byte INS_GET_RECEIVE_STATE = (byte) 0x35;    // CLA 0x00 or 0x84
     public static final byte INS_GET_LAST_TRANSFER = (byte) 0x36;    // CLA 0x00 only (132-byte response)
 
+    // Stellar key and SEP-10 sign-in (applet 0.3, docs/sep10-card-keys.md)
+    public static final byte INS_GET_STELLAR_KEY = (byte) 0x37;      // CLA 0x00 only (169-byte response)
+    public static final byte INS_SIGN_SEP10 = (byte) 0x38;           // CLA 0x00 only (P1 begin / continue / finish)
+
+    // SIGN_SEP10 parts (P1)
+    public static final byte P1_SEP10_BEGIN = (byte) 0x00;
+    public static final byte P1_SEP10_CONTINUE = (byte) 0x01;
+    public static final byte P1_SEP10_FINISH = (byte) 0x02;
+
     // SCP03 instruction codes (only dispatched via the secured CLA 0x84 path)
     public static final byte INS_SCP03_PROVISION_PIN = (byte) 0x70;
     public static final byte INS_SCP03_APPLET_UPDATE = (byte) 0x71;
@@ -74,6 +83,7 @@ public class Constants {
     public static final byte PFLAG_PIN_PROVISIONED = (byte) 0x10;
     public static final byte PFLAG_PROVISIONING_ENFORCED = (byte) 0x20;
     public static final byte PFLAG_TERMINATED = (byte) 0x40;
+    public static final byte PFLAG_STELLAR_KEY = (byte) 0x80;       // the card holds a Stellar (Ed25519) key
 
     // SCP03 status words
     public static final short SW_SCP03_AUTH_FAILED = (short) 0x6300;
@@ -113,6 +123,20 @@ public class Constants {
     public static final byte CERT_VERSION = (byte) 0x01;
     public static final short MAX_COUNTER_JUMP = (short) 1024;
 
+    // Stellar key / SEP-10 lengths and versions
+    public static final short ED25519_PUB_KEY_LENGTH = 32;
+    public static final short ED25519_SIG_LENGTH = 64;
+    public static final short NETWORK_ID_LENGTH = 32;          // SHA-256(network passphrase)
+    public static final short SEP10_MAX_TX_LENGTH = 640;       // the staged Transaction XDR
+    public static final short SEP10_MAX_OPERATIONS = 5;
+    public static final short STELLAR_KEY_RESPONSE_LENGTH = 169; // engine(1) ‖ ed25519Pub(32) ‖ bindingSig(72) ‖ proofSig(64)
+    public static final short SKEY_BINDING_MESSAGE_LENGTH = 77;  // tag(12) ‖ 0x01 ‖ accountId(16) ‖ cardId(16) ‖ ed25519Pub(32)
+    public static final short SKEY_PROOF_MESSAGE_LENGTH = 110;   // tag(12) ‖ 0x02 ‖ accountId(16) ‖ cardId(16) ‖ ecPub(65)
+    public static final byte SKEY_BINDING_VERSION = (byte) 0x01;
+    public static final byte SKEY_PROOF_VERSION = (byte) 0x02;
+    public static final byte ED25519_ENGINE_SOFT = (byte) 0x01;   // JavaCard 3.0.5: ECDH on Wei25519 + applet arithmetic
+    public static final byte ED25519_ENGINE_NATIVE = (byte) 0x02; // JavaCard 3.1 / 3.2: the platform's own EdDSA
+
     public static final short SW_OK = (short) 0x9000;
     public static final short SW_INS_NOT_SUPPORTED = 0x6d00;
     public static final short SW_ERROR_KEY_VERIFICATION_FAILED = 0x0022;
@@ -149,6 +173,13 @@ public class Constants {
     public static final short SW_ERROR_ZERO_AMOUNT = 0x6239;
     public static final short SW_ERROR_TRANSFER_COUNTER_JUMP = 0x623A;
     public static final short SW_ERROR_PROGRAM_ALREADY_BOUND = 0x623B;
+    public static final short SW_ERROR_STELLAR_KEY_MISSING = 0x623C;
+    public static final short SW_ERROR_SEP10_MALFORMED = 0x6240;
+    public static final short SW_ERROR_SEP10_SEQUENCE_NOT_ZERO = 0x6241;
+    public static final short SW_ERROR_SEP10_NOT_MANAGE_DATA = 0x6242;
+    public static final short SW_ERROR_SEP10_WRONG_ACCOUNT = 0x6243;
+    public static final short SW_ERROR_SEP10_NOT_AUTH_CHALLENGE = 0x6244;
+    public static final short SW_ERROR_SEP10_NO_TIME_BOUNDS = 0x6245;
     public static final short SW_ERROR_CARD_DATA_SIGNATURE_INVALID = 0x6677;
     public static final short SW_ERROR_CARD_DATA_NONCE_INVALID = 0x6678;
     public static final short SW_ERROR_WRONG_CARD_ID = 0x6679;

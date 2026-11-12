@@ -16,6 +16,13 @@
 # Bridge API base URL (default: emulator loopback to host)
 TESTNET_BRIDGE_BASE_URL=http://10.0.2.2:8080
 
+# SEP-10 card sign-in: the home domain whose /.well-known/stellar.toml names
+# the web-auth endpoint. Leave it unset to use the bridge's own host[:port]
+# (it must equal the authority of the bridge's SEP10_WEB_AUTH_ENDPOINT). Set it
+# to an empty value to turn SEP-10 off for this build; cards then sign in with
+# the legacy challenge. http is used only for localhost, 127.0.0.1 and 10.0.2.2.
+#TESTNET_SEP10_HOME_DOMAIN=10.0.2.2:8080
+
 # GitHub OAuth App client ID + redirect URI (must match the OAuth App settings)
 TESTNET_GITHUB_CLIENT_ID=YOUR_GITHUB_CLIENT_ID
 TESTNET_GITHUB_REDIRECT_URI=impala://github-callback
@@ -31,6 +38,9 @@ TESTNET_GOOGLE_WEB_CLIENT_ID=YOUR_GOOGLE_WEB_CLIENT_ID
 # ── live flavor (Stellar pubnet) ─────────────────────────────────────────────
 
 LIVE_BRIDGE_BASE_URL=https://api.impala.example.com
+# See TESTNET_SEP10_HOME_DOMAIN. The bridge serves SEP-10 on testnet only in
+# this phase, so a live build falls back to the legacy card challenge.
+#LIVE_SEP10_HOME_DOMAIN=api.impala.example.com
 LIVE_GITHUB_CLIENT_ID=YOUR_GITHUB_CLIENT_ID
 LIVE_GITHUB_REDIRECT_URI=impala://github-callback
 LIVE_GOOGLE_WEB_CLIENT_ID=YOUR_GOOGLE_WEB_CLIENT_ID

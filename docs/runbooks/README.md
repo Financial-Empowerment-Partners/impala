@@ -20,6 +20,7 @@ Start from the task you have, not from the document you think you want.
 | Onboard or offboard an operator; grant a role; fix lost MFA | [`accounts-and-roles.md`](./accounts-and-roles.md) |
 | Install or rotate a provider credential or custodial seed | [`import-keys.md`](./import-keys.md) |
 | Generate the card issuer key; certify cards for personalization | [`card-issuer.md`](./card-issuer.md) |
+| Turn on SEP-10 sign-in for card keys; rotate or revoke its signing key | [`sep10.md`](./sep10.md) |
 | Rotate `JWT_SECRET`, database or delivery credentials | [`rotate-secrets.md`](./rotate-secrets.md) |
 | Enable, fund or operate the conversion reserve | [`conversion-reserve.md`](./conversion-reserve.md) |
 | Work out what an error, log line or failure means | [`triage.md`](./triage.md) |
@@ -58,6 +59,9 @@ Start from the task you have, not from the document you think you want.
   seeds. **Read its danger section before touching `/admin/keys/*`.**
 - [`rotate-secrets.md`](./rotate-secrets.md) — the secret inventory, blast
   radius per secret, and emergency rotation order.
+- [`sep10.md`](./sep10.md) — SEP-10 sign-in with a card's Stellar key
+  (testnet only): what the key can and cannot do, the generate-only signing
+  key and its lifecycle, roll-out, rotation, revocation, troubleshooting.
 - [`conversion-reserve.md`](./conversion-reserve.md) — enabling, funding, day-2
   operations, and the failure queues.
 

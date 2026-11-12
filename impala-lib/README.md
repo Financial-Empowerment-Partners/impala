@@ -69,6 +69,46 @@ and are applied **before** the SELECT, so the SELECT is traced and guarded too:
 A SELECT that no applet answers (`6A82`, `6999`; also `6D00` anywhere) is
 `CardError.AppletNotFound(sw)` and closes the transport.
 
+**Card sign-in: SEP-10 by default, the legacy challenge as the fallback.**
+`CardSignIn` is the compatibility layer between the two mechanisms a card can
+sign in with, run inside `onTap` with the card connected:
+
+```
+CardSignIn(sep10Client, legacyChallenge).signIn(session)
+  identity (unissued or terminated cards stop here, before any request)
+  ├─ the card advertises a Stellar key (GET_PERSONALIZATION flag 0x80, applet 0.3+)
+  │    GET_STELLAR_KEY → Sep10Client.prepare (stellar.toml, challenge, client checks)
+  │    → SIGN_SEP10 on the card → Sep10Client.submit
+  │    → CardSignInResult.Sep10(identity, stellarAddress, tokenJson)
+  └─ any other card, or one of the three fallback cases
+       legacyChallenge.fetch(cardId) → SIGN_AUTH
+       → CardSignInResult.Legacy(identity, signatureHex, fallback)   exchange at POST /auth/card
+```
+
+The fallback has exactly three cases (`Sep10Fallback`, decided by
+`CardSignIn.fallbackFor`): no SEP-10 client was configured; the server does not
+offer SEP-10 (`stellar.toml` missing or without `WEB_AUTH_ENDPOINT` /
+`SIGNING_KEY`, or a 404 / 503); the server answered 401 to the signed
+challenge (it does not know the card's Stellar key, or, on the Impala bridge,
+the account holds a privileged role, which SEP-10 never serves). Everything
+else is
+thrown: a 429 (`Sep10HttpException`), a transport failure, a challenge that
+fails the client checks (`Sep10Exception`: wrong signing key, network, domain
+or time bounds) and a challenge the card itself refuses
+(`CardError.ChallengeRefused`). A failed check is never turned into a quiet
+downgrade. The card signs only what its own parser accepts as a SEP-10
+challenge for its key, so a hostile server cannot use this path to obtain any
+other signature. The contract is
+[`docs/sep10-card-keys.md`](../docs/sep10-card-keys.md).
+
+`com.payala.impala.stellar` holds the client side: `Sep10Client`
+(`prepare` / `submit`, a one-minute `stellar.toml` cache, one refetch when the
+signing key appears to have rotated), `HttpSep10Transport` (https only, http
+for `localhost`, `127.0.0.1` and `10.0.2.2`; no redirects; size and time
+limits), `StellarToml` (a strict reader of the three keys SEP-10 needs) and
+`Ed25519`, signature verification in `java.math.BigInteger` because the
+platform has no Ed25519 before API 33. Nothing in the package logs.
+
 **System dispatch (IsoDep tapped outside reader mode)** — identity only:
 
 ```
@@ -108,17 +148,20 @@ ACTION_LOCATION_UPDATE broadcast
 |-------|---------|
 | `card.ImpalaCardSession` | One connected card: `sdk`, lazily read `identity` (`CardIdentity`), idempotent `close()`, plus `transport` (`CardTransportFacts`, null for `fromBibo`), `aidHex` (the AID SELECTed; null = default selection) and `isReadOnly`. `open(tag, timeoutMs, aidHex, trace, readOnly)` and `fromBibo(bibo, aidHex, trace, readOnly)` are `@JvmOverloads`. Refuses to open on the main thread. |
 | `card.CardReaderController` | Reader mode (NFC-A/B, NDEF check skipped, 1 s presence check); `onTap` on the binder thread with the session open, `onResult` on the main thread. `trace: ApduExchangeHook?` (before `sessionFactory`, so positional Kotlin callers are unaffected) reaches the default factory. `debugInjectTapOrClose(session)` (emulator lane) returns false and closes the session when reader mode is off, instead of throwing like `debugInjectTap` |
-| `card.CardInspector` | `inspect(session)`: a structured read for diagnostics — GET_VERSION, GET_PERSONALIZATION, GET_USER_DATA, GET_EC_PUB_KEY, IS_CARD_ALIVE, GET_RECEIVE_STATE, GET_LAST_TRANSFER, GET_BALANCE, each recorded as an `InspectionStep`, so a blank or terminated card gives a partial result. Requires `session.isReadOnly` and a background thread (`IllegalStateException` otherwise); never throws for card refusals; stops after a tag loss, or when GET_VERSION fails (the answering applet is not Impala's, so later INS bytes would mean something else). Returns a `CardInspection` |
-| `card.CardInspection` | Not a `data` class; `toString()` is redacted. Version line (`0.2 · r17 · g1a2b3c4d`), state and flags, program id, currency, key fingerprints, certificate length, `cert_id`, `certVerifiedByCardIssuer` (local ECDSA), receive counter and digest, the exchanges, and `holderName` / `balanceMinor` / `lastTransfer` as `Masked`. Raw public key and certificate stay private behind `certificateVerifiesUnder(issuerPublicKeyHex)` |
+| `card.CardInspector` | `inspect(session)`: a structured read for diagnostics — GET_VERSION, GET_PERSONALIZATION, GET_USER_DATA, GET_EC_PUB_KEY, IS_CARD_ALIVE, GET_RECEIVE_STATE, GET_LAST_TRANSFER, GET_BALANCE, then GET_STELLAR_KEY for a card that advertises a Stellar key, each recorded as an `InspectionStep`, so a blank or terminated card gives a partial result. Requires `session.isReadOnly` and a background thread (`IllegalStateException` otherwise); never throws for card refusals; stops after a tag loss, or when GET_VERSION fails (the answering applet is not Impala's, so later INS bytes would mean something else). Returns a `CardInspection` |
+| `card.CardInspection` | Not a `data` class; `toString()` is redacted. Version line (`0.2 · r17 · g1a2b3c4d`), state and flags, program id, currency, key fingerprints, certificate length, `cert_id`, `certVerifiedByCardIssuer` (local ECDSA), receive counter and digest, the exchanges, `stellarAddress` / `stellarEngine` / `stellarBindingVerified` / `stellarProofVerified` for a card with a Stellar key, and `holderName` / `balanceMinor` / `lastTransfer` as `Masked`. Raw public key and certificate stay private behind `certificateVerifiesUnder(issuerPublicKeyHex)` |
 | `card.Masked<T>` | Wraps a personal value: `toString()` is `••••`, `reveal()` returns it. The caller decides when revealing is allowed |
 | `card.CardTransportFacts` | The only place tag-layer facts are read (UID, tech list, ISO 14443-4, max transceive length, extended length, timeout, historical bytes / higher-layer response, ATQA, SAK, NFC-B data). Never throws: an unreadable fact is null, 0 or false |
 | `card.CardCertificates` | `verify(issuerPub65, programId, accountId, currency, cardPub65, certDer)` — the card certificate under an issuer key, with `java.security` (API 24+); malformed input is false, nothing is logged. `fingerprint(pub65)` — first 10 bytes of SHA-256 as `ab:cd:…` |
-| `card.CardStepLabels` | `labelFor(exchange)`: a string id for a tap-progress label from the trace (`card_step_reading` for SELECT and every read command, `card_step_signing_login` for SIGN_AUTH, `card_step_signing_transfer` for SIGN_TRANSFER_V2, `card_step_applying_credit` for VERIFY_TRANSFER_V2); null otherwise (there is no VERIFY_PIN label: no flow sends it) |
+| `card.CardStepLabels` | `labelFor(exchange)`: a string id for a tap-progress label from the trace (`card_step_reading` for SELECT and every read command, `card_step_signing_login` for SIGN_AUTH and SIGN_SEP10, `card_step_signing_transfer` for SIGN_TRANSFER_V2, `card_step_applying_credit` for VERIFY_TRANSFER_V2); null otherwise (there is no VERIFY_PIN label: no flow sends it) |
 | `card.CardAppletAid` | `forApp(context)`: the AID from the app's `com.payala.impala.CARD_APPLET_AID` meta-data (see "Consumer manifest") |
 | `card.ImpalaLibLog` / `LibLogSink` | The library's log calls go to `android.util.Log` **and** to an optional `@Volatile` `sink` the app installs (the demo routes them into its Activity Log); a throwing sink is ignored. `LogHygieneTest` keeps secrets and personal values out of every call |
-| `card.CardAuthenticator` | `signChallenge(session, challengeHex)` for `POST /auth/card` |
+| `card.CardAuthenticator` | The card-facing steps of both sign-in mechanisms: `signChallenge(session, challengeHex)` for `POST /auth/card`; `mechanism(session)` (`CardAuthMechanism.SEP10` for a card with a Stellar key, else `LEGACY`); `stellarKey(session)` (`GET_STELLAR_KEY`, read-only, null for a card without one); `signSep10(session, cardKey, challenge)` (the signed envelope, verified under the card's key before it is returned) |
+| `card.CardSignIn` / `CardSignInResult` / `Sep10Fallback` | One card sign-in for every card and server: SEP-10 when the card and the server both have it, the legacy challenge otherwise, in the same tap. See "Card sign-in" above |
+| `card.CardStellarKeys` | `bindingVerifies` / `proofVerifies`: the two cross-signatures that tie a card's Stellar key to its P-256 key, account and card id, checked locally (malformed input is false, nothing is logged) |
+| `stellar.Sep10Client` / `Sep10Transport` / `HttpSep10Transport` / `StellarToml` / `Ed25519` | The SEP-10 client: `stellar.toml`, challenge, client checks (`com.impala.sdk.stellar.Sep10Challenge.verify`), submit; Ed25519 verification for API 24+ |
 | `card.CardTransfers` | `redeem` (zeroes the PIN `CharArray`), `recoverLastSigned`, `previousSendSequence`, `applyCredit` |
-| `card.CardErrorMessages` | String resource / message for each `CardError` (`card_error_*`, overridable by the app), including `card_error_applet_not_found` and `card_error_read_only_refused`; `message(context, error, includeStatusWord)` appends `(SW xxxx)` only when asked (the demo asks in debug builds) |
+| `card.CardErrorMessages` | String resource / message for each `CardError` (`card_error_*`, overridable by the app), including `card_error_applet_not_found`, `card_error_read_only_refused` and `card_error_challenge_refused`; `message(context, error, includeStatusWord)` appends `(SW xxxx)` only when asked (the demo asks in debug builds) |
 | `card.ImpalaCardTapHandler` / `CardTapListener` | Static registry for system-dispatched taps |
 | `NfcContactActivity` | Transient activity for system-dispatched IsoDep taps; reads identity only |
 | `NdefDispatchActivity` | Transient activity handling NDEF message discovery |

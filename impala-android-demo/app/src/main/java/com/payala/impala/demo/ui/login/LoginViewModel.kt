@@ -11,8 +11,14 @@ import com.impala.sdk.flows.CardError
 import com.impala.sdk.flows.CardFlowException
 import com.impala.sdk.flows.CardIdentity
 import com.impala.sdk.flows.Hex
-import com.payala.impala.card.CardAuthenticator
+import com.impala.sdk.models.StellarCardKey
+import com.impala.sdk.stellar.Sep10Exception
+import com.payala.impala.card.CardStellarKeys
+import com.payala.impala.card.CardSignIn
+import com.payala.impala.card.CardSignInResult
 import com.payala.impala.card.ImpalaCardSession
+import com.payala.impala.card.Sep10Fallback
+import com.payala.impala.demo.auth.CardSep10
 import com.payala.impala.demo.auth.TokenManager
 import com.payala.impala.demo.card.TapProgress
 import com.payala.impala.demo.card.TapStep
@@ -20,6 +26,7 @@ import com.payala.impala.demo.log.AppLogger
 import com.payala.impala.demo.model.AuthenticateRequest
 import com.payala.impala.demo.model.CardAuthRequest
 import com.payala.impala.demo.model.CardChallengeRequest
+import com.payala.impala.demo.model.SetCardStellarKeyRequest
 import com.payala.impala.demo.model.GitHubTokenExchangeRequest
 import com.payala.impala.demo.model.GoogleTokenExchangeRequest
 import com.payala.impala.demo.model.OktaTokenExchangeRequest
@@ -30,15 +37,33 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
+import com.payala.impala.stellar.Sep10Client
+import com.payala.impala.stellar.Sep10ClientException
+import com.payala.impala.stellar.Sep10HttpException
 import retrofit2.HttpException
 import java.io.IOException
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * What a card tap produced for login: the card's identity and its DER
- * signature (lowercase hex) over the bridge challenge.
+ * What a card tap produced for login.
+ *
+ * A card with a Stellar key signs in with SEP-10 inside the tap (the signed
+ * challenge is posted while the card is still in the field, so the legacy
+ * challenge can follow in the same tap when the server turns it down):
+ * [sep10TokenJson] is then the bridge's `POST /auth/sep10` answer and
+ * [signatureHex] is empty. Any other tap carries the card's DER signature
+ * (lowercase hex) over the legacy bridge challenge, to exchange at
+ * `POST /auth/card`; [sep10Fallback] says why a card that has a Stellar key
+ * was signed in that way.
  */
-data class CardLoginTap(val identity: CardIdentity, val signatureHex: String)
+data class CardLoginTap(
+    val identity: CardIdentity,
+    val signatureHex: String,
+    val sep10TokenJson: String? = null,
+    val sep10Fallback: Sep10Fallback? = null,
+    /** The card's Stellar key when a fallback tap read it (public values); see [LoginViewModel.loginWithCard]. */
+    val stellarKey: StellarCardKey? = null
+)
 
 /**
  * ViewModel managing the authentication state for [LoginActivity].
@@ -50,9 +75,12 @@ data class CardLoginTap(val identity: CardIdentity, val signatureHex: String)
  * - **GitHub** – OAuth authorization code exchanged at `POST /auth/github`
  *   (the bridge performs the code→token exchange server-side).
  * - **Okta** – access token exchanged at `POST /auth/okta`.
- * - **Card** – NFC challenge-response: `POST /auth/card/challenge`, signed
- *   on-card (ECDSA-SHA256 over the `"IMPALA-AUTH:"`-prefixed message), then
- *   exchanged at `POST /auth/card`.
+ * - **Card** – NFC challenge-response. A card with a Stellar key uses SEP-10
+ *   (`GET /auth/sep10`, the challenge transaction signed on-card with
+ *   `SIGN_SEP10`, `POST /auth/sep10`). Any other card, and any server that
+ *   does not offer SEP-10 or does not know the card's Stellar key, uses the
+ *   legacy pair: `POST /auth/card/challenge`, signed on-card (ECDSA-SHA256
+ *   over the `"IMPALA-AUTH:"`-prefixed message), then `POST /auth/card`.
  *
  * Every method finishes via [completeTokenFlow]: save the refresh token, then
  * `POST /token {refresh_token}` for the temporal token. Each login coroutine
@@ -67,6 +95,9 @@ class LoginViewModel : ViewModel() {
     companion object {
         /** Upper bound for a whole login flow (all bridge round-trips). */
         const val LOGIN_TIMEOUT_MS = 15_000L
+
+        /** How long a finished card login waits for the optional Stellar key registration. */
+        const val STELLAR_KEY_REGISTRATION_TIMEOUT_MS = 4_000L
     }
 
     /** Classifies login errors for UI mapping to appropriate user-facing messages. */
@@ -117,6 +148,15 @@ class LoginViewModel : ViewModel() {
     /** Maps an exception to the appropriate [ErrorType]. */
     private fun classifyError(e: Exception, provider: String? = null): ErrorType {
         return when (e) {
+            // An HTTP answer of the SEP-10 exchange (an IOException subclass: test it first).
+            is Sep10HttpException -> when (e.status) {
+                401 -> ErrorType.CARD_REJECTED
+                429 -> ErrorType.LOCKED_OUT
+                in 500..599 -> ErrorType.SERVER_ERROR
+                else -> ErrorType.UNKNOWN
+            }
+            // The server's SEP-10 challenge or stellar.toml failed a client check.
+            is Sep10Exception, is Sep10ClientException -> ErrorType.SERVER_ERROR
             is IOException -> ErrorType.NETWORK
             is HttpException -> when (e.code()) {
                 401 -> if (provider == "card") ErrorType.CARD_REJECTED else ErrorType.AUTH_FAILED
@@ -300,19 +340,50 @@ class LoginViewModel : ViewModel() {
      * thread, card connected): read the identity — the applet-version and
      * personalization gates run here, so an unissued card fails **before** a
      * challenge is requested and never spends the card's challenge budget —
-     * then fetch the challenge (bounded by [LOGIN_TIMEOUT_MS], so a slow
-     * network aborts before signing) and have the card sign it.
+     * then sign in with the mechanism the card and the server share
+     * (impala-lib's [CardSignIn]):
      *
+     * - a card with a Stellar key and a server that offers SEP-10: the whole
+     *   SEP-10 exchange, here, with the card in the field;
+     * - any other card, no [sep10] client for this build, a server without
+     *   SEP-10 or one that does not know the card's Stellar key (401): the
+     *   legacy challenge, fetched (bounded by [LOGIN_TIMEOUT_MS], so a slow
+     *   network aborts before signing) and signed in the same tap.
+     *
+     * A lockout (429), a transport failure and a SEP-10 challenge that fails
+     * verification are errors, never a reason to fall back.
+     *
+     * @param sep10 the SEP-10 client of this build, or null (legacy only)
      * @throws CardFlowException for any card refusal (typed [CardError])
-     * @throws HttpException / IOException from the challenge request
+     * @throws HttpException / IOException from the bridge requests
+     * @throws Sep10Exception when the server's challenge fails the client checks
      */
-    fun signInWithCardTap(session: ImpalaCardSession, api: BridgeApiService): CardLoginTap {
-        val identity = session.identity.requirePersonalized()
-        TapProgress.report(TapStep.CONTACTING_BRIDGE)
-        val challengeHex = runBlocking {
-            withTimeout(LOGIN_TIMEOUT_MS) { fetchCardChallenge(api, identity.wireCardId) }
+    fun signInWithCardTap(
+        session: ImpalaCardSession,
+        api: BridgeApiService,
+        sep10: Sep10Client? = null
+    ): CardLoginTap {
+        val signIn = CardSignIn(sep10) { wireCardId ->
+            runBlocking { withTimeout(LOGIN_TIMEOUT_MS) { fetchCardChallenge(api, wireCardId) } }
         }
-        return CardLoginTap(identity, CardAuthenticator.signChallenge(session, challengeHex))
+        val result = signIn.signIn(session) { step ->
+            when (step) {
+                CardSignIn.Step.CONTACTING_SERVER, CardSignIn.Step.SUBMITTING, CardSignIn.Step.FALLING_BACK ->
+                    TapProgress.report(TapStep.CONTACTING_BRIDGE)
+                // The card steps show through the traced exchanges (CardStepLabels).
+                CardSignIn.Step.READING_CARD, CardSignIn.Step.SIGNING -> Unit
+            }
+        }
+        return when (result) {
+            is CardSignInResult.Sep10 -> {
+                AppLogger.i("Auth", "Card signed a SEP-10 challenge")
+                CardLoginTap(result.identity, "", sep10TokenJson = result.tokenJson)
+            }
+            is CardSignInResult.Legacy -> {
+                result.fallback?.let { AppLogger.i("Auth", "Card login used the legacy challenge (SEP-10: $it)") }
+                CardLoginTap(result.identity, result.signatureHex, sep10Fallback = result.fallback, stellarKey = result.stellarKey)
+            }
+        }
     }
 
     /** A card tap failed before the exchange; releases the in-flight slot and shows why. */
@@ -324,6 +395,15 @@ class LoginViewModel : ViewModel() {
                 LoginState.Error(e.error.userMessageKey, ErrorType.CARD, e.error)
             }
             is TimeoutCancellationException -> LoginState.Error("Login timed out", ErrorType.TIMEOUT)
+            is Sep10Exception, is Sep10ClientException -> {
+                // Never the exception text: it can quote the server's answer.
+                AppLogger.w("Auth", "The server's SEP-10 challenge was not accepted: ${e.javaClass.simpleName}")
+                LoginState.Error("The server's sign-in challenge could not be verified", ErrorType.SERVER_ERROR)
+            }
+            is Sep10HttpException -> {
+                AppLogger.w("Auth", "SEP-10 card login refused by the server: HTTP ${e.status}")
+                LoginState.Error("Card login failed (HTTP ${e.status})", classifyError(e, "card"))
+            }
             is Exception -> {
                 AppLogger.w("Auth", "Card login failed before the exchange: ${e.javaClass.simpleName}")
                 LoginState.Error(e.message ?: "Card login failed", classifyError(e, "card"))
@@ -334,16 +414,25 @@ class LoginViewModel : ViewModel() {
 
     /**
      * Authenticate via NFC smartcard challenge-response: exchanges the
-     * on-card signature at `POST /auth/card` for local JWT tokens. The card
-     * must already be registered with the bridge (Cards screen) — there is no
-     * auto-provisioning on this path. Releases the in-flight slot when done.
+     * on-card signature at `POST /auth/card` for local JWT tokens, or, when
+     * the tap already completed SEP-10, takes the tokens `POST /auth/sep10`
+     * returned. The card must already be registered with the bridge (Cards
+     * screen) — there is no auto-provisioning on either path. The stored auth
+     * provider is `card` for both. Releases the in-flight slot when done.
+     *
+     * One repair is made on the way: when SEP-10 was refused because the
+     * bridge does not know the card's Stellar key ([Sep10Fallback.NOT_REGISTERED])
+     * and the legacy login then succeeds, the key the tap read is registered
+     * (`PUT /card/stellar-key`) before the login completes, so the card's next
+     * login uses SEP-10. The bridge verifies the card's own signatures over
+     * the key; a failure of this step is logged and changes nothing.
      */
     fun loginWithCard(
         api: BridgeApiService,
         tokenManager: TokenManager,
         tap: CardLoginTap
     ) {
-        if (tap.signatureHex.isEmpty()) {
+        if (tap.sep10TokenJson == null && tap.signatureHex.isEmpty()) {
             endCardLogin()
             _loginState.value = LoginState.Error(
                 "Card did not sign the authentication challenge", ErrorType.VALIDATION
@@ -358,12 +447,23 @@ class LoginViewModel : ViewModel() {
                     val identity = tap.identity
                     AppLogger.i("Auth", "Card login attempt for card: ${identity.wireCardId}")
 
-                    val exchangeResponse = api.cardTokenExchange(
-                        CardAuthRequest(card_id = identity.wireCardId, signature = tap.signatureHex)
-                    )
+                    val exchangeResponse = if (tap.sep10TokenJson != null) {
+                        CardSep10.parseTokens(tap.sep10TokenJson) ?: run {
+                            AppLogger.w("Auth", "The SEP-10 token response was not readable")
+                            _loginState.value = LoginState.Error("Card login failed", ErrorType.TOKEN_FAILED)
+                            return@runLogin
+                        }
+                    } else {
+                        api.cardTokenExchange(
+                            CardAuthRequest(card_id = identity.wireCardId, signature = tap.signatureHex)
+                        )
+                    }
+                    @Suppress("SENSELESS_COMPARISON") // Gson can leave a non-null field null
                     if (!exchangeResponse.success || exchangeResponse.refresh_token == null) {
                         AppLogger.w("Auth", "Card token exchange failed: ${exchangeResponse.message}")
-                        _loginState.value = LoginState.Error(exchangeResponse.message, ErrorType.CARD_REJECTED)
+                        _loginState.value = LoginState.Error(
+                            exchangeResponse.message ?: "Card login failed", ErrorType.CARD_REJECTED
+                        )
                         return@runLogin
                     }
 
@@ -374,7 +474,9 @@ class LoginViewModel : ViewModel() {
                     val accountId = accountIdFromRefreshToken(
                         exchangeResponse.refresh_token, identity.accountUuid
                     )
-                    completeTokenFlow(api, tokenManager, exchangeResponse.refresh_token, accountId, "card")
+                    completeTokenFlow(api, tokenManager, exchangeResponse.refresh_token, accountId, "card") {
+                        registerStellarKeyAfterFallback(api, tap)
+                    }
                 }
             } finally {
                 endCardLogin()
@@ -457,7 +559,8 @@ class LoginViewModel : ViewModel() {
         tokenManager: TokenManager,
         refreshToken: String,
         accountId: String,
-        provider: String
+        provider: String,
+        beforeSuccess: (suspend () -> Unit)? = null
     ) {
         tokenManager.saveRefreshToken(refreshToken)
         tokenManager.saveAccountId(accountId)
@@ -481,9 +584,52 @@ class LoginViewModel : ViewModel() {
             }
         }
 
+        // Best-effort follow-up with the new session (it handles its own failures).
+        beforeSuccess?.invoke()
+
         // No account id here: for OAuth providers it can fall back to an e-mail address.
         AppLogger.i("Auth", "Login successful via $provider")
         _loginState.value = LoginState.Success(accountId)
+    }
+
+    /**
+     * After a legacy card login that was a [Sep10Fallback.NOT_REGISTERED]
+     * fallback: registers the card's Stellar key with the bridge, under the
+     * session the card just opened. Sent only when both of the card's
+     * cross-signatures verify here; bounded by [STELLAR_KEY_REGISTRATION_TIMEOUT_MS];
+     * never fails the login.
+     */
+    private suspend fun registerStellarKeyAfterFallback(api: BridgeApiService, tap: CardLoginTap) {
+        if (tap.sep10Fallback != Sep10Fallback.NOT_REGISTERED) return
+        val key = tap.stellarKey ?: return
+        val identity = tap.identity
+        val binding = key.bindingSignature
+        val proof = key.proofSignature
+        if (binding == null || proof == null ||
+            !CardStellarKeys.bindingVerifies(identity.pubKey, identity.accountId, identity.cardId, key) ||
+            !CardStellarKeys.proofVerifies(identity.pubKey, identity.accountId, identity.cardId, key)
+        ) {
+            AppLogger.w("Auth", "The card's Stellar key signatures do not verify; not registering it")
+            return
+        }
+        try {
+            val response = withTimeoutOrNull(STELLAR_KEY_REGISTRATION_TIMEOUT_MS) {
+                api.setCardStellarKey(
+                    SetCardStellarKeyRequest(identity.wireCardId, key.address, Hex.encode(binding), Hex.encode(proof))
+                )
+            }
+            when {
+                response == null -> AppLogger.w("Auth", "Registering the card's Stellar key timed out; it will be tried again at the next card login")
+                response.success -> AppLogger.i("Auth", "The card's Stellar key is registered; its next login uses SEP-10")
+                else -> AppLogger.w("Auth", "The bridge did not register the card's Stellar key")
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: HttpException) {
+            AppLogger.w("Auth", "The bridge refused the card's Stellar key: HTTP ${e.code()}")
+        } catch (e: Exception) {
+            AppLogger.w("Auth", "Registering the card's Stellar key failed: ${e.javaClass.simpleName}")
+        }
     }
 
     /**

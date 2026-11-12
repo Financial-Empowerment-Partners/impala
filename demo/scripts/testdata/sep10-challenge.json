@@ -1,0 +1,29 @@
+{
+  "envelope_bytes": 404,
+  "fee": 200,
+  "lifetime_secs": 300,
+  "max_time": 1800000300,
+  "min_time": 1800000000,
+  "operations": [
+    {
+      "name": "api-testnet.example.com auth",
+      "source": "GDLS7C3FEUC6BTSO5STMCXV2RNRPQS5RDK6ASC5LUIJFLN2VKP6ZTXHF",
+      "value": "WlpaWlpaWlpaWlpaWlpaWhEgE6S5PwMxNu6xqQ/2ytrYk2VHYf1aX73gGcQejyvd",
+      "value_bytes": 64
+    },
+    {
+      "name": "web_auth_domain",
+      "source": "GDLVVGABQKYQVN6VJP7NHSLEA45A5YLS6PNKMIZFV4BBU2HXA5IRVHUR",
+      "value": "api-testnet.example.com",
+      "value_bytes": 23
+    }
+  ],
+  "sequence": 0,
+  "signatures": [
+    {
+      "bytes": 64,
+      "hint": "f707511a"
+    }
+  ],
+  "source": "GDLVVGABQKYQVN6VJP7NHSLEA45A5YLS6PNKMIZFV4BBU2HXA5IRVHUR"
+}

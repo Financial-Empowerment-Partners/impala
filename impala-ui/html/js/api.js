@@ -245,6 +245,26 @@ var API = (function () {
     }
 
     /**
+     * Extract the machine-readable `code` from a bridge error envelope
+     * `{error:{code}}` (e.g. 'stellar_address_in_use'), so pages can map a
+     * specific refusal to specific advice without parsing the message.
+     * Only a short snake_case token is accepted; anything else is null.
+     * @param {string} rawBody - Raw response body text.
+     * @returns {string|null}
+     */
+    function extractErrorCode(rawBody) {
+        if (!rawBody || typeof rawBody !== 'string') return null;
+        try {
+            var parsed = JSON.parse(rawBody);
+            var code = parsed && parsed.error && parsed.error.code;
+            if (typeof code === 'string' && /^[a-z0-9_]{1,64}$/.test(code)) return code;
+        } catch (e) {
+            // Not JSON.
+        }
+        return null;
+    }
+
+    /**
      * Turn an error response (status + raw body) into a display message.
      * Prefers the bridge's structured `{error:{message}}` envelope (lightly
      * sanitized, NOT SQL-filtered) so guard messages surface cleanly for every
@@ -577,6 +597,9 @@ var API = (function () {
             return res.text().then(function (t) {
                 var err = new Error(extractErrorMessage(status, t));
                 err.status = status;
+                // null when the body is not an envelope (e.g. an unmatched
+                // route's empty 404 on an older bridge).
+                err.code = extractErrorCode(t);
                 throw err;
             });
         }
@@ -632,6 +655,7 @@ var API = (function () {
         refreshTemporalToken: refreshTemporalToken,
         sanitizeErrorMessage: sanitizeErrorMessage,
         extractErrorMessage: extractErrorMessage,
+        extractErrorCode: extractErrorCode,
         setButtonLoading: setButtonLoading,
 
         /** Authenticated GET request. Returns parsed JSON or text. */

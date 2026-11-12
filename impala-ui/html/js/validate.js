@@ -29,6 +29,98 @@ var Validate = (function () {
         return { valid: true, message: '' };
     }
 
+    /** RFC 4648 base32 alphabet, the one StrKey uses (upper case only). */
+    var BASE32_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+
+    /** StrKey version byte of an ed25519 account id (6 << 3): encodes as 'G'. */
+    var STRKEY_VERSION_ACCOUNT_ID = 0x30;
+
+    /**
+     * Decode an unpadded base32 string into bytes. Returns null when a
+     * character is outside the alphabet or leftover bits are not zero.
+     * @param {string} str
+     * @returns {number[]|null}
+     */
+    function base32Decode(str) {
+        var bytes = [];
+        var buffer = 0;
+        var bits = 0;
+        for (var i = 0; i < str.length; i++) {
+            var idx = BASE32_ALPHABET.indexOf(str.charAt(i));
+            if (idx === -1) return null;
+            buffer = ((buffer << 5) | idx) & 0xffff;
+            bits += 5;
+            if (bits >= 8) {
+                bits -= 8;
+                bytes.push((buffer >> bits) & 0xff);
+            }
+        }
+        if (bits > 0 && (buffer & ((1 << bits) - 1)) !== 0) return null;
+        return bytes;
+    }
+
+    /**
+     * CRC16-XModem (poly 0x1021, init 0x0000, no reflection, no final xor)
+     * over bytes[0..len).
+     * @param {number[]} bytes
+     * @param {number} len
+     * @returns {number}
+     */
+    function crc16Xmodem(bytes, len) {
+        var crc = 0;
+        for (var i = 0; i < len; i++) {
+            crc ^= bytes[i] << 8;
+            for (var k = 0; k < 8; k++) {
+                crc = (crc & 0x8000) ? ((crc << 1) ^ 0x1021) & 0xffff : (crc << 1) & 0xffff;
+            }
+        }
+        return crc;
+    }
+
+    /**
+     * Validate a Stellar account id with the full StrKey check (SEP-23):
+     * 56 characters of the upper-case base32 alphabet, decoding to
+     * version byte 0x30 (account id) ‖ 32-byte ed25519 key ‖ CRC16-XModem of
+     * the first 33 bytes, little-endian. Unlike `stellarId` (a shape check),
+     * this rejects a single mistyped character.
+     * @param {string} value
+     * @returns {{valid: boolean, message: string}}
+     */
+    function stellarAccountId(value) {
+        if (!value || typeof value !== 'string' || value.trim() === '') {
+            return { valid: false, message: 'Stellar address is required' };
+        }
+        value = value.trim();
+        if (value.length !== 56) {
+            return { valid: false, message: 'Stellar address must be 56 characters' };
+        }
+        if (!/^[A-Z2-7]+$/.test(value)) {
+            return {
+                valid: false,
+                message: 'Stellar address may contain only upper-case letters A-Z and digits 2-7'
+            };
+        }
+        var bytes = base32Decode(value);
+        if (!bytes || bytes.length !== 35) {
+            return { valid: false, message: 'Stellar address is not valid base32' };
+        }
+        if (bytes[0] !== STRKEY_VERSION_ACCOUNT_ID) {
+            return {
+                valid: false,
+                message: 'Not a Stellar account address (G...): wrong version byte'
+            };
+        }
+        var expected = crc16Xmodem(bytes, 33);
+        var stored = bytes[33] | (bytes[34] << 8);
+        if (expected !== stored) {
+            return {
+                valid: false,
+                message: 'Stellar address checksum does not match (mistyped or truncated?)'
+            };
+        }
+        return { valid: true, message: '' };
+    }
+
     /**
      * Validate an E.164 phone number (starts with +, 8-15 digits).
      * @param {string} value
@@ -139,6 +231,8 @@ var Validate = (function () {
 
     return {
         stellarId: stellarId,
+        stellarAccountId: stellarAccountId,
+        crc16Xmodem: crc16Xmodem,
         phone: phone,
         email: email,
         hexString: hexString,

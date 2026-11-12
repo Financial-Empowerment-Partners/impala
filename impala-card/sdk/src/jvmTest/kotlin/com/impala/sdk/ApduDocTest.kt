@@ -17,17 +17,19 @@ import kotlin.test.fail
 class ApduDocTest {
 
     private companion object {
-        // The application INS the applet dispatches at CLA 0x00 (applet 0.2).
+        // The application INS the applet dispatches at CLA 0x00 (applet 0.3).
         val DISPATCHED_APP_INS = setOf(
             0x02, 0x04, 0x16, 0x18, 0x19, 0x1E, 0x1F, 0x20, 0x21, 0x22,
-            0x24, 0x25, 0x2C, 0x2E, 0x30, 0x31, 0x34, 0x35, 0x36, 0x64
+            0x24, 0x25, 0x2C, 0x2E, 0x30, 0x31, 0x34, 0x35, 0x36, 0x37, 0x38, 0x64
         )
         val SCP03_INS = setOf(0x50, 0x82, 0x70, 0x71, 0x72, 0x73)
         val RETIRED_INS = setOf(0x06, 0x14)
         val UNDISPATCHED_INS = setOf(0x07, 0x23, 0x26, 0x2B, 0x2D)
         val REQUIRED_SW = listOf(
             "6233", "6234", "6235", "6236", "6237", "6238", "6239", "623A", "623B",
-            "6A80", "6984", "6A83", "6E00", "0022", "6677", "6683", "6684", "6688", "6A86"
+            "6A80", "6984", "6A83", "6E00", "0022", "6677", "6683", "6684", "6688", "6A86",
+            // the Stellar key and SEP-10 (applet 0.3)
+            "623C", "6240", "6241", "6242", "6243", "6244", "6245"
         )
     }
 

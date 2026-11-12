@@ -17,4 +17,5 @@
     <string name="card_error_other">The card operation failed.</string>
     <string name="card_error_applet_not_found">No Impala applet for this network answered. This may be a card for another network, not an Impala card, or an unsupported applet version.</string>
     <string name="card_error_read_only_refused">Read-only session refused %1$s. Nothing was sent to the card.</string>
+    <string name="card_error_challenge_refused">The card refused to sign the server\'s sign-in challenge. It signs only a challenge issued for its own key.</string>
 </resources>

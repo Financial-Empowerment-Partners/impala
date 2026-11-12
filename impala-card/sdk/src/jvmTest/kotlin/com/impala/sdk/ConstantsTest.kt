@@ -38,8 +38,50 @@ class ConstantsTest {
         assertEquals(0x34, Constants.INS_GET_PERSONALIZATION.toInt())
         assertEquals(0x35, Constants.INS_GET_RECEIVE_STATE.toInt())
         assertEquals(0x36, Constants.INS_GET_LAST_TRANSFER.toInt())
+        // applet 0.3 / the Stellar key
+        assertEquals(0x37, Constants.INS_GET_STELLAR_KEY.toInt())
+        assertEquals(0x38, Constants.INS_SIGN_SEP10.toInt())
+        assertEquals(0x00, Constants.P1_SEP10_BEGIN.toInt())
+        assertEquals(0x01, Constants.P1_SEP10_CONTINUE.toInt())
+        assertEquals(0x02, Constants.P1_SEP10_FINISH.toInt())
+        assertEquals(0x80.toByte(), Constants.PFLAG_STELLAR_KEY)
         assertEquals(0x72, SCP03Constants.INS_PERSONALIZE.toInt())
         assertEquals(0x73, SCP03Constants.INS_TERMINATE.toInt())
+    }
+
+    @Test
+    fun `Stellar key status words and lengths are pinned`() {
+        assertEquals(0x623C.toShort(), Constants.SW_ERROR_STELLAR_KEY_MISSING)
+        assertEquals(0x6240.toShort(), Constants.SW_ERROR_SEP10_MALFORMED)
+        assertEquals(0x6241.toShort(), Constants.SW_ERROR_SEP10_SEQUENCE_NOT_ZERO)
+        assertEquals(0x6242.toShort(), Constants.SW_ERROR_SEP10_NOT_MANAGE_DATA)
+        assertEquals(0x6243.toShort(), Constants.SW_ERROR_SEP10_WRONG_ACCOUNT)
+        assertEquals(0x6244.toShort(), Constants.SW_ERROR_SEP10_NOT_AUTH_CHALLENGE)
+        assertEquals(0x6245.toShort(), Constants.SW_ERROR_SEP10_NO_TIME_BOUNDS)
+        assertEquals(32, Constants.ED25519_PUB_KEY_LENGTH.toInt())
+        assertEquals(64, Constants.ED25519_SIG_LENGTH.toInt())
+        assertEquals(32, Constants.NETWORK_ID_LENGTH.toInt())
+        assertEquals(640, Constants.SEP10_MAX_TX_LENGTH.toInt())
+        assertEquals(5, Constants.SEP10_MAX_OPERATIONS.toInt())
+        assertEquals(169, Constants.STELLAR_KEY_RESPONSE_LENGTH.toInt())
+        assertEquals(77, Constants.SKEY_BINDING_MESSAGE_LENGTH.toInt())
+        assertEquals(110, Constants.SKEY_PROOF_MESSAGE_LENGTH.toInt())
+        assertEquals(1, Constants.ED25519_ENGINE_SOFT.toInt())
+        assertEquals(2, Constants.ED25519_ENGINE_NATIVE.toInt())
+    }
+
+    @Test
+    fun `every applet constant the SDK mirrors has the applet's value`() {
+        // Every public static field of the applet's Constants that the SDK also
+        // declares must be equal: one registry, two languages.
+        val sdk = Constants::class.java.fields.associateBy { it.name }
+        var compared = 0
+        for (field in com.impala.applet.Constants::class.java.fields) {
+            val mirror = sdk[field.name] ?: continue
+            assertEquals(field.get(null), mirror.get(null), field.name)
+            compared++
+        }
+        assertTrue(compared > 120, "compared only $compared constants")
     }
 
     @Test

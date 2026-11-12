@@ -66,6 +66,28 @@ describe('API.extractErrorMessage — non-enveloped fallback', () => {
     });
 });
 
+describe('API.extractErrorCode — envelope code for specific refusals', () => {
+    it('returns the envelope code', () => {
+        expect(API.extractErrorCode(envelope('in use', 'stellar_address_in_use')))
+            .toBe('stellar_address_in_use');
+        expect(API.extractErrorCode(envelope('bad', 'invalid_stellar_binding')))
+            .toBe('invalid_stellar_binding');
+    });
+
+    it('is null for a non-envelope body (e.g. an unmatched route\'s empty 404)', () => {
+        expect(API.extractErrorCode('')).toBeNull();
+        expect(API.extractErrorCode(undefined)).toBeNull();
+        expect(API.extractErrorCode('<html>502</html>')).toBeNull();
+        expect(API.extractErrorCode('{"message":"x"}')).toBeNull();
+    });
+
+    it('ignores a code that is not a short snake_case token', () => {
+        expect(API.extractErrorCode(JSON.stringify({ error: { code: 'Bad Code<script>' } }))).toBeNull();
+        expect(API.extractErrorCode(JSON.stringify({ error: { code: 42 } }))).toBeNull();
+        expect(API.extractErrorCode(JSON.stringify({ error: { code: 'x'.repeat(65) } }))).toBeNull();
+    });
+});
+
 describe('API.sanitizeErrorMessage — 409 added to the fallback map', () => {
     it('maps 409 to a friendly default', () => {
         expect(API.sanitizeErrorMessage(409, 'whatever')).toBe('Conflict');

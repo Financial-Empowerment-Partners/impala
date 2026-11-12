@@ -11,10 +11,13 @@ on:
     paths:
       - 'demo/**'
       - '.github/workflows/demo.yml'
+      # the fixture of demo/scripts/sep10-challenge.py is this file's ISSUED vector
+      - 'impala-bridge/src/sep10/card_vectors.rs'
   pull_request:
     paths:
       - 'demo/**'
       - '.github/workflows/demo.yml'
+      - 'impala-bridge/src/sep10/card_vectors.rs'
   workflow_dispatch:
 
 permissions:
@@ -55,6 +58,16 @@ jobs:
           grep -q '^FROM docker.io/library/rust:.*@sha256:' /tmp/Containerfile
           grep -q '^FROM docker.io/library/debian:.*@sha256:' /tmp/Containerfile
           grep -q '^target/' impala-bridge/.dockerignore
+
+      - name: SEP-10 challenge reader (Python, no dependencies) reads the bridge's shared vector
+        run: |
+          set -euo pipefail
+          python3 -m py_compile demo/scripts/sep10-challenge.py
+          [ -x demo/scripts/sep10-challenge.py ] || { echo 'not executable: demo/scripts/sep10-challenge.py'; exit 1; }
+          python3 demo/scripts/sep10-challenge.py "$(cat demo/scripts/testdata/sep10-challenge.b64)" | jq -S . | diff - demo/scripts/testdata/sep10-challenge.json
+          # the fixture is the challenge the bridge and the card pin (card_vectors.rs ISSUED): change both or neither
+          grep -qF "$(cat demo/scripts/testdata/sep10-challenge.b64)" impala-bridge/src/sep10/card_vectors.rs
+          if python3 demo/scripts/sep10-challenge.py AAAA 2>/dev/null; then echo 'the reader accepted something that is not a challenge'; exit 1; fi
 
       - name: payala stub (Node, no dependencies) — syntax, unit and HTTP tests
         run: |

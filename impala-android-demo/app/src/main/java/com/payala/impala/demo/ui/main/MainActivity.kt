@@ -26,6 +26,7 @@ import com.payala.impala.card.CardReaderController
 import com.payala.impala.card.ImpalaCardSession
 import com.payala.impala.demo.BuildConfig
 import com.payala.impala.demo.R
+import com.payala.impala.demo.card.TappedStellarKeys
 import com.payala.impala.demo.card.ApduTraceLog
 import com.payala.impala.demo.card.DebugCards
 import com.payala.impala.demo.card.TapProgress
@@ -279,7 +280,7 @@ class MainActivity : AppCompatActivity() {
                         runningTap.remove()
                     }
                 } else if (idleCardTapListener != null) {
-                    TapOutcome.Idle(session.identity)
+                    TapOutcome.Idle(TappedStellarKeys.readDuringTap(session, session.identity))
                 } else {
                     TapOutcome.Ignored
                 }

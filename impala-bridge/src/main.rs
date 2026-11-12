@@ -24,6 +24,7 @@ mod password;
 mod reconciliation;
 mod redis_helpers;
 mod seed_protect;
+mod sep10;
 mod session;
 mod sns;
 mod ssrf;
@@ -55,9 +56,9 @@ use tower_http::trace::TraceLayer;
 use config::load_config;
 use handlers::{
     account, admin, admin_card_issuer, admin_custody, admin_keys, admin_reconciliation,
-    admin_replenish, admin_reserve, admin_webhook, authenticate, card, card_auth, card_issuer,
-    device_token, exchange as exchange_handler, exchange_webhook, github as github_handler,
-    google as google_handler, health, logout, managed_seed, mfa, network,
+    admin_replenish, admin_reserve, admin_sep10, admin_webhook, authenticate, card, card_auth,
+    card_issuer, device_token, exchange as exchange_handler, exchange_webhook,
+    github as github_handler, google as google_handler, health, logout, managed_seed, mfa, network,
     notification_subscription, notify, okta as okta_handler, session as session_handler,
     sso as sso_handler, subscribe, sync, token, transaction,
 };
@@ -353,6 +354,37 @@ async fn run_server(
     );
     let stellar_signer = stellar::build_signer(&stellar_config);
 
+    // SEP-10 (040). Disabled (the default): nothing is validated, no ring
+    // runs, the public routes are not mounted, and the bridge behaves exactly
+    // as before. Enabled: the policy gate and the table check are fatal.
+    let sep10_policy = match config::validate_sep10_policy(&config) {
+        Ok(policy) => policy.map(Arc::new),
+        Err(msg) => {
+            error!("{}", msg);
+            std::process::exit(1);
+        }
+    };
+    let sep10_admin = Arc::new(config::Sep10AdminSettings::from_config(
+        &config,
+        sep10_policy.as_deref(),
+    ));
+    let sep10_ring = match sep10_policy {
+        Some(ref policy) => {
+            if let Err(msg) = sep10::key::assert_table_present(&pool).await {
+                error!("{}", msg);
+                std::process::exit(1);
+            }
+            info!(
+                "SEP-10 enabled: web_auth_endpoint={} challenge_ttl={}s",
+                policy.web_auth_endpoint, policy.challenge_ttl_secs
+            );
+            Some(Arc::new(sep10::key::Sep10Ring::new(
+                policy.challenge_ttl_secs,
+            )))
+        }
+        None => None,
+    };
+
     // Resolve exchange provider credentials, then build the clients from what
     // resolved. Ordering matters: the protector must exist first, because a
     // stored credential can only be opened through it.
@@ -634,6 +666,9 @@ async fn run_server(
             get(managed_seed::get_intent),
         )
         .route("/card", post(card::create_card).delete(card::delete_card))
+        // Attach a Stellar key to a card registered before it was
+        // personalized (owner only; both cross-signatures verified).
+        .route("/card/stellar-key", put(card::set_card_stellar_key))
         .route("/mfa", post(mfa::enroll_mfa).get(mfa::get_mfa))
         .route("/mfa/verify", post(mfa::verify_mfa))
         .route(
@@ -732,6 +767,30 @@ async fn run_server(
         .route(
             "/admin/cards/{card_id}/certificate",
             post(admin_card_issuer::certify_card),
+        )
+        // SEP-10 server signing key: generate-only (no import route, ever —
+        // see handlers/admin_sep10.rs). Always mounted: the key must exist
+        // before SEP10_ENABLED=true serves the public routes.
+        .route(
+            "/admin/sep10/signing-keys",
+            get(admin_sep10::list_signing_keys),
+        )
+        .route(
+            "/admin/sep10/signing-keys/generate",
+            post(admin_sep10::generate_signing_key),
+        )
+        .route(
+            "/admin/sep10/signing-keys/{version}/activate",
+            post(admin_sep10::activate_signing_key),
+        )
+        .route(
+            "/admin/sep10/signing-keys/{version}/revoke",
+            post(admin_sep10::revoke_signing_key),
+        )
+        // An account's cards (with Stellar addresses) for the dashboard.
+        .route(
+            "/admin/accounts/{account_id}/cards",
+            get(admin_sep10::list_account_cards),
         )
         // Conversion-reserve management: reads on Privileged<ReadReserve>
         // (admin, treasurer, auditor), money mutations on
@@ -884,7 +943,19 @@ async fn run_server(
         .layer(TimeoutLayer::with_status_code(
             axum::http::StatusCode::REQUEST_TIMEOUT,
             Duration::from_secs(config.request_timeout_secs),
-        ))
+        ));
+    // The SEP-10 public sub-router (sep10-authentication.md §4.3): merged
+    // AFTER the global CORS / 1 MB limit / timeout so those never wrap it —
+    // it carries its own 16 KiB limit, 10 s timeout and wildcard CORS, and
+    // every response it produces (errors included) carries ACAO — and BEFORE
+    // the compression, request-id, metrics, security-header and Extension
+    // layers, which still reach its handlers.
+    let app = if sep10_policy.is_some() {
+        app.merge(handlers::sep10_auth::public_router())
+    } else {
+        app
+    };
+    let app = app
         .layer(CompressionLayer::new())
         .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
         .layer(PropagateRequestIdLayer::x_request_id())
@@ -945,7 +1016,25 @@ async fn run_server(
         .layer(Extension(reconcile_config.clone()))
         .layer(Extension(submit_tracker.clone()))
         .layer(Extension(reconciliation_deps.clone()))
+        .layer(Extension(sep10_admin))
         .layer(Extension(cancel.clone()));
+
+    // SEP-10 handles, only when enabled (the public handlers need all three;
+    // the admin handlers use the ring when present).
+    let app = match (sep10_policy.clone(), sep10_ring.clone()) {
+        (Some(policy), Some(ring)) => {
+            let backend: Arc<dyn sep10::backend::Sep10Backend> =
+                Arc::new(sep10::backend::LiveBackend {
+                    pool: pool.clone(),
+                    redis: redis_pool.clone(),
+                    admin_ids: admin_ids.clone(),
+                });
+            app.layer(Extension(policy))
+                .layer(Extension(ring))
+                .layer(Extension(backend))
+        }
+        _ => app,
+    };
 
     // Add optional SNS client extension
     let app = if let (Some(client), Some(arn)) = (sns_client, sns_topic_arn) {
@@ -1110,6 +1199,20 @@ async fn run_server(
                     ex_cancel,
                 )
                 .await;
+            }),
+        ));
+    }
+
+    // SEP-10 signing-key ring: polls sep10_signing_key, opens each version
+    // once (never per request), applies activations at their instant.
+    if let Some(ring) = sep10_ring.clone() {
+        let ring_pool = pool.clone();
+        let ring_protector = seed_protector.clone();
+        let ring_cancel = cancel.clone();
+        background.push((
+            "sep10_ring",
+            tokio::spawn(async move {
+                sep10::key::run(ring, ring_pool, ring_protector, ring_cancel).await;
             }),
         ));
     }

@@ -294,6 +294,288 @@ pub struct Config {
     /// Wall-clock budget (seconds) for a full reconciliation walk
     /// (`RECONCILIATION_DEADLINE_SECS`). [600]
     pub reconciliation_deadline_secs: u64,
+    /// SEP-10 web authentication (raw; validated by [`validate_sep10_policy`]
+    /// only when enabled, so a disabled bridge behaves exactly as before).
+    pub sep10: Sep10Settings,
+}
+
+/// SEP-10 configuration as read from the environment / config file. Values
+/// stay raw strings so a bad knob is a boot error when SEP-10 is enabled and
+/// no error at all when it is not.
+#[derive(Debug, Clone, Default)]
+pub struct Sep10Settings {
+    /// `SEP10_ENABLED` (`true`/`1`). [false]
+    pub enabled: bool,
+    /// `SEP10_WEB_AUTH_ENDPOINT`, mandatory when enabled, no default.
+    pub web_auth_endpoint: Option<String>,
+    /// `SEP10_CHALLENGE_TTL_SECS` (60..=900). [300]
+    pub challenge_ttl_secs: Option<String>,
+    /// `SEP10_CHALLENGE_GLOBAL_MAX` challenges per 60 s, all sources. [600]
+    pub challenge_global_max: Option<String>,
+    /// `SEP10_KEY_ACTIVATION_DELAY_SECS` (120..=86400). [120]
+    pub key_activation_delay_secs: Option<String>,
+    /// `STELLAR_NETWORK` exactly as set (the enum maps unset to testnet, so
+    /// the testnet-only gate needs to know whether it was explicit).
+    pub stellar_network_raw: Option<String>,
+    /// `PUBLIC_ENDPOINT` exactly as set (unset → no authority check).
+    pub public_endpoint_raw: Option<String>,
+}
+
+/// Validated SEP-10 policy (present only when `SEP10_ENABLED=true`).
+#[derive(Debug, Clone)]
+pub struct Sep10Policy {
+    /// The canonical `scheme://authority/auth/sep10`.
+    pub web_auth_endpoint: String,
+    /// `host[:port]`: home_domain = web_auth_domain.
+    pub home_domain: String,
+    pub network_passphrase: String,
+    pub network_id: [u8; 32],
+    pub challenge_ttl_secs: u64,
+    pub challenge_global_max: u64,
+    pub activation_delay_secs: u64,
+}
+
+/// What the always-mounted admin signing-key routes need. With SEP-10
+/// disabled the values are derived leniently (an invalid knob falls back to
+/// its default, an invalid endpoint reads as unconfigured) — a disabled
+/// bridge never fails boot over SEP-10.
+#[derive(Debug, Clone)]
+pub struct Sep10AdminSettings {
+    pub enabled: bool,
+    pub home_domain: Option<String>,
+    pub web_auth_endpoint: Option<String>,
+    pub network_passphrase: String,
+    pub challenge_ttl_secs: u64,
+    pub activation_delay_secs: u64,
+}
+
+impl Sep10AdminSettings {
+    pub fn from_config(config: &Config, policy: Option<&Sep10Policy>) -> Self {
+        if let Some(p) = policy {
+            return Sep10AdminSettings {
+                enabled: true,
+                home_domain: Some(p.home_domain.clone()),
+                web_auth_endpoint: Some(p.web_auth_endpoint.clone()),
+                network_passphrase: p.network_passphrase.clone(),
+                challenge_ttl_secs: p.challenge_ttl_secs,
+                activation_delay_secs: p.activation_delay_secs,
+            };
+        }
+        let s = &config.sep10;
+        let lenient = |raw: Option<&str>, default: u64, range: std::ops::RangeInclusive<u64>| {
+            raw.and_then(|v| v.trim().parse::<u64>().ok())
+                .filter(|v| range.contains(v))
+                .unwrap_or(default)
+        };
+        let endpoint = s
+            .web_auth_endpoint
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .and_then(|raw| sep10_endpoint(raw).ok());
+        Sep10AdminSettings {
+            enabled: false,
+            home_domain: endpoint.as_ref().map(|(h, _)| h.clone()),
+            web_auth_endpoint: endpoint.map(|(_, e)| e),
+            network_passphrase: config.stellar_network_passphrase.clone(),
+            challenge_ttl_secs: lenient(
+                s.challenge_ttl_secs.as_deref(),
+                DEFAULT_SEP10_CHALLENGE_TTL_SECS,
+                SEP10_CHALLENGE_TTL_MIN_SECS..=SEP10_CHALLENGE_TTL_MAX_SECS,
+            ),
+            activation_delay_secs: lenient(
+                s.key_activation_delay_secs.as_deref(),
+                DEFAULT_SEP10_KEY_ACTIVATION_DELAY_SECS,
+                SEP10_KEY_ACTIVATION_DELAY_MIN_SECS..=SEP10_KEY_ACTIVATION_DELAY_MAX_SECS,
+            ),
+        }
+    }
+}
+
+fn sep10_knob(
+    raw: Option<&str>,
+    name: &str,
+    default: u64,
+    range: std::ops::RangeInclusive<u64>,
+) -> Result<u64, String> {
+    let Some(raw) = raw.map(str::trim).filter(|v| !v.is_empty()) else {
+        return Ok(default);
+    };
+    let v: u64 = raw
+        .parse()
+        .map_err(|_| format!("{name}={raw:?} is not a whole number of seconds/requests"))?;
+    if !range.contains(&v) {
+        return Err(format!(
+            "{name}={v} is out of range ({}..={})",
+            range.start(),
+            range.end()
+        ));
+    }
+    Ok(v)
+}
+
+/// The authority (`host[:port]`) of a validated SEP-10 endpoint, and the
+/// canonical endpoint string.
+fn sep10_endpoint(raw: &str) -> Result<(String, String), String> {
+    let url = url::Url::parse(raw.trim())
+        .map_err(|e| format!("SEP10_WEB_AUTH_ENDPOINT={raw:?} is not a URL: {e}"))?;
+    let host = url
+        .host_str()
+        .ok_or_else(|| format!("SEP10_WEB_AUTH_ENDPOINT={raw:?} has no host"))?;
+    if !host
+        .bytes()
+        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'.' || b == b'-')
+        || host.is_empty()
+    {
+        return Err(format!(
+            "SEP10_WEB_AUTH_ENDPOINT host {host:?} must be lowercase [a-z0-9.-]"
+        ));
+    }
+    let authority = match url.port() {
+        Some(p) => format!("{host}:{p}"),
+        None => host.to_string(),
+    };
+    match url.scheme() {
+        "https" => {}
+        "http" if SEP10_LOOPBACK_HOSTS.contains(&host) => {}
+        other => {
+            return Err(format!(
+                "SEP10_WEB_AUTH_ENDPOINT must be https (http only for {}), got {other}",
+                SEP10_LOOPBACK_HOSTS.join(", ")
+            ))
+        }
+    }
+    if url.path() != SEP10_AUTH_PATH
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || !url.username().is_empty()
+        || url.password().is_some()
+    {
+        return Err(format!(
+            "SEP10_WEB_AUTH_ENDPOINT path must be exactly {SEP10_AUTH_PATH} (no query, fragment \
+             or credentials)"
+        ));
+    }
+    if authority.len() > SEP10_HOME_DOMAIN_MAX_LEN {
+        return Err(format!(
+            "SEP10_WEB_AUTH_ENDPOINT authority {authority:?} is longer than \
+             {SEP10_HOME_DOMAIN_MAX_LEN} bytes (\"<home> auth\" must fit in 64)"
+        ));
+    }
+    let canonical = format!("{}://{}{}", url.scheme(), authority, SEP10_AUTH_PATH);
+    if raw.trim() != canonical {
+        return Err(format!(
+            "SEP10_WEB_AUTH_ENDPOINT must be written canonically as {canonical:?} (lowercase, no \
+             default port, no trailing slash)"
+        ));
+    }
+    Ok((authority, canonical))
+}
+
+/// Boot gate for SEP-10 (beside [`validate_cors_policy`]). `Ok(None)` when
+/// disabled — nothing is checked and nothing changes. When enabled, refuses
+/// to start unless the endpoint is well formed (`https`, path exactly
+/// `/auth/sep10`, lowercase host ≤ 59 bytes, matching `PUBLIC_ENDPOINT` when
+/// that is set), seed protection is real, no SSO provider name collides with
+/// the `sep10*` scopes, and — this phase only — the network is explicitly
+/// testnet with the testnet passphrase.
+pub fn validate_sep10_policy(config: &Config) -> Result<Option<Sep10Policy>, String> {
+    let s = &config.sep10;
+    if !s.enabled {
+        return Ok(None);
+    }
+    let raw = s
+        .web_auth_endpoint
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .ok_or("SEP10_ENABLED=true requires SEP10_WEB_AUTH_ENDPOINT (there is no default)")?;
+    let (home_domain, web_auth_endpoint) = sep10_endpoint(raw)?;
+
+    if let Some(public) = s
+        .public_endpoint_raw
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        let public_url = url::Url::parse(public)
+            .map_err(|e| format!("PUBLIC_ENDPOINT={public:?} is not a URL: {e}"))?;
+        let public_authority = match (public_url.host_str(), public_url.port()) {
+            (Some(h), Some(p)) => format!("{h}:{p}"),
+            (Some(h), None) => h.to_string(),
+            (None, _) => String::new(),
+        };
+        if public_authority != home_domain {
+            return Err(format!(
+                "SEP10_WEB_AUTH_ENDPOINT authority {home_domain:?} differs from PUBLIC_ENDPOINT \
+                 authority {public_authority:?}; SEP-10 needs a dedicated per-network host"
+            ));
+        }
+    }
+
+    let backend = config.seed_protection_backend.trim();
+    if backend.is_empty() || backend == "none" {
+        return Err(
+            "SEP10_ENABLED=true requires SEED_PROTECTION_BACKEND to be kms, vault or openbao \
+             (the signing key is sealed; there is no plaintext path)"
+                .to_string(),
+        );
+    }
+
+    if let Some(p) = config
+        .sso_providers
+        .iter()
+        .find(|p| p.name.starts_with("sep10"))
+    {
+        return Err(format!(
+            "SSO provider name {:?} collides with the reserved sep10* rate-limit scopes",
+            p.name
+        ));
+    }
+
+    // Phase gate (card-key SEP-10 is testnet-only for now). The enum maps an
+    // unset or unknown STELLAR_NETWORK to testnet, so test the raw value and
+    // the passphrase itself.
+    let explicit_testnet = s
+        .stellar_network_raw
+        .as_deref()
+        .is_some_and(|v| v.trim().eq_ignore_ascii_case("testnet"));
+    if !explicit_testnet || config.stellar_network_passphrase != STELLAR_TESTNET_PASSPHRASE {
+        return Err(
+            "SEP10_ENABLED=true is refused unless STELLAR_NETWORK=testnet is set explicitly and \
+             the network passphrase is the testnet passphrase (pubnet is a later phase)"
+                .to_string(),
+        );
+    }
+
+    let challenge_ttl_secs = sep10_knob(
+        s.challenge_ttl_secs.as_deref(),
+        "SEP10_CHALLENGE_TTL_SECS",
+        DEFAULT_SEP10_CHALLENGE_TTL_SECS,
+        SEP10_CHALLENGE_TTL_MIN_SECS..=SEP10_CHALLENGE_TTL_MAX_SECS,
+    )?;
+    let challenge_global_max = sep10_knob(
+        s.challenge_global_max.as_deref(),
+        "SEP10_CHALLENGE_GLOBAL_MAX",
+        DEFAULT_SEP10_CHALLENGE_GLOBAL_MAX,
+        1..=1_000_000,
+    )?;
+    let activation_delay_secs = sep10_knob(
+        s.key_activation_delay_secs.as_deref(),
+        "SEP10_KEY_ACTIVATION_DELAY_SECS",
+        DEFAULT_SEP10_KEY_ACTIVATION_DELAY_SECS,
+        SEP10_KEY_ACTIVATION_DELAY_MIN_SECS..=SEP10_KEY_ACTIVATION_DELAY_MAX_SECS,
+    )?;
+
+    Ok(Some(Sep10Policy {
+        web_auth_endpoint,
+        home_domain,
+        network_passphrase: config.stellar_network_passphrase.clone(),
+        network_id: crate::sep10::network_id(&config.stellar_network_passphrase),
+        challenge_ttl_secs,
+        challenge_global_max,
+        activation_delay_secs,
+    }))
 }
 
 /// Render an optional secret as its presence, never its value.
@@ -365,6 +647,7 @@ impl std::fmt::Debug for Config {
                 &self.reconciliation_deadline_secs,
             )
             .field("reserve_quote_ttl_secs", &self.reserve_quote_ttl_secs)
+            .field("sep10", &self.sep10)
             // Presence only — never the value.
             .field("twilio_sid", &secret_state(&self.twilio_sid))
             .field("twilio_token", &secret_state(&self.twilio_token))
@@ -905,6 +1188,30 @@ pub fn load_config() -> Config {
         .unwrap_or(crate::constants::DEFAULT_RECONCILIATION_DEADLINE_SECS)
         .max(10);
 
+    // SEP-10: raw values only; validate_sep10_policy decides, and only when
+    // enabled. Empty env values fall through to the config file.
+    let sep10_var = |env_key: &str, file_key: &str| -> Option<String> {
+        env::var(env_key)
+            .ok()
+            .filter(|v| !v.is_empty())
+            .or_else(|| from_file(file_key))
+            .filter(|v| !v.is_empty())
+    };
+    let sep10 = Sep10Settings {
+        enabled: sep10_var("SEP10_ENABLED", "sep10_enabled")
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(false),
+        web_auth_endpoint: sep10_var("SEP10_WEB_AUTH_ENDPOINT", "sep10_web_auth_endpoint"),
+        challenge_ttl_secs: sep10_var("SEP10_CHALLENGE_TTL_SECS", "sep10_challenge_ttl_secs"),
+        challenge_global_max: sep10_var("SEP10_CHALLENGE_GLOBAL_MAX", "sep10_challenge_global_max"),
+        key_activation_delay_secs: sep10_var(
+            "SEP10_KEY_ACTIVATION_DELAY_SECS",
+            "sep10_key_activation_delay_secs",
+        ),
+        stellar_network_raw: sep10_var("STELLAR_NETWORK", "stellar_network"),
+        public_endpoint_raw: sep10_var("PUBLIC_ENDPOINT", "public_endpoint"),
+    };
+
     Config {
         public_endpoint,
         service_address,
@@ -980,6 +1287,7 @@ pub fn load_config() -> Config {
         reconciliation_snapshot_utc_hour,
         reconciliation_max_accounts,
         reconciliation_deadline_secs,
+        sep10,
     }
 }
 
@@ -1063,6 +1371,7 @@ pub(crate) fn test_config() -> Config {
             crate::constants::DEFAULT_RECONCILIATION_SNAPSHOT_UTC_HOUR,
         reconciliation_max_accounts: crate::constants::DEFAULT_RECONCILIATION_MAX_ACCOUNTS,
         reconciliation_deadline_secs: crate::constants::DEFAULT_RECONCILIATION_DEADLINE_SECS,
+        sep10: Sep10Settings::default(),
     }
 }
 
@@ -1326,5 +1635,197 @@ mod tests {
         );
         assert_eq!(providers.len(), 1);
         assert_eq!(providers[0].name, "real");
+    }
+
+    // ── SEP-10 boot gate ───────────────────────────────────────────────
+
+    fn sep10_config(endpoint: &str) -> Config {
+        let mut c = test_config();
+        c.seed_protection_backend = "openbao".to_string();
+        c.sep10 = Sep10Settings {
+            enabled: true,
+            web_auth_endpoint: Some(endpoint.to_string()),
+            stellar_network_raw: Some("testnet".to_string()),
+            ..Sep10Settings::default()
+        };
+        c
+    }
+
+    #[test]
+    fn sep10_disabled_checks_nothing() {
+        let mut c = test_config();
+        c.sep10.web_auth_endpoint = Some("ftp://nonsense".to_string());
+        c.sep10.challenge_ttl_secs = Some("7".to_string());
+        assert!(validate_sep10_policy(&c).unwrap().is_none());
+        let admin = Sep10AdminSettings::from_config(&c, None);
+        assert!(!admin.enabled);
+        assert_eq!(
+            admin.activation_delay_secs,
+            DEFAULT_SEP10_KEY_ACTIVATION_DELAY_SECS
+        );
+        assert_eq!(admin.challenge_ttl_secs, DEFAULT_SEP10_CHALLENGE_TTL_SECS);
+        assert_eq!(
+            admin.home_domain, None,
+            "an invalid endpoint reads as unconfigured"
+        );
+        assert_eq!(admin.web_auth_endpoint, None);
+        // Disabled but configured: the admin status still reports the endpoint.
+        c.sep10.web_auth_endpoint = Some("http://10.0.2.2:8080/auth/sep10".to_string());
+        let admin = Sep10AdminSettings::from_config(&c, None);
+        assert_eq!(admin.home_domain.as_deref(), Some("10.0.2.2:8080"));
+        assert_eq!(
+            admin.web_auth_endpoint.as_deref(),
+            Some("http://10.0.2.2:8080/auth/sep10")
+        );
+        assert_eq!(admin.network_passphrase, STELLAR_TESTNET_PASSPHRASE);
+    }
+
+    #[test]
+    fn sep10_enabled_with_a_good_endpoint_yields_the_policy() {
+        let p = validate_sep10_policy(&sep10_config("https://api-testnet.example.com/auth/sep10"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(p.home_domain, "api-testnet.example.com");
+        assert_eq!(
+            p.web_auth_endpoint,
+            "https://api-testnet.example.com/auth/sep10"
+        );
+        assert_eq!(p.challenge_ttl_secs, 300);
+        assert_eq!(p.challenge_global_max, 600);
+        assert_eq!(p.activation_delay_secs, 120);
+        assert_eq!(p.network_passphrase, STELLAR_TESTNET_PASSPHRASE);
+        for local in [
+            "http://localhost:8080/auth/sep10",
+            "http://127.0.0.1:8080/auth/sep10",
+            "http://10.0.2.2:8080/auth/sep10",
+        ] {
+            let p = validate_sep10_policy(&sep10_config(local))
+                .unwrap()
+                .unwrap();
+            assert!(local.contains(&p.home_domain), "{local}");
+        }
+    }
+
+    #[test]
+    fn sep10_endpoint_shape_is_enforced() {
+        for bad in [
+            "",
+            "http://api-testnet.example.com/auth/sep10", // http off loopback
+            "https://api-testnet.example.com/auth/sep10/", // trailing slash
+            "https://api-testnet.example.com/auth",      // wrong path
+            "https://api-testnet.example.com/api/testnet/auth/sep10", // shared-proxy topology
+            "https://API-testnet.example.com/auth/sep10", // not canonical
+            "https://api-testnet.example.com:443/auth/sep10", // default port written
+            "https://api-testnet.example.com/auth/sep10?x=1",
+            "https://user:pw@api-testnet.example.com/auth/sep10",
+            "https://[::1]/auth/sep10",
+            "not a url",
+        ] {
+            let mut c = sep10_config(bad);
+            if bad.is_empty() {
+                c.sep10.web_auth_endpoint = None;
+            }
+            assert!(
+                validate_sep10_policy(&c).is_err(),
+                "{bad:?} must be refused"
+            );
+        }
+        // 59-byte authority accepted, 60 refused.
+        let host59 = format!("{}.example.com", "a".repeat(59 - ".example.com".len()));
+        assert_eq!(host59.len(), 59);
+        assert!(
+            validate_sep10_policy(&sep10_config(&format!("https://{host59}/auth/sep10"))).is_ok()
+        );
+        let host60 = format!("a{host59}");
+        assert!(
+            validate_sep10_policy(&sep10_config(&format!("https://{host60}/auth/sep10"))).is_err()
+        );
+    }
+
+    #[test]
+    fn sep10_refused_unless_testnet_passphrase() {
+        let ok = "https://api-testnet.example.com/auth/sep10";
+        // STELLAR_NETWORK unset: the enum says testnet, the gate does not.
+        let mut c = sep10_config(ok);
+        c.sep10.stellar_network_raw = None;
+        assert!(validate_sep10_policy(&c).is_err());
+        let mut c = sep10_config(ok);
+        c.sep10.stellar_network_raw = Some("pubnet".to_string());
+        assert!(validate_sep10_policy(&c).is_err());
+        // Explicit testnet but the pubnet passphrase (or anything else).
+        let mut c = sep10_config(ok);
+        c.stellar_network_passphrase = STELLAR_PUBNET_PASSPHRASE.to_string();
+        assert!(validate_sep10_policy(&c).is_err());
+        let mut c = sep10_config(ok);
+        c.stellar_network_passphrase = format!("{STELLAR_TESTNET_PASSPHRASE} ");
+        assert!(validate_sep10_policy(&c).is_err());
+        let mut c = sep10_config(ok);
+        c.sep10.stellar_network_raw = Some("TestNet".to_string());
+        assert!(validate_sep10_policy(&c).is_ok());
+    }
+
+    #[test]
+    fn sep10_requires_real_seed_protection_and_reserved_names() {
+        let ok = "https://api-testnet.example.com/auth/sep10";
+        let mut c = sep10_config(ok);
+        c.seed_protection_backend = "none".to_string();
+        assert!(validate_sep10_policy(&c).is_err());
+        let mut c = sep10_config(ok);
+        c.seed_protection_backend = String::new();
+        assert!(validate_sep10_policy(&c).is_err());
+        let mut c = sep10_config(ok);
+        c.sso_providers = parse_sso_providers(&["sep10".to_string()], |_, k| {
+            (k == "ISSUER_URL").then(|| "https://idp.example.com".to_string())
+        });
+        assert!(validate_sep10_policy(&c).is_err());
+    }
+
+    #[test]
+    fn sep10_public_endpoint_must_share_the_authority_when_set() {
+        let ok = "https://api-testnet.example.com/auth/sep10";
+        let mut c = sep10_config(ok);
+        c.sep10.public_endpoint_raw = Some("https://api-testnet.example.com".to_string());
+        assert!(validate_sep10_policy(&c).is_ok());
+        c.sep10.public_endpoint_raw = Some("https://bridge.example.com".to_string());
+        assert!(validate_sep10_policy(&c).is_err());
+        let mut c = sep10_config("http://10.0.2.2:8080/auth/sep10");
+        c.sep10.public_endpoint_raw = Some("http://localhost:8080".to_string());
+        assert!(validate_sep10_policy(&c).is_err());
+    }
+
+    #[test]
+    fn sep10_knobs_are_range_checked_when_enabled() {
+        let ok = "https://api-testnet.example.com/auth/sep10";
+        for (ttl, good) in [
+            ("59", false),
+            ("60", true),
+            ("900", true),
+            ("901", false),
+            ("x", false),
+        ] {
+            let mut c = sep10_config(ok);
+            c.sep10.challenge_ttl_secs = Some(ttl.to_string());
+            assert_eq!(validate_sep10_policy(&c).is_ok(), good, "ttl {ttl}");
+        }
+        for (delay, good) in [
+            ("119", false),
+            ("120", true),
+            ("86400", true),
+            ("86401", false),
+        ] {
+            let mut c = sep10_config(ok);
+            c.sep10.key_activation_delay_secs = Some(delay.to_string());
+            assert_eq!(validate_sep10_policy(&c).is_ok(), good, "delay {delay}");
+        }
+        let mut c = sep10_config(ok);
+        c.sep10.challenge_global_max = Some("0".to_string());
+        assert!(validate_sep10_policy(&c).is_err());
+        let mut c = sep10_config(ok);
+        c.sep10.key_activation_delay_secs = Some("600".to_string());
+        let p = validate_sep10_policy(&c).unwrap().unwrap();
+        assert_eq!(
+            Sep10AdminSettings::from_config(&c, Some(&p)).activation_delay_secs,
+            600
+        );
     }
 }

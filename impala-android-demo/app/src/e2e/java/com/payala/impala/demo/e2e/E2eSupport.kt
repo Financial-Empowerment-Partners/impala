@@ -1,9 +1,12 @@
 package com.payala.impala.demo.e2e
 
+import com.impala.jcardsim.jc31.CardPlatform
 import com.impala.sdk.flows.UuidBytes
 import com.impala.sdk.models.PersonalizationProtocol
 import com.impala.simulator.SimulatorBibo
 import com.impala.simulator.TestIssuer
+import com.impala.tools.issue.BridgeException
+import com.impala.tools.issue.CeremonyRefused
 import com.impala.tools.issue.CertificateSource
 import com.impala.tools.issue.HttpBridgeClient
 import com.impala.tools.issue.IssuanceCeremony
@@ -119,6 +122,9 @@ object E2e {
     val holder: Pair<String, String> by lazy { newHolder() }
     val otherHolder: Pair<String, String> by lazy { newHolder() }
 
+    /** The operator's account id, when the run names the operator by account (not only by token). */
+    val operatorAccount: String? = System.getenv("IMPALA_E2E_OPERATOR_ACCOUNT")?.trim()?.takeIf { it.isNotEmpty() }
+
     /** The operator's bearer (ManageKeys), or null when the run has no operator. */
     val operatorBearer: String? by lazy {
         readFile("IMPALA_E2E_OPERATOR_TOKEN_FILE") ?: run {
@@ -144,10 +150,27 @@ object E2e {
         return client.cardIssuer() != null
     }
 
-    /** A fresh simulated card on the GP default keys, as a factory-installed card. */
-    fun blankCard(): SimulatorBibo = SimulatorBibo(
-        installParams = PersonalizationProtocol.installParams(enforce = true, keys = null, pins = null, program = null)
+    /**
+     * A fresh simulated card on the GP default keys, as a factory-installed
+     * card. [ed25519] picks the CAP it was loaded with: `soft` (the default
+     * CAP, the software Ed25519 engine), `native` (the platform's EdDSA) or
+     * `none` (a card without a Stellar key). [platform] is its hardware
+     * ([CardPlatform.JC305], [CardPlatform.JC32], …); when it is not named, a
+     * CAP runs on the lowest hardware that loads it (see [SimulatorBibo]).
+     */
+    fun blankCard(ed25519: String? = null, platform: CardPlatform? = null): SimulatorBibo = SimulatorBibo(
+        installParams = PersonalizationProtocol.installParams(enforce = true, keys = null, pins = null, program = null),
+        ed25519 = ed25519,
+        platform = platform
     )
+
+    /**
+     * The hardware the lanes put each CAP on, so that one run covers both
+     * hardware classes: the default CAP on a JavaCard 3.0.5 card, the native
+     * CAP on a JavaCard 3.2 card.
+     */
+    fun hardwareFor(ed25519: String): CardPlatform =
+        if (ed25519 == SimulatorBibo.ED25519_NATIVE) CardPlatform.JC32 else CardPlatform.JC305
 
     private val kmk = ByteArray(16).also { SecureRandom().nextBytes(it) }
 
@@ -164,12 +187,25 @@ object E2e {
         } else {
             CertificateSource.Test(TestIssuer(), if (register) HttpBridgeClient(requireBridge()) to holderBearer else null)
         }
-        return IssuanceCeremony(
-            bibo,
-            IssuanceConfig(accountId, "XLM", 0, kmk, null, userPin.toCharArray(), "14117298".toCharArray()),
-            source,
-            notice = { println("issue: $it") }
-        ).run()
+        // The bridge budgets key-custody calls, certificates among them, at 5 per
+        // 60 s per operator. A lane that issues several cards waits the window out
+        // and runs the ceremony again: it is idempotent per step, so the second run
+        // continues where the first was refused.
+        var attempt = 0
+        while (true) {
+            try {
+                return IssuanceCeremony(
+                    bibo,
+                    IssuanceConfig(accountId, "XLM", 0, kmk, null, userPin.toCharArray(), "14117298".toCharArray()),
+                    source,
+                    notice = { println("issue: $it") }
+                ).run()
+            } catch (e: CeremonyRefused) {
+                if ((e.cause as? BridgeException)?.status != 429 || attempt++ >= 2) throw e
+                println("e2e: the bridge's key-custody budget (5 per 60 s per operator) is used up; waiting 61 s, then continuing the ceremony")
+                Thread.sleep(61_000)
+            }
+        }
     }
 
     /** True when the bridge serves the offline lane (D-3). */

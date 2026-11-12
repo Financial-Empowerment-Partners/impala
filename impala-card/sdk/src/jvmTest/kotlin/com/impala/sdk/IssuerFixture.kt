@@ -170,7 +170,10 @@ internal fun personalizedCard(
     currency: ByteArray = USDC,
     userPin: String = "1111",
     initialCounter: Int = 0,
-    bindAtInstall: Boolean = false
+    bindAtInstall: Boolean = false,
+    ed25519: String? = null,
+    provisionPin: Boolean = true,
+    platform: com.impala.jcardsim.jc31.CardPlatform? = null
 ): PersonalizedCard {
     val keys = customKeys()
     val params = PersonalizationProtocol.installParams(
@@ -179,7 +182,7 @@ internal fun personalizedCard(
         pins = null,
         program = if (bindAtInstall) Pair(issuer.programId, issuer.pub65) else null
     )
-    val bibo = SimulatorBibo(installParams = params)
+    val bibo = SimulatorBibo(installParams = params, ed25519 = ed25519, platform = platform)
     val sdk = ImpalaSDK(bibo, keys)
     sdk.setSeed()
     val pub = sdk.getECPubKey().toByteArray()
@@ -190,7 +193,7 @@ internal fun personalizedCard(
         issuerPubKey = if (bindAtInstall) null else issuer.pub65,
         initialReceiveCounter = initialCounter
     )
-    sdk.provisionUserPIN(userPin)
+    if (provisionPin) sdk.provisionUserPIN(userPin)
     sdk.closeSecureChannel()
     return PersonalizedCard(sdk, bibo, accountId, pub, cert, keys)
 }

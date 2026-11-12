@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # The whole suite, in order, with a scorecard: doctor → prepare → build → up → seed → scenarios → verify.
+# The scenarios run 01, 02, 10, 11 (the smoke tier), then 03 … 07, 12, 13, 08, 09: the card lanes stay together.
 # Writes state/report.md and state/report.json, appends state/timings.tsv. Mandatory steps stop the run
 # when they fail; optional lanes (android, soroban testnet) are skipped with a reason when their
 # prerequisites are missing. Exit 1 when a mandatory step failed.
@@ -46,7 +47,10 @@ step() {
   note=""
   if [ -f "$RECORDS_DIR/$name.json" ]; then note="$(jq -r '(if .passed == null then "" else "\(.passed)/\(.passed + (.failed // 0)) assertions" end) + (if .stellar_hash then "; tx " + .stellar_hash[0:12] + "…" else "" end) | ltrimstr("; ")' "$RECORDS_DIR/$name.json" 2>/dev/null)"; fi
   case "$rc" in
-    0) add_row "$name" passed "$(( $(now_s) - t0 ))" "$note" ;;
+    0) # a scenario that found nothing to do (an optional service unreachable, a lane switched off) records status "skipped"
+       if [ "$(jq -r '.status // empty' "$RECORDS_DIR/$name.json" 2>/dev/null)" = skipped ]; then
+         add_row "$name" skipped "$(( $(now_s) - t0 ))" "$(jq -r '.reason // "nothing to do"' "$RECORDS_DIR/$name.json")"
+       else add_row "$name" passed "$(( $(now_s) - t0 ))" "$note"; fi ;;
     3) add_row "$name" ambiguous "$(( $(now_s) - t0 ))" "outcome unknown — do not re-run blindly; see state/records"; [ "$mandatory" = 1 ] && MANDATORY_FAILED=1 ;;
     *) add_row "$name" failed "$(( $(now_s) - t0 ))" "exit $rc; see output above${note:+; $note}"; [ "$mandatory" = 1 ] && MANDATORY_FAILED=1 ;;
   esac
@@ -86,6 +90,11 @@ if [ "${finish:-0}" != 1 ] && [ "$SMOKE" != 1 ]; then
   andnote="$gsnote"; [ -z "$andnote" ] && ! android_lane_wanted && andnote="no emulator + system image (DEMO_ANDROID=$DEMO_ANDROID)"
   [ -z "$andnote" ] && ! skipped_step scenario-07-android-emulator && quiet_window 61 "the emulator lane"
   step scenario-07-android-emulator 0 "$andnote" "$S/scenario-07-android-emulator.sh"
+  sepnote="$gsnote"; [ -z "$sepnote" ] && ! sep10_enabled && sepnote="SEP-10 is off (DEMO_SEP10=${DEMO_SEP10:-})"
+  [ -z "$sepnote" ] && ! skipped_step scenario-12-sep10-bridge && quiet_window 61 "the SEP-10 bridge lane"
+  step scenario-12-sep10-bridge 0 "$sepnote" "$S/scenario-12-sep10-bridge.sh"
+  tpnote="$gsnote"; [ -z "$tpnote" ] && [ -z "$(printf '%s' "${DEMO_SEP10_THIRD_PARTY:-}" | tr -d ' ,')" ] && tpnote="no third-party SEP-10 server configured (DEMO_SEP10_THIRD_PARTY)"
+  step scenario-13-sep10-third-party 0 "$tpnote" "$S/scenario-13-sep10-third-party.sh"
   ! skipped_step scenario-08-payala-relay && quiet_window 61 "the Payala relay lane"
   step scenario-08-payala-relay 0 "" "$S/scenario-08-payala-relay.sh"
   cargonote=""; command -v cargo >/dev/null 2>&1 || cargonote="cargo not found (Rust toolchain; see DEVELOPMENT.md)"

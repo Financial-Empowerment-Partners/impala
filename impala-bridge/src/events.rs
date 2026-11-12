@@ -39,6 +39,15 @@ pub enum AccountEvent {
         account_id: String,
         card_id: String,
     },
+    /// A card gained its Stellar (Ed25519) key: a second way to sign in as
+    /// `account_id` (SEP-10). Emitted with `card.registered` when the key
+    /// arrives at registration, alone when it is attached afterwards
+    /// (`PUT /card/stellar-key`). The card id only: a card's key never
+    /// changes, so the row answers which address it is.
+    CardStellarKeyRegistered {
+        account_id: String,
+        card_id: String,
+    },
     MfaEnrolled {
         account_id: String,
         mfa_type: String,
@@ -319,6 +328,30 @@ pub enum AccountEvent {
         issuer_version: i32,
         replaced: bool,
     },
+    /// A SEP-10 signing key was generated, `pending` (`account_id` = acting
+    /// operator). Fingerprint only: never the address or any key bytes.
+    Sep10KeyGenerated {
+        account_id: String,
+        version: i32,
+        fingerprint: String,
+    },
+    /// A pending SEP-10 signing key was scheduled to take over at
+    /// `activate_at` (unix seconds, DB clock), superseding
+    /// `supersedes_version` when one was active.
+    Sep10KeyActivated {
+        account_id: String,
+        version: i32,
+        fingerprint: String,
+        supersedes_version: Option<i32>,
+        activate_at: i64,
+    },
+    /// A SEP-10 signing key was revoked and its sealed material scrubbed.
+    Sep10KeyRevoked {
+        account_id: String,
+        version: i32,
+        fingerprint: String,
+        previous_state: String,
+    },
     /// A Payala sync batch was applied for `account_id` (counts only: no
     /// amounts, memos, ids or digests — the mirror is unverified data and
     /// the outbox must not become a second copy of it).
@@ -342,6 +375,7 @@ impl AccountEvent {
             AccountEvent::TransactionCreated { .. } => "transaction.created",
             AccountEvent::CardRegistered { .. } => "card.registered",
             AccountEvent::CardDeleted { .. } => "card.deleted",
+            AccountEvent::CardStellarKeyRegistered { .. } => "card.stellar_key_registered",
             AccountEvent::MfaEnrolled { .. } => "mfa.enrolled",
             AccountEvent::NotifyMobileVerified { .. } => "notify.mobile_verified",
             AccountEvent::DeviceTokenRegistered { .. } => "device_token.registered",
@@ -382,6 +416,9 @@ impl AccountEvent {
             AccountEvent::PayalaSyncBatchApplied { .. } => "payala.sync_batch_applied",
             AccountEvent::CardIssuerKeyGenerated { .. } => "custody.issuer_key_generated",
             AccountEvent::CardCertified { .. } => "custody.card_certified",
+            AccountEvent::Sep10KeyGenerated { .. } => "custody.sep10_key_generated",
+            AccountEvent::Sep10KeyActivated { .. } => "custody.sep10_key_activated",
+            AccountEvent::Sep10KeyRevoked { .. } => "custody.sep10_key_revoked",
         }
     }
 
@@ -392,6 +429,7 @@ impl AccountEvent {
             | AccountEvent::TransactionCreated { account_id, .. }
             | AccountEvent::CardRegistered { account_id, .. }
             | AccountEvent::CardDeleted { account_id, .. }
+            | AccountEvent::CardStellarKeyRegistered { account_id, .. }
             | AccountEvent::MfaEnrolled { account_id, .. }
             | AccountEvent::NotifyMobileVerified { account_id, .. }
             | AccountEvent::DeviceTokenRegistered { account_id, .. }
@@ -427,7 +465,10 @@ impl AccountEvent {
             | AccountEvent::ReconciliationSnapshotRecorded { account_id, .. }
             | AccountEvent::PayalaSyncBatchApplied { account_id, .. }
             | AccountEvent::CardIssuerKeyGenerated { account_id, .. }
-            | AccountEvent::CardCertified { account_id, .. } => account_id,
+            | AccountEvent::CardCertified { account_id, .. }
+            | AccountEvent::Sep10KeyGenerated { account_id, .. }
+            | AccountEvent::Sep10KeyActivated { account_id, .. }
+            | AccountEvent::Sep10KeyRevoked { account_id, .. } => account_id,
         }
     }
 
@@ -463,6 +504,9 @@ impl AccountEvent {
             }),
             AccountEvent::CardRegistered { card_id, .. } => json!({ "card_id": card_id }),
             AccountEvent::CardDeleted { card_id, .. } => json!({ "card_id": card_id }),
+            AccountEvent::CardStellarKeyRegistered { card_id, .. } => {
+                json!({ "card_id": card_id })
+            }
             AccountEvent::MfaEnrolled { mfa_type, .. } => json!({ "mfa_type": mfa_type }),
             AccountEvent::NotifyMobileVerified { notify_id, .. } => {
                 json!({ "notify_id": notify_id })
@@ -780,6 +824,36 @@ impl AccountEvent {
                 "issuer_version": issuer_version,
                 "replaced": replaced,
             }),
+            AccountEvent::Sep10KeyGenerated {
+                version,
+                fingerprint,
+                ..
+            } => json!({
+                "version": version,
+                "fingerprint": fingerprint,
+            }),
+            AccountEvent::Sep10KeyActivated {
+                version,
+                fingerprint,
+                supersedes_version,
+                activate_at,
+                ..
+            } => json!({
+                "version": version,
+                "fingerprint": fingerprint,
+                "supersedes_version": supersedes_version,
+                "activate_at": activate_at,
+            }),
+            AccountEvent::Sep10KeyRevoked {
+                version,
+                fingerprint,
+                previous_state,
+                ..
+            } => json!({
+                "version": version,
+                "fingerprint": fingerprint,
+                "previous_state": previous_state,
+            }),
         }
     }
 }
@@ -829,6 +903,22 @@ mod tests {
         assert_eq!(e.event_type(), "account.updated");
         assert_eq!(e.account_id(), "acct-1");
         assert_eq!(e.data(), json!({ "fields": ["nickname"] }));
+    }
+
+    /// Attaching a login credential is in the audit trail, and the payload
+    /// is the card id alone: no address, no signature bytes.
+    #[test]
+    fn card_stellar_key_payload_is_the_card_id_only() {
+        let e = AccountEvent::CardStellarKeyRegistered {
+            account_id: "acct-1".into(),
+            card_id: "ea94fa5b0f6b2abc1626bc50c0bd5e17".into(),
+        };
+        assert_eq!(e.event_type(), "card.stellar_key_registered");
+        assert_eq!(e.account_id(), "acct-1");
+        assert_eq!(
+            e.data(),
+            json!({ "card_id": "ea94fa5b0f6b2abc1626bc50c0bd5e17" })
+        );
     }
 
     #[test]
@@ -1181,8 +1271,14 @@ mod tests {
             "bridge.key_imported",
             "bridge.key_revoked",
             "bridge.seed_provisioned",
+            // 040: SEP-10 signing-key custody.
+            "custody.sep10_key_generated",
+            "custody.sep10_key_activated",
+            "custody.sep10_key_revoked",
+            // 040: a card's Stellar key (a login credential) was registered.
+            "card.stellar_key_registered",
         ];
-        assert_eq!(FROZEN.len(), 29);
+        assert_eq!(FROZEN.len(), 33);
         let src = include_str!("events.rs");
         let event_type_fn = src
             .find("pub fn event_type(&self)")
@@ -1250,6 +1346,64 @@ mod tests {
             sign(b"key", 1, "body"),
             hex::encode(mac.finalize().into_bytes())
         );
+    }
+
+    #[test]
+    fn sep10_key_payloads_carry_fingerprints_only() {
+        let fp = "0123456789abcdef0123".to_string();
+        let events = [
+            (
+                AccountEvent::Sep10KeyGenerated {
+                    account_id: "admin".into(),
+                    version: 1,
+                    fingerprint: fp.clone(),
+                },
+                "custody.sep10_key_generated",
+                vec!["fingerprint", "version"],
+            ),
+            (
+                AccountEvent::Sep10KeyActivated {
+                    account_id: "admin".into(),
+                    version: 2,
+                    fingerprint: fp.clone(),
+                    supersedes_version: Some(1),
+                    activate_at: 1_800_000_120,
+                },
+                "custody.sep10_key_activated",
+                vec![
+                    "activate_at",
+                    "fingerprint",
+                    "supersedes_version",
+                    "version",
+                ],
+            ),
+            (
+                AccountEvent::Sep10KeyRevoked {
+                    account_id: "admin".into(),
+                    version: 1,
+                    fingerprint: fp.clone(),
+                    previous_state: "superseded".into(),
+                },
+                "custody.sep10_key_revoked",
+                vec!["fingerprint", "previous_state", "version"],
+            ),
+        ];
+        for (event, ty, want) in events {
+            assert_eq!(event.event_type(), ty);
+            let data = event.data();
+            let mut keys: Vec<&str> = data
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect();
+            keys.sort();
+            assert_eq!(keys, want);
+            let text = data.to_string();
+            for forbidden in ["address", "seed", "ciphertext", "mac", "\"G"] {
+                assert!(!text.contains(forbidden), "{ty} carries {forbidden}");
+            }
+        }
     }
 
     #[test]

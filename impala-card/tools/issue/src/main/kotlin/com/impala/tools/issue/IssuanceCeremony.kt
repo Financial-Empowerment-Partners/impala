@@ -8,6 +8,7 @@ import com.impala.sdk.flows.Hex
 import com.impala.sdk.flows.UuidBytes
 import com.impala.sdk.models.CardPersonalization
 import com.impala.sdk.models.ImpalaException
+import com.impala.sdk.models.StellarCardKey
 import com.impala.sdk.models.TransferProtocol
 import com.impala.simulator.Jca
 import com.impala.simulator.TestIssuer
@@ -59,7 +60,9 @@ data class IssuanceRecord(
     val capSha256: String?,
     val issuerVersion: Int?,
     val testIssuer: Boolean,
-    val alreadyIssued: Boolean
+    val alreadyIssued: Boolean,
+    /** The card's Stellar account id (`G…`) for SEP-10 sign-in, or null for a card without a Stellar key. */
+    val stellarAddress: String? = null
 ) {
     fun lines(): List<String> = listOfNotNull(
         "card_id=$cardId",
@@ -71,6 +74,7 @@ data class IssuanceRecord(
         capSha256?.let { "cap_sha256=$it" },
         issuerVersion?.let { "issuer_version=$it" },
         "issuer=${if (testIssuer) "TEST (not redeemable)" else "bridge"}",
+        stellarAddress?.let { "stellar_address=$it" },
         "status=${if (alreadyIssued) "already-issued" else "issued"}"
     )
 }
@@ -83,9 +87,14 @@ class CeremonyRefused(message: String, cause: Throwable? = null) : RuntimeExcept
  * (1) version + state; (2) INITIALIZE unless done; (3) read cardId + pubkey;
  * (4) SCP03 on per-card keys, rotating from the transport keys first if needed;
  * (5) register + certify (or test issuer); (6) PERSONALIZE A[,B],C;
- * (7) PROVISION_PIN master + user; (8) read-back and record.
- * A personalized card prints its record and changes nothing. A torn
- * PERSONALIZE re-runs from part A (the applet commits all-or-nothing).
+ * (7) PROVISION_PIN master + user; (8) read-back and record; (9) register the
+ * card's Stellar key with the bridge (applet 0.3: the card makes the two
+ * cross-signatures the bridge checks at PERSONALIZE, so this cannot ride on
+ * the registration of step 5).
+ * A personalized card prints its record and changes nothing on the card; step
+ * 9 is repeated (the bridge answers a repeat with success), so a re-run also
+ * finishes an issuance whose last step was lost. A torn PERSONALIZE re-runs
+ * from part A (the applet commits all-or-nothing).
  */
 class IssuanceCeremony(
     private val bibo: BIBO,
@@ -112,7 +121,7 @@ class IssuanceCeremony(
         if (p.terminated) throw CeremonyRefused("card is terminated")
         if (p.personalized) {
             notice("card is already personalized; nothing to do")
-            return recordFor(plain, p, versionText, alreadyIssued = true, issuerVersion = null)
+            return recordFor(plain, p, versionText, alreadyIssued = true, issuerVersion = null, stellar = registerStellarKey(plain, p))
         }
 
         // (2) INITIALIZE with host entropy, once.
@@ -168,7 +177,58 @@ class IssuanceCeremony(
         if (!(p.personalized && p.pinProvisioned && !p.scp03KeysDefault)) {
             throw CeremonyRefused("read-back does not show PERSONALIZED|PIN_PROVISIONED|!SCP03_KEYS_DEFAULT: $p")
         }
-        return recordFor(plain, p, versionText, alreadyIssued = false, issuerVersion = lastIssuerVersion)
+        // (9) the Stellar key, now that the card has signed for its identity
+        return recordFor(plain, p, versionText, alreadyIssued = false, issuerVersion = lastIssuerVersion, stellar = registerStellarKey(plain, p))
+    }
+
+    /** Where step 9 registers the Stellar key: the bridge of this ceremony under the holder's token, if any. */
+    private fun stellarRegistration(): Pair<BridgeClient, String>? = when (val src = certificates) {
+        is CertificateSource.Bridge -> src.client to src.holderToken
+        is CertificateSource.Test -> src.registerWith
+    }
+
+    /**
+     * Step 9. Reads the Stellar key of a card that has one, checks its two
+     * cross-signatures here, and registers it with the bridge
+     * (`PUT /card/stellar-key`, holder token). Never fatal: a card whose key
+     * could not be registered is fully issued and signs in with the legacy
+     * challenge until a re-run or the holder's app registers it.
+     *
+     * @return the key, or null for a card without one
+     */
+    private fun registerStellarKey(sdk: ImpalaSDK, p: CardPersonalization): StellarCardKey? {
+        if (!p.stellarKey) return null
+        val key = card { sdk.getStellarKey() } ?: return null
+        notice("stellar key ${key.address} (${key.engineName} engine)")
+        val (client, holderToken) = stellarRegistration() ?: return key
+        val userData = card { sdk.tx(CommandAPDU(Constants.INS_GET_USER_DATA)).data }
+        val account = userData.copyOfRange(0, 16)
+        val cardId = userData.copyOfRange(16, 32)
+        val pub = card { sdk.getECPubKey().toByteArray() }
+        val binding = key.bindingSignature
+        val proof = key.proofSignature
+        if (binding == null || proof == null ||
+            !Jca.verifyP256(Jca.jcaPublicKey(pub), StellarCardKey.bindingMessage(account, cardId, key.publicKey), binding) ||
+            !Jca.verifyEd25519(key.publicKey, StellarCardKey.proofMessage(account, cardId, pub), proof)
+        ) {
+            notice("the card's Stellar key signatures do not verify; NOT registered (the card signs in with the legacy challenge)")
+            return key
+        }
+        try {
+            client.registerStellarKey(holderToken, Hex.encode(cardId), key.address, Hex.encode(binding), Hex.encode(proof))
+            notice("Stellar key registered with the bridge (PUT /card/stellar-key)")
+        } catch (e: BridgeException) {
+            notice(
+                "PUT /card/stellar-key refused (HTTP ${e.status}${e.code?.let { " $it" } ?: ""}); the card is issued and signs in " +
+                    "with the legacy challenge until its Stellar key is registered (re-run, or register it from the holder's app)"
+            )
+        } catch (e: java.io.IOException) {
+            notice(
+                "PUT /card/stellar-key failed (${e.javaClass.simpleName}); the card is issued and signs in with the legacy " +
+                    "challenge until its Stellar key is registered (re-run, or register it from the holder's app)"
+            )
+        }
+        return key
     }
 
     private var lastIssuerVersion: Int? = null
@@ -238,7 +298,10 @@ class IssuanceCeremony(
         return perCardSdk
     }
 
-    private fun recordFor(sdk: ImpalaSDK, p: CardPersonalization, version: String, alreadyIssued: Boolean, issuerVersion: Int?): IssuanceRecord {
+    private fun recordFor(
+        sdk: ImpalaSDK, p: CardPersonalization, version: String, alreadyIssued: Boolean, issuerVersion: Int?,
+        stellar: StellarCardKey? = null
+    ): IssuanceRecord {
         val userData = card { sdk.tx(CommandAPDU(Constants.INS_GET_USER_DATA)).data }
         val account = userData.copyOfRange(0, 16)
         val pub = card { sdk.getECPubKey().toByteArray() }
@@ -253,7 +316,8 @@ class IssuanceCeremony(
             capSha256 = config.capSha256,
             issuerVersion = issuerVersion,
             testIssuer = certificates is CertificateSource.Test,
-            alreadyIssued = alreadyIssued
+            alreadyIssued = alreadyIssued,
+            stellarAddress = stellar?.address
         )
     }
 

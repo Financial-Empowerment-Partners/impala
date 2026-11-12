@@ -2,9 +2,12 @@
  * Cards page module — register and deactivate hardware smartcards.
  *
  * Registration stores the card's EC public key (and optional RSA public key)
- * linked to an account. Deactivation uses a confirmation modal (Foundation JS
- * if available, CSS fallback otherwise) before sending a PUT with card_active: false.
- * Validates hex public keys before submission.
+ * linked to an account, plus, optionally, the card's Stellar key for SEP-10
+ * sign-in (address + two cross-signatures, all three or none; see
+ * CardsView.buildRegistration). Registration is POST /card; the bridge
+ * registers a card only under the signed-in account. Deactivation uses a
+ * confirmation modal (Foundation JS if available, CSS fallback otherwise)
+ * before sending DELETE /card.
  */
 (function () {
     Router.init();
@@ -24,48 +27,38 @@
     registerForm.addEventListener('submit', function (e) {
         e.preventDefault();
 
-        var accountId = document.getElementById('reg-account-id').value.trim();
-        var cardId = document.getElementById('reg-card-id').value.trim();
-        var ecPubkey = document.getElementById('reg-ec-pubkey').value.trim();
-        var rsaPubkey = document.getElementById('reg-rsa-pubkey').value.trim();
+        var value = function (id) { return document.getElementById(id).value; };
 
-        // Validate required fields
-        var error = Validate.firstError([
-            Validate.required(accountId),
-            Validate.required(cardId),
-            Validate.hexString(ecPubkey)
-        ]);
-        if (error) {
-            Router.showToast(error, 'warning');
+        // Validation and the body shape live in the DOM-free CardsView.
+        // Without the optional Stellar group the body is exactly the
+        // pre-SEP-10 one.
+        var built = CardsView.buildRegistration({
+            accountId: value('reg-account-id'),
+            cardId: value('reg-card-id'),
+            ecPubkey: value('reg-ec-pubkey'),
+            rsaPubkey: value('reg-rsa-pubkey'),
+            stellarAddress: value('reg-stellar-address'),
+            stellarBindingSig: value('reg-stellar-binding'),
+            stellarProofSig: value('reg-stellar-proof')
+        });
+        if (!built.ok) {
+            Router.showToast(built.error, 'warning');
             return;
         }
-
-        // Validate optional RSA key if provided
-        if (rsaPubkey) {
-            var rsaCheck = Validate.hexString(rsaPubkey);
-            if (!rsaCheck.valid) {
-                Router.showToast('RSA public key: ' + rsaCheck.message, 'warning');
-                return;
-            }
-        }
-
-        var body = {
-            account_id: accountId,
-            card_id: cardId,
-            ec_pubkey: ecPubkey,
-            rsa_pubkey: rsaPubkey || undefined
-        };
 
         var submitBtn = registerForm.querySelector('button[type="submit"]');
         API.setButtonLoading(submitBtn, true);
 
-        API.post('/account', body)
+        // Registration is POST /card (handlers/card.rs create_card). This
+        // used to post to /account, the account-creation route, which
+        // rejects a card body.
+        API.post('/card', built.body)
             .then(function () {
                 Router.showToast('Card registered successfully', 'success');
                 registerForm.reset();
             })
             .catch(function (err) {
-                Router.showToast('Error: ' + err.message, 'alert');
+                Router.showToast(CardsView.registrationErrorMessage(err), 'alert');
             })
             .then(function () {
                 API.setButtonLoading(submitBtn, false);

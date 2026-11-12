@@ -19,3 +19,18 @@ export function loadScript(filename, exportName) {
     const factory = new Function(`${src}\nreturn ${exportName};`);
     return factory();
 }
+
+/**
+ * Load several IIFE modules into ONE function scope, in the given order (the
+ * same order as their <script> tags), and return the named globals.
+ *
+ * Example: `loadScripts(['validate.js', 'cards-view.js'], ['Validate', 'CardsView'])`.
+ */
+export function loadScripts(filenames, exportNames) {
+    const src = filenames
+        .map((f) => readFileSync(resolve(uiRoot, 'html', 'js', f), 'utf8'))
+        .join('\n;\n');
+    // eslint-disable-next-line no-new-func
+    const factory = new Function(`${src}\nreturn { ${exportNames.join(', ')} };`);
+    return factory();
+}

@@ -41,9 +41,15 @@ class CardInspectorTest {
         assertTrue(i.steps.joinToString(), i.complete)
         assertEquals(
             listOf("GET_VERSION", "GET_PERSONALIZATION", "GET_USER_DATA", "GET_EC_PUB_KEY", "IS_CARD_ALIVE",
-                "GET_RECEIVE_STATE", "GET_LAST_TRANSFER", "GET_BALANCE"),
+                "GET_RECEIVE_STATE", "GET_LAST_TRANSFER", "GET_BALANCE", "GET_STELLAR_KEY"),
             i.steps.map { it.name }
         )
+        // the simulated card is the default build: it has a Stellar key, bound at personalization
+        assertTrue(i.stellarAddress!!, com.impala.sdk.stellar.StrKey.isValidAccountId(i.stellarAddress!!))
+        assertEquals("soft", i.stellarEngine)
+        assertEquals(true, i.stellarBindingVerified)
+        assertEquals(true, i.stellarProofVerified)
+        assertTrue("STELLAR_KEY" in i.flagNames)
         assertEquals(i.steps.map { it.name }, i.exchanges.map { it.insName })
         assertEquals(true, i.certVerifiedByCardIssuer)
         assertEquals(true, i.certificateVerifiesUnder(Hex.encode(issuer.pub65)))
@@ -57,8 +63,8 @@ class CardInspectorTest {
         assertEquals(UuidBytes.format(account), i.accountUuid)
         assertEquals(32, i.wireCardId!!.length)
         assertEquals(holder, i.holderName!!.reveal())
-        assertEquals(0, i.versionMajor); assertEquals(2, i.versionMinor)
-        assertTrue(i.versionLine!!, i.versionLine.matches(Regex("""0\.2 · r\d+ · g[0-9a-f]{8}""")))
+        assertEquals(0, i.versionMajor); assertEquals(3, i.versionMinor)
+        assertTrue(i.versionLine!!, i.versionLine.matches(Regex("""0\.3 · r\d+ · g[0-9a-f]{8}""")))
         assertEquals("PERSONALIZED", i.stateName)
         assertTrue("PERSONALIZED" in i.flagNames && "PIN_PROVISIONED" in i.flagNames)
         assertEquals(true, i.personalized); assertEquals(false, i.terminated)
@@ -75,6 +81,59 @@ class CardInspectorTest {
         // Every command the inspection issued, and every one that reached the card, is on the read-only allow-list.
         assertTrue(i.exchanges.joinToString(), i.exchanges.all { ApduNames.isReadOnly(it.cla, it.ins) && it.outcome != com.impala.sdk.apdu4j.ApduExchange.Outcome.REFUSED })
         assertTrue("sent $sent", sent.all { it in ApduNames.READ_ONLY_INS })
+    }
+
+    @Test
+    fun `a card without a Stellar key is not asked for one`() {
+        val card = personalizedCard(TestIssuer(), uuidBytes(), ed25519 = SimulatorBibo.ED25519_NONE)
+        val sent = mutableListOf<Int>()
+        card.bibo.debugTrace = { cmd, _ -> sent += cmd[1].toInt() and 0xFF }
+        val i = inspect(card.bibo)
+        assertTrue(i.steps.joinToString(), i.complete)
+        assertEquals(8, i.steps.size)
+        assertFalse("GET_STELLAR_KEY" in i.steps.map { it.name })
+        assertFalse("sent $sent", 0x37 in sent)
+        assertNull(i.stellarAddress)
+        assertNull(i.stellarEngine)
+        assertNull(i.stellarBindingVerified)
+        assertNull(i.stellarProofVerified)
+        assertFalse("STELLAR_KEY" in i.flagNames)
+    }
+
+    @Test
+    fun `the Stellar key of a JavaCard 3_1 card is reported the same way`() {
+        val i = inspect(personalizedCard(TestIssuer(), uuidBytes(), ed25519 = SimulatorBibo.ED25519_NATIVE).bibo)
+        assertTrue(i.complete)
+        assertEquals("native", i.stellarEngine)
+        assertEquals(true, i.stellarBindingVerified)
+        assertEquals(true, i.stellarProofVerified)
+    }
+
+    @Test
+    fun `a Stellar key that is not bound yet, or bound to something else, does not verify`() {
+        // initialized but not personalized: the key exists, the signatures do not
+        val fresh = SimulatorBibo().also { com.impala.sdk.ImpalaSDK(it).setSeed() }
+        val unbound = inspect(fresh)
+        assertEquals(56, unbound.stellarAddress!!.length)
+        assertNull(unbound.stellarBindingVerified)
+        assertNull(unbound.stellarProofVerified)
+
+        // a flipped byte in either signature shows as a failed check, not as an error
+        val card = personalizedCard(TestIssuer(), uuidBytes())
+        for ((offset, bindingOk, proofOk) in listOf(Triple(1 + 32 + 10, false, true), Triple(1 + 32 + 72 + 10, true, false))) {
+            val faulty = FaultInjectingBibo(card.bibo)
+            faulty.responseRewrites[0x37] = { resp -> resp[offset] = (resp[offset].toInt() xor 0x01).toByte(); resp }
+            val i = inspect(faulty)
+            assertEquals("binding with byte $offset flipped", bindingOk, i.stellarBindingVerified)
+            assertEquals("proof with byte $offset flipped", proofOk, i.stellarProofVerified)
+        }
+        // another account's identity in GET_USER_DATA: neither signature is for it
+        val swapped = FaultInjectingBibo(card.bibo)
+        swapped.responseRewrites[0x1E] = { resp -> resp[0] = (resp[0].toInt() xor 0x01).toByte(); resp }
+        inspect(swapped).let {
+            assertEquals(false, it.stellarBindingVerified)
+            assertEquals(false, it.stellarProofVerified)
+        }
     }
 
     @Test
@@ -133,7 +192,7 @@ class CardInspectorTest {
         val i = inspect(SimulatorBibo())
         assertFalse(i.complete)
         assertTrue(i.steps.first { it.name == "GET_VERSION" }.ok)
-        assertEquals("0.2", "${i.versionMajor}.${i.versionMinor}")
+        assertEquals("0.3", "${i.versionMajor}.${i.versionMinor}")
         val key = i.steps.first { it.name == "GET_EC_PUB_KEY" }
         assertFalse(key.ok)
         assertNotNull(key.error)

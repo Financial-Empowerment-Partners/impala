@@ -10,7 +10,29 @@ data class CreateCardRequest(
     val account_id: String,
     val card_id: String,
     val ec_pubkey: String,
-    val rsa_pubkey: String? = null
+    val rsa_pubkey: String? = null,
+    /**
+     * The card's Stellar key for SEP-10 sign-in, all three or none
+     * (docs/sep10-card-keys.md §6): the `G…` address, the card key's DER
+     * signature binding it (lowercase hex) and the Stellar key's proof of
+     * possession (128 lowercase hex characters). Omitted from the JSON when
+     * null, so a card without a Stellar key registers exactly as before.
+     */
+    val stellar_address: String? = null,
+    val stellar_binding_sig: String? = null,
+    val stellar_proof_sig: String? = null
+)
+
+/**
+ * `PUT /card/stellar-key`: the Stellar key of a card that is already
+ * registered. The bridge verifies both signatures against the caller's
+ * account and the card's stored key; a repeat for the same key succeeds.
+ */
+data class SetCardStellarKeyRequest(
+    val card_id: String,
+    val stellar_address: String,
+    val stellar_binding_sig: String,
+    val stellar_proof_sig: String
 )
 
 data class DeleteCardRequest(

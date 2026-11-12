@@ -146,9 +146,9 @@ pub enum Capability {
 
 impl Capability {
     /// Every capability. A new variant fails the exhaustive `match` in
-    /// [`role_has_capability`] until it gets a row, and the matrix tests
-    /// iterate this so they cannot silently go stale.
-    #[allow(dead_code)] // consumed by the test-side matrix/invariant loops
+    /// [`role_has_capability`] until it gets a row; the matrix tests iterate
+    /// this so they cannot silently go stale, and [`role_is_privileged`]
+    /// derives from it.
     pub const ALL: [Capability; 9] = [
         Capability::ManageReserve,
         Capability::ReadReserve,
@@ -185,6 +185,16 @@ pub fn role_has_capability(role: &str, cap: Capability) -> bool {
         Capability::ManageCustody => matches!(role, ROLE_ADMIN | ROLE_TREASURER),
         Capability::ReadCustody => matches!(role, ROLE_ADMIN | ROLE_TREASURER | ROLE_AUDITOR),
     }
+}
+
+/// Whether `role` holds any capability at all: admin and the three lateral
+/// roles (treasurer, key-custodian, auditor) today. Derived from the matrix,
+/// so a role that gains its first capability is privileged the same day.
+/// SEP-10 sign-in refuses such accounts (`handlers/sep10_auth.rs`).
+pub fn role_is_privileged(role: &str) -> bool {
+    Capability::ALL
+        .iter()
+        .any(|cap| role_has_capability(role, *cap))
 }
 
 /// The capability check as a Result, for handlers and the extractor.
@@ -681,6 +691,31 @@ mod tests {
         }
     }
 
+    /// "Privileged" is derived from the matrix: every role that holds a
+    /// capability, and no ladder role. SEP-10 sign-in refuses exactly these.
+    #[test]
+    fn privileged_roles_are_the_ones_with_a_capability() {
+        use crate::constants::{
+            ALL_ROLES, ROLE_AUDITOR, ROLE_DEVICE, ROLE_KEY_CUSTODIAN, ROLE_TOKEN, ROLE_TREASURER,
+        };
+        for role in [ROLE_ADMIN, ROLE_TREASURER, ROLE_KEY_CUSTODIAN, ROLE_AUDITOR] {
+            assert!(role_is_privileged(role), "{role}");
+        }
+        for role in [ROLE_VIEW_ONLY, ROLE_DEVICE, ROLE_TOKEN, "", "superuser"] {
+            assert!(!role_is_privileged(role), "{role:?}");
+        }
+        // Every known role is classified by the matrix and nothing else.
+        for role in ALL_ROLES {
+            assert_eq!(
+                role_is_privileged(role),
+                Capability::ALL
+                    .iter()
+                    .any(|c| role_has_capability(role, *c)),
+                "{role}"
+            );
+        }
+    }
+
     #[test]
     fn capability_matrix_is_exactly_as_specified() {
         for cap in Capability::ALL {
@@ -926,6 +961,7 @@ mod tests {
                 "admin_card_issuer.rs",
                 include_str!("handlers/admin_card_issuer.rs"),
             ),
+            ("admin_sep10.rs", include_str!("handlers/admin_sep10.rs")),
         ] {
             assert!(
                 !src.contains("AdminUser"),
@@ -987,6 +1023,7 @@ mod tests {
         let custody = include_str!("handlers/admin_custody.rs");
         let reconciliation = include_str!("handlers/admin_reconciliation.rs");
         let card_issuer = include_str!("handlers/admin_card_issuer.rs");
+        let sep10 = include_str!("handlers/admin_sep10.rs");
 
         let table: &[(&str, &str, &str)] = &[
             // admin_reserve.rs — reads
@@ -1051,6 +1088,12 @@ mod tests {
             (card_issuer, "generate_issuer_key", "Privileged<ManageKeys>"),
             (card_issuer, "certify_card", "Privileged<ManageKeys>"),
             (card_issuer, "list_issuer_keys", "Privileged<ReadKeys>"),
+            // admin_sep10.rs — the SEP-10 signing key is key custody
+            (sep10, "list_signing_keys", "Privileged<ReadKeys>"),
+            (sep10, "generate_signing_key", "Privileged<ManageKeys>"),
+            (sep10, "activate_signing_key", "Privileged<ManageKeys>"),
+            (sep10, "revoke_signing_key", "Privileged<ManageKeys>"),
+            (sep10, "list_account_cards", "Privileged<ReadAccounts>"),
         ];
 
         for (src, name, expected) in table {
@@ -1080,6 +1123,29 @@ mod tests {
         assert_eq!(non_test(custody).matches("pub async fn ").count(), 9);
         assert_eq!(non_test(reconciliation).matches("pub async fn ").count(), 4);
         assert_eq!(non_test(card_issuer).matches("pub async fn ").count(), 3);
+        assert_eq!(non_test(sep10).matches("pub async fn ").count(), 5);
+    }
+
+    /// The public SEP-10 handlers are deliberately unauthenticated (they sit
+    /// behind wildcard CORS): none may take a credential-bearing extractor.
+    /// A new handler in that module must update this test consciously.
+    #[test]
+    fn sep10_public_handlers_take_no_auth_extractor() {
+        let src = include_str!("handlers/sep10_auth.rs");
+        let non_test = src.find("#[cfg(test)]").map_or(src, |i| &src[..i]);
+        assert_eq!(non_test.matches("pub async fn ").count(), 3);
+        for name in ["stellar_toml", "sep10_challenge", "sep10_token"] {
+            let sig = signature_of(non_test, name);
+            for extractor in [
+                "AuthenticatedUser",
+                "AuthContext",
+                "SessionUser",
+                "AdminUser",
+                "Privileged<",
+            ] {
+                assert!(!sig.contains(extractor), "{name} takes {extractor}");
+            }
+        }
     }
 
     /// The custody surface carries the seed-bearing sign path's brake; the

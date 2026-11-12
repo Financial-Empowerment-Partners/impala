@@ -71,6 +71,24 @@
                 <div id="keys-history"></div>
             </div>
         </div>
+
+        <div class="card" id="sep10-panel">
+            <div class="card-section">
+                <h5>SEP-10 signing key (card sign-in)</h5>
+                <p class="text-muted">The bridge&rsquo;s SEP-10 endpoint signs each Stellar Web Authentication challenge with this key, and a card answers with the Stellar key it holds. A challenge signed by a registered card&rsquo;s Stellar key yields the same session as card sign-in with <code>SIGN_AUTH</code>.</p>
+                <ul>
+                    <li><strong>Enabling SEP-10 is a bridge setting</strong> (<code>SEP10_ENABLED=true</code>, then a restart), not something this page does. These controls work either way, so a key can be in service before the endpoint is switched on.</li>
+                    <li><strong>A new key is created pending and signs nothing.</strong> Activating it schedules it: it takes over after the activation delay (<code>SEP10_KEY_ACTIVATION_DELAY_SECS</code>, 120&nbsp;s in the design), on every bridge instance at the same instant, and the previous key becomes superseded.</li>
+                    <li><strong>Revoking the active key stops SEP-10 sign-in</strong> (the endpoint answers 503) until another key is activated and its delay has passed.</li>
+                    <li><strong>Never fund a card&rsquo;s Stellar address.</strong> The card signs only SEP-10 challenges and its key cannot be exported, so nothing can ever sign a transaction that spends from that address: anything sent to it is lost.</li>
+                    <li>The signing key is <strong>generate-only</strong>: there is no import, and no response carries more than the public address and the fingerprint. Generating needs key import enabled on the bridge (<code>KEY_IMPORT_ENABLED</code> with a seed-protection backend).</li>
+                </ul>
+                <div id="sep10-status"><p class="text-muted">Loading&hellip;</p></div>
+                <div id="sep10-notices"></div>
+                <div id="sep10-generate"></div>
+                <div id="sep10-keys"></div>
+            </div>
+        </div>
     </div>
 
     <script src="config.js"></script>
@@ -86,5 +104,7 @@
     <script src="js/router.js"></script>
     <script src="js/keys-view.js"></script>
     <script src="js/keys.js"></script>
+    <script src="js/sep10-view.js"></script>
+    <script src="js/sep10.js"></script>
 </body>
 </html>

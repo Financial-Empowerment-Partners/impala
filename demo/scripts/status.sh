@@ -29,6 +29,10 @@ if [ -n "${IMPALA_ADMIN_PASSWORD:-}" ] && [ -n "${AGENT_G:-}" ] && curl -fsS -o 
     | awk -F'\t' 'BEGIN{printf "  %-19s %-15s %-16s %-24s %s\n","created","origin","stellar_hash","memo","source"} {printf "  %-19s %-15s %-16s %-24s %s\n",$1,$2,$3,$4,$5}' >&2
   info "card program"
   curl -fsS "$BRIDGE_URL/card-issuer" | jq -c '{configured, fingerprint, program_id_hex, redemption_uuid}' | sed 's/^/  /' >&2
+  info "SEP-10 (card sign-in with a Stellar key; home domain $SEP10_HOME_DOMAIN, reached from the host with scripts/lib.sh sep10_curl)"
+  sep10_status "$T" | jq -r '"  enabled=\(.enabled) key_ring_live=\(.key_ring_live) challenge_ttl=\(.challenge_ttl_secs)s cards_with_a_stellar_key=\(.registered_card_keys)",
+    (.keys[]? | "  v\(.version) \(.state)\(if .opened == true then " (open on this instance)" elif .opened == false then " (NOT open on this instance)" else "" end) \(.public_address) fingerprint \(.fingerprint)\(if .state == "pending" and .activate_at != null then " takes over at " + .activate_at else "" end)")' >&2 \
+    || warn "the bridge did not answer GET /admin/sep10/signing-keys (an image older than the SEP-10 routes?)"
 else
   warn "no seeded accounts yet (scripts/seed.sh)"
 fi

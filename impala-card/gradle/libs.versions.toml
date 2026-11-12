@@ -13,7 +13,12 @@ uuid = "0.8.4"
 
 [libraries]
 kotlin-test = { module = "org.jetbrains.kotlin:kotlin-test", version.ref = "kotlin" }
+# jcardsim is consumed ONLY by :jcardsim-jc31, which repackages it with the
+# JavaCard 3.1 EdDSA classes; every other module depends on that project. Putting
+# this jar on a classpath next to it would shadow the patched API classes.
 javacard-simulator = { module = "com.klinec:jcardsim", version = "3.0.6.0" }
+# :jcardsim-jc31's build-time bytecode patcher (never on a runtime classpath).
+asm = { module = "org.ow2.asm:asm", version = "9.9" }
 # jvmTest-only: independent CMac/AES reference implementation in Scp03CounterIcvTest.
 # Was previously satisfied transitively (via at.asitplus.crypto:datatypes, removed
 # 2026-06 as a dead commonMain dep); declared explicitly now that it is the only user.

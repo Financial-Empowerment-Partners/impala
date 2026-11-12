@@ -23,6 +23,7 @@ import com.payala.impala.demo.BuildConfig
 import com.payala.impala.demo.ImpalaApp
 import com.payala.impala.demo.R
 import com.payala.impala.demo.api.ApiClient
+import com.payala.impala.demo.card.TappedStellarKeys
 import com.payala.impala.demo.card.CardStore
 import com.payala.impala.demo.card.StoredCard
 import com.payala.impala.demo.databinding.FragmentCardsBinding
@@ -107,7 +108,8 @@ class CardsFragment : Fragment(R.layout.fragment_cards) {
         val host = main ?: return
         host.awaitCardTap(
             TapPrompt.Register,
-            onTap = { session -> session.identity },
+            // The Stellar key of a card that has one is read in the same tap (registration sends it).
+            onTap = { session -> TappedStellarKeys.readDuringTap(session, session.identity) },
             onResult = { result ->
                 // The view may be gone (rotation): nothing was registered; the user taps again.
                 if (!isAdded || _binding == null) {
@@ -126,7 +128,10 @@ class CardsFragment : Fragment(R.layout.fragment_cards) {
     }
 
     private fun register(identity: CardIdentity, acknowledged: Boolean = false) {
-        viewModel.register(api, store, app.tokenManager.getAccountId(), identity, policy, acknowledged)
+        viewModel.register(
+            api, store, app.tokenManager.getAccountId(), identity, policy, acknowledged,
+            stellarKey = TappedStellarKeys.forCard(identity.wireCardId)
+        )
     }
 
     /** A follow-up registration with no tap before it: the sheet shows Finishing, then the outcome. */

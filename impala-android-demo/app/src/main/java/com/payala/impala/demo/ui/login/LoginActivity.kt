@@ -13,6 +13,7 @@ import androidx.lifecycle.lifecycleScope
 import com.payala.impala.demo.BuildConfig
 import com.payala.impala.demo.ImpalaApp
 import com.payala.impala.demo.R
+import com.payala.impala.demo.auth.CardSep10
 import com.payala.impala.demo.api.ApiClient
 import com.payala.impala.demo.auth.GitHubAuthHelper
 import com.payala.impala.demo.auth.GitHubSignInResult
@@ -189,7 +190,7 @@ class LoginActivity : AppCompatActivity() {
                 tapClaimed = true
                 val mine = attempt.get()
                 val outcome: Result<CardLoginTap> = try {
-                    Result.success(tap.runTap { TapProgress.withSink(tap::onStep) { viewModel.signInWithCardTap(session, api) } })
+                    Result.success(tap.runTap { TapProgress.withSink(tap::onStep) { viewModel.signInWithCardTap(session, api, CardSep10.client) } })
                 } catch (e: CardFlowException) {
                     Result.failure(e)
                 } catch (e: BIBOException) {

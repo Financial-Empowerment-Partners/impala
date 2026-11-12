@@ -764,6 +764,29 @@ pub struct CreateCardRequest {
     /// NULL (migration 038). Validated only when non-empty.
     #[serde(default)]
     pub rsa_pubkey: Option<String>,
+    /// The card's Stellar (Ed25519) key as a `G…` address (applet 0.3+,
+    /// docs/sep10-card-keys.md §6). The three Stellar fields are sent
+    /// together or not at all; absent, `null` and `""` all mean absent.
+    #[serde(default)]
+    pub stellar_address: Option<String>,
+    /// Lowercase hex of the trimmed DER `bindingSig` (ECDSA by the card EC
+    /// key over `SKEY_A`).
+    #[serde(default)]
+    pub stellar_binding_sig: Option<String>,
+    /// Lowercase hex of `proofSig` (Ed25519 by the Stellar key over `SKEY_B`).
+    #[serde(default)]
+    pub stellar_proof_sig: Option<String>,
+}
+
+/// `PUT /card/stellar-key`: the Stellar key of a card that is already
+/// registered (the card was registered before it was personalized, when the
+/// two cross-signatures did not exist yet). All four fields are required.
+#[derive(Deserialize)]
+pub struct SetCardStellarKeyRequest {
+    pub card_id: String,
+    pub stellar_address: String,
+    pub stellar_binding_sig: String,
+    pub stellar_proof_sig: String,
 }
 
 #[derive(Serialize)]
@@ -776,6 +799,135 @@ pub struct CardResponse {
 pub struct DeleteCardRequest {
     pub card_id: String,
 }
+
+// ── SEP-10 (040) ───────────────────────────────────────────────────────
+// Public data only (pinned by sep10::key tests): addresses, fingerprints,
+// states and instants. Nothing sealed ever appears in these shapes.
+
+/// `GET /auth/sep10` — a server-signed challenge.
+#[derive(Serialize)]
+pub struct Sep10ChallengeResponse {
+    pub transaction: String,
+    pub network_passphrase: String,
+}
+
+/// `POST /auth/sep10` body (JSON or form).
+#[derive(Deserialize)]
+pub struct Sep10TokenRequest {
+    pub transaction: String,
+}
+
+/// `POST /auth/sep10` — the session `POST /auth/card` mints, plus the
+/// SEP-10 `token` field (byte-identical to `temporal_token`).
+#[derive(Serialize)]
+pub struct Sep10TokenResponse {
+    pub token: String,
+    #[serde(flatten)]
+    pub house: TokenResponse,
+}
+
+/// `POST /admin/sep10/signing-keys/{version}/activate`.
+#[derive(Deserialize, Default)]
+pub struct ActivateSep10KeyRequest {
+    /// Fingerprint of the active key, or `none` when no key is active.
+    #[serde(default)]
+    pub confirm_supersede: Option<String>,
+    /// `activate sep10-signing {network}`.
+    #[serde(default)]
+    pub confirm_phrase: Option<String>,
+}
+
+/// `POST /admin/sep10/signing-keys/{version}/revoke`.
+#[derive(Deserialize, Default)]
+pub struct RevokeSep10KeyRequest {
+    /// `revoke sep10-signing {network} v{version}`.
+    #[serde(default)]
+    pub confirm_phrase: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct Sep10KeyView {
+    pub version: i32,
+    pub state: String,
+    pub public_address: String,
+    pub fingerprint: String,
+    pub generated_by: String,
+    pub generated_at: String,
+    pub activate_at: Option<String>,
+    pub superseded_at: Option<String>,
+    pub revoked_at: Option<String>,
+    /// Whether the instance that answered holds this version open in its key
+    /// ring (decrypted once, so it can sign and verify with it). `false` for
+    /// a pending key means `activate` would be refused here
+    /// (`sep10_key_not_opened`); for the active key, that this instance
+    /// answers 503. `null` when the instance runs no key ring
+    /// (`SEP10_ENABLED=false`) or the version is revoked. A superseded key is
+    /// dropped once its grace has passed.
+    pub opened: Option<bool>,
+}
+
+/// `GET /admin/sep10/signing-keys` — the status object
+/// (docs/sep10-card-keys.md §6.1). Works with SEP-10 disabled.
+#[derive(Serialize)]
+pub struct Sep10StatusResponse {
+    pub enabled: bool,
+    /// `host[:port]`; `null` when no valid endpoint is configured.
+    pub home_domain: Option<String>,
+    pub web_auth_endpoint: Option<String>,
+    /// The word the confirm phrases use (`testnet` / `pubnet`).
+    pub network: String,
+    pub network_passphrase: String,
+    pub challenge_ttl_secs: u64,
+    /// Active cards with a Stellar address.
+    pub registered_card_keys: i64,
+    /// Whether the key ring of the instance that answered is live (it read
+    /// the key table within the stale window); `false` means that instance
+    /// answers 503 on the public routes. `null` when it runs no key ring.
+    pub key_ring_live: Option<bool>,
+    /// Newest version first.
+    pub keys: Vec<Sep10KeyView>,
+}
+
+/// 201 from `POST /admin/sep10/signing-keys/generate`.
+#[derive(Serialize)]
+pub struct GenerateSep10KeyResponse {
+    pub version: i32,
+    pub state: String,
+    pub public_address: String,
+    pub fingerprint: String,
+}
+
+#[derive(Serialize)]
+pub struct ActivateSep10KeyResponse {
+    pub version: i32,
+    /// Still `pending` until `activate_at`.
+    pub state: String,
+    pub activate_at: String,
+}
+
+#[derive(Serialize)]
+pub struct RevokeSep10KeyResponse {
+    pub version: i32,
+    pub state: String,
+}
+
+/// One card in `GET /admin/accounts/{account_id}/cards`. Public data only:
+/// no EC key, no cross-signatures.
+#[derive(Serialize)]
+pub struct AdminCardView {
+    pub card_id: String,
+    pub active: bool,
+    pub created_at: Option<String>,
+    pub deleted_at: Option<String>,
+    pub stellar_address: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct AdminCardListResponse {
+    pub cards: Vec<AdminCardView>,
+}
+
+// ── end SEP-10 ─────────────────────────────────────────────────────────
 
 // ── Card issuer + certificates (039) ───────────────────────────────────
 

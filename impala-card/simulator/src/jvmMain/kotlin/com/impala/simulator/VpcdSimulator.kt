@@ -1,5 +1,7 @@
 package com.impala.simulator
 
+import com.impala.applet.BuildConfig
+import com.impala.jcardsim.jc31.CardPlatform
 import com.impala.sdk.models.PersonalizationProtocol
 import com.licel.jcardsim.remote.VSmartCardTCPProtocol
 import java.io.File
@@ -70,15 +72,31 @@ class VpcdSimulator(
         const val KEY_AID = "com.licel.jcardsim.card.applet.0.AID"
         /** Our key: the applet install-parameter TLV as hex (docs/apdu.md "Install parameters"). */
         const val KEY_INSTALL_PARAMS = "impala.install.params"
+        /**
+         * Our key: which Ed25519 engine the simulated card was "built" with,
+         * `soft` (the default CAP), `native` or `none`: the three CAP variants
+         * of `-Papplet.ed25519`. Unset follows the JVM default (`soft`).
+         */
+        const val KEY_ED25519 = "impala.ed25519"
+        /**
+         * Our key: the simulated hardware, a [CardPlatform] preset name
+         * (`jc305`, `jc32`, `jc32-per-curve`, …). With it and without
+         * [KEY_ED25519] the card gets the CAP an operator would load on that
+         * hardware; a CAP the hardware does not load fails the start with
+         * [CapNotLoadableException], as a card's loader would refuse it.
+         */
+        const val KEY_PLATFORM = "impala.platform"
 
-        /** Builds the card described by a jcardsim-style cfg (host/port, AID, optional install params). */
+        /** Builds the card described by a jcardsim-style cfg (host/port, AID, optional install params, CAP variant and hardware). */
         fun fromConfig(props: Properties): Triple<SimulatorBibo, String, Int> {
             val host = props.getProperty(KEY_HOST) ?: "localhost"
             val port = props.getProperty(KEY_PORT)?.toIntOrNull() ?: 35963
             val aid = props.getProperty(KEY_AID) ?: SimulatorBibo.APPLET_INSTANCE_AID
             val params = props.getProperty(KEY_INSTALL_PARAMS)?.trim()?.takeIf { it.isNotEmpty() }
                 ?.let { hex -> ByteArray(hex.length / 2) { hex.substring(2 * it, 2 * it + 2).toInt(16).toByte() } }
-            return Triple(SimulatorBibo(aidHex = aid, installParams = params), host, port)
+            val engine = props.getProperty(KEY_ED25519)?.trim()?.takeIf { it.isNotEmpty() }
+            val platform = props.getProperty(KEY_PLATFORM)?.trim()?.takeIf { it.isNotEmpty() }?.let { CardPlatform.byName(it) }
+            return Triple(SimulatorBibo(aidHex = aid, installParams = params, ed25519 = engine, platform = platform), host, port)
         }
 
         /** The TLV for a factory-style install: ENFORCE on, GP default SCP03 keys, no program binding. */
@@ -95,7 +113,20 @@ fun main(args: Array<String>) {
     val cfgPath = args.lastOrNull { !it.startsWith("--") }
         ?: run { System.err.println("usage: VpcdSimulator <jcardsim.cfg>"); kotlin.system.exitProcess(2) }
     val props = Properties().apply { File(cfgPath).inputStream().use { load(it) } }
-    val (card, host, port) = VpcdSimulator.fromConfig(props)
-    System.err.println("vpcd: serving ImpalaApplet 0.2 (${props.getProperty(VpcdSimulator.KEY_AID) ?: SimulatorBibo.APPLET_INSTANCE_AID}) to $host:$port")
+    val (card, host, port) = try {
+        VpcdSimulator.fromConfig(props)
+    } catch (e: CapNotLoadableException) {
+        // The card's loader refused the CAP: there is no applet to serve.
+        System.err.println("vpcd: ${e.message}")
+        kotlin.system.exitProcess(3)
+    } catch (e: IllegalArgumentException) {
+        System.err.println("vpcd: ${e.message}")
+        kotlin.system.exitProcess(2)
+    }
+    val version = "${BuildConfig.MAJOR_VERSION}.${BuildConfig.MINOR_VERSION}"
+    System.err.println(
+        "vpcd: serving ImpalaApplet $version (${props.getProperty(VpcdSimulator.KEY_AID) ?: SimulatorBibo.APPLET_INSTANCE_AID}, " +
+            "${card.capVariant.fileName} on ${card.platform.name()}, JavaCard ${card.platform.level().label()}) to $host:$port"
+    )
     VpcdSimulator(card, host, port).serve()
 }

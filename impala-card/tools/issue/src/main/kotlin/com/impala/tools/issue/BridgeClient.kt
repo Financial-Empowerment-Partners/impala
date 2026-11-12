@@ -42,6 +42,14 @@ interface BridgeClient {
     /** `POST /card` under the holder's bearer token. */
     fun registerCard(holderToken: String, accountId: String, cardId: String, ecPubkeyHex: String)
 
+    /**
+     * `PUT /card/stellar-key` under the holder's bearer token: registers the
+     * Stellar key of a card that is already registered (the card makes its
+     * two cross-signatures at personalization, after `POST /card`). The bridge
+     * verifies both; repeating the call for the same key succeeds.
+     */
+    fun registerStellarKey(holderToken: String, cardId: String, stellarAddress: String, bindingSigHex: String, proofSigHex: String)
+
     /** `POST /admin/cards/{card_id}/certificate` under the operator's bearer token (ManageKeys). */
     fun certify(operatorToken: String, cardId: String, currency: String, cardMinorScale: Int, recertify: Boolean): CertifyResponse
 
@@ -73,6 +81,24 @@ class HttpBridgeClient(baseUrl: String, private val timeout: Duration = Duration
         val resp = post("/card", holderToken, body)
         if (resp.get("success")?.asBoolean == false) {
             throw BridgeException(200, null, resp.get("message")?.asString ?: "card registration refused")
+        }
+    }
+
+    override fun registerStellarKey(holderToken: String, cardId: String, stellarAddress: String, bindingSigHex: String, proofSigHex: String) {
+        val body = JsonObject().apply {
+            addProperty("card_id", cardId)
+            addProperty("stellar_address", stellarAddress)
+            addProperty("stellar_binding_sig", bindingSigHex)
+            addProperty("stellar_proof_sig", proofSigHex)
+        }
+        val resp = send(
+            HttpRequest.newBuilder(URI.create("$base/card/stellar-key"))
+                .header("Content-Type", "application/json")
+                .PUT(HttpRequest.BodyPublishers.ofString(gson.toJson(body))),
+            holderToken
+        )
+        if (resp.get("success")?.asBoolean == false) {
+            throw BridgeException(200, null, resp.get("message")?.asString ?: "Stellar key registration refused")
         }
     }
 

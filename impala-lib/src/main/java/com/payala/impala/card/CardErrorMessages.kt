@@ -23,6 +23,7 @@ object CardErrorMessages {
         "card_error_invalid_request" -> R.string.card_error_invalid_request
         "card_error_applet_not_found" -> R.string.card_error_applet_not_found
         "card_error_read_only_refused" -> R.string.card_error_read_only_refused
+        "card_error_challenge_refused" -> R.string.card_error_challenge_refused
         else -> R.string.card_error_other
     }
 

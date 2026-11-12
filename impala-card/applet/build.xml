@@ -3,7 +3,7 @@
 
     <property name="debug" value="false"/>
 
-    <property name="applet.version" value="0.4"/>
+    <property name="applet.version" value="0.5"/>
     <!--
       Defaults below are testnet-safe. CI overrides the AIDs per network via
       gradle -P (forwarded to Ant in applet/build.gradle.kts):
@@ -26,6 +26,20 @@
       "params" install option (see ImpalaApplet.applyProvisioningParameters for
       the byte layout). When unset, the applet installs with its built-in
       defaults and no signing gate.
+
+      -Papplet.ed25519=soft|native|none picks the Ed25519 engine behind the
+      card's Stellar key (SEP-10 sign-in, docs/sep10-card-keys.md). A CAP holds
+      exactly one:
+        soft   (default) JavaCard 3.0.5: Ed25519Soft, through the card's ECDH
+               engine. build/ImpalaApplet.cap
+        native JavaCard 3.1: Ed25519Native, the platform's own EdDSA. Only
+               loads on a JavaCard 3.1+ card. build/ImpalaApplet-native.cap
+        none   no Stellar key: the legacy card (SIGN_AUTH only).
+               build/ImpalaApplet-none.cap
+      The sources of the chosen variant are staged under build/cap-src (the
+      simulator's Ed25519Provider and the unused engine are left out, the
+      provider from src/cap/<variant>/ is added) and the CAP is built from
+      there. The install target loads the CAP of the same variant.
     -->
     <property name="applet.aid" value="0102030405060708"/>
     <property name="applet.aid.app" value="01020304050607080102"/>
@@ -33,8 +47,9 @@
     <property name="applet.class" value="ImpalaApplet"/>
     <property name="applet.sources" value="src/jvmMain/java/com/impala/applet"/>
 
-    <property name="build.capfile" value="ImpalaApplet.cap"/>
+    <property name="applet.ed25519" value="soft"/>
     <property name="build.dir" value="./build"/>
+    <property name="cap.sources.dir" value="${build.dir}/cap-src"/>
 
     <property name="sdk.build" value="libs/sdks/jc310b43_kit"/>
     <property name="sdk.target" value="libs/sdks/jc305u4_kit"/>
@@ -49,14 +64,80 @@
         <delete dir="${build.dir}"/>
     </target>
 
-    <target name="buildJavacard" description="build applet">
-        <tstamp/>
-        <taskdef name="javacard" classname="pro.javacard.ant.JavaCard" classpath="${deps.ant.jar}"/>
-        <mkdir dir="${build.dir}"/>
-        <javacard jckit="${sdk.build}">
-            <cap targetsdk="3.0.5" sources="${applet.sources}" aid="${applet.aid}" package="${applet.package}" version="${applet.version}"
-                output="${build.dir}/${build.capfile}" export="${build.dir}" verify="true" strip="true" debug="${debug}">
-                <applet class="${applet.class}" aid="${applet.aid.app}"/>
+    <!--
+      Copies the applet sources of one Ed25519 variant to
+      ${cap.sources.dir}/<variant>: everything in ${applet.sources} except the
+      simulator's provider (it uses java.lang.System and names every engine)
+      and the engine the variant does not use (Ed25519Native needs the JavaCard
+      3.1 API, Ed25519Soft the 3.0.5 one), plus the variant's own provider.
+    -->
+    <macrodef name="stage-cap-sources">
+        <attribute name="variant"/>
+        <sequential>
+            <local name="stage.soft"/>
+            <local name="stage.native"/>
+            <local name="stage.known"/>
+            <condition property="stage.soft"><equals arg1="@{variant}" arg2="soft"/></condition>
+            <condition property="stage.native"><equals arg1="@{variant}" arg2="native"/></condition>
+            <condition property="stage.known">
+                <or>
+                    <equals arg1="@{variant}" arg2="soft"/>
+                    <equals arg1="@{variant}" arg2="native"/>
+                    <equals arg1="@{variant}" arg2="none"/>
+                </or>
+            </condition>
+            <fail unless="stage.known" message="applet.ed25519 must be soft, native or none, not '@{variant}'"/>
+            <delete dir="${cap.sources.dir}/@{variant}"/>
+            <copy todir="${cap.sources.dir}/@{variant}/com/impala/applet">
+                <fileset dir="${applet.sources}">
+                    <include name="*.java"/>
+                    <exclude name="Ed25519Provider.java"/>
+                    <exclude name="Ed25519Soft.java" unless="stage.soft"/>
+                    <exclude name="Ed25519Native.java" unless="stage.native"/>
+                </fileset>
+                <fileset dir="src/cap/@{variant}" includes="*.java"/>
+            </copy>
+        </sequential>
+    </macrodef>
+
+    <!--
+      Derives the CAP file name and the JavaCard target from applet.ed25519.
+      A target, not top-level properties: Gradle forwards -Papplet.ed25519 after
+      this file has been imported, and these must follow it.
+    -->
+    <target name="capVariant" description="resolve the Ed25519 variant (applet.ed25519)">
+        <condition property="build.capfile" value="ImpalaApplet.cap" else="ImpalaApplet-${applet.ed25519}.cap">
+            <equals arg1="${applet.ed25519}" arg2="soft"/>
+        </condition>
+        <condition property="variant.native">
+            <equals arg1="${applet.ed25519}" arg2="native"/>
+        </condition>
+        <echo message="Ed25519 variant: ${applet.ed25519} (${build.capfile})"/>
+    </target>
+
+    <!-- Stages one variant and converts it to ${build.dir}/${build.capfile}. -->
+    <macrodef name="build-cap">
+        <attribute name="targetsdk"/>
+        <element name="imports" optional="true"/>
+        <sequential>
+            <tstamp/>
+            <taskdef name="javacard" classname="pro.javacard.ant.JavaCard" classpath="${deps.ant.jar}"/>
+            <mkdir dir="${build.dir}"/>
+            <stage-cap-sources variant="${applet.ed25519}"/>
+            <javacard jckit="${sdk.build}">
+                <cap targetsdk="@{targetsdk}" sources="${cap.sources.dir}/${applet.ed25519}" aid="${applet.aid}" package="${applet.package}" version="${applet.version}"
+                    output="${build.dir}/${build.capfile}" export="${build.dir}" verify="true" strip="true" debug="${debug}">
+                    <applet class="${applet.class}" aid="${applet.aid.app}"/>
+                    <imports/>
+                </cap>
+            </javacard>
+        </sequential>
+    </macrodef>
+
+    <!-- soft and none: the JavaCard 3.1.0 kit converting down to 3.0.5. -->
+    <target name="buildJavacard305" depends="capVariant" unless="variant.native">
+        <build-cap targetsdk="3.0.5">
+            <imports>
                 <!-- ant-javacard v26 no longer sets jc.home on the forked JC 3.1.0
                      converter (v24 did), so when it passes "-target 3.0.5" the
                      converter cannot locate the kit's own api_export_files_3.0.5
@@ -65,17 +146,28 @@
                      ${basedir} is required: ant-javacard resolves this value
                      against the JVM working directory, not the Ant basedir. -->
                 <import exps="${basedir}/${sdk.build}/api_export_files_3.0.5"/>
-            </cap>
-        </javacard>
+            </imports>
+        </build-cap>
     </target>
 
-    <target name="buildJavacardLegacy" description="build applet for Javacard 3.0.1">
+    <!-- native: the kit's own level (3.1.0). No explicit export path here: the
+         converter finds its default one, and naming it again is an error
+         ("multiple export files ... have the same package AID"). -->
+    <target name="buildJavacard31" depends="capVariant" if="variant.native">
+        <build-cap targetsdk="3.1.0"/>
+    </target>
+
+    <target name="buildJavacard" depends="capVariant,buildJavacard305,buildJavacard31" description="build applet"/>
+
+    <!-- JavaCard 3.0.1 has neither Ed25519 engine's primitives: always the legacy variant. -->
+    <target name="buildJavacardLegacy" description="build applet for Javacard 3.0.1 (no Stellar key)">
         <tstamp/>
         <taskdef name="javacard" classname="pro.javacard.ant.JavaCard" classpath="${deps.ant.jar}"/>
         <mkdir dir="${build.dir}"/>
+        <stage-cap-sources variant="none"/>
         <javacard jckit="libs/sdks/jc305u4_kit">
-            <cap targetsdk="libs/sdks/jc303_kit" sources="${applet.sources}" aid="${applet.aid}" package="${applet.package}" version="${applet.version}"
-                output="${build.dir}/${build.capfile}" export="${build.dir}" verify="true" strip="true" debug="${debug}">
+            <cap targetsdk="libs/sdks/jc303_kit" sources="${cap.sources.dir}/none" aid="${applet.aid}" package="${applet.package}" version="${applet.version}"
+                output="${build.dir}/ImpalaApplet-legacy.cap" export="${build.dir}" verify="true" strip="true" debug="${debug}">
                 <applet class="${applet.class}" aid="${applet.aid.app}"/>
             </cap>
         </javacard>
@@ -107,7 +199,7 @@
         </exec>
     </target>
 
-    <target name="install" description="install applet to card">
+    <target name="install" depends="capVariant" description="install applet to card">
         <exec executable="java" failonerror="true">
             <arg value="-jar"/>
             <arg value="${deps.gp.jar}"/>

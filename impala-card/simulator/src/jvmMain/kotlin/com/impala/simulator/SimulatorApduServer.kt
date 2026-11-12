@@ -1,5 +1,6 @@
 package com.impala.simulator
 
+import com.impala.jcardsim.jc31.CardPlatform
 import com.impala.sdk.apdu4j.BIBO
 import com.impala.sdk.apdu4j.BIBOException
 import java.io.DataInputStream
@@ -114,24 +115,68 @@ class TcpApduClient(host: String, port: Int, timeoutMs: Int = 10_000) : BIBO {
     }
 }
 
-/** `./gradlew :simulator:serve --args="--port 9443"` */
-fun main(args: Array<String>) {
-    var port = SimulatorApduServer.DEFAULT_PORT
-    var i = 0
-    while (i < args.size) {
-        when (args[i]) {
-            "--port" -> port = args.getOrNull(++i)?.toIntOrNull() ?: run { System.err.println("--port needs a number"); kotlin.system.exitProcess(2) }
-            "-h", "--help" -> { System.err.println("usage: serve [--port 9443]"); return }
-            else -> { System.err.println("unknown argument: ${args[i]}"); kotlin.system.exitProcess(2) }
+/** What `serve` was asked for on its command line. */
+internal class ServeOptions(val port: Int, val platform: CardPlatform?, val ed25519: String?) {
+    companion object {
+        val USAGE: String = buildString {
+            appendLine("usage: serve [--port 9443] [--platform <hardware>] [--ed25519 soft|native|none]")
+            appendLine("  --platform  the simulated hardware; the CAP an operator would load on it follows unless --ed25519 names one:")
+            for (p in CardPlatform.presets()) appendLine("      %-24s %s".format(p.name(), p.description()))
+            appendLine("  --ed25519   the CAP variant; alone, it runs on the lowest hardware that loads it (soft and none: jc305, native: jc31)")
+            append("  with neither: the default CAP (soft) on a JavaCard 3.0.5 card (jc305)")
         }
-        i++
+
+        /** Parses [args]; a problem is reported as an [IllegalArgumentException] with the message to print. */
+        fun parse(args: Array<String>): ServeOptions {
+            var port = SimulatorApduServer.DEFAULT_PORT
+            var platform: CardPlatform? = null
+            var ed25519: String? = null
+            var i = 0
+            while (i < args.size) {
+                when (args[i]) {
+                    "--port" -> port = args.getOrNull(++i)?.toIntOrNull()?.takeIf { it in 0..65535 }
+                        ?: throw IllegalArgumentException("--port needs a number")
+                    "--platform" -> platform = CardPlatform.byName(args.getOrNull(++i) ?: throw IllegalArgumentException("--platform needs a name"))
+                    "--ed25519" -> ed25519 = CapVariant.byId(args.getOrNull(++i) ?: throw IllegalArgumentException("--ed25519 needs soft, native or none")).id
+                    else -> throw IllegalArgumentException("unknown argument: ${args[i]}")
+                }
+                i++
+            }
+            return ServeOptions(port, platform, ed25519)
+        }
+    }
+}
+
+/** `./gradlew :simulator:serve --args="--port 9443 --platform jc32"` */
+fun main(args: Array<String>) {
+    if (args.any { it == "-h" || it == "--help" }) {
+        System.err.println(ServeOptions.USAGE)
+        return
+    }
+    val options = try {
+        ServeOptions.parse(args)
+    } catch (e: IllegalArgumentException) {
+        System.err.println(e.message)
+        System.err.println(ServeOptions.USAGE)
+        kotlin.system.exitProcess(2)
     }
     // A factory-installed card: ENFORCE, GP default SCP03 keys (the issuance
     // tool's default transport keys), no program binding.
-    val server = SimulatorApduServer(SimulatorBibo(installParams = com.impala.sdk.models.PersonalizationProtocol.installParams(
-        enforce = true, keys = null, pins = null, program = null
-    )), port)
+    val card = try {
+        SimulatorBibo(
+            installParams = com.impala.sdk.models.PersonalizationProtocol.installParams(enforce = true, keys = null, pins = null, program = null),
+            ed25519 = options.ed25519,
+            platform = options.platform
+        )
+    } catch (e: CapNotLoadableException) {
+        // What a card's loader says to a CAP built for a later JavaCard level.
+        System.err.println(e.message)
+        kotlin.system.exitProcess(3)
+    }
+    val server = SimulatorApduServer(card, options.port)
     System.err.println("simulated ImpalaApplet listening on 127.0.0.1:${server.port} (adb reverse tcp:${server.port} tcp:${server.port})")
+    System.err.println("hardware: ${card.platform.name()}, JavaCard ${card.platform.level().label()} (${card.platform.description()})")
+    System.err.println("CAP: ${card.capVariant.fileName} (ed25519 ${card.capVariant.id})")
     System.err.println("issue it with the issuance tool: --transport tcp:127.0.0.1:${server.port}")
     server.serve()
 }

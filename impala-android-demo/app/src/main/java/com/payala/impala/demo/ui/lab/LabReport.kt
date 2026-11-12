@@ -133,6 +133,25 @@ object LabReport {
             tone = inspection.certVerifiedByCardIssuer?.let { tone(it) }
         )
 
+        // Only for a card that has a Stellar key (applet 0.3 with an Ed25519 engine).
+        inspection.stellarAddress?.let { address ->
+            header(R.string.lab_group_stellar)
+            item(R.string.lab_row_stellar_address, address, copyable = true)
+            item(R.string.lab_row_stellar_engine, stellarEngineText(res, inspection.stellarEngine), identifier = true)
+            item(
+                R.string.lab_row_stellar_binding,
+                inspection.stellarBindingVerified?.let { res.getString(if (it) R.string.lab_stellar_verified else R.string.lab_stellar_not_verified) }
+                    ?: res.getString(R.string.lab_stellar_unbound),
+                tone = inspection.stellarBindingVerified?.let { tone(it) }
+            )
+            item(
+                R.string.lab_row_stellar_proof,
+                inspection.stellarProofVerified?.let { res.getString(if (it) R.string.lab_stellar_verified else R.string.lab_stellar_not_verified) }
+                    ?: res.getString(R.string.lab_stellar_unbound),
+                tone = inspection.stellarProofVerified?.let { tone(it) }
+            )
+        }
+
         header(R.string.lab_group_counters)
         item(R.string.lab_row_receive_counter, inspection.receiveCounter?.toString() ?: res.getString(R.string.lab_not_read))
         item(R.string.lab_row_receive_digest, inspection.receiveDigestHex ?: res.getString(R.string.lab_not_read), copyable = inspection.receiveDigestHex != null)
@@ -302,6 +321,14 @@ object LabReport {
         return rows
     }
 
+    /** The engine behind a card's Stellar key, in words; an engine id this app does not know is shown as read. */
+    fun stellarEngineText(res: Resources, engine: String?): String = when (engine) {
+        "soft" -> res.getString(R.string.lab_stellar_engine_soft)
+        "native" -> res.getString(R.string.lab_stellar_engine_native)
+        null -> res.getString(R.string.lab_not_read)
+        else -> engine
+    }
+
     /**
      * The fingerprint of an uncompressed P-256 public key given as hex, in the
      * same `ab:cd:…` form as the Inspector's key fingerprints, or null when
@@ -379,6 +406,10 @@ object LabReport {
             appendLine("issuer key fingerprint: ${inspection.issuerKeyFingerprint ?: "none"}")
             appendLine("certificate: ${inspection.certificateLength?.let { "$it B" } ?: "none"}  cert_id: ${inspection.certIdHex ?: "none"}")
             appendLine("verified by card issuer: ${inspection.certVerifiedByCardIssuer ?: "n/a"}")
+            appendLine(
+                "stellar key: ${inspection.stellarAddress ?: "none"}  engine: ${inspection.stellarEngine ?: "n/a"}  " +
+                    "binding: ${inspection.stellarBindingVerified ?: "n/a"}  proof: ${inspection.stellarProofVerified ?: "n/a"}"
+            )
             appendLine("receive counter: ${inspection.receiveCounter ?: "?"}  digest: ${inspection.receiveDigestHex ?: "?"}")
             appendLine("holder name, balance, last transfer: not exported")
             for (s in inspection.steps) appendLine("step ${s.name}: ${if (s.ok) "OK" else "failed ${s.error?.userMessageKey ?: ""} ${s.error?.statusWordHex ?: ""}".trim()}")

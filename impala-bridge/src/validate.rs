@@ -53,8 +53,50 @@ pub fn validate_stellar_account_id_checksum(id: &str) -> Result<(), AppError> {
     Ok(())
 }
 
+/// The raw 32-byte Ed25519 public key of a checksum-valid `G…` address.
+pub fn decode_stellar_account_id(id: &str) -> Result<[u8; 32], AppError> {
+    validate_stellar_account_id_checksum(id)?;
+    let raw = base32_decode_upper(id).ok_or_else(|| {
+        AppError::BadRequest("Stellar account ID is not valid Base32".to_string())
+    })?;
+    let mut key = [0u8; 32];
+    key.copy_from_slice(&raw[1..33]);
+    Ok(key)
+}
+
+/// The `G…` strkey of a raw Ed25519 public key:
+/// `base32(0x30 ‖ key32 ‖ crc16-xmodem LE)`, 56 characters.
+pub fn encode_stellar_account_id(key: &[u8; 32]) -> String {
+    let mut raw = Vec::with_capacity(35);
+    raw.push(STRKEY_VERSION_ACCOUNT);
+    raw.extend_from_slice(key);
+    let crc = crc16_xmodem(&raw);
+    raw.extend_from_slice(&crc.to_le_bytes());
+    base32_encode_upper(&raw)
+}
+
 /// strkey version byte for an ed25519 public key (`6 << 3`; encodes as `G`).
 const STRKEY_VERSION_ACCOUNT: u8 = 6 << 3;
+
+/// RFC 4648 Base32 encode (upper-case alphabet, no padding).
+fn base32_encode_upper(data: &[u8]) -> String {
+    const ALPHABET: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+    let mut out = String::with_capacity(data.len().div_ceil(5) * 8);
+    let mut buffer: u32 = 0;
+    let mut bits: u32 = 0;
+    for &b in data {
+        buffer = (buffer << 8) | b as u32;
+        bits += 8;
+        while bits >= 5 {
+            bits -= 5;
+            out.push(ALPHABET[((buffer >> bits) & 0x1F) as usize] as char);
+        }
+    }
+    if bits > 0 {
+        out.push(ALPHABET[((buffer << (5 - bits)) & 0x1F) as usize] as char);
+    }
+    out
+}
 
 /// RFC 4648 Base32 (upper-case alphabet, no padding) — the strkey encoding.
 fn base32_decode_upper(s: &str) -> Option<Vec<u8>> {
@@ -1239,6 +1281,25 @@ mod tests {
         let typo: String = chars.into_iter().collect();
         assert!(validate_stellar_account_id(&typo).is_ok());
         assert!(validate_stellar_account_id_checksum(&typo).is_err());
+    }
+
+    /// The encoder is the decoder's inverse on real addresses, and agrees
+    /// with stellar-base's own strkey encoder on an arbitrary key.
+    #[test]
+    fn strkey_account_id_round_trips() {
+        for addr in [USDT0_ISSUER, DOCS_EXAMPLE] {
+            let raw = decode_stellar_account_id(addr).unwrap();
+            assert_eq!(encode_stellar_account_id(&raw), addr);
+        }
+        let key = [0x5Au8; 32];
+        let ours = encode_stellar_account_id(&key);
+        let theirs = stellar_base::crypto::PublicKey::from_slice(&key)
+            .unwrap()
+            .account_id();
+        assert_eq!(ours, theirs);
+        assert_eq!(ours.len(), 56);
+        assert_eq!(decode_stellar_account_id(&ours).unwrap(), key);
+        assert!(decode_stellar_account_id(&ours.replace('G', "M")).is_err());
     }
 
     #[test]

@@ -525,6 +525,116 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '429': { $ref: '#/components/responses/RateLimited' }
 
+  /.well-known/stellar.toml:
+    get:
+      tags: [auth]
+      summary: SEP-1 stellar.toml for SEP-10 discovery (only with SEP10_ENABLED=true).
+      description: |
+        Exactly three `KEY = "value"` lines: `NETWORK_PASSPHRASE`, `SIGNING_KEY`
+        (the active SEP-10 signing key, rendered from the bridge's key ring at
+        request time so it can never drift from the key that signs
+        challenges) and `WEB_AUTH_ENDPOINT`. `Cache-Control: max-age=60`.
+        Wildcard CORS (`Access-Control-Allow-Origin: *`, never with
+        credentials) on every response, errors included. Not mounted (404)
+        unless `SEP10_ENABLED=true`. Each network has its own dedicated host;
+        the shared `/api/<network>/` UI proxy is unsupported for SEP-10.
+      security: []
+      responses:
+        '200':
+          description: The toml document.
+          content:
+            text/plain:
+              schema: { type: string }
+        '503': { description: No signing key is active (or the key ring is stale); code `sep10_unavailable`. }
+
+  /auth/sep10:
+    get:
+      tags: [auth]
+      summary: Issue a SEP-10 login challenge (only with SEP10_ENABLED=true).
+      description: |
+        SEP-10 v3.4.1 challenge for `account` (a checksum-valid `G…`): a v1
+        transaction sourced by the server key, sequence 0, fee 200,
+        `PRECOND_TIME [now, now + SEP10_CHALLENGE_TTL_SECS]` (default 300 s),
+        no memo, two manage-data operations — `"<home_domain> auth"` sourced
+        by the client with a 64-character MAC-bound nonce, and
+        `web_auth_domain` sourced by the server — and exactly one signature,
+        the server's. Stateless (nothing is stored per request).
+        `Cache-Control: no-store`. Budgets: 30/60 s per client source (IPv6
+        aggregated to /64) and a global ceiling (`SEP10_CHALLENGE_GLOBAL_MAX`
+        per 60 s, 503 when exhausted). Wildcard CORS on every response.
+
+        Compliance: ACAO `*` including errors, JSON and form POST, sequence 0,
+        server signature, time bounds checked on POST, unexpected operations
+        and signatures rejected, one session per challenge — compliant. Muxed
+        accounts, memos, `client_domain` and the GET JWT — optional features,
+        declined. Lifetime 300 s (the spec recommends 900). Errors use the
+        house envelope (`{"error":{"code","message"}}`), not SEP-10's bare
+        `{"error": …}` example. The issued token is the house bridge JWT
+        (`sub` = account id, not the G address): a documented deviation.
+      security: []
+      parameters:
+        - { name: account, in: query, required: true, schema: { type: string }, description: 'G… account id. M… (muxed) is refused.' }
+        - { name: home_domain, in: query, required: false, schema: { type: string }, description: Must equal the configured home domain when present. }
+        - { name: memo, in: query, required: false, schema: { type: string }, description: Not supported; any value is refused. }
+        - { name: client_domain, in: query, required: false, schema: { type: string }, description: Accepted and ignored. }
+      responses:
+        '200':
+          description: Challenge issued.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Sep10ChallengeResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '500': { description: Redis unavailable (fail closed). }
+        '503': { description: No active signing key, stale key ring, or the global challenge ceiling; code `sep10_unavailable`. }
+    post:
+      tags: [auth]
+      summary: Exchange a signed SEP-10 challenge for bridge tokens (only with SEP10_ENABLED=true).
+      description: |
+        Accepts the challenge from `GET /auth/sep10` with the client's
+        signature appended, as JSON or `application/x-www-form-urlencoded`
+        (`transaction`, at most 8192 characters; in form bodies a decoded
+        space is read as `+`). In this phase the signing key must be a
+        **card's** Stellar key: the account is the one owning the active card
+        whose `stellar_address` equals the challenge's client account, and the
+        session is exactly what `POST /auth/card` mints for it (same role
+        derivation and token pair); `token` is byte-identical to
+        `temporal_token`.
+
+        Privileged accounts are refused: when the role this session would
+        carry holds any capability (admin, including `ADMIN_ACCOUNT_IDS`,
+        treasurer, key-custodian, auditor) the answer is the generic 401 and
+        no token is minted. Their cards sign in with `POST /auth/card`.
+
+        Order: per-source budget; strict decode (the only 400); the
+        issued-challenge check (401, not counted); the `(sep10:G, source)`
+        lockout (429); the client's master signature (the ONLY failure that
+        counts toward the lockout, 5 → 15 minutes); 10/60 s per G; the card
+        lookup (unknown or deleted card: 401, not counted); the role
+        (privileged: 401, not counted, challenge not consumed); a single-use
+        claim on the transaction hash until maxTime + 120 s (replay: 401).
+        Redis or database failure is a 500, never a 401.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Sep10TokenRequest' }
+          application/x-www-form-urlencoded:
+            schema: { $ref: '#/components/schemas/Sep10TokenRequest' }
+      responses:
+        '200':
+          description: Bridge refresh + temporal tokens.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Sep10TokenResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '413': { description: Body over 16 KiB. }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '500': { description: Redis or database unavailable (fail closed). }
+        '503': { description: Stale key ring; code `sep10_unavailable`. }
+
   /auth/sso/{provider}:
     post:
       tags: [auth]
@@ -1177,6 +1287,146 @@ paths:
         '404': { description: No active card with this card_id. }
         '409': { description: Already certified (no recertify), no issuer key, non-UUID account, compressed key, or a concurrent change. }
         '429': { $ref: '#/components/responses/RateLimited' }
+
+  /admin/sep10/signing-keys:
+    get:
+      tags: [keys]
+      summary: SEP-10 status and signing key versions (ReadKeys).
+      description: |
+        The status object of docs/sep10-card-keys.md §6.1: whether SEP-10 is
+        enabled, the configured home domain and endpoint (`null` when not
+        configured), the network (the word the confirm phrases use) and its
+        passphrase, the challenge TTL, the number of active cards with a
+        Stellar address, and every key version newest first. Public data
+        only: no key material beyond public addresses and fingerprints.
+        Always mounted, also with `SEP10_ENABLED=false`.
+      responses:
+        '200':
+          description: Status.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Sep10StatusResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { description: Role lacks the read_keys capability. }
+
+  /admin/sep10/signing-keys/generate:
+    post:
+      tags: [keys]
+      summary: Generate a pending SEP-10 signing key (admin or key-custodian).
+      description: |
+        **Generate-only.** The Ed25519 key and its challenge MAC key are
+        created inside the bridge and sealed together by the configured seed
+        protector; there is no import and no export. The new version is
+        `pending` and serves nothing until activated. Requires
+        `KEY_IMPORT_ENABLED=true` and a real protection backend. Refused with
+        409 `pending_key_exists` while another version is pending. The body
+        (`{}`) is ignored. Event: `custody.sep10_key_generated {version,
+        fingerprint}`.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { type: object }
+      responses:
+        '201':
+          description: Key generated (pending).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GenerateSep10KeyResponse' }
+        '400': { description: SEED_PROTECTION_BACKEND is none. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { description: Role lacks manage_keys, or KEY_IMPORT_ENABLED is false. }
+        '409': { description: 'Code `pending_key_exists`: a version is already pending (or a concurrent generation won).' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /admin/sep10/signing-keys/{version}/activate:
+    post:
+      tags: [keys]
+      summary: Schedule a pending SEP-10 signing key to take over (admin or key-custodian).
+      description: |
+        Sets `activate_at = now + SEP10_KEY_ACTIVATION_DELAY_SECS` (default
+        120 s, DB clock). At that instant every replica switches to the new
+        key and the previously active one becomes `superseded` (it still
+        verifies its own challenges for TTL + 120 s). Requires
+        `confirm_supersede` = the active key's fingerprint (or `none` when no
+        key is active) and `confirm_phrase` = `activate sep10-signing
+        {network}`. Event: `custody.sep10_key_activated`.
+
+        A replica that serves SEP-10 refuses (409 `sep10_key_not_opened`)
+        until its own key ring has opened this version (it polls every 30 s):
+        the superseded key cannot come back, so a key the replicas cannot
+        unseal must never be scheduled. The swap itself is applied by the key
+        rings; while `SEP10_ENABLED` is off on every replica the version stays
+        `pending` past `activate_at`.
+      parameters:
+        - { name: version, in: path, required: true, schema: { type: integer } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ActivateSep10KeyRequest' }
+      responses:
+        '200':
+          description: Activation scheduled; `state` stays `pending` until `activate_at`.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ActivateSep10KeyResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { description: Role lacks the manage_keys capability. }
+        '404': { description: No such version. }
+        '409': { description: 'Not pending, already scheduled, a wrong confirmation, a concurrent change, or code `sep10_key_not_opened` (this replica has not opened the version yet).' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /admin/sep10/signing-keys/{version}/revoke:
+    post:
+      tags: [keys]
+      summary: Revoke a SEP-10 signing key and scrub its sealed material (admin or key-custodian).
+      description: |
+        Refuses the version's challenges at once on the replica that serves
+        the call and within one poll (30 s) on the others. Revoking the active
+        key leaves SEP-10 answering 503 until another key is activated.
+        Requires `confirm_phrase` = `revoke sep10-signing {network} v{version}`.
+        Event: `custody.sep10_key_revoked`.
+      parameters:
+        - { name: version, in: path, required: true, schema: { type: integer } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RevokeSep10KeyRequest' }
+      responses:
+        '200':
+          description: Revoked.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RevokeSep10KeyResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { description: Role lacks the manage_keys capability. }
+        '404': { description: No such version. }
+        '409': { description: Already revoked, a wrong confirmation phrase, or a concurrent change. }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /admin/accounts/{account_id}/cards:
+    get:
+      tags: [admin]
+      summary: An account's cards, with their Stellar addresses (ReadAccounts).
+      description: |
+        Read-only. Active and deleted cards of the account, newest first, at
+        most 100: `card_id`, `active`, `created_at`, `deleted_at` and
+        `stellar_address` (`null` for a card without a Stellar key). Never the
+        EC key or the cross-signatures. An unknown account yields an empty
+        list.
+      parameters:
+        - { name: account_id, in: path, required: true, schema: { type: string, maxLength: 64 } }
+      responses:
+        '200':
+          description: Cards.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AdminCardListResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { description: Role lacks the read_accounts capability. }
 
   /admin/stellar-seeds/import:
     post:
@@ -2516,6 +2766,10 @@ paths:
     post:
       tags: [card]
       summary: Register a hardware smartcard.
+      description: |
+        Events: `card.registered {card_id}`, and `card.stellar_key_registered
+        {card_id}` as well when the optional Stellar fields are present and
+        verify (a second way to sign in as the account).
       requestBody:
         required: true
         content:
@@ -2528,6 +2782,19 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/CardResponse' }
         '429': { $ref: '#/components/responses/RateLimited' }
+        '400':
+          description: |
+            Invalid request. Code `invalid_stellar_binding` when the optional
+            Stellar fields are partial, malformed, or their cross-signatures
+            do not verify for this account, card id and EC key.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '409':
+          description: Code `stellar_address_in_use` — the Stellar address is active on another card.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
     delete:
       tags: [card]
       summary: Soft-delete a card.
@@ -2542,6 +2809,47 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/CardResponse' }
+
+  /card/stellar-key:
+    put:
+      tags: [card]
+      summary: Attach a Stellar key to an already registered card.
+      description: |
+        For a card that was registered before it was personalized (issuer
+        certification needs the card row first; the card makes its two
+        cross-signatures only at personalization). Owner only. The signatures
+        are verified over messages rebuilt from the caller's account, the card
+        id and the EC key stored on the card row. A card that already has this
+        address answers success; a card's Stellar key is never replaced.
+        Event (only when the key is written): `card.stellar_key_registered
+        {card_id}`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SetCardStellarKeyRequest' }
+      responses:
+        '200':
+          description: The key is registered (now, or already).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CardResponse' }
+        '400':
+          description: Code `invalid_stellar_binding` — malformed fields, or the cross-signatures do not verify for this account, card and EC key.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '404':
+          description: No active card with this id belongs to the caller.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '409':
+          description: Code `stellar_key_already_set` (the card has another Stellar key) or `stellar_address_in_use` (the address is active on another card).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '429': { $ref: '#/components/responses/RateLimited' }
 
   /mfa:
     post:
@@ -3555,7 +3863,34 @@ components:
           type: string
           nullable: true
           description: Legacy and optional. Applet 0.2 has no RSA key; omit it, or send null or an empty string. A non-empty value must be 100-2048 Base64 characters and unique.
+        stellar_address:
+          type: string
+          nullable: true
+          description: |
+            Optional (applet 0.3+): the card's Stellar key as a checksum-valid
+            `G…` address. The three Stellar fields are sent together or not at
+            all (null, missing or "" mean absent); with them the account id must
+            be a UUID, `card_id` 32 hex characters and `ec_pubkey` the 130-hex
+            uncompressed point. A card registered with them can sign in through
+            SEP-10 (`/auth/sep10`).
+        stellar_binding_sig:
+          type: string
+          nullable: true
+          description: 'Lowercase hex (16-144 characters) of the trimmed DER ECDSA-P256-SHA256 signature by the card EC key over SKEY_A = "IMPALA-SKEY:" ‖ 0x01 ‖ accountId(16) ‖ cardId(16) ‖ ed25519Pub(32).'
+        stellar_proof_sig:
+          type: string
+          nullable: true
+          description: 'Lowercase hex (128 characters) of the Ed25519 signature by the Stellar key over SKEY_B = "IMPALA-SKEY:" ‖ 0x02 ‖ accountId(16) ‖ cardId(16) ‖ ecPub(65).'
       required: [account_id, card_id, ec_pubkey]
+
+    SetCardStellarKeyRequest:
+      type: object
+      properties:
+        card_id: { type: string, description: The 32-hex id of the caller's own active card. }
+        stellar_address: { type: string, description: 'The card''s Stellar key as a checksum-valid `G…` address.' }
+        stellar_binding_sig: { type: string, description: 'As in CreateCardRequest: lowercase hex of the trimmed DER signature by the card EC key over SKEY_A.' }
+        stellar_proof_sig: { type: string, description: 'As in CreateCardRequest: 128 lowercase hex characters, the Stellar key''s Ed25519 signature over SKEY_B.' }
+      required: [card_id, stellar_address, stellar_binding_sig, stellar_proof_sig]
 
     GenerateIssuerKeyRequest:
       type: object
@@ -3625,6 +3960,119 @@ components:
         redemption_uuid: { type: string, format: uuid }
         program_id_hex: { type: string }
       required: [configured]
+
+    Sep10ChallengeResponse:
+      type: object
+      properties:
+        transaction: { type: string, description: Base64 XDR TransactionEnvelope (v1) signed by the server key. }
+        network_passphrase: { type: string }
+      required: [transaction, network_passphrase]
+
+    Sep10TokenRequest:
+      type: object
+      properties:
+        transaction: { type: string, maxLength: 8192, description: The challenge envelope with the client signature appended. }
+      required: [transaction]
+
+    Sep10TokenResponse:
+      type: object
+      properties:
+        token: { type: string, description: SEP-10 field; byte-identical to temporal_token. }
+        success: { type: boolean }
+        message: { type: string }
+        temporal_token: { type: string }
+        refresh_token: { type: string }
+      required: [token, success, message, temporal_token]
+
+    ActivateSep10KeyRequest:
+      type: object
+      properties:
+        confirm_supersede: { type: string, description: Fingerprint of the active key, or `none` when no key is active. }
+        confirm_phrase: { type: string, description: '`activate sep10-signing {network}`.' }
+      required: [confirm_supersede, confirm_phrase]
+
+    RevokeSep10KeyRequest:
+      type: object
+      properties:
+        confirm_phrase: { type: string, description: '`revoke sep10-signing {network} v{version}`.' }
+      required: [confirm_phrase]
+
+    Sep10KeyView:
+      type: object
+      properties:
+        version: { type: integer }
+        state: { type: string, enum: [pending, active, superseded, revoked] }
+        public_address: { type: string, description: G… address (stellar.toml SIGNING_KEY when active). }
+        fingerprint: { type: string }
+        generated_by: { type: string }
+        generated_at: { type: string, format: date-time }
+        activate_at: { type: string, format: date-time, nullable: true }
+        superseded_at: { type: string, format: date-time, nullable: true }
+        revoked_at: { type: string, format: date-time, nullable: true }
+        opened:
+          type: boolean
+          nullable: true
+          description: >
+            Whether the instance that answered holds this version open in its
+            key ring. `false` on a pending key means `activate` would answer
+            409 `sep10_key_not_opened` there (the ring polls every 30 s);
+            `false` on the active key means that instance answers 503. `null`
+            when the instance runs no key ring (SEP10_ENABLED=false) or the
+            version is revoked. A superseded key is dropped after its grace.
+
+    Sep10StatusResponse:
+      type: object
+      properties:
+        enabled: { type: boolean }
+        home_domain: { type: string, nullable: true, description: 'host[:port]; null when no valid endpoint is configured.' }
+        web_auth_endpoint: { type: string, nullable: true }
+        network: { type: string, enum: [testnet, pubnet], description: The word the confirm phrases use. }
+        network_passphrase: { type: string }
+        challenge_ttl_secs: { type: integer }
+        registered_card_keys: { type: integer, description: Active cards with a Stellar address. }
+        key_ring_live: { type: boolean, nullable: true, description: 'Whether the key ring of the instance that answered is live (it read the key table within the last 5 minutes); false means that instance answers 503 on the public SEP-10 routes. null when it runs no key ring.' }
+        keys: { type: array, items: { $ref: '#/components/schemas/Sep10KeyView' }, description: Newest version first. }
+      required: [enabled, home_domain, web_auth_endpoint, network, network_passphrase, challenge_ttl_secs, registered_card_keys, key_ring_live, keys]
+
+    GenerateSep10KeyResponse:
+      type: object
+      properties:
+        version: { type: integer }
+        state: { type: string, enum: [pending] }
+        public_address: { type: string }
+        fingerprint: { type: string }
+      required: [version, state, public_address, fingerprint]
+
+    ActivateSep10KeyResponse:
+      type: object
+      properties:
+        version: { type: integer }
+        state: { type: string, enum: [pending], description: Stays pending until activate_at. }
+        activate_at: { type: string, format: date-time }
+      required: [version, state, activate_at]
+
+    RevokeSep10KeyResponse:
+      type: object
+      properties:
+        version: { type: integer }
+        state: { type: string, enum: [revoked] }
+      required: [version, state]
+
+    AdminCardView:
+      type: object
+      properties:
+        card_id: { type: string }
+        active: { type: boolean }
+        created_at: { type: string, format: date-time, nullable: true }
+        deleted_at: { type: string, format: date-time, nullable: true }
+        stellar_address: { type: string, nullable: true }
+      required: [card_id, active, created_at, deleted_at, stellar_address]
+
+    AdminCardListResponse:
+      type: object
+      properties:
+        cards: { type: array, items: { $ref: '#/components/schemas/AdminCardView' }, maxItems: 100 }
+      required: [cards]
 
     DeleteCardRequest:
       type: object

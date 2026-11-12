@@ -42,6 +42,23 @@ object Jca {
             verify(der)
         }
 
+    /**
+     * Pure Ed25519 verification (RFC 8032, the JDK's) from the raw 32-byte
+     * public key: the oracle for a card's Stellar key. False for a signature
+     * that does not verify and for any malformed key or signature.
+     */
+    fun verifyEd25519(publicKey: ByteArray, message: ByteArray, signature: ByteArray): Boolean = try {
+        val spki = byteArrayOf(0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00) + publicKey
+        val key = KeyFactory.getInstance("Ed25519").generatePublic(java.security.spec.X509EncodedKeySpec(spki))
+        Signature.getInstance("Ed25519").run {
+            initVerify(key)
+            update(message)
+            verify(signature)
+        }
+    } catch (_: java.security.GeneralSecurityException) {
+        false
+    }
+
     /** Encodes a JCA EC public key as a 65-byte uncompressed SEC1 point. */
     fun uncompressedPoint(publicKey: ECPublicKey): ByteArray {
         fun pad32(value: BigInteger): ByteArray {
@@ -135,7 +152,10 @@ fun simulatorScp03Keys(): Triple<ByteArray, ByteArray, ByteArray> =
  *
  * [certify] defaults to [issuer]'s local key; pass a function that asks a real
  * bridge for the certificate to personalize a simulated card the bridge can
- * redeem (the T1 lane).
+ * redeem (the T1 lane). [ed25519] picks the CAP the card was loaded with
+ * (`soft`, `native` or `none`) and [platform] its hardware (a
+ * `CardPlatform` such as `JC305` or `JC32`); see [SimulatorBibo] for what
+ * naming one, both or neither means.
  */
 @JvmOverloads
 fun personalizedCard(
@@ -145,7 +165,9 @@ fun personalizedCard(
     userPin: String = "1111",
     initialCounter: Int = 0,
     bindAtInstall: Boolean = false,
-    certify: (accountId: ByteArray, currency: ByteArray, cardPub65: ByteArray) -> ByteArray = issuer::certify
+    certify: (accountId: ByteArray, currency: ByteArray, cardPub65: ByteArray) -> ByteArray = issuer::certify,
+    ed25519: String? = null,
+    platform: com.impala.jcardsim.jc31.CardPlatform? = null
 ): PersonalizedCard {
     val keys = simulatorScp03Keys()
     val params = PersonalizationProtocol.installParams(
@@ -154,7 +176,7 @@ fun personalizedCard(
         pins = null,
         program = if (bindAtInstall) Pair(issuer.programId, issuer.pub65) else null
     )
-    val bibo = SimulatorBibo(installParams = params)
+    val bibo = SimulatorBibo(installParams = params, ed25519 = ed25519, platform = platform)
     val sdk = ImpalaSDK(bibo, keys)
     sdk.setSeed()
     val pub = sdk.getECPubKey().toByteArray()

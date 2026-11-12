@@ -49,6 +49,7 @@ check "fresh accounts carry role view-only in their JWT" sh -c "[ '$(jwt_claim "
 expect "view-only: GET /admin/keys" "$T0_T" GET /admin/keys 403
 expect "view-only: GET /admin/custody/policy" "$T0_T" GET /admin/custody/policy 403
 expect "view-only: GET /admin/events" "$T0_A" GET '/admin/events?since=0&limit=1' 403
+expect "view-only: GET /admin/sep10/signing-keys" "$T0_K" GET /admin/sep10/signing-keys 403
 
 info "2/4 grants by the admin (PUT /admin/accounts/{id}/role): each one revokes the target's current tokens"
 grant() { # <id> <role>
@@ -79,6 +80,14 @@ expect "auditor: GET /admin/custody/policy (ReadCustody)" "$A_JWT" GET /admin/cu
 expect "auditor: PUT /admin/custody/policy (ManageCustody not held)" "$A_JWT" PUT /admin/custody/policy 403 '{"per_tx_max_stroops":1}'
 expect "auditor: PUT /admin/accounts/{id}/role (governance is admin-only)" "$A_JWT" PUT "/admin/accounts/$T_ID/role" 403 '{"role":"admin"}'
 expect "treasurer: cannot grant roles either" "$T_JWT" PUT "/admin/accounts/$A_ID/role" 403 '{"role":"admin"}'
+# the SEP-10 signing key is key custody: read with ReadKeys, change with ManageKeys; an account's cards need ReadAccounts
+expect "key-custodian: GET /admin/sep10/signing-keys (ReadKeys)" "$K_JWT" GET /admin/sep10/signing-keys 200
+expect "auditor: GET /admin/sep10/signing-keys (ReadKeys, read-only oversight)" "$A_JWT" GET /admin/sep10/signing-keys 200
+expect "treasurer: GET /admin/sep10/signing-keys (ReadKeys not held)" "$T_JWT" GET /admin/sep10/signing-keys 403
+expect "auditor: POST /admin/sep10/signing-keys/generate (ManageKeys not held)" "$A_JWT" POST /admin/sep10/signing-keys/generate 403 '{}'
+expect "treasurer: POST /admin/sep10/signing-keys/1/revoke (ManageKeys not held)" "$T_JWT" POST /admin/sep10/signing-keys/1/revoke 403 '{"confirm_phrase":"x"}'
+expect "key-custodian: GET /admin/accounts/{id}/cards (ReadAccounts)" "$K_JWT" GET "/admin/accounts/$T_ID/cards" 200
+expect "treasurer: GET /admin/accounts/{id}/cards (ReadAccounts not held)" "$T_JWT" GET "/admin/accounts/$K_ID/cards" 403
 
 info "4/4 the grants are visible to the admin and auditable"
 accounts="$(bridge_api GET '/accounts?per_page=50' "$ADMIN_JWT")"

@@ -9,9 +9,9 @@ package com.impala.sdk
  * INS codes identify the applet command to execute. Status words in the
  * response indicate success ([SW_OK] = 0x9000) or a specific error condition.
  *
- * This file mirrors `applet/.../Constants.java` byte-for-byte (applet 0.2,
- * transfer protocol v1); `ApduDocDriftTest` and `ConstantsTest` pin the two
- * together. Secure-channel INS live in [com.impala.sdk.scp03.SCP03Constants].
+ * This file mirrors `applet/.../Constants.java` byte-for-byte (applet 0.3:
+ * transfer protocol v1 and the Stellar key); `ApduDocDriftTest` and
+ * `ConstantsTest` pin the two together. Secure-channel INS live in [com.impala.sdk.scp03.SCP03Constants].
  */
 object Constants {
     // ---- Numeric helpers ----
@@ -53,6 +53,15 @@ object Constants {
     const val INS_GET_RECEIVE_STATE: Byte = 0x35     // CLA 0x00 or 0x84
     const val INS_GET_LAST_TRANSFER: Byte = 0x36     // CLA 0x00 only
 
+    // Stellar key and SEP-10 sign-in (applet 0.3, docs/sep10-card-keys.md)
+    const val INS_GET_STELLAR_KEY: Byte = 0x37       // CLA 0x00 only (169-byte response)
+    const val INS_SIGN_SEP10: Byte = 0x38            // CLA 0x00 only (P1 begin / continue / finish)
+
+    // SIGN_SEP10 parts (P1)
+    const val P1_SEP10_BEGIN: Byte = 0x00
+    const val P1_SEP10_CONTINUE: Byte = 0x01
+    const val P1_SEP10_FINISH: Byte = 0x02
+
     // PERSONALIZE parts (P1)
     const val P1_PERSONALIZE_IDENTITY: Byte = 0x01
     const val P1_PERSONALIZE_ISSUER_KEY: Byte = 0x02
@@ -72,6 +81,7 @@ object Constants {
     const val PFLAG_PIN_PROVISIONED: Byte = 0x10
     const val PFLAG_PROVISIONING_ENFORCED: Byte = 0x20
     const val PFLAG_TERMINATED: Byte = 0x40
+    const val PFLAG_STELLAR_KEY: Byte = 0x80.toByte() // the card holds a Stellar (Ed25519) key
 
     // PIN type
     const val P2_MASTER_PIN: Byte = 129.toByte() // P2 byte for Master PIN in Verify 0x81
@@ -111,6 +121,20 @@ object Constants {
     const val CERT_VERSION: Byte = 0x01
     const val MAX_COUNTER_JUMP: Short = 1024
 
+    // Stellar key / SEP-10 lengths and versions
+    const val ED25519_PUB_KEY_LENGTH: Short = 32
+    const val ED25519_SIG_LENGTH: Short = 64
+    const val NETWORK_ID_LENGTH: Short = 32          // SHA-256(network passphrase)
+    const val SEP10_MAX_TX_LENGTH: Short = 640       // the staged Transaction XDR
+    const val SEP10_MAX_OPERATIONS: Short = 5
+    const val STELLAR_KEY_RESPONSE_LENGTH: Short = 169 // engine(1) ‖ ed25519Pub(32) ‖ bindingSig(72) ‖ proofSig(64)
+    const val SKEY_BINDING_MESSAGE_LENGTH: Short = 77  // tag(12) ‖ 0x01 ‖ accountId(16) ‖ cardId(16) ‖ ed25519Pub(32)
+    const val SKEY_PROOF_MESSAGE_LENGTH: Short = 110   // tag(12) ‖ 0x02 ‖ accountId(16) ‖ cardId(16) ‖ ecPub(65)
+    const val SKEY_BINDING_VERSION: Byte = 0x01
+    const val SKEY_PROOF_VERSION: Byte = 0x02
+    const val ED25519_ENGINE_SOFT: Byte = 0x01       // JavaCard 3.0.5: ECDH on Wei25519 + applet arithmetic
+    const val ED25519_ENGINE_NATIVE: Byte = 0x02     // JavaCard 3.1: Signature.SIG_CIPHER_EDDSA
+
     // ---- Status words (SW1-SW2) ----
     const val SW_OK: Short = 0x9000.toShort()
     const val SW_INS_NOT_SUPPORTED: Short = 0x6d00
@@ -148,6 +172,13 @@ object Constants {
     const val SW_ERROR_ZERO_AMOUNT: Short = 0x6239
     const val SW_ERROR_TRANSFER_COUNTER_JUMP: Short = 0x623A
     const val SW_ERROR_PROGRAM_ALREADY_BOUND: Short = 0x623B
+    const val SW_ERROR_STELLAR_KEY_MISSING: Short = 0x623C
+    const val SW_ERROR_SEP10_MALFORMED: Short = 0x6240
+    const val SW_ERROR_SEP10_SEQUENCE_NOT_ZERO: Short = 0x6241
+    const val SW_ERROR_SEP10_NOT_MANAGE_DATA: Short = 0x6242
+    const val SW_ERROR_SEP10_WRONG_ACCOUNT: Short = 0x6243
+    const val SW_ERROR_SEP10_NOT_AUTH_CHALLENGE: Short = 0x6244
+    const val SW_ERROR_SEP10_NO_TIME_BOUNDS: Short = 0x6245
     const val SW_ERROR_CARD_DATA_SIGNATURE_INVALID: Short = 0x6677
     const val SW_ERROR_CARD_DATA_NONCE_INVALID: Short = 0x6678
     const val SW_ERROR_WRONG_CARD_ID: Short = 0x6679

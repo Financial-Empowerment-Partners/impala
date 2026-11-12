@@ -66,6 +66,53 @@ class IssuanceCeremonyTest {
             assertEquals(Hex.encode(pub), bridge.cards[record.cardId]!!.second)
             assertEquals(1, record.issuerVersion)
             assertFalse(record.testIssuer)
+
+            // Step 9: the card's Stellar key, made provable only by PERSONALIZE, is registered too.
+            val stellar = sdk.getStellarKey()!!
+            assertEquals(stellar.address, bridge.stellarKeys[record.cardId])
+            assertEquals(stellar.address, record.stellarAddress)
+            assertTrue(record.lines().contains("stellar_address=${stellar.address}"))
+            assertEquals(listOf("POST /card", "PUT /card/stellar-key"), bridge.requests.filter { it.path!!.startsWith("/card") && it.path != "/card-issuer" }.map { "${it.method} ${it.path}" })
+        }
+    }
+
+    @Test
+    fun `a card without a Stellar key is issued exactly as before`() {
+        FakeBridge().use { bridge ->
+            val bibo = SimulatorBibo(
+                installParams = PersonalizationProtocol.installParams(enforce = true, keys = null, pins = null, program = null),
+                ed25519 = SimulatorBibo.ED25519_NONE
+            )
+            val record = ceremony(bibo, bridge).run()
+            assertTrue(ImpalaSDK(bibo).getPersonalization().personalized)
+            assertEquals(null, record.stellarAddress)
+            assertFalse(record.lines().any { it.startsWith("stellar_address=") })
+            assertTrue(bridge.stellarKeys.isEmpty())
+            assertFalse(bridge.requests.any { it.path == "/card/stellar-key" })
+        }
+    }
+
+    @Test
+    fun `a lost Stellar key registration does not fail the issuance and a re-run finishes it`() {
+        FakeBridge().use { bridge ->
+            val bibo = freshCard()
+            bridge.stellarKeyFailure = 503
+            val notices = mutableListOf<String>()
+            val first = ceremony(bibo, bridge, notices).run()
+            assertFalse(first.alreadyIssued)
+            assertTrue(ImpalaSDK(bibo).getPersonalization().personalized, "the card is fully issued")
+            assertTrue(bridge.stellarKeys.isEmpty())
+            assertTrue(notices.any { it.contains("PUT /card/stellar-key refused (HTTP 503") }, notices.joinToString())
+
+            // The re-run changes nothing on the card and registers the key.
+            bridge.stellarKeyFailure = null
+            val second = ceremony(bibo, bridge).run()
+            assertTrue(second.alreadyIssued)
+            assertEquals(first.stellarAddress, second.stellarAddress)
+            assertEquals(second.stellarAddress, bridge.stellarKeys[second.cardId])
+            // And once more: the bridge answers the repeat with success.
+            ceremony(bibo, bridge).run()
+            assertEquals(1, bridge.stellarKeys.size)
         }
     }
 
@@ -79,7 +126,12 @@ class IssuanceCeremonyTest {
             val second = ceremony(bibo, bridge, notices).run()
             assertTrue(second.alreadyIssued)
             assertEquals(first.certIdHex, second.certIdHex)
-            assertEquals(before, bridge.requests.size, "no bridge calls on a no-op re-run")
+            // The one call of a re-run: the idempotent Stellar key registration (step 9).
+            assertEquals(
+                listOf("PUT /card/stellar-key"),
+                bridge.requests.drop(before).map { "${it.method} ${it.path}" },
+                "a no-op re-run only repeats the Stellar key registration"
+            )
             assertTrue(notices.any { it.contains("already personalized") })
 
             // And through the CLI: exit 0, record on stdout.

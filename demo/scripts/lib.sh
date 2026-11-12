@@ -87,7 +87,18 @@ load_env() {
   OPENBAO_URL="http://127.0.0.1:${OPENBAO_PORT:-8200}"
   PAYALA_URL="http://127.0.0.1:${PAYALA_PORT:-4000}"
   SIM_PORT="${SIM_PORT:-9443}"
-  export ENGINE COMPOSE_BIN BRIDGE_URL UI_URL OPENBAO_URL PAYALA_URL SIM_PORT
+  # SEP-10: an .env written before these keys existed gets the defaults of .env.example (a set-but-empty
+  # DEMO_SEP10_THIRD_PARTY means "skip the third-party scenario").
+  DEMO_SEP10="${DEMO_SEP10:-true}"
+  DEMO_SEP10_THIRD_PARTY="${DEMO_SEP10_THIRD_PARTY-testanchor.stellar.org}"
+  SEP10_HOME_DOMAIN="10.0.2.2:${BRIDGE_PORT:-8080}"
+  # The simulated card's hardware (scripts/simulator.sh): a card model of impala-card's simulator. jc305 is a
+  # JavaCard 3.0.5 card, jc32 a JavaCard 3.2 card; the CAP an operator would load on it follows (the software
+  # Ed25519 engine on jc305, the platform's own EdDSA on jc32) unless DEMO_CARD_ED25519 names one.
+  DEMO_CARD_PLATFORM="${DEMO_CARD_PLATFORM:-jc305}"
+  DEMO_CARD_ED25519="${DEMO_CARD_ED25519:-}"
+  export ENGINE COMPOSE_BIN BRIDGE_URL UI_URL OPENBAO_URL PAYALA_URL SIM_PORT DEMO_SEP10 DEMO_SEP10_THIRD_PARTY SEP10_HOME_DOMAIN \
+    DEMO_CARD_PLATFORM DEMO_CARD_ED25519
   mkdir -p "$STATE_DIR" "$RECORDS_DIR" "$ARTIFACTS_DIR"
 }
 
@@ -156,6 +167,15 @@ b64_to_hex() { openssl base64 -d -A | bin_to_hex; }
 hex_to_b64() { hex_to_bin | openssl base64 -A; }
 uuid_hex()   { printf '%s' "$1" | tr -d '-' | tr 'A-F' 'a-f'; }
 utc_now()    { date -u +%Y-%m-%dT%H:%M:%SZ; }
+# applet_version -> "major.minor" of the applet this tree builds (impala-card BuildConfig.java). The simulator
+# probe is checked against it, so a version bump cannot leave a stale literal in the checks; unreadable = status 1.
+applet_version() {
+  local f="$REPO_DIR/impala-card/applet/src/jvmMain/java/com/impala/applet/BuildConfig.java" major minor
+  major="$(sed -n 's/.*MAJOR_VERSION = \([0-9][0-9]*\);.*/\1/p' "$f" 2>/dev/null | head -n1)"
+  minor="$(sed -n 's/.*MINOR_VERSION = \([0-9][0-9]*\);.*/\1/p' "$f" 2>/dev/null | head -n1)"
+  [ -n "$major" ] && [ -n "$minor" ] || return 1
+  printf '%s.%s' "$major" "$minor"
+}
 # utc_from_epoch <seconds> -> YYYY-MM-DDTHH:MM:SSZ (BSD date -r / GNU date -d @)
 utc_from_epoch() { date -u -r "$1" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d "@$1" +%Y-%m-%dT%H:%M:%SZ; }
 now_s() { date +%s; }
@@ -230,6 +250,45 @@ transit_canary_ok() {
 wait_bridge() {
   wait_http "$BRIDGE_URL/readyz" "${1:-30}" 2
   [ "$(curl -fsS "$BRIDGE_URL/network" | jq -r .network_passphrase)" = "$TESTNET_PASSPHRASE" ] || die "bridge is not on testnet"
+}
+
+# ---------------------------------------------------------------- SEP-10 helpers
+# The bridge's SEP-10 home domain is 10.0.2.2:$BRIDGE_PORT, the emulator's name for this host (compose.yaml).
+# On the host the same listener is 127.0.0.1:$BRIDGE_PORT. sep10_curl connects there while every URL, Host
+# header and signed name stays the home domain, the way a hosts-file entry would.
+sep10_enabled() { case "${DEMO_SEP10:-true}" in 1|true|yes|TRUE|True) return 0 ;; *) return 1 ;; esac; }
+sep10_curl() { curl --connect-to "$SEP10_HOME_DOMAIN:127.0.0.1:${BRIDGE_PORT:-8080}" "$@"; }
+# sep10_status <admin-or-reader token> -> the status object of GET /admin/sep10/signing-keys
+sep10_status() { bridge_api GET /admin/sep10/signing-keys "$1"; }
+# sep10_wait_active <token> [seconds] -> the status object once a key is ACTIVE and open on this bridge.
+# A key that seed.sh activated takes over at its activate_at (120 s after activation) plus one key-ring poll.
+sep10_wait_active() {
+  local token="$1" limit="${2:-240}" t0 st waited=0 at
+  t0="$(now_s)"
+  while :; do
+    st="$(sep10_status "$token")" || return 1
+    if printf '%s' "$st" | jq -e '.enabled==true and .key_ring_live==true and ([.keys[] | select(.state=="active" and .opened==true)] | length)==1' >/dev/null 2>&1; then
+      printf '%s' "$st"; return 0
+    fi
+    printf '%s' "$st" | jq -e '.enabled==true' >/dev/null 2>&1 || { warn "SEP-10 is not enabled on this bridge (DEMO_SEP10 in .env, then scripts/up.sh)"; return 1; }
+    printf '%s' "$st" | jq -e '[.keys[] | select(.state=="pending" and .activate_at != null)] | length >= 1' >/dev/null 2>&1 \
+      || { warn "no SEP-10 signing key is active or scheduled (scripts/seed.sh generates and activates one)"; return 1; }
+    if [ "$waited" = 0 ]; then
+      at="$(printf '%s' "$st" | jq -r '[.keys[] | select(.state=="pending")][0].activate_at // "?"')"
+      log "  waiting for the SEP-10 signing key to take over (activate_at $at, then one 30 s key-ring poll)"
+      waited=1
+    fi
+    [ $(( $(now_s) - t0 )) -lt "$limit" ] || { warn "the SEP-10 signing key did not become active within ${limit}s"; return 1; }
+    sleep 5
+  done
+}
+# toml_value <KEY> : reads a top-level KEY = "value" (or 'value') from a stellar.toml on stdin. Top-level
+# only: reading stops at the first table header, so a key of the same name inside [[CURRENCIES]] or
+# [DOCUMENTATION] is never taken for it. A trailing comment is allowed.
+toml_value() {
+  sed -n -e '/^[[:space:]]*\[/q' \
+    -e "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*\"\([^\"]*\)\"[[:space:]]*\(#.*\)\{0,1\}\$/\1/p" \
+    -e "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*'\([^']*\)'[[:space:]]*\(#.*\)\{0,1\}\$/\1/p" | head -n1
 }
 
 # ---------------------------------------------------------------- Stellar helpers

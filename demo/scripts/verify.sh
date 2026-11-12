@@ -28,6 +28,9 @@ if [ -n "${AGENT_G:-}" ]; then
   done
   check_eval "custody caps configured" "bridge_api GET /admin/custody/policy '$T' | jq -e '.configured==true' >/dev/null"
   check_eval "card program issuer key configured" "curl -fsS $BRIDGE_URL/card-issuer | jq -e '.configured==true' >/dev/null"
+  if sep10_enabled; then
+    check_eval "SEP-10 enabled for $SEP10_HOME_DOMAIN with one signing key active or scheduled" "sep10_status '$T' | jq -e '.enabled==true and .home_domain==\"$SEP10_HOME_DOMAIN\" and ([.keys[] | select(.state==\"active\" or (.state==\"pending\" and .activate_at != null))] | length)==1' >/dev/null"
+  fi
 else
   warn "no state/impala.env (scripts/seed.sh): skipping account checks"
 fi
@@ -61,16 +64,30 @@ if rec scenario-05-card-issue; then
   CID="$(get scenario-05-card-issue .card_id)"
   check_eval "card program id on the bridge equals the issued card's" "[ \"\$(curl -fsS $BRIDGE_URL/card-issuer | jq -r .program_id_hex)\" = \"$(get scenario-05-card-issue .program_id_hex)\" ]"
   check_eval "card $CID is registered for the holder" "[ \"\$(psql_impala -tAc \"select count(*) from card where card_id='$CID' and account_id='${DEMO_HOLDER_ID:-}'\" | tr -d '[:space:]')\" = 1 ]"
-  if "$DEMO_DIR/scripts/simulator.sh" status >/dev/null 2>&1; then check_eval "simulator still serving the issued card (GET_VERSION 0.2)" "'$DEMO_DIR/scripts/simulator.sh' probe | grep -q 'applet 0.2'"; else warn "simulator not running: the issued card lives in that process (scenario 05 re-issues on the next run)"; fi
+  CG="$(get scenario-05-card-issue .stellar_address)"
+  [ -z "$CG" ] || check_eval "the card's Stellar key $CG is the one registered on its row (SEP-10 identity)" "[ \"\$(psql_impala -tAc \"select count(*) from card where card_id='$CID' and is_delete=false and stellar_address='$CG'\" | tr -d '[:space:]')\" = 1 ]"
+  if "$DEMO_DIR/scripts/simulator.sh" status >/dev/null 2>&1; then AV="$(applet_version || true)"; check_eval "simulator still serving the issued card (GET_VERSION ${AV:-unreadable})" "[ -n '$AV' ] && '$DEMO_DIR/scripts/simulator.sh' probe | grep -qF 'applet $AV '"; else warn "simulator not running: the issued card lives in that process (scenario 05 re-issues on the next run)"; fi
 fi
-for s in scenario-06-card-login-jvm scenario-07-android-emulator scenario-08-payala-relay scenario-09-soroban; do
+for s in scenario-06-card-login-jvm scenario-07-android-emulator scenario-08-payala-relay scenario-09-soroban scenario-12-sep10-bridge scenario-13-sep10-third-party; do
   if rec "$s"; then
     hr "$s"
+    if [ "$(get "$s" .status)" = skipped ]; then log "  $s was skipped: $(get "$s" .reason)"; continue; fi
     check "$s recorded as passed ($(get "$s" .passed) assertions)" [ "$(get "$s" .status)" = passed ]
     rep="$(get "$s" .report)"
     [ -n "$rep" ] && check "$s report artifact present: $rep" [ -e "$rep" ]
   fi
 done
+if rec scenario-12-sep10-bridge && [ "$(get scenario-12-sep10-bridge .status)" = passed ]; then
+  K="$(get scenario-12-sep10-bridge .signing_key.public_address)"
+  check_eval "SEP-10: stellar.toml still names the signing key scenario 12 saw ($K), and the admin API still reports it active" \
+    "[ \"\$(sep10_curl -fsS 'http://$SEP10_HOME_DOMAIN/.well-known/stellar.toml' | toml_value SIGNING_KEY)\" = '$K' ] && sep10_status '$T' | jq -e '[.keys[] | select(.state==\"active\" and .public_address==\"$K\")] | length==1' >/dev/null"
+  n="$(get scenario-12-sep10-bridge '[.sign_ins[] | select(.mechanism=="sep10")] | length')"
+  check "SEP-10: scenario 12 recorded $n sign-ins through the bridge's SEP-10 endpoint (both Ed25519 engines)" [ "${n:-0}" -ge 2 ]
+fi
+if rec scenario-13-sep10-third-party && [ "$(get scenario-13-sep10-third-party .status)" = passed ]; then
+  check "SEP-10: scenario 13 recorded sign-ins at third-party servers: $(get scenario-13-sep10-third-party '[.servers[] | select(.reachable==true) | .domain] | join(", ")')" \
+    [ "$(get scenario-13-sep10-third-party '[.servers[] | select(.reachable==true) | .sign_ins | length] | add // 0')" -ge 2 ]
+fi
 
 if rec scenario-08-payala-relay; then
   if payala_get / >/dev/null 2>&1; then

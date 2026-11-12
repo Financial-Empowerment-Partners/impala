@@ -67,6 +67,13 @@ fi
 hr "optional lanes"
 ok "payala stub: in-repo (payala-stub/server.mjs on docker.io/library/node:22-alpine; no Payala API image or source tree needed)"
 if [ -n "${SCARDUTIL_DIR:-}" ] && [ -d "$SCARDUTIL_DIR/src/scardutil" ]; then have_scardutil=1; ok "scardutil checkout: $SCARDUTIL_DIR"; else warn "scardutil not configured (SCARDUTIL_DIR): the fleet check in scenario 05 is skipped"; fi
+if sep10_enabled; then ok "SEP-10 on the bridge: enabled (DEMO_SEP10; home domain 10.0.2.2:${BRIDGE_PORT:-8080}, scenarios 07 and 12)"; else warn "SEP-10 on the bridge: off (DEMO_SEP10=${DEMO_SEP10:-}): scenario 12 is skipped and card logins use the legacy challenge"; fi
+tp="$(printf '%s' "${DEMO_SEP10_THIRD_PARTY-testanchor.stellar.org}" | tr ',' ' ')"
+if [ -z "$(printf '%s' "$tp" | tr -d ' ')" ]; then warn "no third-party SEP-10 server configured (DEMO_SEP10_THIRD_PARTY is empty): scenario 13 is skipped"; fi
+for d in $tp; do
+  if curl -fsS -m 10 -o /dev/null "https://$d/.well-known/stellar.toml" 2>/dev/null; then ok "third-party SEP-10 server reachable: $d (scenario 13)"
+  else warn "third-party SEP-10 server not reachable: $d (scenario 13 skips it)"; fi
+done
 
 mkdir -p "$STATE_DIR"
 jq -n --arg engine "$have_engine" --arg jdk "$have_jdk17" --arg sdk "$have_sdk" --arg image "$have_image" --arg adb "$have_adb" \

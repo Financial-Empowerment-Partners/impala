@@ -15,6 +15,7 @@ import com.impala.sdk.models.ImpalaUser
 import com.impala.sdk.models.ImpalaVersion
 import com.impala.sdk.models.PersonalizationProtocol
 import com.impala.sdk.models.ReceiveState
+import com.impala.sdk.models.StellarCardKey
 import com.impala.sdk.models.TransferEnvelope
 import com.impala.sdk.models.TransferProtocol
 import com.impala.sdk.models.toUuid
@@ -37,6 +38,11 @@ class ImpalaSDK(
 ) {
     private val apduChannel: APDUBIBO = APDUBIBO(apduChannel)
     private var scp03Channel: SCP03Channel? = null
+
+    private companion object {
+        /** The data field of a short (case 3) command APDU. */
+        const val MAX_SHORT_APDU_DATA = 255
+    }
 
     /**
      * Sends prepared APDU.
@@ -510,6 +516,72 @@ class ImpalaSDK(
         tx(CommandAPDU(0x00, Constants.INS_VERIFY_TRANSFER_V2.toInt(), 0x00, 0x00, signable))
         val tail = TransferProtocol.padSlot72(signature) + pubKey + TransferProtocol.padSlot72(certificate)
         tx(CommandAPDU(0x00, Constants.INS_VERIFY_TRANSFER_V2.toInt(), 0x01, 0x00, tail))
+    }
+
+    // --- Stellar key / SEP-10 sign-in (applet 0.3) ---
+
+    /**
+     * Reads GET_STELLAR_KEY (INS 0x37, 169 bytes): the card's Stellar (Ed25519)
+     * public key, the engine behind it and the two cross-signatures that bind
+     * it to the card's P-256 key, account and card id.
+     *
+     * @return the key, or null when the card has none: a card built or
+     *   installed without an Ed25519 engine answers 0x623C, and an applet older
+     *   than 0.3 does not know the command (0x6D00)
+     * @throws ImpalaException on an unexpected length or any other card error
+     */
+    @Throws(ImpalaException::class)
+    fun getStellarKey(): StellarCardKey? {
+        val resp = try {
+            tx(CommandAPDU(Constants.INS_GET_STELLAR_KEY))
+        } catch (e: ImpalaException) {
+            if (e.statusWord == 0x623C || e.statusWord == 0x6D00) return null
+            throw e
+        }
+        if (resp.data.size != Constants.STELLAR_KEY_RESPONSE_LENGTH.toInt()) {
+            throw ImpalaException("Expected ${Constants.STELLAR_KEY_RESPONSE_LENGTH} bytes for GET_STELLAR_KEY, got ${resp.data.size}")
+        }
+        return StellarCardKey.parse(resp.data)
+    }
+
+    /**
+     * Signs a SEP-10 challenge transaction with the card's Stellar key
+     * (SIGN_SEP10, INS 0x38). The transaction is sent in parts of at most 255
+     * bytes (BEGIN with the network id, CONTINUE, FINISH), and FINISH always
+     * carries at least one of them: a command without a data field that still
+     * expects response data is the one APDU shape on which readers and card
+     * runtimes disagree. The card parses it
+     * itself, refuses anything that is not a sequence-number-0, manage-data-only
+     * challenge addressed to its own key (0x6240..0x6245), computes
+     * `SHA-256(networkId ‖ 00000002 ‖ transaction)` and returns the Ed25519
+     * signature of that hash: a Stellar signature for that transaction on that
+     * network. The host never supplies the value that is signed.
+     *
+     * @param networkId SHA-256 of the network passphrase (32 bytes)
+     * @param transaction the `Transaction` XDR of the challenge (the `tx` of a
+     *   v1 envelope, without envelope type and signatures), 2 to 640 bytes
+     * @return the 64-byte Ed25519 signature
+     * @throws ImpalaException on any card-side refusal
+     */
+    @Throws(ImpalaException::class)
+    fun signSep10(networkId: ByteArray, transaction: ByteArray): ByteArray {
+        require(networkId.size == Constants.NETWORK_ID_LENGTH.toInt()) { "networkId must be ${Constants.NETWORK_ID_LENGTH} bytes" }
+        require(transaction.size >= 2 && transaction.size <= Constants.SEP10_MAX_TX_LENGTH.toInt()) {
+            "the challenge transaction must be 2..${Constants.SEP10_MAX_TX_LENGTH} bytes, got ${transaction.size}"
+        }
+        val ins = Constants.INS_SIGN_SEP10.toInt()
+        // BEGIN takes what fits beside the network id, but never the last byte: that one is FINISH's.
+        var sent = minOf(transaction.size - 1, MAX_SHORT_APDU_DATA - networkId.size)
+        tx(CommandAPDU(0x00, ins, Constants.P1_SEP10_BEGIN.toInt(), 0x00, networkId + transaction.copyOfRange(0, sent)))
+        while (transaction.size - sent > MAX_SHORT_APDU_DATA) {
+            tx(CommandAPDU(0x00, ins, Constants.P1_SEP10_CONTINUE.toInt(), 0x00, transaction.copyOfRange(sent, sent + MAX_SHORT_APDU_DATA)))
+            sent += MAX_SHORT_APDU_DATA
+        }
+        val resp = tx(CommandAPDU(0x00, ins, Constants.P1_SEP10_FINISH.toInt(), 0x00, transaction.copyOfRange(sent, transaction.size)))
+        if (resp.data.size != Constants.ED25519_SIG_LENGTH.toInt()) {
+            throw ImpalaException("Expected ${Constants.ED25519_SIG_LENGTH} bytes for SIGN_SEP10, got ${resp.data.size}")
+        }
+        return resp.data
     }
 
     /**

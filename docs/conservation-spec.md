@@ -485,4 +485,9 @@ destination, memo, Stellar hash, signable, signature, secret or PII.
 `reconciliation.snapshot_recorded`, `payala.sync_batch_applied`,
 `custody.issuer_key_generated`, `custody.card_certified` (card program
 issuer, migration 039: public-key fingerprints and card ids only; no money
-moves on either).
+moves on either), `custody.sep10_key_generated`,
+`custody.sep10_key_activated`, `custody.sep10_key_revoked` (SEP-10 server
+signing key, migration 040: fingerprints and versions only; no money moves),
+`card.stellar_key_registered` (a card gained its SEP-10 login key, at
+registration or through `PUT /card/stellar-key`, migration 040: the card id
+only; no money moves).

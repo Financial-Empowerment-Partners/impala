@@ -8,6 +8,7 @@ import java.util.Properties
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
 /** Plays the vpcd listener (what scardutil does) against [VpcdSimulator]. */
@@ -37,7 +38,7 @@ class VpcdSimulatorTest {
                 frame(output, byteArrayOf(0x00, 0x64, 0x00, 0x00, 0x00))
                 val version = read(input)
                 assertEquals(12, version.size)
-                assertEquals(2, version[3].toInt())                 // 0.2
+                assertEquals(3, version[3].toInt())                 // 0.3
                 frame(output, byteArrayOf(0x00, 0x2C, 0x00, 0x00, 0x04, 1, 2, 3, 4)) // INITIALIZE
                 assertContentEquals(byteArrayOf(0x90.toByte(), 0x00), read(input))
                 frame(output, byteArrayOf(2))                       // reset: selection cleared, state kept
@@ -58,6 +59,22 @@ class VpcdSimulatorTest {
         val (card, _, _) = VpcdSimulator.fromConfig(props)
         val sdk = com.impala.sdk.ImpalaSDK(card)
         assertTrue(sdk.getPersonalization().provisioningEnforced)
+    }
+
+    @Test
+    fun `the Ed25519 engine from the cfg decides whether the card has a Stellar key`() {
+        fun stellarKeyAfterInitialize(engine: String?): Int {
+            val props = Properties().apply { engine?.let { setProperty(VpcdSimulator.KEY_ED25519, it) } }
+            val (card, _, _) = VpcdSimulator.fromConfig(props)
+            assertEquals(0x623C, sw(card.transceive(byteArrayOf(0x00, 0x37, 0x00, 0x00, 0x00)))) // blank: no key yet
+            assertEquals(0x9000, sw(card.transceive(byteArrayOf(0x00, 0x2C, 0x00, 0x00, 0x04, 1, 2, 3, 4))))
+            return sw(card.transceive(byteArrayOf(0x00, 0x37, 0x00, 0x00, 0x00)))
+        }
+        assertEquals(0x9000, stellarKeyAfterInitialize(null))       // the default CAP: soft
+        assertEquals(0x9000, stellarKeyAfterInitialize("soft"))
+        assertEquals(0x9000, stellarKeyAfterInitialize("native"))
+        assertEquals(0x623C, stellarKeyAfterInitialize("none"))     // a legacy card, by build
+        assertFailsWith<IllegalArgumentException> { VpcdSimulator.fromConfig(Properties().apply { setProperty(VpcdSimulator.KEY_ED25519, "fast") }) }
     }
 
     private fun sw(r: ByteArray) = ((r[r.size - 2].toInt() and 0xFF) shl 8) or (r[r.size - 1].toInt() and 0xFF)

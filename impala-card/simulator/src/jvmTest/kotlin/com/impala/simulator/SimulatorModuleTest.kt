@@ -10,12 +10,12 @@ import kotlin.test.assertTrue
 
 class SimulatorModuleTest {
     @Test
-    fun `simulator module installs the applet under the instance AID and answers GET_VERSION 0_2`() {
+    fun `simulator module installs the applet under the instance AID and answers GET_VERSION 0_3`() {
         val sdk = ImpalaSDK(SimulatorBibo())
         assertEquals("01020304050607080102", SimulatorBibo.APPLET_INSTANCE_AID)
         val v = sdk.requireCertifiedProtocol()
         assertEquals(0, v.major.toInt())
-        assertEquals(2, v.minor.toInt())
+        assertEquals(3, v.minor.toInt())
     }
 
     @Test

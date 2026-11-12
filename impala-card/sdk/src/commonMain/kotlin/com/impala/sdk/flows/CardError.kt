@@ -34,6 +34,12 @@ sealed class CardError(val userMessageKey: String, val statusWord: Int? = null) 
      * unsupported applet version).
      */
     class AppletNotFound(sw: Int) : CardError("card_error_applet_not_found", sw)
+    /**
+     * The card refused to sign a SEP-10 challenge: its own parser did not find
+     * a challenge addressed to this card (`6240`..`6245`). Never a reason to
+     * retry with the same transaction.
+     */
+    class ChallengeRefused(sw: Int) : CardError("card_error_challenge_refused", sw)
     /** A read-only session refused [command] (an instruction name) before anything reached the card. */
     class ReadOnlyRefused(val command: String) : CardError("card_error_read_only_refused") {
         override fun toString(): String = "ReadOnlyRefused($command)"
@@ -53,7 +59,8 @@ sealed class CardError(val userMessageKey: String, val statusWord: Int? = null) 
             "card_error_wrong_pin", "card_error_pin_blocked", "card_error_insufficient_funds",
             "card_error_counter_invalid", "card_error_counter_jump", "card_error_send_sequence_invalid",
             "card_error_wrong_protocol_version", "card_error_tag_lost", "card_error_invalid_request",
-            "card_error_other", "card_error_applet_not_found", "card_error_read_only_refused"
+            "card_error_other", "card_error_applet_not_found", "card_error_read_only_refused",
+            "card_error_challenge_refused"
         )
 
         /** Maps a card status word to its case. */
@@ -68,6 +75,7 @@ sealed class CardError(val userMessageKey: String, val statusWord: Int? = null) 
             0x623A -> CounterJump
             0x6238 -> SendSequenceInvalid
             0x6A82, 0x6999, 0x6D00 -> AppletNotFound(sw)
+            in 0x6240..0x6245 -> ChallengeRefused(sw)
             else -> Other(sw)
         }
 

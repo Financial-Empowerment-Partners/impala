@@ -68,7 +68,9 @@ export default [
                 TxFilter: 'writable',
                 ReserveMath: 'writable',
                 KeysView: 'writable',
-                CustodyView: 'writable'
+                CustodyView: 'writable',
+                Sep10View: 'writable',
+                CardsView: 'writable'
             }
         },
         rules: {

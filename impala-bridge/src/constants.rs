@@ -1311,6 +1311,96 @@ pub const VALID_CARD_ISSUER_STATES: &[&str] = &["active", "superseded", "revoked
 pub const CARD_ISSUER_FP_KIND: &str = "card_issuer";
 pub const CARD_ISSUER_FP_PART: &str = "public_key";
 
+// ── SEP-10 web authentication with card-held keys (040) ────────────────
+// docs/sep10-card-keys.md (binding) and docs/sep10-authentication.md §4, §7-9.
+
+/// Domain tag of the two card cross-signature messages (contract §3.2).
+pub const STELLAR_SKEY_DOMAIN_PREFIX: &[u8; 12] = b"IMPALA-SKEY:";
+/// `SKEY_A` kind byte: the card EC key vouches for the Stellar key.
+pub const STELLAR_SKEY_KIND_BINDING: u8 = 0x01;
+/// `SKEY_B` kind byte: the Stellar key proves possession, bound to the card.
+pub const STELLAR_SKEY_KIND_PROOF: u8 = 0x02;
+/// `"IMPALA-SKEY:" ‖ 0x01 ‖ accountId(16) ‖ cardId(16) ‖ ed25519Pub(32)`.
+pub const STELLAR_SKEY_A_LEN: usize = 77;
+/// `"IMPALA-SKEY:" ‖ 0x02 ‖ accountId(16) ‖ cardId(16) ‖ ecPub(65)`.
+pub const STELLAR_SKEY_B_LEN: usize = 110;
+/// Hex bounds of `stellar_binding_sig` (trimmed DER ECDSA, 8..=72 bytes).
+pub const STELLAR_BINDING_SIG_HEX_MIN: usize = 16;
+pub const STELLAR_BINDING_SIG_HEX_MAX: usize = 144;
+/// Hex length of `stellar_proof_sig` (a 64-byte Ed25519 signature).
+pub const STELLAR_PROOF_SIG_HEX_LEN: usize = 128;
+
+/// Bound-header magic sealed inside a SEP-10 signing-key ciphertext, ahead
+/// of the version line, the 32-byte Ed25519 seed and the 32-byte MAC key.
+pub const SEP10_KEY_HEADER_MAGIC: &str = "impala-sep10-v1";
+/// `sep10_signing_key.state` vocabulary (mirrors `chk_ssk_state`).
+#[allow(dead_code)] // pinned against migration 040 by tests
+pub const VALID_SEP10_KEY_STATES: &[&str] = &["pending", "active", "superseded", "revoked"];
+/// Fingerprint kind/part for the signing public key (`keys::fingerprint`).
+pub const SEP10_FP_KIND: &str = "sep10_signing";
+pub const SEP10_FP_PART: &str = "public_key";
+
+/// The only path a configured `SEP10_WEB_AUTH_ENDPOINT` may name.
+pub const SEP10_AUTH_PATH: &str = "/auth/sep10";
+/// Hosts allowed on plain `http` (CI, local stack, Android emulator).
+pub const SEP10_LOOPBACK_HOSTS: &[&str] = &["localhost", "127.0.0.1", "10.0.2.2"];
+/// Longest home domain (`host[:port]`): `"<home> auth"` must fit in 64 bytes.
+pub const SEP10_HOME_DOMAIN_MAX_LEN: usize = 59;
+/// Body limit and deadline of the public SEP-10 sub-router.
+pub const SEP10_BODY_LIMIT_BYTES: usize = 16 * 1024;
+pub const SEP10_TIMEOUT_SECS: u64 = 10;
+/// Longest accepted `transaction` field (base64 characters).
+pub const SEP10_TRANSACTION_MAX_CHARS: usize = 8192;
+/// `stellar.toml` `Cache-Control: max-age`.
+pub const SEP10_TOML_MAX_AGE_SECS: u64 = 60;
+
+/// Challenge lifetime: `maxTime - minTime` (`SEP10_CHALLENGE_TTL_SECS`).
+pub const DEFAULT_SEP10_CHALLENGE_TTL_SECS: u64 = 300;
+pub const SEP10_CHALLENGE_TTL_MIN_SECS: u64 = 60;
+pub const SEP10_CHALLENGE_TTL_MAX_SECS: u64 = 900;
+/// Server-side grace before `minTime` (replica clock skew).
+pub const SEP10_MIN_TIME_GRACE_SECS: i64 = 30;
+/// The single-use claim outlives `maxTime` by this much (replica skew).
+pub const SEP10_CLAIM_MARGIN_SECS: i64 = 120;
+/// A superseded key still verifies its own challenges for TTL + this.
+pub const SEP10_SUPERSEDED_GRACE_MARGIN_SECS: i64 = 120;
+/// How long after its grace a superseded signing key keeps its sealed
+/// material before the ring's housekeeping scrubs it. The ring stops
+/// accepting (and decrypting) the key at the end of the grace; the delay
+/// only covers a replica that polled just before.
+pub const SEP10_SUPERSEDED_SCRUB_DELAY_SECS: i64 = 3600;
+/// Base fee per operation; a login challenge has two operations.
+pub const SEP10_FEE_PER_OP: u32 = 100;
+/// Most decorated signatures a POSTed envelope may carry.
+pub const SEP10_MAX_SIGNATURES: usize = 20;
+/// Login challenge nonce: 16 random bytes ‖ 32-byte HMAC = 48 bytes, 64 base64 chars.
+pub const SEP10_NONCE_RANDOM_BYTES: usize = 16;
+pub const SEP10_NONCE_DECODED_LEN: usize = 48;
+pub const SEP10_NONCE_B64_LEN: usize = 64;
+/// HMAC domain of the nonce MAC and the purpose of a login challenge.
+pub const SEP10_NONCE_DOMAIN: &[u8] = b"impala-sep10-chal-v1";
+pub const SEP10_PURPOSE_LOGIN: &[u8] = b"login";
+/// Name of the second (server-sourced) challenge operation.
+pub const SEP10_WEB_AUTH_DOMAIN_KEY: &str = "web_auth_domain";
+
+/// `activate` schedules the swap this far ahead (`SEP10_KEY_ACTIVATION_DELAY_SECS`).
+/// The floor covers two ring polls plus the toml max-age.
+pub const DEFAULT_SEP10_KEY_ACTIVATION_DELAY_SECS: u64 = 120;
+pub const SEP10_KEY_ACTIVATION_DELAY_MIN_SECS: u64 = 120;
+pub const SEP10_KEY_ACTIVATION_DELAY_MAX_SECS: u64 = 86_400;
+/// Background ring: DB poll cadence, staleness cut-off, decrypt backoff.
+pub const SEP10_KEY_POLL_SECS: u64 = 30;
+pub const SEP10_RING_STALE_SECS: i64 = 300;
+pub const SEP10_DECRYPT_BACKOFF_MIN_SECS: i64 = 5;
+pub const SEP10_DECRYPT_BACKOFF_MAX_SECS: i64 = 60;
+
+/// Rate-limit scopes. `sep10` is charged per G only after a verified master
+/// signature; the global challenge ceiling is one shared key.
+pub const SEP10_RATE_LIMIT_SCOPE: &str = "sep10";
+pub const SEP10_CHALLENGE_GLOBAL_SCOPE: &str = "sep10_challenge_global";
+pub const DEFAULT_SEP10_CHALLENGE_GLOBAL_MAX: u64 = 600;
+pub const SEP10_CHALLENGE_GLOBAL_WINDOW_SECS: usize = 60;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1398,6 +1488,7 @@ mod tests {
             CREDENTIAL_HEADER_MAGIC,
             SEED_HEADER_MAGIC,
             ISSUER_KEY_HEADER_MAGIC,
+            SEP10_KEY_HEADER_MAGIC,
         ];
         for (i, a) in magics.iter().enumerate() {
             assert!(a.ends_with("-v1"), "{a} must be -v1 suffixed");
@@ -1405,6 +1496,50 @@ mod tests {
                 assert!(!a.starts_with(b) && !b.starts_with(a), "{a} vs {b}");
             }
         }
+    }
+
+    #[test]
+    fn sep10_key_states_match_migration_040() {
+        let ddl = include_str!("../migrations/040_sep10_card_keys.sql");
+        let quoted: Vec<String> = VALID_SEP10_KEY_STATES
+            .iter()
+            .map(|s| format!("'{s}'"))
+            .collect();
+        assert!(ddl.contains(&format!(
+            "CONSTRAINT chk_ssk_state CHECK (state IN ({}))",
+            quoted.join(", ")
+        )));
+    }
+
+    /// The SEP-10 sizes are arithmetic, not taste: pin the arithmetic.
+    #[test]
+    fn sep10_sizes_are_consistent() {
+        assert_eq!(STELLAR_SKEY_A_LEN, 12 + 1 + 16 + 16 + 32);
+        assert_eq!(STELLAR_SKEY_B_LEN, 12 + 1 + 16 + 16 + 65);
+        assert_eq!(
+            SEP10_NONCE_DECODED_LEN,
+            SEP10_NONCE_RANDOM_BYTES + 32,
+            "r16 ‖ HMAC-SHA256"
+        );
+        assert_eq!(SEP10_NONCE_B64_LEN, SEP10_NONCE_DECODED_LEN / 3 * 4);
+        // "<home> auth" fits a 64-byte manage-data name.
+        assert_eq!(SEP10_HOME_DOMAIN_MAX_LEN + " auth".len(), 64);
+        assert_eq!(STELLAR_BINDING_SIG_HEX_MAX, CARD_SIGNATURE_MAX_BYTES * 2);
+        // The activation fence covers two ring polls plus the toml max-age.
+        const {
+            assert!(
+                SEP10_KEY_ACTIVATION_DELAY_MIN_SECS
+                    >= 2 * SEP10_KEY_POLL_SECS + SEP10_TOML_MAX_AGE_SECS
+            )
+        };
+        const { assert!(DEFAULT_SEP10_KEY_ACTIVATION_DELAY_SECS >= SEP10_KEY_ACTIVATION_DELAY_MIN_SECS) };
+        const {
+            assert!(
+                SEP10_CHALLENGE_TTL_MIN_SECS <= DEFAULT_SEP10_CHALLENGE_TTL_SECS
+                    && DEFAULT_SEP10_CHALLENGE_TTL_SECS <= SEP10_CHALLENGE_TTL_MAX_SECS
+            )
+        };
+        const { assert!(SEP10_TIMEOUT_SECS < REQUEST_TIMEOUT_SECS) };
     }
 
     #[test]

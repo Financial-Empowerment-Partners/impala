@@ -39,6 +39,10 @@ counts="$(printf '%s' "$events" | jq -c '[.events[].event_type]|group_by(.)|map(
 log "  $counts"
 check_jq "the three custodial accounts seed.sh created through the API appear as account.created + bridge.seed_provisioned events (the admin row is inserted by SQL and has none)" '([.events[]|select(.event_type=="account.created")]|length)>=3 and ([.events[]|select(.event_type=="bridge.seed_provisioned")]|length)>=3' "$events"
 check_jq "custody events: policy update, issuer key generated, card certified, payments settled" '([.events[]|select(.event_type=="custody.policy_updated")]|length)>=1 and ([.events[]|select(.event_type=="custody.issuer_key_generated")]|length)>=1 and ([.events[]|select(.event_type=="custodial.payment_settled")]|length)>=1' "$events"
+if sep10_enabled; then
+  check_jq "SEP-10 signing key custody events: generated and activated, carrying versions and fingerprints only (never the key's address)" \
+    '([.events[]|select(.event_type=="custody.sep10_key_generated")]|length)>=1 and ([.events[]|select(.event_type=="custody.sep10_key_activated")]|length)>=1 and ([.events[]|select(.event_type|startswith("custody.sep10_"))|.payload|(has("version") and has("fingerprint")) and ((tostring|test("G[A-Z2-7]{55}"))|not)]|all)' "$events"
+fi
 check_eval "no event payload carries a Stellar seed, a password or a JWT" "! printf '%s' '$(printf '%s' "$events" | tr -d "'")' | grep -Eq 'S[A-Z2-7]{55}|\"password\"|eyJ[A-Za-z0-9_-]{20,}\\.'"
 check_jq "payment events carry the intent id, never the destination or hash (payload minimalism)" '[.events[]|select(.event_type=="custodial.payment_settled")|.payload|has("intent_id") and (has("destination")|not) and (has("stellar_hash")|not)]|all' "$events"
 check_eval "the holder cannot read the admin event feed" "bridge_api GET '/admin/events?since=0&limit=1' '$HOLDER_JWT' >/dev/null 2>&1; [ \"\$(http_code)\" = 403 ]"

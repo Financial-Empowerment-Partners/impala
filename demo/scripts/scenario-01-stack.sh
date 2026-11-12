@@ -31,6 +31,16 @@ check_eval "bridge SSO config for openbao is enabled (client id minted at bootst
 check "OpenBao still holds the Transit key that sealed the seeds (canary decrypts)" transit_canary_ok
 issuer="$(curl -fsS "$BRIDGE_URL/card-issuer")"
 check_jq "card program issuer key configured (program id + redemption identity published)" '.configured==true and (.program_id_hex|length)==32' "$issuer"
+if sep10_enabled; then
+  require_env PAYALA_ADMIN_ID IMPALA_ADMIN_PASSWORD
+  s10="$(sep10_status "$(admin_jwt)")"
+  check_jq "SEP-10 is enabled with the home domain $SEP10_HOME_DOMAIN (the emulator's name for this host) and this instance's key ring is live" ".enabled==true and .home_domain==\"$SEP10_HOME_DOMAIN\" and .web_auth_endpoint==\"http://$SEP10_HOME_DOMAIN/auth/sep10\" and .key_ring_live==true" "$s10"
+  check_jq "SEP-10 signing key: one key is active, or activated by seed.sh and waiting out its delay (generate-only, sealed by OpenBao)" '[.keys[] | select(.state=="active" or (.state=="pending" and .activate_at != null))] | length == 1' "$s10"
+  check_eval "SEP-10 public routes are mounted (stellar.toml answers 200, or 503 until the key takes over; never 404)" "c=\$(sep10_curl -s -o /dev/null -w '%{http_code}' 'http://$SEP10_HOME_DOMAIN/.well-known/stellar.toml'); [ \"\$c\" = 200 ] || [ \"\$c\" = 503 ]"
+else
+  check_eval "SEP-10 is off (DEMO_SEP10=$DEMO_SEP10): its public routes are not mounted (stellar.toml answers 404)" "[ \"\$(curl -s -o /dev/null -w '%{http_code}' '$BRIDGE_URL/.well-known/stellar.toml')\" = 404 ]"
+fi
+check_eval "admin UI serves the SEP-10 signing-key panel (keys.html loads js/sep10-view.js and js/sep10.js)" "curl -fsS '$UI_URL/keys.html' | grep -q 'js/sep10-view.js' && curl -fsS '$UI_URL/js/sep10.js' | grep -q 'Sep10View'"
 check_eval "otel collector receives the bridge's telemetry (logs show OTLP traffic)" "compose logs --tail=200 otel-collector 2>/dev/null | grep -qi 'ResourceSpans\|ResourceMetrics\|Metrics\|Traces'"
 check_eval "no container is restarting" "! compose ps 2>/dev/null | grep -qi restarting"
 

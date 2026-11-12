@@ -40,7 +40,7 @@ kotlin {
 
         jvmTest.dependencies {
             implementation(libs.kotlin.test)
-            implementation(libs.javacard.simulator)
+            implementation(project(":jcardsim-jc31"))
             // Direct org.bouncycastle.* imports in Scp03CounterIcvTest (CMac reference
             // impl) — previously a hidden transitive of the removed datatypes dep.
             implementation(libs.bouncycastle)

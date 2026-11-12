@@ -11,6 +11,7 @@ import com.impala.sdk.models.CardPersonalization
 import com.impala.sdk.models.ImpalaException
 import com.impala.sdk.models.ImpalaVersion
 import com.impala.sdk.models.Signable
+import com.impala.sdk.models.StellarCardKey
 import com.impala.sdk.models.TransferProtocol
 import java.security.MessageDigest
 
@@ -53,6 +54,13 @@ class LastTransferSummary(
  * @property certVerifiedByCardIssuer the certificate verifies under the card's own issuer key
  *   (null when the card carries no certificate or key)
  * @property lastTransfer `Masked(null)` when the card never signed a transfer; null when unread
+ * @property stellarAddress the card's Stellar account id (`G…`), or null for a card without a
+ *   Stellar key (or when the key was not read)
+ * @property stellarEngine the Ed25519 engine behind it: `soft`, `native` or `unknown(0xNN)`
+ * @property stellarBindingVerified the card's P-256 key vouches for the Stellar key (its signature
+ *   over this account, card and key verifies); null when the key is unbound or an input is missing
+ * @property stellarProofVerified the Stellar key's proof of possession for this account, card and
+ *   P-256 key verifies; null as above
  */
 class CardInspection(
     val readAtEpochMs: Long,
@@ -81,7 +89,11 @@ class CardInspection(
     val receiveDigestHex: String?,
     val balanceMinor: Masked<Long>?,
     val lastTransfer: Masked<LastTransferSummary?>?,
-    val alive: Boolean?
+    val alive: Boolean?,
+    val stellarAddress: String? = null,
+    val stellarEngine: String? = null,
+    val stellarBindingVerified: Boolean? = null,
+    val stellarProofVerified: Boolean? = null
 ) {
     private var certMaterial: CertMaterial? = null
 
@@ -122,7 +134,8 @@ class CardInspection(
  * Reads everything a developer needs to troubleshoot a card, without changing
  * it: identity (GET_VERSION, GET_PERSONALIZATION, GET_USER_DATA,
  * GET_EC_PUB_KEY), IS_CARD_ALIVE, GET_RECEIVE_STATE, GET_LAST_TRANSFER and
- * GET_BALANCE, in that order. Each step is separate, so a blank, terminated or
+ * GET_BALANCE, in that order, then GET_STELLAR_KEY for a card that advertises a
+ * Stellar key (a card without one is not asked). Each step is separate, so a blank, terminated or
  * foreign card still yields a partial inspection; a tag loss ends the
  * inspection early (the remaining steps are not attempted). Card refusals are
  * recorded in [CardInspection.steps], never thrown.
@@ -163,6 +176,7 @@ object CardInspector {
         var lastTransferRead = false
         var lastTransfer: LastTransferSummary? = null
         var balance: Long? = null
+        var stellarKey: StellarCardKey? = null
 
         private inline fun step(name: String, block: () -> Unit) {
             if (lost) return
@@ -232,6 +246,11 @@ object CardInspector {
                 lastTransferRead = true
             }
             step("GET_BALANCE") { balance = sdk.getBalance() }
+            // Only a card that says it has a Stellar key (flag 0x80) is asked for it: an older
+            // applet does not know the command.
+            if (personalization?.stellarKey == true) {
+                step("GET_STELLAR_KEY") { stellarKey = sdk.getStellarKey() }
+            }
             if (lost) ImpalaLibLog.w(TAG, "Inspection ended early: the card left the field or is not an Impala card")
             return this
         }
@@ -254,6 +273,9 @@ object CardInspector {
                     null
                 }
             } else null
+            val stellar = stellarKey
+            val card = cardId
+            val boundInputs = stellar != null && stellar.isBound && account != null && card != null && pub != null
             val inspection = CardInspection(
                 readAtEpochMs = System.currentTimeMillis(),
                 aidHex = session.aidHex,
@@ -281,7 +303,11 @@ object CardInspector {
                 receiveDigestHex = receiveDigestHex,
                 balanceMinor = balance?.let { Masked(it) },
                 lastTransfer = if (lastTransferRead) Masked(lastTransfer) else null,
-                alive = alive
+                alive = alive,
+                stellarAddress = stellar?.address,
+                stellarEngine = stellar?.engineName,
+                stellarBindingVerified = if (boundInputs) CardStellarKeys.bindingVerifies(pub!!, account!!, card!!, stellar!!) else null,
+                stellarProofVerified = if (boundInputs) CardStellarKeys.proofVerifies(pub!!, account!!, card!!, stellar!!) else null
             )
             if (haveCertInputs) inspection.attachCertMaterial(p.programId, account, p.currency, pub, cert)
             return inspection
@@ -307,6 +333,7 @@ object CardInspector {
         if (p.pinProvisioned) add("PIN_PROVISIONED")
         if (p.provisioningEnforced) add("PROVISIONING_ENFORCED")
         if (p.terminated) add("TERMINATED")
+        if (p.stellarKey) add("STELLAR_KEY")
     }
 
     /** The 4-byte currency tag as text (`USDC`, `XLM`), NULs dropped; hex when it is not printable ASCII. */

@@ -30,6 +30,7 @@ plugins {
 }
 
 include(":sdk")
+include(":jcardsim-jc31")
 include(":applet")
 include(":simulator")
 include(":tools:issue")
