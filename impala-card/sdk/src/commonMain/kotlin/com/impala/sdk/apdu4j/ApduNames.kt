@@ -18,17 +18,17 @@ object ApduNames {
      * signature (card-audit §4): NOP, GET_BALANCE, GET_ACCOUNT_ID, GET_USER_DATA,
      * GET_FULL_NAME, GET_GENDER, GET_EC_PUB_KEY, IS_CARD_ALIVE,
      * GET_PERSONALIZATION, GET_RECEIVE_STATE, GET_LAST_TRANSFER,
-     * GET_STELLAR_KEY, GET_VERSION. Valid at CLA 0x00 only.
+     * GET_STELLAR_KEY, GET_USER_VERIFICATION, GET_VERSION. Valid at CLA 0x00 only.
      */
-    val READ_ONLY_INS: Set<Int> = setOf(0x02, 0x04, 0x16, 0x1E, 0x20, 0x21, 0x24, 0x2E, 0x34, 0x35, 0x36, 0x37, 0x64)
+    val READ_ONLY_INS: Set<Int> = setOf(0x02, 0x04, 0x16, 0x1E, 0x20, 0x21, 0x24, 0x2E, 0x34, 0x35, 0x36, 0x37, 0x39, 0x64)
 
     /**
      * Dispatched application instructions that change card state, consume a PIN
      * try or produce a signature: VERIFY_PIN, UPDATE_USER_PIN, SET_FULL_NAME,
      * SET_GENDER, SIGN_AUTH, INITIALIZE, SIGN_TRANSFER_V2, VERIFY_TRANSFER_V2,
-     * SIGN_SEP10. Disjoint from [READ_ONLY_INS].
+     * SIGN_SEP10, SET_SIGN_IN_POLICY, CHANGE_USER_PIN. Disjoint from [READ_ONLY_INS].
      */
-    val MUTATING_INS: Set<Int> = setOf(0x18, 0x19, 0x1F, 0x22, 0x25, 0x2C, 0x30, 0x31, 0x38)
+    val MUTATING_INS: Set<Int> = setOf(0x18, 0x19, 0x1F, 0x22, 0x25, 0x2C, 0x30, 0x31, 0x38, 0x3A, 0x3B)
 
     /**
      * Status words from the card platform rather than the applet: `6A82` (the
@@ -59,6 +59,9 @@ object ApduNames {
         0x36 to "GET_LAST_TRANSFER",
         0x37 to "GET_STELLAR_KEY",
         0x38 to "SIGN_SEP10",
+        0x39 to "GET_USER_VERIFICATION",
+        0x3A to "SET_SIGN_IN_POLICY",
+        0x3B to "CHANGE_USER_PIN",
         0x64 to "GET_VERSION",
         // Declared but not dispatched (the applet answers 6D00).
         0x07 to "GET_RSA_PUB_KEY",

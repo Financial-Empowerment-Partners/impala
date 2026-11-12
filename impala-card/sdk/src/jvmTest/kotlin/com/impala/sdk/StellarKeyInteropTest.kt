@@ -51,9 +51,9 @@ class StellarKeyInteropTest {
     // ---------------------------------------------------------------- lifecycle
 
     @Test
-    fun `the applet is version 0_3`() {
+    fun `the applet is version 0_4`() {
         val v = ImpalaSDK(SimulatorBibo()).getImpalaAppletVersion()
-        assertEquals("0.3", "${v.major}.${v.minor}")
+        assertEquals("0.4", "${v.major}.${v.minor}")
     }
 
     @Test

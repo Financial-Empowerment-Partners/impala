@@ -45,6 +45,16 @@ class ConstantsTest {
         assertEquals(0x01, Constants.P1_SEP10_CONTINUE.toInt())
         assertEquals(0x02, Constants.P1_SEP10_FINISH.toInt())
         assertEquals(0x80.toByte(), Constants.PFLAG_STELLAR_KEY)
+        // applet 0.4 / cardholder verification for sign-in
+        assertEquals(0x39, Constants.INS_GET_USER_VERIFICATION.toInt())
+        assertEquals(0x3A, Constants.INS_SET_SIGN_IN_POLICY.toInt())
+        assertEquals(0x3B, Constants.INS_CHANGE_USER_PIN.toInt())
+        assertEquals(0x00, Constants.P1_SIGN_AUTH_PLAIN.toInt())
+        assertEquals(0x01, Constants.P1_SIGN_AUTH_PIN_PROOF.toInt())
+        assertEquals(0x01, Constants.UV_POLICY_SIGN_IN_PIN.toInt())
+        assertEquals(0x02, Constants.UV_POLICY_SIGN_IN_PIN_FIXED.toInt())
+        assertEquals(0x04, Constants.UV_POLICY_PIN_PROVISIONED.toInt())
+        assertEquals(0x01, Constants.UV_SESSION_PIN_VERIFIED.toInt())
         assertEquals(0x72, SCP03Constants.INS_PERSONALIZE.toInt())
         assertEquals(0x73, SCP03Constants.INS_TERMINATE.toInt())
     }

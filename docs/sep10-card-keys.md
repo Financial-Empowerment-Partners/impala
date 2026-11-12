@@ -470,33 +470,29 @@ address and the fingerprint.
   The lanes are `:app:e2eTnetDebug -Pe2e.tests=<class>`; see
   `impala-android-demo/app/src/e2e/README.md`.
 
-## 8. Planned: user PIN and biometrics for SEP-10 signing
+## 8. User PIN, biometrics and the card as an MFA factor
 
-Not built in this phase; the protocol leaves room for all three.
+Built, as applet 0.4 and the multi-factor sign-in model —
+[`mfa-card-pin-biometrics.md`](mfa-card-pin-biometrics.md) is the contract.
+In short, and differing from the earlier sketch here:
 
-1. **Card-enforced user PIN.** A personalization flag (`FLAG_INSTALL_SEP10_PIN`,
-   install TLV) makes `SIGN_SEP10` FINISH answer `0x6982` unless the user PIN
-   was verified in the same session (`VERIFY_PIN`, P2 `0x82`); the retry
-   counter and block rules are the existing ones. `GET_PERSONALIZATION` gains a
-   flag so impala-lib asks for the PIN before the tap. The bridge learns that a
-   PIN was used from a second certified statement, not from the client: the
-   card adds a `card_auth_method` manage-data operation check, or the session
-   is minted with an `amr` value only when the card's registration records the
-   PIN policy. Steps: applet flag and gate; SDK `signSep10(pin = …)`;
-   impala-lib prompt; bridge `amr`; tests for wrong PIN, blocked PIN and
-   PIN-less cards.
-2. **Phone-side biometric gate.** `BiometricPrompt` (class 3) before the app
-   arms the tap sheet for sign-in. It protects against someone else using the
-   holder's phone with the holder's card; it is an app policy, not a card or
-   bridge guarantee. Steps: setting in the app, prompt before `arm`, no change
-   to card or bridge.
-3. **Second factor from the phone's secure hardware.** The device-key design of
-   `sep10-authentication.md` §10 (Android Keystore Ed25519, biometric-bound)
-   becomes a step-up: the bridge issues one challenge with two client
-   operations and requires both the card's and the device key's signatures.
-   Steps: finish Part A phases 1–3, add a two-signer challenge purpose, add a
-   biometric-capable card (`javacardx.biometry`) as an alternative where the
-   match happens on the card.
+1. **Card-enforced user PIN and a PIN proof.** Rather than make `SIGN_SEP10`
+   itself PIN-gated (which would couple the Stellar key to the PIN), the card
+   signs a separate **PIN proof** with its P-256 key (`SIGN_AUTH` P1=0x01, tag
+   `"IMPALA-APIN:"`) that it produces only while the user PIN is verified, and
+   a card can require the PIN for any sign-in (`SET_SIGN_IN_POLICY`, install
+   flag `0x10`). The bridge credits the `pin` factor on a verified proof from
+   an issuer-certified card. The Stellar key's contract (§3.3) is unchanged.
+2. **Phone biometric gate** — a class-3 `BiometricPrompt`, realized as the
+   biometric binding of the phone **device key** below rather than a bare app
+   gate.
+3. **Second factor from the phone's secure hardware** — a P-256 Android
+   Keystore device key (biometric-bound), carried into the sign-in or a
+   `POST /mfa/step-up`; the bridge credits `dev` (and `bio` when configured).
+
+Still future: verifying Android key attestation (so `bio` need not be opt-in),
+on-card biometrics (`javacardx.biometry`), and iOS. See
+`mfa-card-pin-biometrics.md` §9.
 
 ## 9. Verification, and what has not been verified
 

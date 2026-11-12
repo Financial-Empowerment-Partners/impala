@@ -191,9 +191,15 @@ pub async fn sso_token_exchange(
     // Issue local JWT tokens, embedding the account's server-side role
     // (the ADMIN_ACCOUNT_IDS allowlist overrides to admin, matching every
     // other issuance path).
-    let role = crate::auth::issuance_role(&pool, &admin_ids, &account_id).await;
+    let (role, assurance) = crate::auth::issue_session(
+        &pool,
+        &admin_ids,
+        &account_id,
+        vec![crate::constants::AMR_FEDERATED.to_string()],
+    )
+    .await;
     let (refresh_token, temporal_token) =
-        crate::jwt::encode_token_pair(&jwt_keys, &account_id, &role)?;
+        crate::jwt::encode_token_pair(&jwt_keys, &account_id, &role, &assurance)?;
 
     info!(
         "sso[{}]: tokens issued for account_id={}",

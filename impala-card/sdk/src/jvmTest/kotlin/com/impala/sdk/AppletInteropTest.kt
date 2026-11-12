@@ -48,7 +48,7 @@ class AppletInteropTest {
 
         val version = sdk.getImpalaAppletVersion()
         assertEquals(0, version.major.toInt())
-        assertEquals(3, version.minor.toInt())
+        assertEquals(4, version.minor.toInt())
 
         sdk.setUserName("Jane Impala")
         assertEquals("Jane Impala", sdk.getFullName())

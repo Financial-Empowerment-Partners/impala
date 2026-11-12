@@ -136,11 +136,14 @@ pub fn sliding_ttl(created_at: u64, now: u64) -> usize {
 /// Create a server-side session for `account_id` and return the `Set-Cookie`
 /// header value plus the CSRF token for the response body. Fail-closed: any
 /// Redis or CSPRNG failure means no cookie is issued.
+#[allow(clippy::too_many_arguments)]
 pub async fn establish_session(
     redis_pool: &deadpool_redis::Pool,
     account_id: &str,
     is_admin: bool,
     secure: bool,
+    methods: Vec<String>,
+    mfa_required: bool,
 ) -> Result<(HeaderValue, String), AppError> {
     let sid = generate_token(SESSION_ID_BYTES)?;
     let csrf = generate_token(CSRF_TOKEN_BYTES)?;
@@ -151,6 +154,9 @@ pub async fn establish_session(
         csrf: csrf.clone(),
         created_at: now,
         is_admin,
+        amr: crate::constants::finalize_amr(methods),
+        auth_time: now,
+        mfa_required,
     };
 
     redis_helpers::create_session(redis_pool, &hash_sid(&sid), &record, sliding_ttl(now, now))

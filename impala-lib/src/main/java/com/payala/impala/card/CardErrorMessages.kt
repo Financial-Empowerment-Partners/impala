@@ -14,6 +14,7 @@ object CardErrorMessages {
         "card_error_terminated" -> R.string.card_error_terminated
         "card_error_wrong_pin" -> R.string.card_error_wrong_pin
         "card_error_pin_blocked" -> R.string.card_error_pin_blocked
+        "card_error_pin_required" -> R.string.card_error_pin_required
         "card_error_insufficient_funds" -> R.string.card_error_insufficient_funds
         "card_error_counter_invalid" -> R.string.card_error_counter_invalid
         "card_error_counter_jump" -> R.string.card_error_counter_jump

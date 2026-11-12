@@ -209,9 +209,15 @@ async fn finish_github_login(
     provision_federated_account(pool, &account_id, AUTH_PROVIDER_GITHUB).await?;
 
     // Issue local JWT tokens (role derived from DB + allowlist at issuance)
-    let role = crate::auth::issuance_role(pool, admin_ids, &account_id).await;
+    let (role, assurance) = crate::auth::issue_session(
+        pool,
+        admin_ids,
+        &account_id,
+        vec![crate::constants::AMR_FEDERATED.to_string()],
+    )
+    .await;
     let (refresh_token, temporal_token) =
-        crate::jwt::encode_token_pair(jwt_keys, &account_id, &role)?;
+        crate::jwt::encode_token_pair(jwt_keys, &account_id, &role, &assurance)?;
 
     info!("github: tokens issued for account_id={}", account_id);
 

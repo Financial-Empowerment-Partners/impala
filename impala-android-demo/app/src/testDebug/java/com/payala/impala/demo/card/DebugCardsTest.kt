@@ -82,7 +82,7 @@ class DebugCardsTest {
         SimulatorApduServer(port = 0).start().use { server ->
             configure("127.0.0.1:${server.port}")
             val minor = offMain { DebugCards.openSession(readOnly = true)!!.use { s -> assertTrue(s.isReadOnly); s.sdk.getImpalaAppletVersion().minor.toInt() } }
-            assertEquals(3, minor)
+            assertEquals(4, minor)
             assertEquals(SimulatorStatus.State.READY, offMain { DebugCards.probe() }!!.state)
         }
     }

@@ -9,8 +9,9 @@ package com.impala.sdk
  * INS codes identify the applet command to execute. Status words in the
  * response indicate success ([SW_OK] = 0x9000) or a specific error condition.
  *
- * This file mirrors `applet/.../Constants.java` byte-for-byte (applet 0.3:
- * transfer protocol v1 and the Stellar key); `ApduDocDriftTest` and
+ * This file mirrors `applet/.../Constants.java` byte-for-byte (applet 0.4:
+ * transfer protocol v1, the Stellar key and cardholder verification for
+ * sign-in); `ApduDocDriftTest` and
  * `ConstantsTest` pin the two together. Secure-channel INS live in [com.impala.sdk.scp03.SCP03Constants].
  */
 object Constants {
@@ -56,6 +57,27 @@ object Constants {
     // Stellar key and SEP-10 sign-in (applet 0.3, docs/sep10-card-keys.md)
     const val INS_GET_STELLAR_KEY: Byte = 0x37       // CLA 0x00 only (169-byte response)
     const val INS_SIGN_SEP10: Byte = 0x38            // CLA 0x00 only (P1 begin / continue / finish)
+
+    // Cardholder verification for sign-in (applet 0.4, docs/mfa-card-pin-biometrics.md)
+    const val INS_GET_USER_VERIFICATION: Byte = 0x39 // CLA 0x00 or 0x84 (4-byte response)
+    const val INS_SET_SIGN_IN_POLICY: Byte = 0x3A    // P1 on / off; user PIN verified
+    const val INS_CHANGE_USER_PIN: Byte = 0x3B       // new user PIN; user PIN verified
+
+    // SIGN_AUTH forms (P1): any value but PIN_PROOF is the plain form.
+    const val P1_SIGN_AUTH_PLAIN: Byte = 0x00
+    const val P1_SIGN_AUTH_PIN_PROOF: Byte = 0x01
+
+    // SET_SIGN_IN_POLICY (P1)
+    const val P1_SIGN_IN_PIN_OFF: Byte = 0x00
+    const val P1_SIGN_IN_PIN_ON: Byte = 0x01
+
+    // GET_USER_VERIFICATION: format(1) ‖ policy(1) ‖ userPinTriesLeft(1) ‖ session(1)
+    const val USER_VERIFICATION_LENGTH: Short = 4
+    const val USER_VERIFICATION_FORMAT: Byte = 0x01
+    const val UV_POLICY_SIGN_IN_PIN: Byte = 0x01       // sign-in needs the user PIN verified
+    const val UV_POLICY_SIGN_IN_PIN_FIXED: Byte = 0x02 // set at install: cannot be turned off
+    const val UV_POLICY_PIN_PROVISIONED: Byte = 0x04   // a user PIN was provisioned: PIN proofs are possible
+    const val UV_SESSION_PIN_VERIFIED: Byte = 0x01     // the user PIN is verified in this session
 
     // SIGN_SEP10 parts (P1)
     const val P1_SEP10_BEGIN: Byte = 0x00

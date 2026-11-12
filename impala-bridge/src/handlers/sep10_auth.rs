@@ -221,6 +221,12 @@ pub async fn sep10_challenge(
 /// bodies a decoded space is mapped back to `+` (unescaped base64).
 pub struct Sep10PostBody {
     pub transaction: String,
+    /// MFA extras, JSON bodies only (a form body leaves them `None`): a card
+    /// PIN proof and/or a phone device-key assertion over the challenge hash
+    /// (`docs/mfa-card-pin-biometrics.md` §5.1).
+    pub pin_proof: Option<String>,
+    pub device_key_id: Option<String>,
+    pub device_signature: Option<String>,
 }
 
 fn body_error(message: &str) -> Response {
@@ -272,18 +278,30 @@ where
         let bytes = axum::body::Bytes::from_request(req, state)
             .await
             .map_err(IntoResponse::into_response)?;
-        let transaction = if form {
-            form_transaction(&bytes)
-                .ok_or_else(|| body_error("the form body needs exactly one transaction field"))?
+        let (transaction, pin_proof, device_key_id, device_signature) = if form {
+            // Extras are JSON-only: a form sign-in is a bare card tap.
+            let tx = form_transaction(&bytes)
+                .ok_or_else(|| body_error("the form body needs exactly one transaction field"))?;
+            (tx, None, None, None)
         } else {
-            serde_json::from_slice::<Sep10TokenRequest>(&bytes)
-                .map_err(|_| body_error("the JSON body needs a transaction string"))?
-                .transaction
+            let req = serde_json::from_slice::<Sep10TokenRequest>(&bytes)
+                .map_err(|_| body_error("the JSON body needs a transaction string"))?;
+            (
+                req.transaction,
+                req.pin_proof,
+                req.device_key_id,
+                req.device_signature,
+            )
         };
         if transaction.is_empty() || transaction.len() > SEP10_TRANSACTION_MAX_CHARS {
             return Err(body_error("transaction must be 1-8192 base64 characters"));
         }
-        Ok(Sep10PostBody { transaction })
+        Ok(Sep10PostBody {
+            transaction,
+            pin_proof,
+            device_key_id,
+            device_signature,
+        })
     }
 }
 
@@ -304,7 +322,7 @@ pub async fn sep10_token(
         &jwt_keys,
         &metrics,
         &source,
-        &body.transaction,
+        &body,
         unix_now(),
     )
     .await;
@@ -342,9 +360,10 @@ async fn sep10_token_inner(
     jwt_keys: &JwtKeys,
     metrics: &AppMetrics,
     source: &str,
-    transaction: &str,
+    body: &Sep10PostBody,
     now: i64,
 ) -> Result<Json<Sep10TokenResponse>, AppError> {
+    let transaction = body.transaction.as_str();
     let snapshot = ring.snapshot();
     if !snapshot.is_live(now) {
         return Err(unavailable());
@@ -454,9 +473,29 @@ async fn sep10_token_inner(
 
     backend.clear_lockout(&lockout_id, &bucket).await;
 
+    // Card possession is proven; add any PIN proof / device-key assertion the
+    // client sent over the challenge hash (a present-but-bad extra is a hard
+    // 401, never ignored). SEP-10 verifies only non-privileged accounts, so a
+    // PIN proof here yields `sc` + `pin`.
+    let mut methods = vec![crate::constants::AMR_CARD.to_string()];
+    methods.extend(
+        backend
+            .card_extras(
+                &address,
+                &account_id,
+                &issued.hash,
+                body.pin_proof.as_deref(),
+                body.device_key_id.as_deref(),
+                body.device_signature.as_deref(),
+            )
+            .await?,
+    );
+    let assurance =
+        crate::jwt::SessionAssurance::now(methods, backend.account_mfa_required(&account_id).await);
+
     // Otherwise exactly the session POST /auth/card mints for this account.
     let (refresh_token, temporal_token) =
-        crate::jwt::encode_token_pair(jwt_keys, &account_id, &role)?;
+        crate::jwt::encode_token_pair(jwt_keys, &account_id, &role, &assurance)?;
     info!(
         "sep10: card key {} signed in; tokens issued for account_id={} (key v{})",
         address, account_id, issued.version
@@ -590,6 +629,23 @@ mod tests {
                 .unwrap()
                 .unwrap_or(crate::constants::ROLE_VIEW_ONLY)
                 .to_string()
+        }
+        async fn account_mfa_required(&self, _account_id: &str) -> bool {
+            false
+        }
+        async fn card_extras(
+            &self,
+            _stellar_address: &str,
+            _account_id: &str,
+            _hash: &[u8; 32],
+            _pin_proof: Option<&str>,
+            _device_key_id: Option<&str>,
+            _device_signature: Option<&str>,
+        ) -> Result<Vec<String>, AppError> {
+            // The sign-in-order tests exercise a bare tap (no extras logged, so
+            // the asserted call sequence is unchanged); the extras are verified
+            // end-to-end in the mfa module's own tests.
+            Ok(vec![])
         }
     }
 
@@ -1232,8 +1288,11 @@ mod tests {
         assert!(pos("role_is_privileged(&role)") < pos("claim_challenge("));
         assert!(pos("claim_challenge(") < pos("clear_lockout("));
         assert!(pos("clear_lockout(") < pos("encode_token_pair("));
-        // The session is minted exactly the card way, with the role checked above.
-        assert!(body.contains("crate::jwt::encode_token_pair(jwt_keys, &account_id, &role)"));
+        // The session is minted exactly the card way, with the role checked
+        // above and the factors (card, plus any PIN proof / device key) carried
+        // in the assurance.
+        assert!(body
+            .contains("crate::jwt::encode_token_pair(jwt_keys, &account_id, &role, &assurance)"));
         assert_eq!(body.matches("issuance_role(").count(), 1);
     }
 

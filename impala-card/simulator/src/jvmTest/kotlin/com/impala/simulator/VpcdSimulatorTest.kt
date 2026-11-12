@@ -38,7 +38,7 @@ class VpcdSimulatorTest {
                 frame(output, byteArrayOf(0x00, 0x64, 0x00, 0x00, 0x00))
                 val version = read(input)
                 assertEquals(12, version.size)
-                assertEquals(3, version[3].toInt())                 // 0.3
+                assertEquals(4, version[3].toInt())                 // 0.4
                 frame(output, byteArrayOf(0x00, 0x2C, 0x00, 0x00, 0x04, 1, 2, 3, 4)) // INITIALIZE
                 assertContentEquals(byteArrayOf(0x90.toByte(), 0x00), read(input))
                 frame(output, byteArrayOf(2))                       // reset: selection cleared, state kept

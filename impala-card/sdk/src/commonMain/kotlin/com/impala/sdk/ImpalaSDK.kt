@@ -18,6 +18,7 @@ import com.impala.sdk.models.ReceiveState
 import com.impala.sdk.models.StellarCardKey
 import com.impala.sdk.models.TransferEnvelope
 import com.impala.sdk.models.TransferProtocol
+import com.impala.sdk.models.UserVerification
 import com.impala.sdk.models.toUuid
 import com.impala.sdk.scp03.SCP03Channel
 import com.impala.sdk.scp03.SCP03Constants
@@ -657,14 +658,17 @@ class ImpalaSDK(
      *
      * The applet signs ECDSA-SHA256 over ASCII "IMPALA-AUTH:" (12 bytes) ||
      * accountId (16 bytes) || nonce, and rejects nonces outside 8..64 bytes
-     * with 0x6700 (the pinned card-auth contract).
+     * with 0x6700 (the pinned card-auth contract). With [pinProof] the P1 byte
+     * is 0x01 and the tag is "IMPALA-APIN:" instead; the applet produces that
+     * form only while the user PIN is verified (see [signPinProof]).
      *
      * @param nonce to sign
      * @return signed nonce
      * @throws ImpalaException
      */
-    private fun getSignedNonce(nonce: ByteArray): ByteString {
-        val cmd = CommandAPDU(Constants.INS_SIGN_AUTH, nonce)
+    private fun getSignedNonce(nonce: ByteArray, pinProof: Boolean = false): ByteString {
+        val p1 = if (pinProof) Constants.P1_SIGN_AUTH_PIN_PROOF else Constants.P1_SIGN_AUTH_PLAIN
+        val cmd = CommandAPDU(0x00, Constants.INS_SIGN_AUTH.toInt(), p1.toInt(), 0x00, nonce)
         val bArr = tx(cmd).data
         return bArr.toByteString()
     }
@@ -685,6 +689,65 @@ class ImpalaSDK(
     fun signAuthChallenge(challenge: ByteArray): ByteString {
         require(challenge.size in 8..64) { "Challenge must be 8-64 bytes" }
         return getSignedNonce(challenge)
+    }
+
+    /**
+     * Signs a PIN proof over [challenge] with the card's EC key (SIGN_AUTH
+     * P1=0x01). The signed message is "IMPALA-APIN:" || accountId(16) ||
+     * challenge, which the applet produces only while the user PIN is verified,
+     * so the signature is evidence that it was (the bridge's `pin` factor,
+     * CARD_PIN_PROOF_DOMAIN_PREFIX). Verify the user PIN first ([verifyUserPin]);
+     * a card whose PIN is not verified answers 0x6690, one without a provisioned
+     * PIN 0x6985, and an applet older than 0.4 ignores P1 — so never treat a
+     * plain signature as a PIN proof.
+     *
+     * @param challenge the same 8..64-byte value the plain sign-in signature covers
+     * @return the DER-encoded ECDSA signature over the PIN-proof message
+     */
+    @Throws(ImpalaException::class)
+    fun signPinProof(challenge: ByteArray): ByteString {
+        require(challenge.size in 8..64) { "Challenge must be 8-64 bytes" }
+        return getSignedNonce(challenge, pinProof = true)
+    }
+
+    /**
+     * Reads GET_USER_VERIFICATION (INS 0x39, 4 bytes): the card's sign-in PIN
+     * policy and whether the user PIN is verified now. Returns null for an
+     * applet older than 0.4 (0x6D00), which has no such policy.
+     */
+    @Throws(ImpalaException::class)
+    fun getUserVerification(): UserVerification? {
+        val resp = try {
+            tx(CommandAPDU(Constants.INS_GET_USER_VERIFICATION))
+        } catch (e: ImpalaException) {
+            if (e.statusWord == 0x6D00) return null
+            throw e
+        }
+        return UserVerification.parse(resp.data)
+    }
+
+    /**
+     * Turns this card's sign-in PIN requirement on or off (SET_SIGN_IN_POLICY,
+     * INS 0x3A). The user PIN must be verified first ([verifyUserPin]); a
+     * requirement fixed at install cannot be turned off (0x6985).
+     */
+    @Throws(ImpalaException::class)
+    fun setSignInPinRequired(required: Boolean) {
+        val p1 = if (required) Constants.P1_SIGN_IN_PIN_ON else Constants.P1_SIGN_IN_PIN_OFF
+        tx(CommandAPDU(0x00, Constants.INS_SET_SIGN_IN_POLICY.toInt(), p1.toInt(), 0x00))
+    }
+
+    /**
+     * Changes the user PIN (CHANGE_USER_PIN, INS 0x3B) with the current one
+     * already verified ([verifyUserPin]). The new PIN is 4 digits and not
+     * "0000". The session returns to "not verified" afterwards.
+     */
+    @Throws(ImpalaException::class)
+    fun changeUserPin(pin: String) {
+        require(pin.length == 4 && pin.all { it.isDigit() } && pin != "0000") { "User PIN must be 4 digits and not 0000" }
+        val pinBytes = mapDigitsToByteArray(pin)
+        val cmd = CommandAPDU(0x00, Constants.INS_CHANGE_USER_PIN.toInt(), 0x00, 0x00, pinBytes)
+        try { tx(cmd) } finally { cmd.wipe() }
     }
 
     fun verifyMasterPin(mPin: String) {

@@ -16,6 +16,8 @@ object PersonalizationProtocol {
     const val FLAG_PINS = 0x04
     /** programId(16) ‖ issuerPubKey(65) follow the PINs (requires FLAG_KEYS). */
     const val FLAG_PROGRAM = 0x08
+    /** Require the user PIN to be verified before the card signs in, for life. No data. */
+    const val FLAG_SIGN_IN_PIN = 0x10
 
     const val IDENTITY_LENGTH = 40
     const val PERSONALIZATION_LENGTH = 159
@@ -30,7 +32,8 @@ object PersonalizationProtocol {
         enforce: Boolean,
         keys: Triple<ByteArray, ByteArray, ByteArray>?,
         pins: Pair<ByteArray, ByteArray>?,
-        program: Pair<ByteArray, ByteArray>?
+        program: Pair<ByteArray, ByteArray>?,
+        signInPin: Boolean = false
     ): ByteArray {
         require(program == null || keys != null) { "a program block requires custom SCP03 keys (flag 0x08 needs 0x02)" }
         var flags = 0
@@ -38,6 +41,7 @@ object PersonalizationProtocol {
         if (keys != null) flags = flags or FLAG_KEYS
         if (pins != null) flags = flags or FLAG_PINS
         if (program != null) flags = flags or FLAG_PROGRAM
+        if (signInPin) flags = flags or FLAG_SIGN_IN_PIN
         var out = byteArrayOf(TAG_INSTALL_PROVISIONING, flags.toByte())
         keys?.let { (enc, mac, dek) ->
             require(enc.size == 16 && mac.size == 16 && dek.size == 16) { "SCP03 keys must be 16 bytes each" }

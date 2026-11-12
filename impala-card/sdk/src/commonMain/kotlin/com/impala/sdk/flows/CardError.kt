@@ -19,6 +19,9 @@ sealed class CardError(val userMessageKey: String, val statusWord: Int? = null) 
     object Terminated : CardError("card_error_terminated", 0x6687)
     class WrongPin(val triesLeft: Int) : CardError("card_error_wrong_pin", 0x69C0 or triesLeft)
     object PinBlocked : CardError("card_error_pin_blocked", 0x69C0)
+    /// The card requires the user PIN to be verified before it signs in, and
+    /// none was supplied: the caller must prompt for it and retry (0x6690).
+    object PinRequired : CardError("card_error_pin_required", 0x6690)
     object InsufficientFunds : CardError("card_error_insufficient_funds", 0x6224)
     object CounterInvalid : CardError("card_error_counter_invalid", 0x6233)
     object CounterJump : CardError("card_error_counter_jump", 0x623A)
@@ -60,7 +63,7 @@ sealed class CardError(val userMessageKey: String, val statusWord: Int? = null) 
             "card_error_counter_invalid", "card_error_counter_jump", "card_error_send_sequence_invalid",
             "card_error_wrong_protocol_version", "card_error_tag_lost", "card_error_invalid_request",
             "card_error_other", "card_error_applet_not_found", "card_error_read_only_refused",
-            "card_error_challenge_refused"
+            "card_error_challenge_refused", "card_error_pin_required"
         )
 
         /** Maps a card status word to its case. */
@@ -68,6 +71,7 @@ sealed class CardError(val userMessageKey: String, val statusWord: Int? = null) 
             0x6234 -> NotPersonalized
             0x6985 -> ProvisioningRequired
             0x6687 -> Terminated
+            0x6690 -> PinRequired
             0x69C0 -> PinBlocked
             in 0x69C1..0x69C9 -> WrongPin(sw and 0x0F)
             0x6224 -> InsufficientFunds

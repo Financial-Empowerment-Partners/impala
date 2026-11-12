@@ -217,6 +217,10 @@ dependencies {
     // without touching call sites.
     implementation("androidx.security:security-crypto:1.1.0")
 
+    // Biometric prompt for the device-key MFA factor (class-3 strong auth that
+    // gates signing with the Keystore device key; docs/mfa-card-pin-biometrics.md).
+    implementation("androidx.biometric:biometric:1.1.0")
+
     // Google Sign-In via Credential Manager
     implementation("androidx.credentials:credentials:1.6.0")
     implementation("androidx.credentials:credentials-play-services-auth:1.6.0")

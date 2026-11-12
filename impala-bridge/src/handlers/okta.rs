@@ -201,7 +201,13 @@ async fn okta_token_exchange_inner(
     // Server-side role for the token claims: the account's DB role with the
     // ADMIN_ACCOUNT_IDS allowlist overriding to admin
     // (provision_federated_account defaults new accounts to view-only).
-    let role = crate::auth::issuance_role(&pool, &admin_ids, &account_id).await;
+    let (role, assurance) = crate::auth::issue_session(
+        &pool,
+        &admin_ids,
+        &account_id,
+        vec![crate::constants::AMR_FEDERATED.to_string()],
+    )
+    .await;
 
     // Browser clients opt into a cookie session instead of bearer tokens
     // (the impala-ui Okta flow sends cookie_mode: true).
@@ -211,6 +217,8 @@ async fn okta_token_exchange_inner(
             &account_id,
             is_admin,
             session_config.cookie_secure,
+            assurance.amr.clone(),
+            assurance.mfa_required,
         )
         .await?;
         metrics.sessions_created.add(1, &[]);
@@ -233,7 +241,7 @@ async fn okta_token_exchange_inner(
 
     // Issue local JWT tokens (role derived from DB + allowlist at issuance)
     let (refresh_token, temporal_token) =
-        crate::jwt::encode_token_pair(&jwt_keys, &account_id, &role)?;
+        crate::jwt::encode_token_pair(&jwt_keys, &account_id, &role, &assurance)?;
 
     info!("okta: tokens issued for account_id={}", account_id);
 

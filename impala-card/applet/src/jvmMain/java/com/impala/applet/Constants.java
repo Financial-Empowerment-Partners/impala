@@ -5,8 +5,8 @@ package com.impala.applet;
  * Constants shared across the applet: APDU instruction codes, PIN type identifiers,
  * data size definitions, and status word error codes.
  *
- * This is the number registry for the card protocol (applet 0.3: transfer
- * protocol v1 and the Stellar key). Every INS / SW / length here is mirrored byte-for-byte in the
+ * This is the number registry for the card protocol (applet 0.4: transfer
+ * protocol v1, the Stellar key and cardholder verification for sign-in). Every INS / SW / length here is mirrored byte-for-byte in the
  * SDK's Constants.kt and documented in docs/apdu.md; ApduDocDriftTest pins the
  * three together.
  */
@@ -52,6 +52,28 @@ public class Constants {
     // Stellar key and SEP-10 sign-in (applet 0.3, docs/sep10-card-keys.md)
     public static final byte INS_GET_STELLAR_KEY = (byte) 0x37;      // CLA 0x00 only (169-byte response)
     public static final byte INS_SIGN_SEP10 = (byte) 0x38;           // CLA 0x00 only (P1 begin / continue / finish)
+
+    // Cardholder verification for sign-in (applet 0.4, docs/mfa-card-pin-biometrics.md)
+    public static final byte INS_GET_USER_VERIFICATION = (byte) 0x39; // CLA 0x00 or 0x84 (4-byte response)
+    public static final byte INS_SET_SIGN_IN_POLICY = (byte) 0x3A;    // P1 on / off; user PIN verified
+    public static final byte INS_CHANGE_USER_PIN = (byte) 0x3B;       // new user PIN; user PIN verified
+
+    // SIGN_AUTH forms (P1). Any value but PIN_PROOF is the plain form: applets
+    // before 0.4 never looked at P1, and terminals in the field may send anything.
+    public static final byte P1_SIGN_AUTH_PLAIN = (byte) 0x00;
+    public static final byte P1_SIGN_AUTH_PIN_PROOF = (byte) 0x01;
+
+    // SET_SIGN_IN_POLICY (P1)
+    public static final byte P1_SIGN_IN_PIN_OFF = (byte) 0x00;
+    public static final byte P1_SIGN_IN_PIN_ON = (byte) 0x01;
+
+    // GET_USER_VERIFICATION: format(1) ‖ policy(1) ‖ userPinTriesLeft(1) ‖ session(1)
+    public static final short USER_VERIFICATION_LENGTH = 4;
+    public static final byte USER_VERIFICATION_FORMAT = (byte) 0x01;
+    public static final byte UV_POLICY_SIGN_IN_PIN = (byte) 0x01;       // sign-in needs the user PIN verified
+    public static final byte UV_POLICY_SIGN_IN_PIN_FIXED = (byte) 0x02; // set at install: cannot be turned off
+    public static final byte UV_POLICY_PIN_PROVISIONED = (byte) 0x04;   // a user PIN was provisioned: PIN proofs are possible
+    public static final byte UV_SESSION_PIN_VERIFIED = (byte) 0x01;     // the user PIN is verified in this session
 
     // SIGN_SEP10 parts (P1)
     public static final byte P1_SEP10_BEGIN = (byte) 0x00;

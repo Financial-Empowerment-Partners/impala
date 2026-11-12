@@ -226,6 +226,31 @@ pub const DEFAULT_GITHUB_OAUTH_TOKEN_URL: &str = "https://github.com/login/oauth
 /// transfer signature.
 pub const CARD_AUTH_DOMAIN_PREFIX: &[u8; 12] = b"IMPALA-AUTH:";
 
+/// Card PIN-proof signed-message domain prefix (pinned cross-stream contract).
+///
+/// ASCII "IMPALA-APIN:" — 12 bytes. Must match `AUTH_PIN_DOMAIN_TAG` in the
+/// applet. The applet produces a signature over
+/// `CARD_PIN_PROOF_DOMAIN_PREFIX || accountId(16) || challenge(8..=64)`
+/// (`SIGN_AUTH` P1=0x01) only while the cardholder's provisioned user PIN is
+/// verified, so a valid proof is evidence the PIN was entered. The tag differs
+/// from `CARD_AUTH_DOMAIN_PREFIX` in bytes 7..11, so neither signature can
+/// stand in for the other (`docs/mfa-card-pin-biometrics.md` §3.3).
+pub const CARD_PIN_PROOF_DOMAIN_PREFIX: &[u8; 12] = b"IMPALA-APIN:";
+
+/// Device-key assertion domain prefix (phone-held P-256 MFA factor).
+///
+/// ASCII "IMPALA-DKEY:" — 12 bytes. The phone's keystore key signs
+/// `DEVICE_KEY_DOMAIN_PREFIX || 0x01 || purpose(1) || sha256(account_id)(32) ||
+/// challenge(32)` (`docs/mfa-card-pin-biometrics.md` §4.2).
+pub const DEVICE_KEY_DOMAIN_PREFIX: &[u8; 12] = b"IMPALA-DKEY:";
+
+/// Device-key assertion version byte and purposes.
+pub const DEVICE_KEY_VERSION: u8 = 0x01;
+pub const DEVICE_KEY_PURPOSE_ENROLL: u8 = 0x01;
+pub const DEVICE_KEY_PURPOSE_STEP_UP: u8 = 0x02;
+pub const DEVICE_KEY_PURPOSE_CARD_SIGN_IN: u8 = 0x03;
+pub const DEVICE_KEY_PURPOSE_SEP10_SIGN_IN: u8 = 0x04;
+
 /// Card-auth challenge size in raw bytes (64 hex chars on the wire).
 pub const CARD_CHALLENGE_BYTES: usize = 32;
 
@@ -327,6 +352,106 @@ pub const ALL_ROLES: &[&str] = &[
 
 /// Valid transaction review statuses (mirrors the `chk_review_status` DB CHECK).
 pub const VALID_REVIEW_STATUSES: &[&str] = &["unreviewed", "cleared", "flagged", "escalated"];
+
+// ── Multi-factor authentication (docs/mfa-card-pin-biometrics.md) ──────────
+
+/// Authentication-method-reference (`amr`) values the bridge stamps into a
+/// session. Each is backed by evidence the bridge itself verified; `AMR_MFA`
+/// is derived (two different factor kinds), never an input.
+pub const AMR_PASSWORD: &str = "pwd";
+pub const AMR_FEDERATED: &str = "fed";
+pub const AMR_CARD: &str = "sc";
+pub const AMR_CARD_PIN: &str = "pin";
+pub const AMR_TOTP: &str = "otp";
+pub const AMR_DEVICE_KEY: &str = "dev";
+pub const AMR_BIOMETRIC: &str = "bio";
+pub const AMR_MFA: &str = "mfa";
+
+/// Every `amr` value the bridge may stamp (used to drop unknown values from a
+/// presented token before `amr` is recomputed). `AMR_MFA` is derived here, not
+/// listed as an input.
+pub const ALL_AMR: &[&str] = &[
+    AMR_PASSWORD,
+    AMR_FEDERATED,
+    AMR_CARD,
+    AMR_CARD_PIN,
+    AMR_TOTP,
+    AMR_DEVICE_KEY,
+    AMR_BIOMETRIC,
+];
+
+/// Step-up challenge: raw bytes (64 hex on the wire), TTL, and how many may be
+/// outstanding for one account at once.
+pub const MFA_CHALLENGE_BYTES: usize = 32;
+pub const MFA_CHALLENGE_TTL_SECS: usize = 120;
+pub const MFA_CHALLENGE_MAX_OUTSTANDING: usize = 3;
+
+/// A device-key assertion / PIN proof reuses the card-signature size bound.
+pub const DEVICE_SIGNATURE_MAX_BYTES: usize = 72;
+
+/// Default `MFA_MAX_AGE_SECS`: how long a multi-factor verification keeps a
+/// session multi-factor before a step-up is needed (12 h).
+pub const MFA_MAX_AGE_SECS_DEFAULT: i64 = 43_200;
+
+/// Default freshness window for a factor change under a required-MFA account
+/// (`mfa_reauth_required` otherwise): 15 minutes.
+pub const MFA_REAUTH_MAX_AGE_SECS: i64 = 900;
+
+/// `MFA_CARD_PIN_TRUST` values: trust a PIN proof only from an issuer-certified
+/// card (default), or from any registered card (test rigs).
+pub const MFA_CARD_PIN_TRUST_CERTIFIED: &str = "certified";
+pub const MFA_CARD_PIN_TRUST_ANY: &str = "any";
+
+/// `MFA_DEVICE_BIOMETRIC` values: never credit `bio` (default), or credit it
+/// for a device key the client declared biometric-bound at enrollment.
+pub const MFA_DEVICE_BIOMETRIC_OFF: &str = "off";
+pub const MFA_DEVICE_BIOMETRIC_CLAIMED: &str = "claimed";
+
+/// Device-key `user_verification` declarations (stored verbatim; §4.3).
+pub const DEVICE_USER_VERIFICATION_BIOMETRIC: &str = "biometric";
+pub const DEVICE_USER_VERIFICATION_NONE: &str = "none";
+
+/// Step-up factor types accepted at `POST /mfa/step-up`.
+pub const MFA_STEP_UP_TOTP: &str = "totp";
+pub const MFA_STEP_UP_CARD: &str = "card";
+pub const MFA_STEP_UP_DEVICE: &str = "device";
+
+/// The two factor kinds knowledge/possession/inherence/federated, used to
+/// decide whether `amr` is multi-factor (two DIFFERENT kinds).
+pub fn amr_is_multi_factor(amr: &[String]) -> bool {
+    let mut kinds = 0u8;
+    for m in amr {
+        let bit = match m.as_str() {
+            AMR_PASSWORD | AMR_CARD_PIN => 0b0001,          // knowledge
+            AMR_FEDERATED => 0b0010,                        // federated
+            AMR_CARD | AMR_TOTP | AMR_DEVICE_KEY => 0b0100, // possession
+            AMR_BIOMETRIC => 0b1000,                        // inherence
+            _ => 0,
+        };
+        kinds |= bit;
+    }
+    kinds.count_ones() >= 2
+}
+
+/// Canonicalize an `amr` list for a token: drop anything not in [`ALL_AMR`]
+/// (unknown values, and a presented derived `mfa`), sort, dedup, then append
+/// the derived [`AMR_MFA`] when the remaining factors are multi-factor. The
+/// single place `amr` is built, so every issuance path agrees and `mfa` is
+/// always recomputed rather than trusted from a presented token.
+pub fn finalize_amr(mut methods: Vec<String>) -> Vec<String> {
+    methods.retain(|m| ALL_AMR.contains(&m.as_str()));
+    methods.sort();
+    methods.dedup();
+    if amr_is_multi_factor(&methods) {
+        methods.push(AMR_MFA.to_string());
+    }
+    methods
+}
+
+/// Whether a finalized `amr` carries the derived multi-factor marker.
+pub fn amr_has_mfa(amr: &[String]) -> bool {
+    amr.iter().any(|m| m == AMR_MFA)
+}
 
 /// Payala sync mode: batches are aggregated into a single per-currency
 /// reserve-balance update.
@@ -1404,6 +1529,65 @@ pub const SEP10_CHALLENGE_GLOBAL_WINDOW_SECS: usize = 60;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn finalize_amr_sorts_dedups_drops_unknowns_and_appends_mfa() {
+        // Single factor: sorted, no `mfa`.
+        assert_eq!(finalize_amr(vec!["sc".into()]), vec!["sc"]);
+        // Two of the same kind (both possession): not multi-factor.
+        assert_eq!(
+            finalize_amr(vec!["dev".into(), "sc".into()]),
+            vec!["dev", "sc"]
+        );
+        // Two different kinds: `mfa` appended, input sorted and de-duplicated.
+        assert_eq!(
+            finalize_amr(vec!["sc".into(), "pin".into(), "sc".into()]),
+            vec!["pin", "sc", "mfa"]
+        );
+        // Unknown values (and a presented `mfa`) are dropped, then `mfa` is
+        // recomputed from what remains.
+        assert_eq!(
+            finalize_amr(vec![
+                "mfa".into(),
+                "pwd".into(),
+                "bogus".into(),
+                "otp".into()
+            ]),
+            vec!["otp", "pwd", "mfa"]
+        );
+        assert!(!amr_has_mfa(&finalize_amr(vec!["pwd".into()])));
+        assert!(amr_has_mfa(&finalize_amr(vec!["pwd".into(), "otp".into()])));
+    }
+
+    #[test]
+    fn card_pin_proof_tag_differs_from_sign_in_tag_only_in_the_middle() {
+        // Same "IMPALA-" prefix and ":" terminator; the 4 middle bytes differ,
+        // so a sign-in signature can never pass as a PIN proof.
+        assert_eq!(
+            &CARD_PIN_PROOF_DOMAIN_PREFIX[..7],
+            &CARD_AUTH_DOMAIN_PREFIX[..7]
+        );
+        assert_eq!(
+            CARD_PIN_PROOF_DOMAIN_PREFIX[11],
+            CARD_AUTH_DOMAIN_PREFIX[11]
+        );
+        assert_ne!(
+            &CARD_PIN_PROOF_DOMAIN_PREFIX[7..11],
+            &CARD_AUTH_DOMAIN_PREFIX[7..11]
+        );
+        assert_eq!(CARD_PIN_PROOF_DOMAIN_PREFIX, b"IMPALA-APIN:");
+        assert_eq!(DEVICE_KEY_DOMAIN_PREFIX, b"IMPALA-DKEY:");
+        // Shared card/bridge vectors (scripts/check-shared-vectors.sh): the hex
+        // of the two MFA domain tags must match the card side byte for byte.
+        assert_eq!(
+            hex::encode(CARD_PIN_PROOF_DOMAIN_PREFIX),
+            "494d50414c412d4150494e3a"
+        );
+        assert_eq!(
+            hex::encode(DEVICE_KEY_DOMAIN_PREFIX),
+            "494d50414c412d444b45593a"
+        );
+    }
 
     /// Two loops sharing a key would silently serialize against each other
     /// (or one would skip its pass forever while the other runs).

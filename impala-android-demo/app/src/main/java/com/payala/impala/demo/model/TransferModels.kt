@@ -61,3 +61,62 @@ data class EnrollMfaRequest(
     val secret: String? = null,
     val phone_number: String? = null
 )
+
+// ── Multi-factor sign-in (docs/mfa-card-pin-biometrics.md) ─────────────────
+
+/** `GET /mfa/status`: the current session's assurance and the account's requirement. */
+data class MfaStatusResponse(
+    val amr: List<String> = emptyList(),
+    val auth_time: Long = 0,
+    val mfa: Boolean = false,
+    val required: Boolean = false,
+    val required_by_role: Boolean = false,
+    val satisfied: Boolean = true,
+    val max_age_secs: Long = 0,
+)
+
+/** `POST /mfa/challenge`: a single-use step-up / enrollment challenge. */
+data class MfaChallengeResponse(val challenge: String, val expires_in: Long)
+
+/** `POST /mfa/step-up`: add a factor (`totp`, `card` or `device`) to this session. */
+data class StepUpRequest(
+    val mfa_type: String,
+    val code: String? = null,
+    val challenge: String? = null,
+    val card_id: String? = null,
+    val signature: String? = null,
+    val pin_proof: String? = null,
+    val key_id: String? = null,
+    val device_signature: String? = null,
+)
+
+data class StepUpResponse(
+    val success: Boolean = false,
+    val amr: List<String> = emptyList(),
+    val refresh_token: String? = null,
+    val temporal_token: String? = null,
+)
+
+/** `POST /mfa/device-keys`: enroll a phone device key proven by signing a challenge. */
+data class EnrollDeviceKeyRequest(
+    val public_key: String,
+    val label: String? = null,
+    val platform: String? = "android",
+    val user_verification: String? = "none",
+    val challenge: String,
+    val signature: String,
+)
+
+data class EnrollDeviceKeyResponse(val success: Boolean = false, val key_id: String? = null)
+
+/** One active device key from `GET /mfa/device-keys`. */
+data class DeviceKeyView(
+    val key_id: String,
+    val label: String? = null,
+    val platform: String? = null,
+    val user_verification: String = "none",
+    val created_at_unix: Long = 0,
+)
+
+/** `PUT /mfa/policy`: turn the account's own MFA requirement on or off. */
+data class MfaPolicyRequest(val required: Boolean)

@@ -140,7 +140,7 @@ class CardReaderControllerTest {
         val session = ImpalaCardSession.fromBibo(card.bibo)
         assertTrue(controller.debugInjectTapOrClose(session))
         idleMainUntil { result != null }
-        assertEquals("0.3", result!!.getOrThrow())
+        assertEquals("0.4", result!!.getOrThrow())
         assertSame(Looper.getMainLooper().thread, resultThread)
         assertTrue(session.isClosed)
         controller.disableReaderMode()

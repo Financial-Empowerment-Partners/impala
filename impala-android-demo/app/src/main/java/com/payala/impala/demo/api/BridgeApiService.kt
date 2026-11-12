@@ -115,6 +115,36 @@ interface BridgeApiService {
     @POST("mfa")
     suspend fun enrollMfa(@Body request: EnrollMfaRequest): MfaResponse
 
+    // ── Multi-factor step-up and device keys (docs/mfa-card-pin-biometrics.md) ─
+
+    /** The current session's MFA assurance and the account's requirement. */
+    @GET("mfa/status")
+    suspend fun mfaStatus(): MfaStatusResponse
+
+    /** A single-use step-up / device-key-enrollment challenge for this account. */
+    @POST("mfa/challenge")
+    suspend fun mfaChallenge(): MfaChallengeResponse
+
+    /** Add a factor (`totp`, `card`, `device`) to the current session. */
+    @POST("mfa/step-up")
+    suspend fun mfaStepUp(@Body request: StepUpRequest): StepUpResponse
+
+    /** The caller's active phone device keys. */
+    @GET("mfa/device-keys")
+    suspend fun listDeviceKeys(): List<DeviceKeyView>
+
+    /** Enroll a phone device key (proven by signing a `/mfa/challenge`). */
+    @POST("mfa/device-keys")
+    suspend fun enrollDeviceKey(@Body request: EnrollDeviceKeyRequest): EnrollDeviceKeyResponse
+
+    /** Revoke one of the caller's device keys. */
+    @DELETE("mfa/device-keys/{key_id}")
+    suspend fun deleteDeviceKey(@Path("key_id") keyId: String): Response<Unit>
+
+    /** Turn the account's own MFA requirement on or off. */
+    @PUT("mfa/policy")
+    suspend fun setMfaPolicy(@Body request: MfaPolicyRequest): Response<Unit>
+
     // ── Notify ────────────────────────────────────────────────────────
 
     /** List notification preferences for the authenticated user (paginated envelope). */

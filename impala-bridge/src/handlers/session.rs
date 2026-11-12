@@ -106,11 +106,14 @@ pub async fn session_login(
     }
 
     let is_admin = admin_ids.contains(&payload.username);
+    let mfa_required = crate::auth::account_mfa_required(&pool, &payload.username).await;
     let (cookie, csrf_token) = session::establish_session(
         &redis_pool,
         &payload.username,
         is_admin,
         session_config.cookie_secure,
+        vec![crate::constants::AMR_PASSWORD.to_string()],
+        mfa_required,
     )
     .await?;
 

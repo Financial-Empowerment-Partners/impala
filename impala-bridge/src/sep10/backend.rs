@@ -48,13 +48,34 @@ pub trait Sep10Backend: Send + Sync {
     async fn card_account(&self, stellar_address: &str) -> Result<Option<String>, AppError>;
     /// `auth::issuance_role` — the same role every login path stamps.
     async fn issuance_role(&self, account_id: &str) -> String;
+    /// Whether the account carries the per-account MFA mandate.
+    async fn account_mfa_required(&self, account_id: &str) -> bool;
+    /// Verify the optional MFA extras that rode the sign-in (a card PIN proof,
+    /// a device-key assertion) over the challenge `hash`, returning the extra
+    /// `amr` factors they prove. A present-but-invalid extra is a hard 401
+    /// (`docs/mfa-card-pin-biometrics.md` §5.1), never silently dropped.
+    async fn card_extras(
+        &self,
+        stellar_address: &str,
+        account_id: &str,
+        hash: &[u8; 32],
+        pin_proof: Option<&str>,
+        device_key_id: Option<&str>,
+        device_signature: Option<&str>,
+    ) -> Result<Vec<String>, AppError>;
 }
+
+/// The active card's id and EC public key, by Stellar address — for verifying
+/// a PIN proof that rode a SEP-10 sign-in.
+pub(crate) const CARD_KEYS_BY_STELLAR_ADDRESS_SQL: &str =
+    "SELECT card_id, ec_pubkey FROM card WHERE stellar_address = $1::bpchar AND is_delete = FALSE";
 
 /// Redis + Postgres.
 pub struct LiveBackend {
     pub pool: PgPool,
     pub redis: Arc<deadpool_redis::Pool>,
     pub admin_ids: Arc<HashSet<String>>,
+    pub mfa_cfg: Arc<crate::mfa::MfaConfig>,
 }
 
 #[async_trait]
@@ -100,6 +121,59 @@ impl Sep10Backend for LiveBackend {
 
     async fn issuance_role(&self, account_id: &str) -> String {
         crate::auth::issuance_role(&self.pool, &self.admin_ids, account_id).await
+    }
+
+    async fn account_mfa_required(&self, account_id: &str) -> bool {
+        crate::auth::account_mfa_required(&self.pool, account_id).await
+    }
+
+    async fn card_extras(
+        &self,
+        stellar_address: &str,
+        account_id: &str,
+        hash: &[u8; 32],
+        pin_proof: Option<&str>,
+        device_key_id: Option<&str>,
+        device_signature: Option<&str>,
+    ) -> Result<Vec<String>, AppError> {
+        let mut methods: Vec<String> = Vec::new();
+        if pin_proof.is_none() && device_key_id.is_none() {
+            return Ok(methods);
+        }
+        // The account id a card-held Stellar key signs in with is a UUID (the
+        // on-card accountId); a non-UUID cannot carry a PIN proof.
+        let account_uuid = match uuid::Uuid::parse_str(account_id) {
+            Ok(u) => u,
+            Err(_) => return Err(AppError::Unauthorized),
+        };
+        let row = sqlx::query_as::<_, (String, String)>(CARD_KEYS_BY_STELLAR_ADDRESS_SQL)
+            .bind(stellar_address)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| {
+                error!("sep10: database error reading card keys: {}", e);
+                AppError::InternalError("Database error".to_string())
+            })?;
+        let Some((card_id, ec_pubkey_hex)) = row else {
+            return Err(AppError::Unauthorized);
+        };
+        let ec_pubkey = hex::decode(ec_pubkey_hex.trim()).map_err(|_| AppError::Unauthorized)?;
+        crate::mfa::collect_card_extras(
+            &self.pool,
+            &self.mfa_cfg,
+            &account_uuid,
+            account_id,
+            card_id.trim(),
+            &ec_pubkey,
+            hash,
+            crate::constants::DEVICE_KEY_PURPOSE_SEP10_SIGN_IN,
+            pin_proof,
+            device_key_id,
+            device_signature,
+            &mut methods,
+        )
+        .await?;
+        Ok(methods)
     }
 }
 

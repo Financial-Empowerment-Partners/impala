@@ -142,7 +142,52 @@ fn encode_with_claims(keys: &JwtKeys, claims: &Claims, what: &str) -> Result<Str
     })
 }
 
-fn build_claims(subject: &str, token_type: &str, ttl: usize, role: &str, fid: &str) -> Claims {
+/// The session-assurance a token carries beyond its subject and role: the
+/// verified factors (`amr`), when they were last verified (`auth_time`), and
+/// whether the account must be multi-factor (`mfr`). Built once per sign-in or
+/// step-up and threaded through the issuance helpers so every path stamps the
+/// same shape (`docs/mfa-card-pin-biometrics.md` §2).
+#[derive(Debug, Clone)]
+pub struct SessionAssurance {
+    /// Finalized `amr` (via [`crate::constants::finalize_amr`]): sorted,
+    /// de-duplicated, unknowns dropped, `mfa` appended when multi-factor.
+    pub amr: Vec<String>,
+    /// Unix seconds of the most recent factor verification.
+    pub auth_time: usize,
+    /// Whether the account must present multiple factors (stamped as `mfr`).
+    pub mfa_required: bool,
+}
+
+impl SessionAssurance {
+    /// A sign-in with the given methods, all verified now.
+    pub fn now(methods: Vec<String>, mfa_required: bool) -> Self {
+        SessionAssurance {
+            amr: crate::constants::finalize_amr(methods),
+            auth_time: chrono::Utc::now().timestamp().max(0) as usize,
+            mfa_required,
+        }
+    }
+
+    /// Carry a presented token's `amr`/`auth_time` forward across a refresh
+    /// rotation, dropping unknowns and recomputing `mfa`, while `mfa_required`
+    /// is re-derived from the database by the caller.
+    pub fn carried(amr: Vec<String>, auth_time: usize, mfa_required: bool) -> Self {
+        SessionAssurance {
+            amr: crate::constants::finalize_amr(amr),
+            auth_time,
+            mfa_required,
+        }
+    }
+}
+
+fn build_claims(
+    subject: &str,
+    token_type: &str,
+    ttl: usize,
+    role: &str,
+    fid: &str,
+    assurance: &SessionAssurance,
+) -> Claims {
     let now = chrono::Utc::now().timestamp() as usize;
     Claims {
         sub: subject.to_string(),
@@ -154,6 +199,9 @@ fn build_claims(subject: &str, token_type: &str, ttl: usize, role: &str, fid: &s
         aud: JWT_AUDIENCE.to_string(),
         fid: fid.to_string(),
         role: role.to_string(),
+        amr: assurance.amr.clone(),
+        auth_time: assurance.auth_time,
+        mfr: assurance.mfa_required,
     }
 }
 
@@ -169,6 +217,7 @@ pub fn encode_refresh_token(
     subject: &str,
     role: &str,
     fid: &str,
+    assurance: &SessionAssurance,
 ) -> Result<String, AppError> {
     let claims = build_claims(
         subject,
@@ -176,6 +225,7 @@ pub fn encode_refresh_token(
         REFRESH_TOKEN_TTL_SECS,
         role,
         fid,
+        assurance,
     );
     encode_with_claims(keys, &claims, "encode_refresh_token")
 }
@@ -187,6 +237,7 @@ pub fn encode_temporal_token(
     subject: &str,
     role: &str,
     fid: &str,
+    assurance: &SessionAssurance,
 ) -> Result<String, AppError> {
     let claims = build_claims(
         subject,
@@ -194,6 +245,7 @@ pub fn encode_temporal_token(
         TEMPORAL_TOKEN_TTL_SECS,
         role,
         fid,
+        assurance,
     );
     encode_with_claims(keys, &claims, "encode_temporal_token")
 }
@@ -205,9 +257,10 @@ pub fn encode_token_pair(
     keys: &JwtKeys,
     subject: &str,
     role: &str,
+    assurance: &SessionAssurance,
 ) -> Result<(String, String), AppError> {
     let fid = uuid::Uuid::new_v4().to_string();
-    encode_token_pair_with_family(keys, subject, role, &fid)
+    encode_token_pair_with_family(keys, subject, role, &fid, assurance)
 }
 
 /// Encode a refresh + temporal token pair inside an existing token family
@@ -218,9 +271,10 @@ pub fn encode_token_pair_with_family(
     subject: &str,
     role: &str,
     fid: &str,
+    assurance: &SessionAssurance,
 ) -> Result<(String, String), AppError> {
-    let refresh = encode_refresh_token(keys, subject, role, fid)?;
-    let temporal = encode_temporal_token(keys, subject, role, fid)?;
+    let refresh = encode_refresh_token(keys, subject, role, fid, assurance)?;
+    let temporal = encode_temporal_token(keys, subject, role, fid, assurance)?;
     Ok((refresh, temporal))
 }
 
@@ -234,6 +288,11 @@ mod tests {
     const TEST_SECRET: &str = "test-secret-key-for-jwt-unit-tests";
     const OTHER_SECRET: &str = "other-secret-key-for-jwt-unit-tests";
 
+    /// A single-factor password assurance for the issuance-shape tests.
+    fn sa() -> SessionAssurance {
+        SessionAssurance::now(vec![crate::constants::AMR_PASSWORD.to_string()], false)
+    }
+
     fn keys() -> JwtKeys {
         JwtKeys::new(TEST_SECRET.to_string(), None).expect("primary-only keys")
     }
@@ -244,8 +303,8 @@ mod tests {
 
     #[test]
     fn test_encode_token_pair_returns_two_different_tokens() {
-        let (refresh, temporal) =
-            encode_token_pair(&keys(), "alice", ROLE_VIEW_ONLY).expect("token pair should succeed");
+        let (refresh, temporal) = encode_token_pair(&keys(), "alice", ROLE_VIEW_ONLY, &sa())
+            .expect("token pair should succeed");
 
         assert_ne!(refresh, temporal, "refresh and temporal tokens must differ");
         assert!(!refresh.is_empty());
@@ -256,7 +315,7 @@ mod tests {
     fn test_tokens_decode_and_carry_correct_claims() {
         let k = keys();
         let (refresh, temporal) =
-            encode_token_pair(&k, "carol", ROLE_TOKEN).expect("token pair should succeed");
+            encode_token_pair(&k, "carol", ROLE_TOKEN, &sa()).expect("token pair should succeed");
 
         let refresh_claims =
             decode_claims(&k, &refresh, TOKEN_TYPE_REFRESH).expect("refresh should decode");
@@ -290,7 +349,8 @@ mod tests {
     fn test_pair_with_family_inherits_fid() {
         let k = keys();
         let (refresh, temporal) =
-            encode_token_pair_with_family(&k, "dave", ROLE_VIEW_ONLY, "family-1").expect("pair");
+            encode_token_pair_with_family(&k, "dave", ROLE_VIEW_ONLY, "family-1", &sa())
+                .expect("pair");
         let r = decode_claims(&k, &refresh, TOKEN_TYPE_REFRESH).unwrap();
         let t = decode_claims(&k, &temporal, TOKEN_TYPE_TEMPORAL).unwrap();
         assert_eq!(r.fid, "family-1");
@@ -300,7 +360,8 @@ mod tests {
     #[test]
     fn test_wrong_token_type_rejected() {
         let k = keys();
-        let (refresh, temporal) = encode_token_pair(&k, "erin", ROLE_VIEW_ONLY).expect("pair");
+        let (refresh, temporal) =
+            encode_token_pair(&k, "erin", ROLE_VIEW_ONLY, &sa()).expect("pair");
         assert!(decode_claims(&k, &refresh, TOKEN_TYPE_TEMPORAL).is_err());
         assert!(decode_claims(&k, &temporal, TOKEN_TYPE_REFRESH).is_err());
     }
@@ -309,7 +370,7 @@ mod tests {
     fn test_admin_role_propagates_into_both_tokens() {
         let k = keys();
         let (refresh, temporal) =
-            encode_token_pair(&k, "root", ROLE_ADMIN).expect("token pair should succeed");
+            encode_token_pair(&k, "root", ROLE_ADMIN, &sa()).expect("token pair should succeed");
         for (tok, ty) in [
             (&refresh, TOKEN_TYPE_REFRESH),
             (&temporal, TOKEN_TYPE_TEMPORAL),
@@ -325,7 +386,7 @@ mod tests {
     #[test]
     fn test_kid_header_present_and_matches_fingerprint() {
         let k = keys();
-        let (refresh, _) = encode_token_pair(&k, "alice", ROLE_VIEW_ONLY).expect("pair");
+        let (refresh, _) = encode_token_pair(&k, "alice", ROLE_VIEW_ONLY, &sa()).expect("pair");
         let header = decode_header(&refresh).expect("header decodes");
         let kid = header.kid.expect("kid header must be stamped");
         assert_eq!(kid.len(), JWT_KID_LEN);
@@ -336,7 +397,7 @@ mod tests {
     fn test_token_signed_with_previous_secret_decodes_during_rotation() {
         // Token minted under the old secret (carrying its kid)...
         let old = keys();
-        let (refresh, _) = encode_token_pair(&old, "alice", ROLE_VIEW_ONLY).expect("pair");
+        let (refresh, _) = encode_token_pair(&old, "alice", ROLE_VIEW_ONLY, &sa()).expect("pair");
         // ...still verifies once the old secret moves to JWT_SECRET_PREVIOUS.
         let rotated = keys_with_previous();
         let claims = decode_claims(&rotated, &refresh, TOKEN_TYPE_REFRESH)
@@ -348,7 +409,8 @@ mod tests {
     fn test_token_with_unknown_kid_rejected() {
         let minted_by =
             JwtKeys::new("a-third-secret-key-no-longer-active!".to_string(), None).expect("keys");
-        let (refresh, _) = encode_token_pair(&minted_by, "alice", ROLE_VIEW_ONLY).expect("pair");
+        let (refresh, _) =
+            encode_token_pair(&minted_by, "alice", ROLE_VIEW_ONLY, &sa()).expect("pair");
         // Verifier knows primary+previous, neither matches the token's kid.
         assert!(decode_claims(&keys_with_previous(), &refresh, TOKEN_TYPE_REFRESH).is_err());
     }
@@ -356,7 +418,8 @@ mod tests {
     #[test]
     fn test_wrong_secret_rejected_without_previous() {
         let minted_by = keys();
-        let (refresh, _) = encode_token_pair(&minted_by, "alice", ROLE_VIEW_ONLY).expect("pair");
+        let (refresh, _) =
+            encode_token_pair(&minted_by, "alice", ROLE_VIEW_ONLY, &sa()).expect("pair");
         let other = JwtKeys::new(OTHER_SECRET.to_string(), None).expect("keys");
         assert!(decode_claims(&other, &refresh, TOKEN_TYPE_REFRESH).is_err());
     }
@@ -419,6 +482,9 @@ mod tests {
             aud: JWT_AUDIENCE.to_string(),
             fid: "f".to_string(),
             role: ROLE_VIEW_ONLY.to_string(),
+            amr: vec![],
+            auth_time: 1000,
+            mfr: false,
         };
         let token = encode(
             &k.signing_header(),

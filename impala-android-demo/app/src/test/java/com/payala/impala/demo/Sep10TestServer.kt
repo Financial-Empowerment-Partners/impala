@@ -36,6 +36,8 @@ internal class Sep10TestServer(
     var tomlAnswer: (() -> String)? = null
     var challengeAnswer: ((account: String) -> String)? = null
     var postAnswer: ((transaction: String) -> String)? = null
+    /** The MFA extras the last postChallenge carried (for assertions). */
+    var lastPostExtras: com.payala.impala.stellar.Sep10PostExtras = com.payala.impala.stellar.Sep10PostExtras.NONE
     private var issuedFor: String? = null
 
     private fun sha256(vararg parts: ByteArray) = MessageDigest.getInstance("SHA-256").run { parts.forEach { update(it) }; digest() }
@@ -78,8 +80,13 @@ internal class Sep10TestServer(
         return "{\"transaction\":\"${challenge(StrKey.decodeAccountId(account))}\",\"network_passphrase\":\"$passphrase\"}"
     }
 
-    override fun postChallenge(webAuthEndpoint: String, transaction: String): String {
+    override fun postChallenge(
+        webAuthEndpoint: String,
+        transaction: String,
+        extras: com.payala.impala.stellar.Sep10PostExtras,
+    ): String {
         calls += "post"
+        lastPostExtras = extras
         postAnswer?.let { return it(transaction) }
         val env = Base64.getDecoder().decode(transaction)
         val client = StrKey.decodeAccountId(issuedFor ?: throw Sep10HttpException(401, ""))

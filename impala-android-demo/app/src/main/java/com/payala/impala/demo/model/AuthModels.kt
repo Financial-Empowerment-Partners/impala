@@ -98,7 +98,11 @@ data class CardChallengeResponse(
  */
 data class CardAuthRequest(
     val card_id: String,
-    val signature: String
+    val signature: String,
+    /** Optional MFA extras over the same challenge (docs/mfa-card-pin-biometrics.md §5.1). */
+    val pin_proof: String? = null,
+    val device_key_id: String? = null,
+    val device_signature: String? = null,
 )
 
 /** Response from `GET /auth/okta/config`. Contains Okta client configuration. */

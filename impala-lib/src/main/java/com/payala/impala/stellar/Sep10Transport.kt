@@ -25,7 +25,44 @@ interface Sep10Transport {
 
     /** POST `{"transaction": "<transaction>"}` to [webAuthEndpoint]: the token JSON. */
     @Throws(IOException::class)
-    fun postChallenge(webAuthEndpoint: String, transaction: String): String
+    fun postChallenge(webAuthEndpoint: String, transaction: String): String =
+        postChallenge(webAuthEndpoint, transaction, Sep10PostExtras.NONE)
+
+    /**
+     * POST the challenge with optional MFA extras (a card PIN proof and/or a
+     * phone device-key assertion over the challenge hash,
+     * `docs/mfa-card-pin-biometrics.md` §5.1). The default implementation
+     * ignores [extras]; [HttpSep10Transport] includes them in the JSON body.
+     */
+    @Throws(IOException::class)
+    fun postChallenge(webAuthEndpoint: String, transaction: String, extras: Sep10PostExtras): String
+}
+
+/**
+ * Optional MFA extras carried alongside a SEP-10 challenge POST. All hex; all
+ * absent is [NONE] (a bare card tap).
+ */
+class Sep10PostExtras(
+    val pinProofHex: String? = null,
+    val deviceKeyId: String? = null,
+    val deviceSignatureHex: String? = null,
+) {
+    val isEmpty: Boolean
+        get() = pinProofHex == null && deviceKeyId == null && deviceSignatureHex == null
+
+    /** The extra JSON fields (with leading commas), or "" when empty. */
+    internal fun jsonTail(): String {
+        val sb = StringBuilder()
+        pinProofHex?.let { sb.append(",\"pin_proof\":").append(MiniJson.quote(it)) }
+        deviceKeyId?.let { sb.append(",\"device_key_id\":").append(MiniJson.quote(it)) }
+        deviceSignatureHex?.let { sb.append(",\"device_signature\":").append(MiniJson.quote(it)) }
+        return sb.toString()
+    }
+
+    companion object {
+        @JvmField
+        val NONE = Sep10PostExtras()
+    }
 }
 
 /**
@@ -120,9 +157,9 @@ class HttpSep10Transport @JvmOverloads constructor(
         return exchange(url, "GET", null, "application/json", maxResponseBytes)
     }
 
-    override fun postChallenge(webAuthEndpoint: String, transaction: String): String {
+    override fun postChallenge(webAuthEndpoint: String, transaction: String, extras: Sep10PostExtras): String {
         Sep10Urls.checkEndpoint(webAuthEndpoint)
-        val body = "{\"transaction\":" + MiniJson.quote(transaction) + "}"
+        val body = "{\"transaction\":" + MiniJson.quote(transaction) + extras.jsonTail() + "}"
         return exchange(webAuthEndpoint, "POST", body.toByteArray(Charsets.UTF_8), "application/json", maxResponseBytes)
     }
 

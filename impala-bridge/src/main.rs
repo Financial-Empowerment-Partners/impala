@@ -14,6 +14,7 @@ mod jobs;
 mod jwt;
 mod keys;
 mod ldap;
+mod mfa;
 mod middleware;
 mod models;
 mod notifications;
@@ -58,9 +59,9 @@ use handlers::{
     account, admin, admin_card_issuer, admin_custody, admin_keys, admin_reconciliation,
     admin_replenish, admin_reserve, admin_sep10, admin_webhook, authenticate, card, card_auth,
     card_issuer, device_token, exchange as exchange_handler, exchange_webhook,
-    github as github_handler, google as google_handler, health, logout, managed_seed, mfa, network,
-    notification_subscription, notify, okta as okta_handler, session as session_handler,
-    sso as sso_handler, subscribe, sync, token, transaction,
+    github as github_handler, google as google_handler, health, logout, managed_seed,
+    mfa as mfa_handlers, network, notification_subscription, notify, okta as okta_handler,
+    session as session_handler, sso as sso_handler, subscribe, sync, token, transaction,
 };
 
 #[tokio::main]
@@ -268,6 +269,15 @@ async fn run_server(
     let admin_ids: Arc<std::collections::HashSet<String>> =
         Arc::new(config.admin_account_ids.clone());
     info!("Admin allowlist: {} account(s) configured", admin_ids.len());
+
+    let mfa_cfg = Arc::new(mfa::MfaConfig::from_config(&config));
+    info!(
+        "MFA policy: {} required role(s), max-age {}s, card-PIN trust '{}', device biometric '{}'",
+        mfa_cfg.required_roles.len(),
+        mfa_cfg.max_age_secs,
+        config.mfa_card_pin_trust,
+        config.mfa_device_biometric,
+    );
 
     // Stellar network configuration
     let stellar_config = Arc::new(config.stellar_config());
@@ -636,6 +646,20 @@ async fn run_server(
             "/admin/accounts/{account_id}/sync-mode",
             put(admin::set_sync_mode),
         )
+        // Per-account MFA: factor summary (accounts-read), the mandate
+        // (admin), and device-key recovery for a lost phone (admin).
+        .route(
+            "/admin/accounts/{account_id}/mfa",
+            get(mfa::handlers::admin_get_account_mfa),
+        )
+        .route(
+            "/admin/accounts/{account_id}/mfa-policy",
+            put(mfa::handlers::admin_set_account_mfa_policy),
+        )
+        .route(
+            "/admin/accounts/{account_id}/mfa/device-keys/{key_id}",
+            delete(mfa::handlers::admin_delete_device_key),
+        )
         .route("/authenticate", post(authenticate::authenticate))
         .route("/sync", post(sync::sync_account))
         .route("/sync/payala", post(sync::sync_payala))
@@ -669,8 +693,24 @@ async fn run_server(
         // Attach a Stellar key to a card registered before it was
         // personalized (owner only; both cross-signatures verified).
         .route("/card/stellar-key", put(card::set_card_stellar_key))
-        .route("/mfa", post(mfa::enroll_mfa).get(mfa::get_mfa))
-        .route("/mfa/verify", post(mfa::verify_mfa))
+        .route(
+            "/mfa",
+            post(mfa_handlers::enroll_mfa).get(mfa_handlers::get_mfa),
+        )
+        .route("/mfa/verify", post(mfa_handlers::verify_mfa))
+        // Step-up and factor management (docs/mfa-card-pin-biometrics.md §5).
+        .route("/mfa/status", get(mfa::handlers::mfa_status))
+        .route("/mfa/challenge", post(mfa::handlers::mfa_challenge))
+        .route("/mfa/step-up", post(mfa::handlers::mfa_step_up))
+        .route(
+            "/mfa/device-keys",
+            get(mfa::handlers::list_device_keys).post(mfa::handlers::enroll_device_key),
+        )
+        .route(
+            "/mfa/device-keys/{key_id}",
+            delete(mfa::handlers::delete_device_key),
+        )
+        .route("/mfa/policy", put(mfa::handlers::set_mfa_policy))
         .route(
             "/notify",
             get(notify::list_notify)
@@ -995,6 +1035,7 @@ async fn run_server(
         .layer(Extension(Arc::new(subscribe::ActiveStreams::default())))
         .layer(Extension(stellar_config.clone()))
         .layer(Extension(admin_ids.clone()))
+        .layer(Extension(mfa_cfg.clone()))
         .layer(Extension(seed_protector.clone()))
         .layer(Extension(stellar_signer))
         // Always present, unlike the ConversionReserve handle: the quarantine
@@ -1028,6 +1069,7 @@ async fn run_server(
                     pool: pool.clone(),
                     redis: redis_pool.clone(),
                     admin_ids: admin_ids.clone(),
+                    mfa_cfg: mfa_cfg.clone(),
                 });
             app.layer(Extension(policy))
                 .layer(Extension(ring))

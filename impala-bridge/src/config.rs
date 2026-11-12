@@ -193,6 +193,20 @@ pub struct Config {
     /// Account IDs (JWT `sub`) granted admin; overrides the DB role to `admin`
     /// when the `role` claim is stamped at token issuance.
     pub admin_account_ids: HashSet<String>,
+    /// Roles whose sessions must be multi-factor to use the API
+    /// (`MFA_REQUIRED_ROLES`, comma-separated; empty by default).
+    pub mfa_required_roles: HashSet<String>,
+    /// How long a multi-factor verification keeps a session multi-factor
+    /// before a step-up is needed (`MFA_MAX_AGE_SECS`, default 12 h).
+    pub mfa_max_age_secs: i64,
+    /// Whether to trust a card PIN proof only from an issuer-certified card
+    /// (`MFA_CARD_PIN_TRUST` = `certified`, default) or any registered card
+    /// (`any`, test rigs).
+    pub mfa_card_pin_trust: String,
+    /// Whether to credit the `bio` factor for a device key the client declared
+    /// biometric-bound (`MFA_DEVICE_BIOMETRIC` = `claimed`) or never (`off`,
+    /// default — the bridge does not verify platform key attestation).
+    pub mfa_device_biometric: String,
     /// Max delivery attempts before an admin-webhook delivery is marked failed.
     pub admin_webhook_max_attempts: u32,
     /// Consecutive-failure count after which a webhook is auto-disabled.
@@ -972,6 +986,44 @@ pub fn load_config() -> Config {
         })
         .unwrap_or_default();
 
+    let mfa_required_roles = env::var("MFA_REQUIRED_ROLES")
+        .ok()
+        .or_else(|| from_file("mfa_required_roles"))
+        .map(|s| {
+            s.split(',')
+                .map(|p| p.trim().to_string())
+                .filter(|p| !p.is_empty())
+                .collect::<HashSet<String>>()
+        })
+        .unwrap_or_default();
+
+    let mfa_max_age_secs = env::var("MFA_MAX_AGE_SECS")
+        .ok()
+        .or_else(|| from_file("mfa_max_age_secs"))
+        .and_then(|v| v.parse().ok())
+        .filter(|&v: &i64| v > 0)
+        .unwrap_or(crate::constants::MFA_MAX_AGE_SECS_DEFAULT);
+
+    let mfa_card_pin_trust = env::var("MFA_CARD_PIN_TRUST")
+        .ok()
+        .or_else(|| from_file("mfa_card_pin_trust"))
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| {
+            s == crate::constants::MFA_CARD_PIN_TRUST_CERTIFIED
+                || s == crate::constants::MFA_CARD_PIN_TRUST_ANY
+        })
+        .unwrap_or_else(|| crate::constants::MFA_CARD_PIN_TRUST_CERTIFIED.to_string());
+
+    let mfa_device_biometric = env::var("MFA_DEVICE_BIOMETRIC")
+        .ok()
+        .or_else(|| from_file("mfa_device_biometric"))
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| {
+            s == crate::constants::MFA_DEVICE_BIOMETRIC_OFF
+                || s == crate::constants::MFA_DEVICE_BIOMETRIC_CLAIMED
+        })
+        .unwrap_or_else(|| crate::constants::MFA_DEVICE_BIOMETRIC_OFF.to_string());
+
     let admin_webhook_max_attempts = env::var("ADMIN_WEBHOOK_MAX_ATTEMPTS")
         .ok()
         .or_else(|| from_file("admin_webhook_max_attempts"))
@@ -1257,6 +1309,10 @@ pub fn load_config() -> Config {
         stellar_network_passphrase,
         soroban_contract_id,
         admin_account_ids,
+        mfa_required_roles,
+        mfa_max_age_secs,
+        mfa_card_pin_trust,
+        mfa_device_biometric,
         admin_webhook_max_attempts,
         admin_webhook_disable_threshold,
         admin_webhook_poll_secs,
@@ -1340,6 +1396,10 @@ pub(crate) fn test_config() -> Config {
         stellar_network_passphrase: "Test SDF Network ; September 2015".to_string(),
         soroban_contract_id: None,
         admin_account_ids: HashSet::new(),
+        mfa_required_roles: HashSet::new(),
+        mfa_max_age_secs: crate::constants::MFA_MAX_AGE_SECS_DEFAULT,
+        mfa_card_pin_trust: crate::constants::MFA_CARD_PIN_TRUST_CERTIFIED.to_string(),
+        mfa_device_biometric: crate::constants::MFA_DEVICE_BIOMETRIC_OFF.to_string(),
         admin_webhook_max_attempts: DEFAULT_ADMIN_WEBHOOK_MAX_ATTEMPTS,
         admin_webhook_disable_threshold: DEFAULT_ADMIN_WEBHOOK_DISABLE_THRESHOLD,
         admin_webhook_poll_secs: DEFAULT_ADMIN_WEBHOOK_POLL_SECS,

@@ -793,6 +793,15 @@ pub struct SessionRecord {
     pub csrf: String,
     pub created_at: u64,
     pub is_admin: bool,
+    /// Verified factors for this cookie session and when they were last
+    /// verified — the same `amr`/`auth_time` the bearer path carries, so MFA
+    /// enforcement is identical on both paths. A step-up upgrades them in
+    /// place. Empty / 0 for a session minted before MFA support.
+    pub amr: Vec<String>,
+    pub auth_time: u64,
+    /// Whether the account must be multi-factor (its `mfa_required` column,
+    /// read once at login).
+    pub mfa_required: bool,
 }
 
 fn session_key(sid_hash: &str) -> String {
@@ -824,6 +833,12 @@ pub async fn create_session(
         .arg(record.created_at)
         .arg("is_admin")
         .arg(record.is_admin as u8)
+        .arg("amr")
+        .arg(record.amr.join(","))
+        .arg("auth_time")
+        .arg(record.auth_time)
+        .arg("mfa_required")
+        .arg(record.mfa_required as u8)
         .cmd("EXPIRE")
         .arg(&key)
         .arg(ttl_secs as i64)
@@ -868,6 +883,16 @@ pub async fn get_session(
             .and_then(|v| v.parse().ok())
             .unwrap_or(0),
         is_admin: map.get("is_admin").map(|v| v == "1").unwrap_or(false),
+        amr: map
+            .get("amr")
+            .filter(|s| !s.is_empty())
+            .map(|s| s.split(',').map(str::to_string).collect())
+            .unwrap_or_default(),
+        auth_time: map
+            .get("auth_time")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0),
+        mfa_required: map.get("mfa_required").map(|v| v == "1").unwrap_or(false),
     };
 
     // A record missing its core fields is corrupt — treat as absent.
@@ -877,6 +902,47 @@ pub async fn get_session(
     }
 
     Ok(Some(record))
+}
+
+/// Upgrade a cookie session's verified factors in place after a step-up: set
+/// `amr` and `auth_time` on the existing record, preserving its TTL. Fails
+/// closed (a step-up that could not be recorded must not report success).
+pub async fn upgrade_session_factors(
+    pool: &RedisPool,
+    sid_hash: &str,
+    amr: &[String],
+    auth_time: u64,
+) -> Result<(), AppError> {
+    let mut conn = pool.get().await.map_err(|e| {
+        error!(
+            "upgrade_session_factors: failed to get Redis connection: {}",
+            e
+        );
+        AppError::InternalError("Service temporarily unavailable".to_string())
+    })?;
+    let key = session_key(sid_hash);
+    // Only touch an existing record; HSET on a missing key would resurrect a
+    // logged-out session without its core fields.
+    let exists: bool = conn.exists(&key).await.map_err(|e| {
+        warn!("upgrade_session_factors: EXISTS failed for {}: {}", key, e);
+        AppError::InternalError("Service temporarily unavailable".to_string())
+    })?;
+    if !exists {
+        return Err(AppError::Unauthorized);
+    }
+    redis::pipe()
+        .cmd("HSET")
+        .arg(&key)
+        .arg("amr")
+        .arg(amr.join(","))
+        .arg("auth_time")
+        .arg(auth_time)
+        .query_async::<()>(&mut conn)
+        .await
+        .map_err(|e| {
+            warn!("upgrade_session_factors: HSET failed for {}: {}", key, e);
+            AppError::InternalError("Service temporarily unavailable".to_string())
+        })
 }
 
 /// Slide the session's idle TTL. Fire-and-forget: a failure only shortens the
@@ -951,6 +1017,88 @@ pub(crate) fn mfa_attempts_key(account_id: &str, mfa_type: &str, source: &str) -
 /// string the previous binary SET (WRONGTYPE).
 pub(crate) fn card_challenges_key(card_id: &str) -> String {
     format!("impala:card_challenges:{card_id}")
+}
+
+/// Outstanding step-up challenge list key for an account
+/// (`docs/mfa-card-pin-biometrics.md` §5.2). Same shape and single-use
+/// semantics as the card-challenge list, keyed by account id.
+pub(crate) fn mfa_challenges_key(account_id: &str) -> String {
+    format!("impala:mfa_challenges:{account_id}")
+}
+
+/// Store a freshly-issued step-up challenge for `account_id` (bounded set,
+/// per-entry TTL), mirroring [`push_card_challenge`]. Fails closed.
+pub async fn push_mfa_challenge(
+    pool: &RedisPool,
+    account_id: &str,
+    entry: &str,
+    max_outstanding: usize,
+    ttl_secs: usize,
+) -> Result<(), AppError> {
+    let mut conn = pool.get().await.map_err(|e| {
+        error!("push_mfa_challenge: failed to get Redis connection: {}", e);
+        AppError::InternalError("Service temporarily unavailable".to_string())
+    })?;
+    let key = mfa_challenges_key(account_id);
+    let _pushed: i64 = redis::Script::new(CARD_CHALLENGE_PUSH_SCRIPT)
+        .key(&key)
+        .arg(entry)
+        .arg(max_outstanding as i64)
+        .arg(ttl_secs as i64)
+        .invoke_async(&mut *conn)
+        .await
+        .map_err(|e| {
+            warn!("push_mfa_challenge: Redis script failed for {}: {}", key, e);
+            AppError::InternalError("Service temporarily unavailable".to_string())
+        })?;
+    Ok(())
+}
+
+/// Read (without consuming) every outstanding step-up challenge entry for an
+/// account, oldest first. Fails closed.
+pub async fn list_mfa_challenges(
+    pool: &RedisPool,
+    account_id: &str,
+) -> Result<Vec<String>, AppError> {
+    let mut conn = pool.get().await.map_err(|e| {
+        error!("list_mfa_challenges: failed to get Redis connection: {}", e);
+        AppError::InternalError("Service temporarily unavailable".to_string())
+    })?;
+    let key = mfa_challenges_key(account_id);
+    conn.lrange::<_, Vec<String>>(&key, 0, -1)
+        .await
+        .map_err(|e| {
+            warn!(
+                "list_mfa_challenges: Redis LRANGE failed for {}: {}",
+                key, e
+            );
+            AppError::InternalError("Service temporarily unavailable".to_string())
+        })
+}
+
+/// Atomically consume one outstanding step-up challenge entry, making it
+/// single-use ([`consume_card_challenge`] semantics). Fails closed.
+pub async fn consume_mfa_challenge(
+    pool: &RedisPool,
+    account_id: &str,
+    entry: &str,
+) -> Result<bool, AppError> {
+    let mut conn = pool.get().await.map_err(|e| {
+        error!(
+            "consume_mfa_challenge: failed to get Redis connection: {}",
+            e
+        );
+        AppError::InternalError("Service temporarily unavailable".to_string())
+    })?;
+    let key = mfa_challenges_key(account_id);
+    let removed: i64 = conn.lrem(&key, 1, entry).await.map_err(|e| {
+        warn!(
+            "consume_mfa_challenge: Redis LREM failed for {}: {}",
+            key, e
+        );
+        AppError::InternalError("Service temporarily unavailable".to_string())
+    })?;
+    Ok(removed == 1)
 }
 
 #[cfg(test)]

@@ -35,6 +35,17 @@ pub struct AuthContext {
     /// ADMIN_ACCOUNT_IDS allowlist, otherwise least privilege.
     pub role: String,
     pub source: AuthSource,
+    /// Authentication methods verified for this session (`amr`), and when they
+    /// were last verified (`auth_time`, unix seconds) — the same shape on both
+    /// credential paths so MFA enforcement cannot diverge
+    /// (`docs/mfa-card-pin-biometrics.md`). Empty / 0 for a session minted
+    /// before MFA support (treated as single-factor, long ago).
+    pub amr: Vec<String>,
+    pub auth_time: usize,
+    /// Whether the account must be multi-factor (its stamped `mfr`, bearer
+    /// path; its column, session path). ORed with the role-based requirement
+    /// at enforcement time.
+    pub mfa_required: bool,
 }
 
 impl AuthContext {
@@ -275,6 +286,7 @@ where
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
         let context = validate_request_auth(parts, state).await?;
         authorize_capability(&context.role, C::CAPABILITY)?;
+        enforce_mfa(parts, state, &context).await?;
         Ok(Privileged {
             account_id: context.account_id,
             role: context.role,
@@ -302,6 +314,84 @@ pub async fn issuance_role(
         .ok()
         .flatten()
         .unwrap_or_else(crate::models::default_role)
+}
+
+/// The account's issuance role and whether it must be multi-factor, in one
+/// read. Role follows [`issuance_role`] (allowlist overrides to admin); the
+/// `mfa_required` flag is the account's column (default false, fail-open only
+/// for the per-account mandate — the role-based requirement is enforced
+/// separately against the live `MFA_REQUIRED_ROLES`). Shared by every
+/// token-issuance path through [`issue_session`] / [`reissue_session`].
+async fn role_and_mfa(
+    pool: &sqlx::PgPool,
+    admin_ids: &std::collections::HashSet<String>,
+    account_id: &str,
+) -> (String, bool) {
+    let row = sqlx::query_as::<_, (String, Option<bool>)>(
+        "SELECT role, mfa_required FROM impala_account WHERE payala_account_id = $1",
+    )
+    .bind(account_id)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten();
+    let mfa_required = row.as_ref().and_then(|(_, m)| *m).unwrap_or(false);
+    let role = if admin_ids.contains(account_id) {
+        ROLE_ADMIN.to_string()
+    } else {
+        row.map(|(r, _)| r)
+            .unwrap_or_else(crate::models::default_role)
+    };
+    (role, mfa_required)
+}
+
+/// Whether the account carries the per-account MFA mandate (`mfa_required`
+/// column). Used by the cookie-session login paths, which store it on the
+/// session record. Defaults false (fail-open only for the per-account mandate;
+/// the role-based requirement is ORed in at enforcement).
+pub async fn account_mfa_required(pool: &sqlx::PgPool, account_id: &str) -> bool {
+    sqlx::query_scalar::<_, Option<bool>>(
+        "SELECT mfa_required FROM impala_account WHERE payala_account_id = $1",
+    )
+    .bind(account_id)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()
+    .flatten()
+    .unwrap_or(false)
+}
+
+/// Resolve the role and build the [`SessionAssurance`] for a fresh sign-in that
+/// verified `methods` now. The single place a sign-in path turns a set of
+/// just-verified factors into the token's `amr`/`auth_time`/`mfr`.
+pub async fn issue_session(
+    pool: &sqlx::PgPool,
+    admin_ids: &std::collections::HashSet<String>,
+    account_id: &str,
+    methods: Vec<String>,
+) -> (String, crate::jwt::SessionAssurance) {
+    let (role, mfa_required) = role_and_mfa(pool, admin_ids, account_id).await;
+    (
+        role,
+        crate::jwt::SessionAssurance::now(methods, mfa_required),
+    )
+}
+
+/// Resolve the role and carry a presented token's `amr`/`auth_time` forward
+/// across a refresh rotation (role and `mfr` re-derived from the database).
+pub async fn reissue_session(
+    pool: &sqlx::PgPool,
+    admin_ids: &std::collections::HashSet<String>,
+    account_id: &str,
+    amr: Vec<String>,
+    auth_time: usize,
+) -> (String, crate::jwt::SessionAssurance) {
+    let (role, mfa_required) = role_and_mfa(pool, admin_ids, account_id).await;
+    (
+        role,
+        crate::jwt::SessionAssurance::carried(amr, auth_time, mfa_required),
+    )
 }
 
 /// Validate a request's authentication and return its [`AuthContext`].
@@ -357,6 +447,9 @@ where
         AuthContext {
             account_id: claims.sub,
             role: claims.role,
+            amr: claims.amr,
+            auth_time: claims.auth_time,
+            mfa_required: claims.mfr,
             source: AuthSource::Bearer {
                 jti: claims.jti,
                 fid: claims.fid,
@@ -428,6 +521,9 @@ where
         AuthContext {
             account_id: record.account_id,
             role,
+            amr: record.amr,
+            auth_time: record.auth_time as usize,
+            mfa_required: record.mfa_required,
             source: AuthSource::Session { sid_hash },
         }
     };
@@ -445,6 +541,49 @@ where
     .await?;
 
     Ok(context)
+}
+
+/// The 403 a session that must be multi-factor but is not gets from the gated
+/// extractors.
+fn mfa_required_error() -> AppError {
+    AppError::coded(
+        axum::http::StatusCode::FORBIDDEN,
+        "mfa_required",
+        "This account must complete multi-factor authentication; step up at /mfa/step-up",
+    )
+}
+
+/// Enforce the account's MFA mandate for the general API: if the account must
+/// be multi-factor (its stamped `mfr`, or its role in the live
+/// `MFA_REQUIRED_ROLES`) and the session is not multi-factor-and-fresh, reject
+/// with `mfa_required`. Applied by the gated extractors
+/// ([`AuthenticatedUser`], [`AdminUser`], [`Privileged`]); the step-up,
+/// status, `/session/me` and logout paths deliberately do not call it, so a
+/// single-factor session can reach them to step up.
+async fn enforce_mfa<S>(parts: &mut Parts, state: &S, context: &AuthContext) -> Result<(), AppError>
+where
+    S: Send + Sync,
+{
+    let Extension(mfa_cfg) =
+        Extension::<Arc<crate::mfa::MfaConfig>>::from_request_parts(parts, state)
+            .await
+            .map_err(|_| AppError::InternalError("MFA policy not configured".to_string()))?;
+    if crate::mfa::account_requires_mfa(
+        context.mfa_required,
+        &context.role,
+        &mfa_cfg.required_roles,
+    ) {
+        let now = chrono::Utc::now().timestamp();
+        if !crate::mfa::is_session_multi_factor(
+            &context.amr,
+            context.auth_time,
+            now,
+            mfa_cfg.max_age_secs,
+        ) {
+            return Err(mfa_required_error());
+        }
+    }
+    Ok(())
 }
 
 impl<S> FromRequestParts<S> for AuthContext
@@ -466,6 +605,7 @@ where
 
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
         let context = validate_request_auth(parts, state).await?;
+        enforce_mfa(parts, state, &context).await?;
         Ok(AuthenticatedUser {
             account_id: context.account_id,
             role: context.role,
@@ -484,6 +624,7 @@ where
         if !context.is_admin() {
             return Err(AppError::Forbidden);
         }
+        enforce_mfa(parts, state, &context).await?;
         Ok(AdminUser {
             account_id: context.account_id,
         })
@@ -550,7 +691,18 @@ mod tests {
         parts
             .extensions
             .insert(Arc::new(std::collections::HashSet::<String>::new()));
+        parts.extensions.insert(Arc::new(crate::mfa::MfaConfig {
+            required_roles: std::collections::HashSet::new(),
+            max_age_secs: crate::constants::MFA_MAX_AGE_SECS_DEFAULT,
+            card_pin_trust_certified: true,
+            device_biometric_claimed: false,
+        }));
         parts
+    }
+
+    /// A single-factor password assurance for the extractor tests.
+    fn test_assurance() -> crate::jwt::SessionAssurance {
+        crate::jwt::SessionAssurance::now(vec![crate::constants::AMR_PASSWORD.to_string()], false)
     }
 
     #[tokio::test]
@@ -584,7 +736,8 @@ mod tests {
         // way makes them throw away tokens that are still valid once Redis
         // recovers (impalactl deletes its stored refresh token on 401).
         let keys = JwtKeys::new(TEST_SECRET.to_string(), None).unwrap();
-        let (_refresh, temporal) = encode_token_pair(&keys, "alice", ROLE_VIEW_ONLY).unwrap();
+        let (_refresh, temporal) =
+            encode_token_pair(&keys, "alice", ROLE_VIEW_ONLY, &test_assurance()).unwrap();
         let mut parts = parts_with_extensions(
             Request::builder()
                 .uri("/account")
@@ -601,7 +754,8 @@ mod tests {
     #[tokio::test]
     async fn refresh_token_rejected_on_protected_route() {
         let keys = JwtKeys::new(TEST_SECRET.to_string(), None).unwrap();
-        let (refresh, _temporal) = encode_token_pair(&keys, "alice", ROLE_VIEW_ONLY).unwrap();
+        let (refresh, _temporal) =
+            encode_token_pair(&keys, "alice", ROLE_VIEW_ONLY, &test_assurance()).unwrap();
         let mut parts = parts_with_extensions(
             Request::builder()
                 .uri("/account")

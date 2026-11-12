@@ -490,4 +490,8 @@ moves on either), `custody.sep10_key_generated`,
 signing key, migration 040: fingerprints and versions only; no money moves),
 `card.stellar_key_registered` (a card gained its SEP-10 login key, at
 registration or through `PUT /card/stellar-key`, migration 040: the card id
-only; no money moves).
+only; no money moves), `mfa.device_key_registered`, `mfa.device_key_revoked`
+(a phone device key was added or revoked as an MFA factor, migration 041: the
+device-key handle only — never the key bytes; no money moves),
+`mfa.policy_changed` (the per-account MFA mandate was turned on or off,
+migration 041: the boolean state only; no money moves).

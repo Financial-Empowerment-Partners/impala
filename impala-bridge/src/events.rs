@@ -52,6 +52,23 @@ pub enum AccountEvent {
         account_id: String,
         mfa_type: String,
     },
+    /// A phone device key was registered as an MFA factor. Public handle only
+    /// (the key id) — never the key bytes.
+    MfaDeviceKeyRegistered {
+        account_id: String,
+        key_id: String,
+    },
+    /// A device key was revoked (by the owner or by an admin recovery).
+    MfaDeviceKeyRevoked {
+        account_id: String,
+        key_id: String,
+    },
+    /// The per-account MFA mandate was turned on or off (by the owner or an
+    /// admin). `required` is the new state.
+    MfaPolicyChanged {
+        account_id: String,
+        required: bool,
+    },
     /// An SMS notification destination was confirmed by its recipient. Carries
     /// the row id only — never the number.
     NotifyMobileVerified {
@@ -377,6 +394,9 @@ impl AccountEvent {
             AccountEvent::CardDeleted { .. } => "card.deleted",
             AccountEvent::CardStellarKeyRegistered { .. } => "card.stellar_key_registered",
             AccountEvent::MfaEnrolled { .. } => "mfa.enrolled",
+            AccountEvent::MfaDeviceKeyRegistered { .. } => "mfa.device_key_registered",
+            AccountEvent::MfaDeviceKeyRevoked { .. } => "mfa.device_key_revoked",
+            AccountEvent::MfaPolicyChanged { .. } => "mfa.policy_changed",
             AccountEvent::NotifyMobileVerified { .. } => "notify.mobile_verified",
             AccountEvent::DeviceTokenRegistered { .. } => "device_token.registered",
             AccountEvent::DeviceTokenDeleted { .. } => "device_token.deleted",
@@ -431,6 +451,9 @@ impl AccountEvent {
             | AccountEvent::CardDeleted { account_id, .. }
             | AccountEvent::CardStellarKeyRegistered { account_id, .. }
             | AccountEvent::MfaEnrolled { account_id, .. }
+            | AccountEvent::MfaDeviceKeyRegistered { account_id, .. }
+            | AccountEvent::MfaDeviceKeyRevoked { account_id, .. }
+            | AccountEvent::MfaPolicyChanged { account_id, .. }
             | AccountEvent::NotifyMobileVerified { account_id, .. }
             | AccountEvent::DeviceTokenRegistered { account_id, .. }
             | AccountEvent::DeviceTokenDeleted { account_id }
@@ -508,6 +531,9 @@ impl AccountEvent {
                 json!({ "card_id": card_id })
             }
             AccountEvent::MfaEnrolled { mfa_type, .. } => json!({ "mfa_type": mfa_type }),
+            AccountEvent::MfaDeviceKeyRegistered { key_id, .. } => json!({ "key_id": key_id }),
+            AccountEvent::MfaDeviceKeyRevoked { key_id, .. } => json!({ "key_id": key_id }),
+            AccountEvent::MfaPolicyChanged { required, .. } => json!({ "required": required }),
             AccountEvent::NotifyMobileVerified { notify_id, .. } => {
                 json!({ "notify_id": notify_id })
             }
@@ -1277,8 +1303,12 @@ mod tests {
             "custody.sep10_key_revoked",
             // 040: a card's Stellar key (a login credential) was registered.
             "card.stellar_key_registered",
+            // 041: multi-factor sign-in factors and the per-account mandate.
+            "mfa.device_key_registered",
+            "mfa.device_key_revoked",
+            "mfa.policy_changed",
         ];
-        assert_eq!(FROZEN.len(), 33);
+        assert_eq!(FROZEN.len(), 36);
         let src = include_str!("events.rs");
         let event_type_fn = src
             .find("pub fn event_type(&self)")

@@ -101,11 +101,13 @@ internal class FakeTransport(
     var post: (endpoint: String, transaction: String) -> String = { _, _ -> "{\"token\":\"t\",\"success\":true}" },
 ) : Sep10Transport {
     val calls = mutableListOf<String>()
+    /** The extras the last postChallenge carried (for MFA-threading assertions). */
+    var lastPostExtras: Sep10PostExtras = Sep10PostExtras.NONE
     override fun fetchToml(homeDomain: String): String { calls += "toml $homeDomain"; return toml() }
     override fun getChallenge(webAuthEndpoint: String, account: String, homeDomain: String): String {
         calls += "challenge $webAuthEndpoint $account $homeDomain"; return challenge(webAuthEndpoint, account, homeDomain)
     }
-    override fun postChallenge(webAuthEndpoint: String, transaction: String): String {
-        calls += "post $webAuthEndpoint"; return post(webAuthEndpoint, transaction)
+    override fun postChallenge(webAuthEndpoint: String, transaction: String, extras: Sep10PostExtras): String {
+        calls += "post $webAuthEndpoint"; lastPostExtras = extras; return post(webAuthEndpoint, transaction)
     }
 }

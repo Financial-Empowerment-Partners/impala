@@ -27,6 +27,26 @@ pub struct Claims {
     /// set it (HS256-signed).
     #[serde(default = "default_role")]
     pub role: String,
+    /// Authentication method references the bridge verified for this session,
+    /// sorted, with the derived `mfa` present when it is multi-factor
+    /// (`docs/mfa-card-pin-biometrics.md` §2). Serde-defaulted to empty:
+    /// a token minted before MFA support is single-factor (never `mfa`), the
+    /// fail-closed direction. Re-derived at every issuance; clients cannot set
+    /// it (HS256-signed).
+    #[serde(default)]
+    pub amr: Vec<String>,
+    /// Unix seconds of the most recent factor verification in this session's
+    /// lineage. A step-up refreshes it; a refresh rotation carries it forward.
+    /// Defaulted to 0 (treated as "long ago": a multi-factor claim without a
+    /// fresh `auth_time` is stale).
+    #[serde(default)]
+    pub auth_time: usize,
+    /// Whether the account must present multiple factors to use the API
+    /// (`mfa_required` column or a role in `MFA_REQUIRED_ROLES`), stamped at
+    /// issuance. Defaulted false; re-derived at every issuance, so a change
+    /// takes effect within one temporal-token lifetime.
+    #[serde(default)]
+    pub mfr: bool,
 }
 
 /// Default role for tokens/accounts without an explicit role. Least privilege.
@@ -812,9 +832,19 @@ pub struct Sep10ChallengeResponse {
 }
 
 /// `POST /auth/sep10` body (JSON or form).
+///
+/// The optional MFA extras (JSON bodies only) ride the same tap as the
+/// challenge: a card PIN proof and/or a phone device-key assertion over the
+/// challenge-transaction hash (`docs/mfa-card-pin-biometrics.md` §5.1).
 #[derive(Deserialize)]
 pub struct Sep10TokenRequest {
     pub transaction: String,
+    #[serde(default)]
+    pub pin_proof: Option<String>,
+    #[serde(default)]
+    pub device_key_id: Option<String>,
+    #[serde(default)]
+    pub device_signature: Option<String>,
 }
 
 /// `POST /auth/sep10` — the session `POST /auth/card` mints, plus the
@@ -1397,6 +1427,15 @@ pub struct CardTokenExchangeRequest {
     pub card_id: String,
     /// Hex-encoded ASN.1 DER ECDSA-SHA256 signature from the card (INS_SIGN_AUTH).
     pub signature: String,
+    /// Optional MFA extras over the same challenge the card signed
+    /// (`docs/mfa-card-pin-biometrics.md` §5.1): a card PIN proof (hex DER,
+    /// `SIGN_AUTH` P1=0x01) and/or a phone device-key assertion.
+    #[serde(default)]
+    pub pin_proof: Option<String>,
+    #[serde(default)]
+    pub device_key_id: Option<String>,
+    #[serde(default)]
+    pub device_signature: Option<String>,
 }
 
 // ── Admin webhook feed ───────────────────────────────────────────────────

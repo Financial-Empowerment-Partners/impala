@@ -27,7 +27,7 @@ class TcpBiboTest {
             val session = ImpalaCardSession.openForTest(TcpBibo("127.0.0.1", server.port))
             val version = offMain { session.use { it.sdk.getImpalaAppletVersion() } }
             assertEquals(0, version.major.toInt())
-            assertEquals(3, version.minor.toInt())
+            assertEquals(4, version.minor.toInt())
         }
     }
 
@@ -83,7 +83,7 @@ class TcpBiboTest {
             assertEquals("127.0.0.1:${server.port}", ready.endpoint)
             // The probe released the one-client simulator: a session still works.
             val v = offMain { DebugCardTransport.openSession("127.0.0.1", server.port).use { it.sdk.getImpalaAppletVersion() } }
-            assertEquals(3, v.minor.toInt())
+            assertEquals(4, v.minor.toInt())
         }
         val down = offMain { DebugCardTransport.probe("127.0.0.1", closedPort(), timeoutMs = 500) }
         assertEquals(SimProbe.State.DOWN, down.state)
@@ -99,7 +99,7 @@ class TcpBiboTest {
             holder.close()
             // The queued probe connection is drained, then a fresh session is served.
             val v = offMain { DebugCardTransport.openSession("127.0.0.1", server.port).use { it.sdk.getImpalaAppletVersion() } }
-            assertEquals(3, v.minor.toInt())
+            assertEquals(4, v.minor.toInt())
             assertEquals(SimProbe.State.READY, offMain { DebugCardTransport.probe("127.0.0.1", server.port) }.state)
         }
     }
@@ -112,7 +112,7 @@ class TcpBiboTest {
             assertEquals(false, controller.debugInjectTapOrClose(session)) // reader mode is off
             assertTrue(session.isClosed)
             val v = offMain { DebugCardTransport.openSession("127.0.0.1", server.port).use { it.sdk.getImpalaAppletVersion() } }
-            assertEquals(3, v.minor.toInt())
+            assertEquals(4, v.minor.toInt())
         }
     }
 }

@@ -79,8 +79,11 @@ object Sep10E2e {
         override fun getChallenge(webAuthEndpoint: String, account: String, homeDomain: String): String =
             inner.getChallenge(aliased(webAuthEndpoint), account, homeDomain)
 
-        override fun postChallenge(webAuthEndpoint: String, transaction: String): String =
-            inner.postChallenge(aliased(webAuthEndpoint), transaction)
+        override fun postChallenge(
+            webAuthEndpoint: String,
+            transaction: String,
+            extras: com.payala.impala.stellar.Sep10PostExtras,
+        ): String = inner.postChallenge(aliased(webAuthEndpoint), transaction, extras)
     }
 
     /**

@@ -38,7 +38,7 @@ class ImpalaCardSessionTest {
         assertEquals(identity.cardUuid.replace("-", ""), identity.wireCardId)
         assertEquals(130, identity.pubKeyHex.length)
         assertTrue(identity.isPersonalized)
-        assertEquals("0.3", identity.versionString)
+        assertEquals("0.4", identity.versionString)
     }
 
     @Test

@@ -84,7 +84,11 @@ class CardSignInTest {
     }
 
     private fun run(s: Setup): CardSignInResult =
-        offMain { ImpalaCardSession.fromBibo(s.card.bibo).use { session -> s.signIn.signIn(session) { step -> s.steps += step } } }
+        offMain {
+            ImpalaCardSession.fromBibo(s.card.bibo).use { session ->
+                s.signIn.signIn(session, listener = { step -> s.steps += step })
+            }
+        }
 
     private fun assertLegacySignature(s: Setup, result: CardSignInResult.Legacy) {
         val message = "IMPALA-AUTH:".toByteArray() + s.card.accountId + ByteArray(32) { 0x5a }
@@ -340,5 +344,100 @@ class CardSignInTest {
             assertThrows(IllegalStateException::class.java) { CardAuthenticator.mechanism(ImpalaCardSession.fromBibo(card.bibo)) }
             assertThrows(IllegalStateException::class.java) { CardAuthenticator.stellarKey(ImpalaCardSession.fromBibo(card.bibo)) }
         }
+    }
+
+    // ── MFA extras (docs/mfa-card-pin-biometrics.md) ───────────────────────
+
+    /** The challenge hash a SEP-10 envelope was signed over (as a server recomputes it). */
+    private fun challengeHashOf(anchor: TestAnchor, transaction: String): ByteArray {
+        val env = Base64.getDecoder().decode(transaction)
+        val tx = env.copyOfRange(4, env.size - 4 - 2 * 72)
+        return sha256(sha256(anchor.passphrase.toByteArray()), byteArrayOf(0, 0, 0, 2), tx)
+    }
+
+    @Test
+    fun `a SEP-10 sign-in with the user PIN attaches a verifying PIN proof`() {
+        val s = setup(SimulatorBibo.ED25519_SOFT)
+        var postedTx: String? = null
+        val inner = s.transport.post
+        s.transport.post = { endpoint, tx -> postedTx = tx; inner(endpoint, tx) }
+
+        val result = offMain {
+            ImpalaCardSession.fromBibo(s.card.bibo).use { session ->
+                s.signIn.signIn(session, null, SignInOptions(pin = "1111"))
+            }
+        } as CardSignInResult.Sep10
+        assertTrue(result.tokenJson.contains("header.payload.sig"))
+
+        // The PIN proof rode the POST and verifies under the card's P-256 key
+        // over "IMPALA-APIN:" ‖ accountId ‖ challengeHash — a different tag from
+        // the "IMPALA-AUTH:" sign-in message.
+        val proofHex = s.transport.lastPostExtras.pinProofHex!!
+        val hash = challengeHashOf(s.anchor, postedTx!!)
+        val der = ByteArray(proofHex.length / 2) { proofHex.substring(2 * it, 2 * it + 2).toInt(16).toByte() }
+        val pub = Jca.jcaPublicKey(s.card.pub65)
+        assertTrue(Jca.verifyP256(pub, "IMPALA-APIN:".toByteArray() + s.card.accountId + hash, der))
+        assertFalse(Jca.verifyP256(pub, "IMPALA-AUTH:".toByteArray() + s.card.accountId + hash, der))
+        assertTrue("VERIFY_PIN was used", 0x18 in s.cardCommands)
+    }
+
+    @Test
+    fun `a SEP-10 sign-in with a device signer attaches a verifying device assertion`() {
+        val s = setup(SimulatorBibo.ED25519_SOFT)
+        var postedTx: String? = null
+        val inner = s.transport.post
+        s.transport.post = { endpoint, tx -> postedTx = tx; inner(endpoint, tx) }
+
+        val deviceKey = Jca.genP256()
+        val devicePub = Jca.uncompressedPoint(deviceKey.public as java.security.interfaces.ECPublicKey)
+        val accountId = "device-account-1"
+        val signer = DeviceAssertionSigner { purpose, challenge ->
+            val msg = DeviceKeyProtocol.message(purpose, accountId, challenge)
+            DeviceAssertion("key-123", Jca.signP256(deviceKey.private, msg).let { der -> der.joinToString("") { "%02x".format(it) } })
+        }
+
+        offMain {
+            ImpalaCardSession.fromBibo(s.card.bibo).use { session ->
+                s.signIn.signIn(session, null, SignInOptions(deviceSigner = signer))
+            }
+        }
+        assertEquals("key-123", s.transport.lastPostExtras.deviceKeyId)
+        val sigHex = s.transport.lastPostExtras.deviceSignatureHex!!
+        val der = ByteArray(sigHex.length / 2) { sigHex.substring(2 * it, 2 * it + 2).toInt(16).toByte() }
+        val hash = challengeHashOf(s.anchor, postedTx!!)
+        val expected = DeviceKeyProtocol.message(DeviceKeyProtocol.PURPOSE_SEP10_SIGN_IN, accountId, hash)
+        assertTrue(Jca.verifyP256(Jca.jcaPublicKey(devicePub), expected, der))
+    }
+
+    @Test
+    fun `a legacy sign-in with the user PIN carries a PIN proof on the result`() {
+        val s = setup(SimulatorBibo.ED25519_NONE) // no Stellar key: the legacy path
+        val result = offMain {
+            ImpalaCardSession.fromBibo(s.card.bibo).use { session ->
+                s.signIn.signIn(session, null, SignInOptions(pin = "1111"))
+            }
+        } as CardSignInResult.Legacy
+        val proofHex = result.pinProofHex!!
+        val der = ByteArray(proofHex.length / 2) { proofHex.substring(2 * it, 2 * it + 2).toInt(16).toByte() }
+        val challenge = ByteArray(32) { 0x5a }
+        val pub = Jca.jcaPublicKey(s.card.pub65)
+        assertTrue(Jca.verifyP256(pub, "IMPALA-APIN:".toByteArray() + s.card.accountId + challenge, der))
+    }
+
+    @Test
+    fun `mfa domain tags match the bridge byte for byte`() {
+        // Shared card/bridge vectors (scripts/check-shared-vectors.sh).
+        fun hex(b: ByteArray) = b.joinToString("") { "%02x".format(it) }
+        assertEquals("494d50414c412d4150494e3a", hex("IMPALA-APIN:".toByteArray()))
+        assertEquals("494d50414c412d444b45593a", hex(DeviceKeyProtocol.DOMAIN_TAG))
+    }
+
+    @Test
+    fun `device key protocol message is a fixed layout`() {
+        val msg = DeviceKeyProtocol.message(DeviceKeyProtocol.PURPOSE_STEP_UP, "acct-1", ByteArray(32) { it.toByte() })
+        assertEquals(12 + 1 + 1 + 32 + 32, msg.size)
+        assertEquals("IMPALA-DKEY:", String(msg.copyOfRange(0, 12)))
+        assertEquals(1, msg[12].toInt())
+        assertEquals(DeviceKeyProtocol.PURPOSE_STEP_UP, msg[13])
     }
 }

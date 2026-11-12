@@ -16,6 +16,7 @@ import com.impala.sdk.stellar.Sep10Exception
 import com.payala.impala.card.CardStellarKeys
 import com.payala.impala.card.CardSignIn
 import com.payala.impala.card.CardSignInResult
+import com.payala.impala.card.SignInOptions
 import com.payala.impala.card.ImpalaCardSession
 import com.payala.impala.card.Sep10Fallback
 import com.payala.impala.demo.auth.CardSep10
@@ -62,7 +63,12 @@ data class CardLoginTap(
     val sep10TokenJson: String? = null,
     val sep10Fallback: Sep10Fallback? = null,
     /** The card's Stellar key when a fallback tap read it (public values); see [LoginViewModel.loginWithCard]. */
-    val stellarKey: StellarCardKey? = null
+    val stellarKey: StellarCardKey? = null,
+    /** MFA extras from a legacy tap, to post with `POST /auth/card` (the SEP-10
+     *  path posts its own inside the tap). All null for a bare tap. */
+    val pinProofHex: String? = null,
+    val deviceKeyId: String? = null,
+    val deviceSignatureHex: String? = null,
 )
 
 /**
@@ -358,22 +364,24 @@ class LoginViewModel : ViewModel() {
      * @throws HttpException / IOException from the bridge requests
      * @throws Sep10Exception when the server's challenge fails the client checks
      */
+    @JvmOverloads
     fun signInWithCardTap(
         session: ImpalaCardSession,
         api: BridgeApiService,
-        sep10: Sep10Client? = null
+        sep10: Sep10Client? = null,
+        options: SignInOptions = SignInOptions(),
     ): CardLoginTap {
         val signIn = CardSignIn(sep10) { wireCardId ->
             runBlocking { withTimeout(LOGIN_TIMEOUT_MS) { fetchCardChallenge(api, wireCardId) } }
         }
-        val result = signIn.signIn(session) { step ->
+        val result = signIn.signIn(session, { step ->
             when (step) {
                 CardSignIn.Step.CONTACTING_SERVER, CardSignIn.Step.SUBMITTING, CardSignIn.Step.FALLING_BACK ->
                     TapProgress.report(TapStep.CONTACTING_BRIDGE)
                 // The card steps show through the traced exchanges (CardStepLabels).
                 CardSignIn.Step.READING_CARD, CardSignIn.Step.SIGNING -> Unit
             }
-        }
+        }, options)
         return when (result) {
             is CardSignInResult.Sep10 -> {
                 AppLogger.i("Auth", "Card signed a SEP-10 challenge")
@@ -381,7 +389,11 @@ class LoginViewModel : ViewModel() {
             }
             is CardSignInResult.Legacy -> {
                 result.fallback?.let { AppLogger.i("Auth", "Card login used the legacy challenge (SEP-10: $it)") }
-                CardLoginTap(result.identity, result.signatureHex, sep10Fallback = result.fallback, stellarKey = result.stellarKey)
+                CardLoginTap(
+                    result.identity, result.signatureHex, sep10Fallback = result.fallback,
+                    stellarKey = result.stellarKey, pinProofHex = result.pinProofHex,
+                    deviceKeyId = result.deviceKeyId, deviceSignatureHex = result.deviceSignatureHex,
+                )
             }
         }
     }
@@ -455,7 +467,13 @@ class LoginViewModel : ViewModel() {
                         }
                     } else {
                         api.cardTokenExchange(
-                            CardAuthRequest(card_id = identity.wireCardId, signature = tap.signatureHex)
+                            CardAuthRequest(
+                                card_id = identity.wireCardId,
+                                signature = tap.signatureHex,
+                                pin_proof = tap.pinProofHex,
+                                device_key_id = tap.deviceKeyId,
+                                device_signature = tap.deviceSignatureHex,
+                            )
                         )
                     }
                     @Suppress("SENSELESS_COMPARISON") // Gson can leave a non-null field null

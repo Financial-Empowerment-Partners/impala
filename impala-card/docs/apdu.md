@@ -1,8 +1,11 @@
 # Impala APDU Command Reference
 
-Applet 0.3 / transfer protocol v1 (applet 0.1 = protocol v0, retired). Applet
-0.3 adds the card's Stellar key and SEP-10 sign-in (`GET_STELLAR_KEY`,
-`SIGN_SEP10`); nothing of 0.2 changed.
+Applet 0.4 / transfer protocol v1 (applet 0.1 = protocol v0, retired). Applet
+0.3 added the card's Stellar key and SEP-10 sign-in (`GET_STELLAR_KEY`,
+`SIGN_SEP10`); applet 0.4 adds cardholder verification for sign-in
+(`GET_USER_VERIFICATION`, `SET_SIGN_IN_POLICY`, `CHANGE_USER_PIN`, and
+`SIGN_AUTH` P1=0x01, the PIN proof — `docs/mfa-card-pin-biometrics.md`).
+Nothing of 0.2 or 0.3 changed.
 
 Package AID: `0102030405060708`, applet instance AID `01020304050607080102`
 (defaults in `applet/build.xml`; live builds override both via
@@ -16,7 +19,7 @@ applet source is authoritative. `ApduDocTest` and `ApduDocDriftTest`
 (`sdk/src/jvmTest`) pin this table, the dispatch switch, both `Constants`
 files and the status words the applet throws to each other.
 
-<!-- claim-count: apdu-app-ins=22 apdu-scp03-ins=6 apdu-undispatched=5 -->
+<!-- claim-count: apdu-app-ins=25 apdu-scp03-ins=6 apdu-undispatched=5 -->
 
 ## Command classes (CLA)
 
@@ -57,7 +60,7 @@ the secured CLA with `0x6E00` — they are **CLA 0x00 only**.
 | `0x21` | GET_GENDER | 0/0 | — | stored gender bytes (variable, ≤ 16) | none |
 | `0x22` | SET_GENDER | 0/0 | free-form bytes, ≤ 16 (`0x6C04` if longer) | — | none (only: not terminated) |
 | `0x24` | GET_EC_PUB_KEY | 0/0 | — | 65-byte uncompressed secp256r1 public key (`0x6230` before INITIALIZE) | none |
-| `0x25` | SIGN_AUTH | 0/0 | bridge challenge, 8–64 raw bytes (`0x6700` outside bounds) | DER ECDSA-SHA256 signature over `"IMPALA-AUTH:" ‖ accountId(16) ‖ challenge` | not terminated; provisioning gate; personalized (`0x6234`) |
+| `0x25` | SIGN_AUTH | P1 form/0 | bridge challenge, 8–64 raw bytes (`0x6700` outside bounds) | DER ECDSA-SHA256 signature over `"IMPALA-AUTH:" ‖ accountId(16) ‖ challenge`, or, with P1=0x01 (PIN proof), over `"IMPALA-APIN:" ‖ accountId(16) ‖ challenge` | not terminated; provisioning gate; personalized (`0x6234`); P1=0x01 and (on a card whose sign-in policy requires it) P1=0x00 need the user PIN verified (`0x6690`, `0x6985` with no provisioned PIN) |
 | `0x2C` | INITIALIZE | 0/0 | host entropy seed (mixed into the RNG; does not determine keys) | — | one-shot: `0x6686` once initialized; not terminated |
 | `0x2E` | IS_CARD_ALIVE | 0/0 | — | — (`0x6687` if terminated) | not terminated |
 | `0x30` | SIGN_TRANSFER_V2 | 0/0 | 4-byte user PIN (or `0000` PIN-less) + 60-byte signable | 209 bytes: DER transfer signature (72B slot) ‖ EC pubkey (65B) ‖ issuer certificate (72B slot) | user PIN or PIN-less; not terminated; provisioning gate; personalized (`0x6234`); CLA 0x00 only (`0x6E00`) |
@@ -66,7 +69,10 @@ the secured CLA with `0x6E00` — they are **CLA 0x00 only**.
 | `0x35` | GET_RECEIVE_STATE | 0/0 | — | 36 bytes: lastReceiveCounter(4 BE) ‖ lastReceiveDigest(32) | none |
 | `0x36` | GET_LAST_TRANSFER | 0/0 | — | 132 bytes: lastSentSignable(60) ‖ signature(72B slot); `0x6A83` when never sent | none; CLA 0x00 only (`0x6E00`) |
 | `0x37` | GET_STELLAR_KEY | 0/0 | — | 169 bytes: engine(1: `0x01` soft, `0x02` native) ‖ Ed25519 public key(32) ‖ binding signature(72B slot) ‖ proof signature(64); both signatures are zeros until personalized; `0x623C` on a card without a Stellar key | none; CLA 0x00 only (`0x6E00`) |
-| `0x38` | SIGN_SEP10 | part/0 | P1=0x00 BEGIN: networkId(32) ‖ first transaction bytes. P1=0x01 CONTINUE: more bytes. P1=0x02 FINISH: last bytes (the SDK always sends at least one) | FINISH: 64-byte Ed25519 signature of SHA-256(networkId ‖ `00000002` ‖ transaction) | not terminated; provisioning gate; personalized (`0x6234`); Stellar key (`0x623C`); CLA 0x00 only (`0x6E00`); no PIN |
+| `0x38` | SIGN_SEP10 | part/0 | P1=0x00 BEGIN: networkId(32) ‖ first transaction bytes. P1=0x01 CONTINUE: more bytes. P1=0x02 FINISH: last bytes (the SDK always sends at least one) | FINISH: 64-byte Ed25519 signature of SHA-256(networkId ‖ `00000002` ‖ transaction) | not terminated; provisioning gate; personalized (`0x6234`); Stellar key (`0x623C`); CLA 0x00 only (`0x6E00`); sign-in PIN policy (`0x6690`) |
+| `0x39` | GET_USER_VERIFICATION | 0/0 | — | 4 bytes: format `0x01` ‖ policy(1: `0x01` sign-in PIN, `0x02` fixed, `0x04` PIN provisioned) ‖ user-PIN tries left(1) ‖ session(1: `0x01` PIN verified) | none (every state) |
+| `0x3A` | SET_SIGN_IN_POLICY | P1 on/off, 0 | — | — | not terminated; user PIN verified (`0x6690`; `0x6985` with no provisioned PIN, or turning off a requirement fixed at install) |
+| `0x3B` | CHANGE_USER_PIN | 0/0 | new user PIN: 4 digit values, not `0000` (`0x6691`) | — | not terminated; user PIN verified (`0x6690` / `0x6985`) |
 | `0x64` | GET_VERSION | 0/0 | — | major (2B) ‖ minor (2B) ‖ git rev count (2B) ‖ short git hash (4B) | none |
 
 Notes:

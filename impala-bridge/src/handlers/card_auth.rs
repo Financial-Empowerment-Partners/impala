@@ -189,17 +189,21 @@ pub async fn card_challenge(
 /// a bad signature over a live challenge — a real guess — counts toward the
 /// `(card, source)` lockout. An empty submission against a card whose UID
 /// anyone can read must not be able to spend the holder's budget.
+#[allow(clippy::too_many_arguments)]
 pub async fn card_token_exchange(
     Extension(pool): Extension<PgPool>,
     Extension(jwt_keys): Extension<Arc<crate::jwt::JwtKeys>>,
     Extension(redis_pool): Extension<Arc<deadpool_redis::Pool>>,
     Extension(admin_ids): Extension<Arc<std::collections::HashSet<String>>>,
+    Extension(mfa_cfg): Extension<Arc<crate::mfa::MfaConfig>>,
     Extension(metrics): Extension<Arc<AppMetrics>>,
     ClientSource(source): ClientSource,
     Json(payload): Json<CardTokenExchangeRequest>,
 ) -> Result<Json<TokenResponse>, AppError> {
-    let result =
-        card_token_exchange_inner(pool, jwt_keys, redis_pool, admin_ids, &source, payload).await;
+    let result = card_token_exchange_inner(
+        pool, jwt_keys, redis_pool, admin_ids, mfa_cfg, &source, payload,
+    )
+    .await;
     metrics.record_token_exchange("card", token_exchange_outcome(&result));
     result
 }
@@ -209,6 +213,7 @@ async fn card_token_exchange_inner(
     jwt_keys: Arc<crate::jwt::JwtKeys>,
     redis_pool: Arc<deadpool_redis::Pool>,
     admin_ids: Arc<std::collections::HashSet<String>>,
+    mfa_cfg: Arc<crate::mfa::MfaConfig>,
     source: &str,
     payload: CardTokenExchangeRequest,
 ) -> Result<Json<TokenResponse>, AppError> {
@@ -309,9 +314,9 @@ async fn card_token_exchange_inner(
         .find(|(_, challenge)| {
             verify_card_signature(&ec_pubkey, &account_uuid, challenge, &signature)
         })
-        .map(|(entry, _)| *entry);
+        .map(|(entry, challenge)| (*entry, challenge.clone()));
 
-    let Some(entry) = matched else {
+    let Some((entry, challenge)) = matched else {
         // A real guess: a signature that verifies against no live challenge.
         // This is the ONLY card-path failure that counts toward lockout.
         warn!(
@@ -347,11 +352,32 @@ async fn card_token_exchange_inner(
         card_id, account_id
     );
 
+    // The factors verified in this exchange become the session's `amr`: card
+    // possession always, plus a PIN proof and/or a device-key assertion when
+    // the client sent them (verified against the challenge the card signed).
+    let mut methods = vec![crate::constants::AMR_CARD.to_string()];
+    crate::mfa::collect_card_extras(
+        &pool,
+        &mfa_cfg,
+        &account_uuid,
+        &account_id,
+        &card_id,
+        &ec_pubkey,
+        &challenge,
+        crate::constants::DEVICE_KEY_PURPOSE_CARD_SIGN_IN,
+        payload.pin_proof.as_deref(),
+        payload.device_key_id.as_deref(),
+        payload.device_signature.as_deref(),
+        &mut methods,
+    )
+    .await?;
+
     // Issue local JWT tokens (role derived from DB + allowlist at issuance).
     // No auto-provisioning: the card FK guarantees the account exists.
-    let role = crate::auth::issuance_role(&pool, &admin_ids, &account_id).await;
+    let (role, assurance) =
+        crate::auth::issue_session(&pool, &admin_ids, &account_id, methods).await;
     let (refresh_token, temporal_token) =
-        crate::jwt::encode_token_pair(&jwt_keys, &account_id, &role)?;
+        crate::jwt::encode_token_pair(&jwt_keys, &account_id, &role, &assurance)?;
 
     info!("card_auth: tokens issued for account_id={}", account_id);
 

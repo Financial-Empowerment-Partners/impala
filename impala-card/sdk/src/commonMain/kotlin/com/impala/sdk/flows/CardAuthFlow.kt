@@ -30,4 +30,12 @@ object CardAuthFlow {
         val challenge = decodeChallenge(challengeHex)
         return cardFlow { Hex.encode(sdk.signAuthChallenge(challenge).toByteArray()) }
     }
+
+    /**
+     * Produces a card PIN proof (`SIGN_AUTH` P1=0x01) over [challenge] and
+     * returns the DER signature as lowercase hex. The user PIN must have been
+     * verified this session, or the card refuses (`CardError.PinRequired`).
+     */
+    fun signPinProof(sdk: ImpalaSDK, challenge: ByteArray): String =
+        cardFlow { Hex.encode(sdk.signPinProof(challenge).toByteArray()) }
 }

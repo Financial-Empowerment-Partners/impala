@@ -182,9 +182,21 @@ pub async fn token(
         // or a DB error mints least privilege, never the presented token's
         // role — a deleted treasurer must not keep re-minting treasury power
         // off a 14-day refresh family.
-        let role = crate::auth::issuance_role(&pool, &admin_ids, &claims.sub).await;
-        let (new_refresh_token, temporal_token) =
-            crate::jwt::encode_token_pair_with_family(&jwt_keys, &claims.sub, &role, &claims.fid)?;
+        let (role, assurance) = crate::auth::reissue_session(
+            &pool,
+            &admin_ids,
+            &claims.sub,
+            claims.amr,
+            claims.auth_time,
+        )
+        .await;
+        let (new_refresh_token, temporal_token) = crate::jwt::encode_token_pair_with_family(
+            &jwt_keys,
+            &claims.sub,
+            &role,
+            &claims.fid,
+            &assurance,
+        )?;
 
         info!(
             "token: tokens issued (with refresh rotation) for sub={}",
@@ -272,12 +284,19 @@ pub async fn token(
 
     // Embed the account's server-side role in the token (defaults to
     // view-only), with the ADMIN_ACCOUNT_IDS allowlist overriding to admin.
-    let role = crate::auth::issuance_role(&pool, &admin_ids, username).await;
+    // The factor here is the password; `mfr` is derived from the account.
+    let (role, assurance) = crate::auth::issue_session(
+        &pool,
+        &admin_ids,
+        username,
+        vec![crate::constants::AMR_PASSWORD.to_string()],
+    )
+    .await;
 
     // Mint a fresh family; also return a temporal token (additive — saves
     // well-behaved clients an immediate refresh round trip).
     let (refresh_token, temporal_token) =
-        crate::jwt::encode_token_pair(&jwt_keys, username, &role)?;
+        crate::jwt::encode_token_pair(&jwt_keys, username, &role, &assurance)?;
 
     info!("token: refresh token issued for username={}", username);
     Ok(Json(TokenResponse {

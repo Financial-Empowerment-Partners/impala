@@ -9,7 +9,7 @@ class SimulatorApduServerTest {
     fun `round-trips GET_VERSION and keeps the card across connections`() {
         SimulatorApduServer(port = 0).start().use { server ->
             TcpApduClient("127.0.0.1", server.port).use { client ->
-                assertEquals(3, ImpalaSDK(client).getImpalaAppletVersion().minor.toInt())
+                assertEquals(4, ImpalaSDK(client).getImpalaAppletVersion().minor.toInt())
                 ImpalaSDK(client).setSeed()
             }
             TcpApduClient("127.0.0.1", server.port).use { client ->

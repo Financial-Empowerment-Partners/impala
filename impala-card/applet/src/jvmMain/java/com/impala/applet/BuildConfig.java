@@ -5,7 +5,7 @@ public class BuildConfig {
 
     public static final short MAJOR_VERSION = 0;
 
-    public static final short MINOR_VERSION = 3;
+    public static final short MINOR_VERSION = 4;
 
     /** git rev-list --count HEAD **/
     public static final short GIT_REV_LIST = 0;

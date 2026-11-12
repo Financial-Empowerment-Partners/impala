@@ -5,6 +5,7 @@ import com.impala.sdk.flows.CardError
 import com.impala.sdk.flows.CardFlowException
 import com.impala.sdk.flows.Sep10Flow
 import com.impala.sdk.models.StellarCardKey
+import com.impala.sdk.models.UserVerification
 import com.impala.sdk.stellar.Sep10Challenge
 import com.payala.impala.stellar.Ed25519
 
@@ -92,5 +93,58 @@ object CardAuthenticator {
     fun signSep10(session: ImpalaCardSession, cardKey: ByteArray, challenge: Sep10Challenge): String {
         requireBackgroundThread("Signing a SEP-10 challenge")
         return Sep10Flow.sign(session.sdk, cardKey, challenge, Ed25519)
+    }
+
+    /**
+     * The card's cardholder-verification state (applet 0.4): whether a sign-in
+     * PIN is required, whether a user PIN is provisioned, and whether it is
+     * verified in this session. Null for an applet older than 0.4.
+     *
+     * @throws IllegalStateException on the main thread
+     * @throws CardFlowException on any card failure
+     */
+    @JvmStatic
+    fun userVerification(session: ImpalaCardSession): UserVerification? {
+        requireBackgroundThread("Reading cardholder verification")
+        return try {
+            session.sdk.getUserVerification()
+        } catch (e: Exception) {
+            throw CardFlowException(CardError.from(e), e)
+        }
+    }
+
+    /**
+     * Verifies the cardholder's user PIN for this session (`VERIFY_PIN`), so a
+     * subsequent PIN proof or a policy-gated sign-in is allowed. A wrong or
+     * blocked PIN surfaces as [CardError.WrongPin] / [CardError.PinBlocked].
+     *
+     * @throws IllegalStateException on the main thread
+     * @throws CardFlowException on any card failure
+     */
+    @JvmStatic
+    fun verifyUserPin(session: ImpalaCardSession, pin: String) {
+        requireBackgroundThread("Verifying the user PIN")
+        try {
+            session.sdk.verifyUserPin(pin)
+        } catch (e: Exception) {
+            throw CardFlowException(CardError.from(e), e)
+        }
+    }
+
+    /**
+     * Produces a PIN proof (`SIGN_AUTH` P1=0x01) over [challenge] and returns
+     * the DER signature as lowercase hex. The user PIN must have been verified
+     * this session ([verifyUserPin]); the applet refuses otherwise
+     * ([CardError.PinRequired]). The challenge is the same value the sign-in
+     * signature covers: the legacy card challenge, or a SEP-10 transaction
+     * hash.
+     *
+     * @throws IllegalStateException on the main thread
+     * @throws CardFlowException on any card failure
+     */
+    @JvmStatic
+    fun signPinProof(session: ImpalaCardSession, challenge: ByteArray): String {
+        requireBackgroundThread("Signing a PIN proof")
+        return CardAuthFlow.signPinProof(session.sdk, challenge)
     }
 }

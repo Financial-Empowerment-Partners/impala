@@ -83,10 +83,15 @@ class Sep10Client @JvmOverloads constructor(
      * Posts [signedEnvelope] to [webAuthEndpoint] and returns the raw token
      * JSON, after checking it is a JSON object with a string `token`.
      */
+    @JvmOverloads
     @Throws(IOException::class, Sep10ClientException::class)
-    fun submit(webAuthEndpoint: String, signedEnvelope: String): String {
+    fun submit(
+        webAuthEndpoint: String,
+        signedEnvelope: String,
+        extras: Sep10PostExtras = Sep10PostExtras.NONE,
+    ): String {
         checkedEndpoint(webAuthEndpoint)
-        val body = transport.postChallenge(webAuthEndpoint, signedEnvelope)
+        val body = transport.postChallenge(webAuthEndpoint, signedEnvelope, extras)
         val fields = jsonFields(body, "token response")
         if (fields["token"].isNullOrEmpty()) throw Sep10ClientException(Sep10ClientException.Kind.RESPONSE_INVALID, "token response has no token")
         return body

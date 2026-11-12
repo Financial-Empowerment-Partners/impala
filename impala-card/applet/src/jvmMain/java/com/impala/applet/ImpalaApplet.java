@@ -29,6 +29,7 @@ import static com.impala.applet.Constants.DOMAIN_TAG_LENGTH;
 import static com.impala.applet.Constants.ED25519_PUB_KEY_LENGTH;
 import static com.impala.applet.Constants.ED25519_SIG_LENGTH;
 import static com.impala.applet.Constants.HASH_LENGTH;
+import static com.impala.applet.Constants.INS_CHANGE_USER_PIN;
 import static com.impala.applet.Constants.INS_GET_ACCOUNT_ID;
 import static com.impala.applet.Constants.INS_GET_BALANCE;
 import static com.impala.applet.Constants.INS_GET_EC_PUB_KEY;
@@ -39,6 +40,7 @@ import static com.impala.applet.Constants.INS_GET_PERSONALIZATION;
 import static com.impala.applet.Constants.INS_GET_RECEIVE_STATE;
 import static com.impala.applet.Constants.INS_GET_STELLAR_KEY;
 import static com.impala.applet.Constants.INS_GET_USER_DATA;
+import static com.impala.applet.Constants.INS_GET_USER_VERIFICATION;
 import static com.impala.applet.Constants.INS_GET_VERSION;
 import static com.impala.applet.Constants.INS_INITIALIZE;
 import static com.impala.applet.Constants.INS_IS_CARD_ALIVE;
@@ -49,6 +51,7 @@ import static com.impala.applet.Constants.INS_SCP03_PROVISION_PIN;
 import static com.impala.applet.Constants.INS_SCP03_TERMINATE;
 import static com.impala.applet.Constants.INS_SET_FULL_NAME;
 import static com.impala.applet.Constants.INS_SET_GENDER;
+import static com.impala.applet.Constants.INS_SET_SIGN_IN_POLICY;
 import static com.impala.applet.Constants.INS_SIGN_AUTH;
 import static com.impala.applet.Constants.INS_SIGN_SEP10;
 import static com.impala.applet.Constants.INS_SIGN_TRANSFER_V2;
@@ -68,6 +71,9 @@ import static com.impala.applet.Constants.P1_PERSONALIZE_ISSUER_KEY;
 import static com.impala.applet.Constants.P1_SEP10_BEGIN;
 import static com.impala.applet.Constants.P1_SEP10_CONTINUE;
 import static com.impala.applet.Constants.P1_SEP10_FINISH;
+import static com.impala.applet.Constants.P1_SIGN_AUTH_PIN_PROOF;
+import static com.impala.applet.Constants.P1_SIGN_IN_PIN_OFF;
+import static com.impala.applet.Constants.P1_SIGN_IN_PIN_ON;
 import static com.impala.applet.Constants.P2_MASTER_PIN;
 import static com.impala.applet.Constants.P2_USER_PIN;
 import static com.impala.applet.Constants.PERSONALIZATION_LENGTH;
@@ -112,13 +118,19 @@ import static com.impala.applet.Constants.SW_ERROR_ZERO_AMOUNT;
 import static com.impala.applet.Constants.TAG_LENGTH_LENGTH;
 import static com.impala.applet.Constants.TRANSFER_PROTOCOL_VERSION;
 import static com.impala.applet.Constants.TRANSFER_RESPONSE_LENGTH;
+import static com.impala.applet.Constants.USER_VERIFICATION_FORMAT;
+import static com.impala.applet.Constants.USER_VERIFICATION_LENGTH;
 import static com.impala.applet.Constants.UUID_LENGTH;
+import static com.impala.applet.Constants.UV_POLICY_PIN_PROVISIONED;
+import static com.impala.applet.Constants.UV_POLICY_SIGN_IN_PIN;
+import static com.impala.applet.Constants.UV_POLICY_SIGN_IN_PIN_FIXED;
+import static com.impala.applet.Constants.UV_SESSION_PIN_VERIFIED;
 import static com.impala.applet.Constants.XFER_MESSAGE_LENGTH;
 import static com.impala.applet.Constants.ZERO;
 
 /**
- * Main JavaCard applet for the Impala payment card (applet 0.3: transfer
- * protocol v1 and the Stellar key).
+ * Main JavaCard applet for the Impala payment card (applet 0.4: transfer
+ * protocol v1, the Stellar key and cardholder verification for sign-in).
  *
  * <p>Handles APDU commands for account management, PIN verification, the
  * issuer-certified offline transfer protocol (SIGN_TRANSFER_V2 /
@@ -138,6 +150,13 @@ import static com.impala.applet.Constants.ZERO;
  * SEP-10 challenge (sequence number zero, manage-data operations only,
  * addressed to this key). It never signs a hash or message supplied by the
  * host, so it cannot authorize a ledger transaction.</p>
+ *
+ * <p>Cardholder verification (docs/mfa-card-pin-biometrics.md): "the user PIN
+ * is verified" means a PIN the issuer provisioned (never a factory value, and
+ * never while the factory master PIN could still replace it) was checked
+ * since the applet was selected. A card can require that before it signs in
+ * at all, and SIGN_AUTH can state it in what it signs: the PIN proof, a
+ * message under its own tag that the applet signs in no other state.</p>
  */
 public class ImpalaApplet extends Applet {
     // --- Status word constants for APDU error responses (applet-local names;
@@ -180,6 +199,15 @@ public class ImpalaApplet extends Applet {
             (byte) 0x49, (byte) 0x4D, (byte) 0x50, (byte) 0x41, // "IMPA"
             (byte) 0x4C, (byte) 0x41, (byte) 0x2D, (byte) 0x41, // "LA-A"
             (byte) 0x55, (byte) 0x54, (byte) 0x48, (byte) 0x3A  // "UTH:"
+    };
+    // ASCII "IMPALA-APIN:" — the PIN proof: SIGN_AUTH P1=0x01 signs
+    // AUTH_PIN_DOMAIN_TAG || accountId(16) || challenge(8..=64), and only while
+    // the user PIN is verified. Must match CARD_PIN_PROOF_DOMAIN_PREFIX in
+    // impala-bridge/src/constants.rs (docs/mfa-card-pin-biometrics.md §3.3).
+    private static final byte[] AUTH_PIN_DOMAIN_TAG = {
+            (byte) 0x49, (byte) 0x4D, (byte) 0x50, (byte) 0x41, // "IMPA"
+            (byte) 0x4C, (byte) 0x41, (byte) 0x2D, (byte) 0x41, // "LA-A"
+            (byte) 0x50, (byte) 0x49, (byte) 0x4E, (byte) 0x3A  // "PIN:"
     };
     // ASCII "IMPALA-XFER:" — the transfer message a card signs is
     // XFER_DOMAIN_TAG || 0x01 || programId(16) || signable(60) (89 bytes).
@@ -226,11 +254,13 @@ public class ImpalaApplet extends Applet {
     //   [ENC(16) | MAC(16) | DEK(16)      if flags & FLAG_INSTALL_KEYS]
     //   [masterPIN(8) | userPIN(4)        if flags & FLAG_INSTALL_PINS]
     //   [programId(16) | issuerPubKey(65) if flags & FLAG_INSTALL_PROGRAM (requires FLAG_INSTALL_KEYS)]
+    // FLAG_INSTALL_SIGN_IN_PIN carries no data: it fixes the sign-in policy.
     private static final byte TAG_INSTALL_PROVISIONING = (byte) 0x01;
     private static final byte FLAG_INSTALL_ENFORCE = (byte) 0x01;
     private static final byte FLAG_INSTALL_KEYS = (byte) 0x02;
     private static final byte FLAG_INSTALL_PINS = (byte) 0x04;
     private static final byte FLAG_INSTALL_PROGRAM = (byte) 0x08;
+    private static final byte FLAG_INSTALL_SIGN_IN_PIN = (byte) 0x10;
     private static final short SCP03_KEY_SET_LENGTH = 48;
     private static final short INSTALL_PIN_BLOCK_LENGTH = 12;
 
@@ -307,6 +337,10 @@ public class ImpalaApplet extends Applet {
     private boolean pinProvisioned;       // set by install-time PIN injection or SCP03 PROVISION_PIN
     private boolean scp03KeysCustom;      // static SCP03 keys are not the GP defaults (install keys or APPLET_UPDATE)
 
+    // --- Sign-in policy (cardholder verification) ---
+    private boolean signInPinRequired;    // SIGN_AUTH and SIGN_SEP10 need the user PIN verified
+    private boolean signInPinFixed;       // FLAG_INSTALL_SIGN_IN_PIN: the requirement can never be turned off
+
     // --- Transient working buffers ---
     private byte[] scratchpad;         // General-purpose transient buffer (255 bytes, CLEAR_ON_RESET)
     private byte[] sigBuffer;          // Holds signature output from signing operations
@@ -375,6 +409,8 @@ public class ImpalaApplet extends Applet {
         provisioningEnforced = false;
         pinProvisioned = false;
         scp03KeysCustom = false;
+        signInPinRequired = false;
+        signInPinFixed = false;
 
         scratchpad = JCSystem.makeTransientByteArray((short) 255, JCSystem.CLEAR_ON_RESET);
         sigBuffer = JCSystem.makeTransientByteArray(MAX_SIG_LENGTH, JCSystem.CLEAR_ON_RESET);
@@ -468,12 +504,14 @@ public class ImpalaApplet extends Applet {
      *       INS_GET_FULL_NAME (0x20), INS_GET_GENDER (0x21), INS_GET_USER_DATA (0x1E),
      *       INS_GET_PERSONALIZATION (0x34), INS_GET_RECEIVE_STATE (0x35),
      *       INS_GET_LAST_TRANSFER (0x36), INS_GET_STELLAR_KEY (0x37, 0x623C without a
-     *       Stellar key) — readable in every state, TERMINATED included</li>
+     *       Stellar key), INS_GET_USER_VERIFICATION (0x39) — readable in every
+     *       state, TERMINATED included</li>
      *   <li><b>Card must not be terminated:</b>
      *       INS_INITIALIZE (0x2C), INS_VERIFY_PIN (0x18), INS_SET_FULL_NAME (0x1F),
      *       INS_SET_GENDER (0x22), INS_SIGN_AUTH (0x25), INS_SIGN_SEP10 (0x38),
      *       INS_SIGN_TRANSFER_V2 (0x30), INS_VERIFY_TRANSFER_V2 (0x31),
-     *       INS_UPDATE_USER_PIN (0x19), INS_IS_CARD_ALIVE (0x2E), and every SCP03 command</li>
+     *       INS_UPDATE_USER_PIN (0x19), INS_IS_CARD_ALIVE (0x2E), INS_SET_SIGN_IN_POLICY (0x3A),
+     *       INS_CHANGE_USER_PIN (0x3B), and every SCP03 command</li>
      *   <li><b>Card must be personalized (0x6234 otherwise):</b>
      *       INS_SIGN_AUTH, INS_SIGN_SEP10, INS_SIGN_TRANSFER_V2, INS_VERIFY_TRANSFER_V2</li>
      *   <li><b>CLA 0x00 only (0x6E00 when secured):</b>
@@ -494,9 +532,15 @@ public class ImpalaApplet extends Applet {
      *   <li><b>Provisioning gate (install-time FLAG_INSTALL_ENFORCE):</b>
      *       INS_SIGN_TRANSFER_V2 (0x30), INS_SIGN_AUTH (0x25), INS_SIGN_SEP10 (0x38)
      *       answer 0x6985 until a user PIN has been provisioned</li>
-     *   <li><b>No PIN (parity with INS_SIGN_AUTH):</b>
-     *       INS_SIGN_SEP10 — the card signs only what its own parser accepts as a
-     *       SEP-10 challenge for its key; see {@link Sep10}</li>
+     *   <li><b>User PIN verified in this session (0x6690; 0x6985 when no user
+     *       PIN was provisioned):</b> INS_SET_SIGN_IN_POLICY, INS_CHANGE_USER_PIN,
+     *       INS_SIGN_AUTH with P1=0x01 (the PIN proof), and, on a card whose
+     *       sign-in policy requires the PIN, INS_SIGN_AUTH and INS_SIGN_SEP10 in
+     *       every form</li>
+     *   <li><b>No PIN unless the sign-in policy asks for one:</b>
+     *       INS_SIGN_AUTH (plain), INS_SIGN_SEP10 — the Stellar key signs only
+     *       what the card's own parser accepts as a SEP-10 challenge for its
+     *       key; see {@link Sep10}</li>
      * </ul>
      *
      * @param apdu the incoming APDU
@@ -660,7 +704,13 @@ public class ImpalaApplet extends Applet {
                     failIfCardIsTerminated();
                     failIfProvisioningRequired();
                     failIfNotPersonalized();
-                    signAuth(apdu, buffer, dataLength);
+                    boolean pinProof = buffer[ISO7816.OFFSET_P1] == P1_SIGN_AUTH_PIN_PROOF;
+                    if (pinProof) {
+                        failIfUserPinNotVerified();
+                    } else {
+                        failIfSignInPinMissing();
+                    }
+                    signAuth(apdu, buffer, dataLength, pinProof);
                     break;
                 }
                 case INS_SIGN_TRANSFER_V2: {
@@ -759,7 +809,26 @@ public class ImpalaApplet extends Applet {
                     failIfProvisioningRequired();
                     failIfNotPersonalized();
                     failIfNoStellarKey();
+                    failIfSignInPinMissing();
                     signSep10(apdu, buffer, dataLength, sep10Pending == (short) 1);
+                    break;
+                }
+                case INS_GET_USER_VERIFICATION: {
+                    scratchpad[0] = USER_VERIFICATION_FORMAT;
+                    scratchpad[1] = signInPolicyFlags();
+                    scratchpad[2] = userPIN.getTriesRemaining();
+                    scratchpad[3] = userPinVerified() ? UV_SESSION_PIN_VERIFIED : (byte) 0;
+                    sendBytes(apdu, scratchpad, ZERO, USER_VERIFICATION_LENGTH);
+                    break;
+                }
+                case INS_SET_SIGN_IN_POLICY: {
+                    failIfCardIsTerminated();
+                    processSetSignInPolicy(buffer, dataLength);
+                    break;
+                }
+                case INS_CHANGE_USER_PIN: {
+                    failIfCardIsTerminated();
+                    processChangeUserPIN(buffer, dataLength);
                     break;
                 }
                 case INS_GET_FULL_NAME: {
@@ -848,6 +917,56 @@ public class ImpalaApplet extends Applet {
         if (provisioningEnforced && !pinProvisioned) {
             ISOException.throwIt(ISO7816.SW_CONDITIONS_NOT_SATISFIED);
         }
+    }
+
+    /**
+     * True while the cardholder is verified: a user PIN the issuer provisioned
+     * (never the factory default, which has {@code pinProvisioned} clear) was
+     * checked since the applet was selected. The applet states exactly this in
+     * a PIN proof; whether to trust that statement as a factor is the bridge's
+     * decision (it credits the PIN factor only for an issuer-certified card,
+     * whose issuance always replaced the factory master PIN, so no factory
+     * master PIN could have reset the user PIN — docs/mfa-card-pin-biometrics.md
+     * §3.3).
+     */
+    private boolean userPinVerified() {
+        return pinProvisioned && userPIN.isValidated();
+    }
+
+    /**
+     * Throws unless the cardholder is verified: 0x6985 on a card without a
+     * provisioned user PIN (there is nothing a holder could verify), 0x6690
+     * when the provisioned user PIN has not been verified in this session.
+     */
+    private void failIfUserPinNotVerified() {
+        if (!pinProvisioned) {
+            ISOException.throwIt(ISO7816.SW_CONDITIONS_NOT_SATISFIED);
+        }
+        if (!userPIN.isValidated()) {
+            ISOException.throwIt(SW_ERROR_PIN_REQUIRED);
+        }
+    }
+
+    /** On a card whose sign-in policy requires the user PIN: {@link #failIfUserPinNotVerified}. */
+    private void failIfSignInPinMissing() {
+        if (signInPinRequired) {
+            failIfUserPinNotVerified();
+        }
+    }
+
+    /** GET_USER_VERIFICATION policy byte. */
+    private byte signInPolicyFlags() {
+        byte f = 0;
+        if (signInPinRequired) {
+            f |= UV_POLICY_SIGN_IN_PIN;
+        }
+        if (signInPinFixed) {
+            f |= UV_POLICY_SIGN_IN_PIN_FIXED;
+        }
+        if (pinProvisioned) {
+            f |= UV_POLICY_PIN_PROVISIONED;
+        }
+        return f;
     }
 
     /** Throws 0x6234 until PERSONALIZE part C has committed the card's identity and certificate. */
@@ -940,6 +1059,8 @@ public class ImpalaApplet extends Applet {
      * Applies the provisioning TLV from the applet data field:
      * [0x01][flags] [ENC|MAC|DEK if flags&amp;0x02] [masterPIN|userPIN if flags&amp;0x04]
      * [programId(16)|issuerPubKey(65) if flags&amp;0x08].
+     * FLAG_INSTALL_SIGN_IN_PIN (0x10, no data) makes every sign-in need the user
+     * PIN verified, for the life of the card.
      * FLAG_INSTALL_ENFORCE (0x01) gates SIGN_TRANSFER_V2 and SIGN_AUTH with 0x6985
      * until a user PIN is provisioned. FLAG_INSTALL_PROGRAM (0x08) requires
      * FLAG_INSTALL_KEYS (a bound card must never run on default keys); any key
@@ -952,7 +1073,7 @@ public class ImpalaApplet extends Applet {
         }
         byte flags = bArray[(short) (offset + 1)];
         if ((byte) (flags & ~(FLAG_INSTALL_ENFORCE | FLAG_INSTALL_KEYS
-                | FLAG_INSTALL_PINS | FLAG_INSTALL_PROGRAM)) != 0) {
+                | FLAG_INSTALL_PINS | FLAG_INSTALL_PROGRAM | FLAG_INSTALL_SIGN_IN_PIN)) != 0) {
             ISOException.throwIt(ISO7816.SW_WRONG_DATA); // unknown flag bits
         }
         if ((flags & FLAG_INSTALL_PROGRAM) != 0 && (flags & FLAG_INSTALL_KEYS) == 0) {
@@ -1015,6 +1136,10 @@ public class ImpalaApplet extends Applet {
         }
         if ((flags & FLAG_INSTALL_ENFORCE) != 0) {
             provisioningEnforced = true;
+        }
+        if ((flags & FLAG_INSTALL_SIGN_IN_PIN) != 0) {
+            signInPinRequired = true;
+            signInPinFixed = true;
         }
         if (programOffset >= 0) {
             // A CryptoException here (invalid point) propagates = clean install failure
@@ -1352,12 +1477,20 @@ public class ImpalaApplet extends Applet {
      * bridge /auth/card verifier (CARD_AUTH_DOMAIN_PREFIX in
      * impala-bridge/src/constants.rs) checks exactly those bytes.
      * Challenges outside 8..=64 bytes are rejected with 0x6700.
+     *
+     * <p>With {@code pinProof} (P1=0x01) the tag is AUTH_PIN_DOMAIN_TAG
+     * ("IMPALA-APIN:") instead: the same layout, a different statement. The
+     * dispatcher lets that form through only while the user PIN is verified,
+     * so a signature under that tag says so (CARD_PIN_PROOF_DOMAIN_PREFIX on
+     * the bridge). The two tags differ in their bytes, so neither signature
+     * can stand in for the other.</p>
      */
-    private void signAuth(APDU apdu, byte[] buffer, short dataLength) {
+    private void signAuth(APDU apdu, byte[] buffer, short dataLength, boolean pinProof) {
         if (dataLength < MIN_AUTH_CHALLENGE_LENGTH || dataLength > MAX_AUTH_CHALLENGE_LENGTH) {
             ISOException.throwIt(ISO7816.SW_WRONG_LENGTH);
         }
-        Util.arrayCopyNonAtomic(AUTH_DOMAIN_TAG, ZERO, scratchpad, ZERO, AUTH_DOMAIN_TAG_LENGTH);
+        Util.arrayCopyNonAtomic(pinProof ? AUTH_PIN_DOMAIN_TAG : AUTH_DOMAIN_TAG, ZERO,
+                scratchpad, ZERO, AUTH_DOMAIN_TAG_LENGTH);
         Util.arrayCopyNonAtomic(accountId, ZERO, scratchpad, AUTH_DOMAIN_TAG_LENGTH, UUID_LENGTH);
         Util.arrayCopyNonAtomic(buffer, ISO7816.OFFSET_CDATA, scratchpad,
                 (short) (AUTH_DOMAIN_TAG_LENGTH + UUID_LENGTH), dataLength);
@@ -1801,6 +1934,59 @@ public class ImpalaApplet extends Applet {
             ISOException.throwIt(SW_ERROR_PIN_REJECTED);
         }
         userPIN.update(buffer, ISO7816.OFFSET_CDATA, USER_PIN_LENGTH);
+    }
+
+    /**
+     * SET_SIGN_IN_POLICY (INS 0x3A): the cardholder decides whether this card
+     * needs the user PIN before it signs in (SIGN_AUTH, SIGN_SEP10). P1=0x01
+     * turns the requirement on, P1=0x00 off; no data. Only a verified
+     * cardholder may change it (0x6690, or 0x6985 without provisioned PINs),
+     * and a requirement fixed at install (FLAG_INSTALL_SIGN_IN_PIN) is never
+     * turned off (0x6985). One persistent byte: nothing to tear.
+     */
+    private void processSetSignInPolicy(byte[] buffer, short dataLength) {
+        byte p1 = buffer[ISO7816.OFFSET_P1];
+        if (buffer[ISO7816.OFFSET_P2] != (byte) 0x00
+                || (p1 != P1_SIGN_IN_PIN_OFF && p1 != P1_SIGN_IN_PIN_ON)) {
+            ISOException.throwIt(ISO7816.SW_INCORRECT_P1P2);
+        }
+        if (dataLength != 0) {
+            ISOException.throwIt(ISO7816.SW_WRONG_LENGTH);
+        }
+        failIfUserPinNotVerified();
+        if (p1 == P1_SIGN_IN_PIN_OFF && signInPinFixed) {
+            ISOException.throwIt(ISO7816.SW_CONDITIONS_NOT_SATISFIED);
+        }
+        signInPinRequired = p1 == P1_SIGN_IN_PIN_ON;
+    }
+
+    /**
+     * CHANGE_USER_PIN (INS 0x3B): the verified cardholder sets a new user PIN
+     * (4 digit values 0..9; 0000 is refused, it is the PIN-less marker of
+     * SIGN_TRANSFER_V2). The new PIN is not verified by having been set: the
+     * session goes back to "not verified" and the try counter to its limit.
+     */
+    private void processChangeUserPIN(byte[] buffer, short dataLength) {
+        if (buffer[ISO7816.OFFSET_P1] != (byte) 0x00 || buffer[ISO7816.OFFSET_P2] != (byte) 0x00) {
+            ISOException.throwIt(ISO7816.SW_INCORRECT_P1P2);
+        }
+        if (dataLength != USER_PIN_LENGTH) {
+            ISOException.throwIt(ISO7816.SW_WRONG_LENGTH);
+        }
+        failIfUserPinNotVerified();
+        for (short i = 0; i < USER_PIN_LENGTH; i++) {
+            byte digit = buffer[(short) (ISO7816.OFFSET_CDATA + i)];
+            if (digit < 0 || digit > 9) {
+                ISOException.throwIt(SW_ERROR_PIN_REJECTED);
+            }
+        }
+        if (Util.arrayCompare(buffer, ISO7816.OFFSET_CDATA, FOUR_ZERO_PIN, ZERO, USER_PIN_LENGTH) == 0) {
+            ISOException.throwIt(SW_ERROR_PIN_REJECTED);
+        }
+        userPIN.update(buffer, ISO7816.OFFSET_CDATA, USER_PIN_LENGTH);
+        // update() resets the validated flag on a conforming platform; reset()
+        // makes it so on any other.
+        userPIN.reset();
     }
 
     /**

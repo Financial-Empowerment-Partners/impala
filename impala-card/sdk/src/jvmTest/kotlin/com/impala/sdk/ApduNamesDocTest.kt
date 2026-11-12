@@ -67,7 +67,7 @@ class ApduNamesDocTest {
 
     @Test
     fun `application command names equal apdu_md`() {
-        assertEquals(22, app.size, "application table parse drift")
+        assertEquals(25, app.size, "application table parse drift")
         app.forEach { (ins, name) -> assertEquals(name, ApduNames.ins(0x00, ins), "INS 0x%02X".format(ins)) }
     }
 
@@ -120,9 +120,10 @@ class ApduNamesDocTest {
 
     @Test
     fun `READ_ONLY_INS is the pinned literal, disjoint from MUTATING_INS, and both cover the dispatched table`() {
-        assertEquals(setOf(0x02, 0x04, 0x16, 0x1E, 0x20, 0x21, 0x24, 0x2E, 0x34, 0x35, 0x36, 0x37, 0x64), ApduNames.READ_ONLY_INS)
-        // SIGN_SEP10 (0x38) produces a signature: a read-only session must refuse it.
-        assertEquals(setOf(0x18, 0x19, 0x1F, 0x22, 0x25, 0x2C, 0x30, 0x31, 0x38), ApduNames.MUTATING_INS)
+        assertEquals(setOf(0x02, 0x04, 0x16, 0x1E, 0x20, 0x21, 0x24, 0x2E, 0x34, 0x35, 0x36, 0x37, 0x39, 0x64), ApduNames.READ_ONLY_INS)
+        // SIGN_SEP10 (0x38) produces a signature; SET_SIGN_IN_POLICY (0x3A) and
+        // CHANGE_USER_PIN (0x3B) change card state: a read-only session refuses them.
+        assertEquals(setOf(0x18, 0x19, 0x1F, 0x22, 0x25, 0x2C, 0x30, 0x31, 0x38, 0x3A, 0x3B), ApduNames.MUTATING_INS)
         assertTrue(ApduNames.READ_ONLY_INS.intersect(ApduNames.MUTATING_INS).isEmpty())
         assertEquals(app.keys, ApduNames.READ_ONLY_INS + ApduNames.MUTATING_INS, "every dispatched INS must be classified")
         for (ins in ApduNames.READ_ONLY_INS) {

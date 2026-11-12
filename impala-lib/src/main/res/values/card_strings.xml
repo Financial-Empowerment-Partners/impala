@@ -7,6 +7,7 @@
     <string name="card_error_terminated">This card has been terminated and can no longer be used.</string>
     <string name="card_error_wrong_pin">Wrong PIN. Tries left: %1$d.</string>
     <string name="card_error_pin_blocked">The card PIN is blocked.</string>
+    <string name="card_error_pin_required">This card needs its PIN to sign in. Enter the card PIN and tap again.</string>
     <string name="card_error_insufficient_funds">The card balance is too low for this amount.</string>
     <string name="card_error_counter_invalid">The card refused this transfer as already applied or out of date.</string>
     <string name="card_error_counter_jump">The card refused this transfer: its counter is too far ahead.</string>

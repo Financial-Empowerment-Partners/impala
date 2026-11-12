@@ -27,6 +27,14 @@ SEP10_BINDING_SIG=304502202b495a9b4142dc317624626ad108d4896c12a97af1a1372e9a7b0f
 SEP10_PROOF_SIG=6da881be63f5dc8c56e103625c67d5c89fc5c88a53629b7884775d522a763beffba92b3107031f2e0ead000068049e4bc3633b4de6428073eb429100f2e7e705
 SEP10_SKEY_TAG=494d50414c412d534b45593a
 
+# MFA domain tags (docs/mfa-card-pin-biometrics.md §8): the card PIN proof tag
+# "IMPALA-APIN:" and the phone device-key tag "IMPALA-DKEY:", pinned in hex on
+# the card side (impala-lib) and the bridge side so neither can drift.
+MFA_PIN_TAG=494d50414c412d4150494e3a
+MFA_DKEY_TAG=494d50414c412d444b45593a
+LIB_MFA=impala-lib/src/test/java/com/payala/impala/card/CardSignInTest.kt
+BRIDGE_CONSTANTS=impala-bridge/src/constants.rs
+
 SDK_SEP10=impala-card/sdk/src/jvmTest/kotlin/com/impala/sdk/BridgeVectorTest.kt
 BRIDGE_SEP10=impala-bridge/src/sep10/card_vectors.rs
 BRIDGE_SKEY=impala-bridge/src/sep10/binding.rs
@@ -60,6 +68,8 @@ require sep10_card_address "$SEP10_CARD_ADDRESS" "$SDK_SEP10" "$BRIDGE_SEP10"
 require sep10_binding_sig "$SEP10_BINDING_SIG" "$SDK_SEP10" "$BRIDGE_SEP10"
 require sep10_proof_sig "$SEP10_PROOF_SIG" "$SDK_SEP10" "$BRIDGE_SEP10"
 require skey_tag "$SEP10_SKEY_TAG" "$SDK_SKEY" "$BRIDGE_SKEY"
+require mfa_pin_proof_tag "$MFA_PIN_TAG" "$LIB_MFA" "$BRIDGE_CONSTANTS"
+require mfa_device_key_tag "$MFA_DKEY_TAG" "$LIB_MFA" "$BRIDGE_CONSTANTS"
 
 if [ "$failures" -ne 0 ]; then
   echo "check-shared-vectors: $failures failure(s)"

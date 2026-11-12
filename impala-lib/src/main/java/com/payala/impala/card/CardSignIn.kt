@@ -3,6 +3,7 @@ package com.payala.impala.card
 import com.impala.sdk.flows.CardError
 import com.impala.sdk.flows.CardFlowException
 import com.impala.sdk.flows.CardIdentity
+import com.impala.sdk.flows.Hex
 import com.impala.sdk.models.StellarCardKey
 import com.impala.sdk.stellar.Sep10Exception
 import com.payala.impala.stellar.Sep10Client
@@ -60,12 +61,31 @@ sealed class CardSignInResult {
         override val identity: CardIdentity,
         val signatureHex: String,
         val fallback: Sep10Fallback?,
-        val stellarKey: StellarCardKey? = null
+        val stellarKey: StellarCardKey? = null,
+        /** A card PIN proof over the same challenge (DER hex), when a PIN was
+         *  supplied and verified — post it as `pin_proof` to `POST /auth/card`. */
+        val pinProofHex: String? = null,
+        /** A phone device-key assertion over the same challenge, when a signer
+         *  produced one — post `device_key_id` + `device_signature`. */
+        val deviceKeyId: String? = null,
+        val deviceSignatureHex: String? = null,
     ) : CardSignInResult() {
         override val mechanism: CardAuthMechanism get() = CardAuthMechanism.LEGACY
         override fun toString(): String = "CardSignInResult.Legacy(card=${identity.wireCardId}, fallback=$fallback)"
     }
 }
+
+/**
+ * Optional multi-factor extras for a card sign-in
+ * (`docs/mfa-card-pin-biometrics.md`): a cardholder PIN to verify on the card
+ * (yielding the `pin` factor via a PIN proof), and a device-key signer (the
+ * `dev`/`bio` factor). A card that requires a sign-in PIN ([CardError.PinRequired])
+ * is refused before any network call unless [pin] is given.
+ */
+class SignInOptions @JvmOverloads constructor(
+    val pin: String? = null,
+    val deviceSigner: DeviceAssertionSigner? = null,
+)
 
 /**
  * One card sign-in for every card and every server: the compatibility layer
@@ -122,12 +142,32 @@ class CardSignIn(
      */
     @JvmOverloads
     @Throws(Exception::class)
-    fun signIn(session: ImpalaCardSession, listener: Listener? = null): CardSignInResult {
+    fun signIn(
+        session: ImpalaCardSession,
+        listener: Listener? = null,
+        options: SignInOptions = SignInOptions(),
+    ): CardSignInResult {
         requireBackgroundThread("Signing in with a card")
         listener?.onStep(Step.READING_CARD)
         val identity = session.identity.requirePersonalized()
-        if (!identity.hasStellarKey) return legacy(session, identity, null, listener)
-        if (sep10 == null) return legacy(session, identity, Sep10Fallback.NOT_CONFIGURED, listener)
+
+        // Cardholder verification (applet 0.4): a card that requires a sign-in
+        // PIN is refused here unless one was supplied; a supplied PIN is
+        // verified now so a PIN proof can be made (the `pin` factor). A wrong
+        // or blocked PIN is an error, never a downgrade to a PIN-less sign-in.
+        val uv = CardAuthenticator.userVerification(session)
+        if (uv != null && uv.signInPinRequired && options.pin == null) {
+            throw CardFlowException(CardError.PinRequired)
+        }
+        val pinVerified = if (options.pin != null && uv != null && uv.pinProvisioned) {
+            CardAuthenticator.verifyUserPin(session, options.pin)
+            true
+        } else {
+            false
+        }
+
+        if (!identity.hasStellarKey) return legacy(session, identity, null, listener, options = options, pinVerified = pinVerified)
+        if (sep10 == null) return legacy(session, identity, Sep10Fallback.NOT_CONFIGURED, listener, options = options, pinVerified = pinVerified)
 
         val key = CardAuthenticator.stellarKey(session)
             // The flag said yes and the read says no: not a card to guess about.
@@ -137,23 +177,46 @@ class CardSignIn(
             val prepared = sep10.prepare(key.publicKey)
             listener?.onStep(Step.SIGNING)
             val envelope = CardAuthenticator.signSep10(session, key.publicKey, prepared.challenge)
+            val extras = buildExtras(
+                session, DeviceKeyProtocol.PURPOSE_SEP10_SIGN_IN, prepared.challenge.hash, options, pinVerified
+            )
             listener?.onStep(Step.SUBMITTING)
-            return CardSignInResult.Sep10(identity, key.address, sep10.submit(prepared.webAuthEndpoint, envelope))
+            return CardSignInResult.Sep10(identity, key.address, sep10.submit(prepared.webAuthEndpoint, envelope, extras))
         } catch (e: Exception) {
             val fallback = fallbackFor(e) ?: throw e
             listener?.onStep(Step.FALLING_BACK)
-            return legacy(session, identity, fallback, listener, key)
+            return legacy(session, identity, fallback, listener, key, options, pinVerified)
         }
+    }
+
+    /** The PIN proof + device assertion for a SEP-10 sign-in, over the challenge hash. */
+    private fun buildExtras(
+        session: ImpalaCardSession, purpose: Byte, challenge32: ByteArray,
+        options: SignInOptions, pinVerified: Boolean
+    ): com.payala.impala.stellar.Sep10PostExtras {
+        val pinProof = if (pinVerified) CardAuthenticator.signPinProof(session, challenge32) else null
+        val device = options.deviceSigner?.sign(purpose, challenge32)
+        return com.payala.impala.stellar.Sep10PostExtras(pinProof, device?.keyId, device?.signatureDerHex)
     }
 
     private fun legacy(
         session: ImpalaCardSession, identity: CardIdentity, fallback: Sep10Fallback?, listener: Listener?,
-        stellarKey: StellarCardKey? = null
+        stellarKey: StellarCardKey? = null, options: SignInOptions = SignInOptions(), pinVerified: Boolean = false
     ): CardSignInResult {
         listener?.onStep(Step.CONTACTING_SERVER)
         val challengeHex = legacyChallenge.fetch(identity.wireCardId)
         listener?.onStep(Step.SIGNING)
-        return CardSignInResult.Legacy(identity, CardAuthenticator.signChallenge(session, challengeHex), fallback, stellarKey)
+        val signatureHex = CardAuthenticator.signChallenge(session, challengeHex)
+        val challengeBytes = Hex.decode(challengeHex)
+        val pinProof = if (pinVerified) CardAuthenticator.signPinProof(session, challengeBytes) else null
+        val device = if (challengeBytes.size == DeviceKeyProtocol.CHALLENGE_LENGTH) {
+            options.deviceSigner?.sign(DeviceKeyProtocol.PURPOSE_CARD_SIGN_IN, challengeBytes)
+        } else {
+            null
+        }
+        return CardSignInResult.Legacy(
+            identity, signatureHex, fallback, stellarKey, pinProof, device?.keyId, device?.signatureDerHex
+        )
     }
 
     companion object {

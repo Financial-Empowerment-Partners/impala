@@ -18,9 +18,9 @@ object ApduTrace {
     /**
      * Returns a copy of [command] with secret data bytes replaced by [MASK]:
      * the whole body of VERIFY_PIN / UPDATE_USER_PIN / UPDATE_MASTER_PIN /
-     * PROVISION_PIN / APPLET_UPDATE (SCP03 keys), and the leading 4-byte PIN of
-     * SIGN_TRANSFER_V2 and the retired SIGN_TRANSFER. Malformed or header-only
-     * commands are returned unchanged (they carry no data).
+     * CHANGE_USER_PIN / PROVISION_PIN / APPLET_UPDATE (SCP03 keys), and the
+     * leading 4-byte PIN of SIGN_TRANSFER_V2 and the retired SIGN_TRANSFER.
+     * Malformed or header-only commands are returned unchanged (they carry no data).
      */
     fun mask(command: ByteArray): ByteArray {
         val out = command.copyOf()
@@ -35,6 +35,7 @@ object ApduTrace {
         val end = minOf(5 + lc, out.size)
         val secretLen = when (out[1]) {
             Constants.INS_VERIFY_PIN, Constants.INS_UPDATE_USER_PIN, Constants.INS_UPDATE_MASTER_PIN,
+            Constants.INS_CHANGE_USER_PIN,
             SCP03Constants.INS_PROVISION_PIN, SCP03Constants.INS_APPLET_UPDATE -> lc
             Constants.INS_SIGN_TRANSFER_V2, Constants.INS_SIGN_TRANSFER -> 4
             else -> 0
