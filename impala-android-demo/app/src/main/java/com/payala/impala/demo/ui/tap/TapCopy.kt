@@ -16,7 +16,7 @@ object TapCopy {
     @StringRes
     fun doneDetail(@StringRes summaryRes: Int): Int? = when (summaryRes) {
         R.string.tap_done_registered -> R.string.tap_done_detail_registered
-        R.string.tap_done_signed_in -> R.string.tap_done_detail_signed_in
+        R.string.tap_done_signed_in, R.string.tap_done_signed_in_sep10 -> R.string.tap_done_detail_signed_in
         R.string.tap_done_sent, R.string.tap_done_load_created -> R.string.tap_done_detail_transfers
         R.string.tap_done_loaded -> R.string.tap_done_detail_loaded
         R.string.tap_done_nothing_signed -> R.string.tap_done_detail_nothing_signed

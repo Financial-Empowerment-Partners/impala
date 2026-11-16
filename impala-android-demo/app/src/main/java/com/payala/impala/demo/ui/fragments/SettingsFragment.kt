@@ -62,6 +62,20 @@ class SettingsFragment : Fragment(R.layout.fragment_settings) {
         binding.tvAvatarInitial.visibility = if (initial != null) View.VISIBLE else View.GONE
         binding.ivAvatarGlyph.visibility = if (initial != null) View.GONE else View.VISIBLE
 
+        // How this session was signed in. A card that signed a SEP-10 challenge also shows the Stellar
+        // address that signed (a public account id; long-press copies it).
+        val provider = tokenManager.getAuthProvider()
+        val cardSignIn = tokenManager.getCardSignIn()
+        binding.tvSignInMethod.text = SignInSummary.methodRes(provider, cardSignIn)?.let(::getString)
+            ?: provider?.takeIf { it.isNotBlank() } ?: getString(R.string.not_available)
+        val cardStellar = tokenManager.getCardStellarAddress()?.takeIf { SignInSummary.showsStellarAddress(provider, cardSignIn) }
+        binding.tvCardStellarLabel.visibility = if (cardStellar != null) View.VISIBLE else View.GONE
+        binding.tvCardStellar.visibility = if (cardStellar != null) View.VISIBLE else View.GONE
+        if (cardStellar != null) {
+            binding.tvCardStellar.text = Identifiers.breakable(cardStellar)
+            copyOnLongPress(binding.tvCardStellar, getString(R.string.settings_label_card_stellar), cardStellar)
+        }
+
         // Server: read-only (fixed at build time), with the Stellar network.
         binding.tvServerUrl.text = Identifiers.breakable(BuildConfig.BRIDGE_BASE_URL)
         copyOnLongPress(binding.tvServerUrl, getString(R.string.hint_server_url), BuildConfig.BRIDGE_BASE_URL)

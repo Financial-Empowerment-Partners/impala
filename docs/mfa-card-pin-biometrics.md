@@ -241,10 +241,36 @@ otherwise. Without `mfr`, factor changes work as before.
   and none was given, and adds the extras. A wrong or blocked PIN is an
   error, never a downgrade to a PIN-less sign-in. `DeviceKeys` manages the
   keystore key.
-- **Android demo**: PIN sheet before the tap, biometric prompt before arming
-  the tap, "this phone as a second factor", session assurance in Settings.
-- **Admin dashboard**: session assurance, step-up dialog on `mfa_required`,
-  device keys, the requirement toggle, per-account MFA in Accounts.
+- **Android demo**: the data path (`SignInOptions`, the PIN proof and device
+  fields on `POST /auth/card` and `POST /auth/sep10`, `DeviceMfa`). The
+  prompting screens are not built (§9).
+- **Admin dashboard** (`impala-ui`, the MFA page): this session's verified
+  factors with a TOTP step-up when one is required, and for an admin an
+  account's factor summary, the mandate toggle and device-key recovery. The
+  step-up stores the token pair the bridge re-issues for a bearer session; a
+  refused code is shown as that and the session is kept (the bridge's 401 for
+  a bad factor is the same generic 401 as for a bad token, so the page posts
+  the code with `API.postCredential`, which never refreshes or re-sends); and
+  a mandate change asks for confirmation in both directions, because either
+  one signs the account out everywhere.
+- **impalactl** (the operator CLI): `mfa status`, `mfa step-up --totp|--device`,
+  `mfa totp enroll`, `mfa device enroll|list|revoke` (a P-256 key in a `0600`
+  file on the machine, declared as `platform: impalactl`,
+  `user_verification: none`: a possession factor, never biometric),
+  `login --totp|--device`, the admin summary, mandate and recovery
+  (`mfa admin …`), and `login --card tcp:HOST:PORT --pin`, which verifies the
+  PIN on a simulated card and sends the PIN proof on either sign-in path.
+  Every `mfa_required` / `mfa_reauth_required` refusal is explained with the
+  command that fixes it. Two choices are stricter than `CardSignIn`: `--pin`
+  on a card that cannot make a PIN proof, and `--device` without a local key,
+  are errors rather than a sign-in without the factor. The card's own PIN
+  setup is there too, over the same simulator transport: `card pin policy
+  on|off` (`SET_SIGN_IN_POLICY`, after `VERIFY_PIN`; a requirement fixed at
+  install is reported as that), `card pin change` (`CHANGE_USER_PIN`, then the
+  new PIN is verified once), and `card pin reset`, which verifies the 8-digit
+  master PIN (10 tries, no recovery) and sets a new user PIN with
+  `UPDATE_USER_PIN`: the way out of a blocked PIN. `card setup` provisions both
+  PINs at issuance.
 
 ## 8. Shared vectors
 
@@ -266,14 +292,19 @@ Pinned on both sides (`scripts/check-shared-vectors.sh`):
   verify the holder where the PIN is verified today, and the PIN proof would
   carry over unchanged. No such card or simulator is available here.
 - **iOS**: the device key and the biometric prompt are Android only.
-- **Admin dashboard MFA panels and the Android PIN-entry / step-up screens.**
-  The data path and APIs are in place and unit-tested end to end; the operator
-  dashboard views (session assurance, step-up, device-key list, the mandate
-  toggle, per-account MFA in Accounts) and the app's PIN-entry sheet, biometric
+- **The Android PIN-entry and step-up screens.** The data path and APIs are in
+  place and unit-tested end to end; the app's PIN-entry sheet, biometric
   prompt wiring and step-up screen are not built. A card that requires a PIN
   surfaces `CardError.PinRequired` to the app, and `CardSignIn.signIn` already
   takes the PIN and device signer; the fragment that prompts and re-taps is the
-  remaining UI.
+  remaining UI. (The operator dashboard's MFA page and the command-line client
+  are built: §7.)
+- **A way in for an account mandated before it has a second factor.** Under a
+  mandate the TOTP routes answer `403 mfa_required` and device enrollment
+  `mfa_reauth_required`, so such an account cannot enroll its first factor
+  itself; an admin lifts the mandate, the holder enrolls, the admin sets it
+  again. A card with a provisioned PIN is the exception: its PIN proof makes
+  the sign-in itself multi-factor.
 
 ## 10. Verification and QA
 
@@ -298,11 +329,32 @@ Pinned on both sides (`scripts/check-shared-vectors.sh`):
   assertion; purpose is bound; `forget` clears it), plus the full tnet/live
   unit suites compile against the new models and service.
 - **Cross-component**: `scripts/check-shared-vectors.sh` pins the
-  `IMPALA-APIN:` and `IMPALA-DKEY:` tags on both the card and the bridge side.
+  `IMPALA-APIN:` and `IMPALA-DKEY:` tags on both the card and the bridge side,
+  and the device-key tag in impalactl.
+- **Admin dashboard**: `mfa-admin-view.test.js` (status and factor-summary
+  normalisation, the step-up and policy request bodies, error classes).
+- **impalactl** (`go test ./...`, a fake card with real P-256 and Ed25519 and
+  `httptest` bridges): step-up with credential replacement, device enrollment
+  and the assertion layout, the `mfa_required` mapping, card sign-in with a
+  PIN proof on both paths, PIN required and wrong PIN.
+- **Against a real bridge** (the demo suite, `demo/`): scenario 14 drives
+  TOTP and device-key step-up, the mandate (`403 mfa_required`, single-use TOTP
+  codes, recovery) with curl and openssl, and scenario 16 drives the same from
+  impalactl, including the first run of the **card PIN proof against a real
+  bridge**: the applet on jcardsim verifies the PIN and signs the proof, the
+  bridge credits `pin` for its issuer-certified card, and the session is
+  `sc` + `pin` + `mfa` on the SEP-10 path and on the legacy path. Both run
+  migration 041 and these queries on a real Postgres and Redis. Scenario 17
+  drives the card's **sign-in policy** on the real applet from impalactl: with
+  the policy on, a tap without the PIN is refused before any request and a tap
+  with it is multi-factor; the PIN is changed and the old one refused; five
+  wrong PINs block it (`0x69C0`, and the card then refuses even the right
+  PIN); the master PIN resets it; and the policy is turned off again.
 
-The **DB lane is not run here** (migration 041 is exercised only as pinned SQL
-strings); QA should run `RUN_DB_TESTS=1 … cargo test --test db` and the
-operator migrate against a real Postgres. **No physical card** was used;
+The bridge's **opt-in DB test lane is not run here** (`RUN_DB_TESTS=1 … cargo
+test --test db`); what has run on a real Postgres is the demo suite above, which
+applies migration 041 with the operator's migrate step and exercises the
+device-key and mandate queries. **No physical card** was used;
 verification is on the jcardsim simulator across JavaCard 3.0.5/3.1/3.2.
 
 ### 10.2 Manual QA checklist

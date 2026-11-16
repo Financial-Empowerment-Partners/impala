@@ -69,6 +69,26 @@ jobs:
           grep -qF "$(cat demo/scripts/testdata/sep10-challenge.b64)" impala-bridge/src/sep10/card_vectors.rs
           if python3 demo/scripts/sep10-challenge.py AAAA 2>/dev/null; then echo 'the reader accepted something that is not a challenge'; exit 1; fi
 
+      - name: card and MFA helpers (Python, no dependencies) check themselves against RFC 8032, RFC 6238 and the shared vector
+        run: |
+          set -euo pipefail
+          python3 -m py_compile demo/scripts/sep10-card.py demo/scripts/mfa-factor.py
+          [ -x demo/scripts/sep10-card.py ] || { echo 'not executable: demo/scripts/sep10-card.py'; exit 1; }
+          # the Ed25519 verifier against RFC 8032 section 7.1, the strkey codec, the envelope reader
+          python3 demo/scripts/sep10-card.py self-test
+          # the bridge's shared challenge is signed by the account it names, for testnet and for no other network
+          B64="$(cat demo/scripts/testdata/sep10-challenge.b64)"
+          python3 demo/scripts/sep10-card.py server-signed "$B64" --passphrase 'Test SDF Network ; September 2015'
+          if python3 demo/scripts/sep10-card.py server-signed "$B64" --passphrase 'Public Global Stellar Network ; September 2015'; then echo 'a testnet signature verified for the public network'; exit 1; fi
+          # the transaction a card is handed is the envelope without its tag and signatures: the reader and the card helper agree on its source
+          [ "$(python3 demo/scripts/sep10-card.py tx "$B64" | cut -c9-72)" = "$(python3 -c 'import base64,sys; print(base64.b32decode(sys.argv[1])[1:33].hex())' "$(jq -r .source demo/scripts/testdata/sep10-challenge.json)")" ]
+          # TOTP: RFC 6238 appendix B (SHA-1, T = 59 s): 94287082, of which the bridge's six digits are 287082
+          [ "$(python3 demo/scripts/mfa-factor.py totp GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ 59)" = 287082 ]
+          # the device-key assertion: "IMPALA-DKEY:" || 0x01 || purpose || sha256(account) || challenge(32) = 78 bytes
+          python3 demo/scripts/mfa-factor.py device-message 10000000-0000-4000-8000-000000000006 2 "$(printf '%064d' 0)" > /tmp/dkey.bin
+          [ "$(wc -c < /tmp/dkey.bin | tr -d ' ')" = 78 ]
+          [ "$(od -An -v -tx1 -N14 /tmp/dkey.bin | tr -d ' \n')" = 494d50414c412d444b45593a0102 ]
+
       - name: payala stub (Node, no dependencies) — syntax, unit and HTTP tests
         run: |
           set -euo pipefail

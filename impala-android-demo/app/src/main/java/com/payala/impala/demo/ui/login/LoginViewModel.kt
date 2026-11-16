@@ -69,6 +69,8 @@ data class CardLoginTap(
     val pinProofHex: String? = null,
     val deviceKeyId: String? = null,
     val deviceSignatureHex: String? = null,
+    /** The Stellar address that signed, for a SEP-10 tap (a public account id; shown in Settings). */
+    val stellarAddress: String? = null,
 )
 
 /**
@@ -385,7 +387,7 @@ class LoginViewModel : ViewModel() {
         return when (result) {
             is CardSignInResult.Sep10 -> {
                 AppLogger.i("Auth", "Card signed a SEP-10 challenge")
-                CardLoginTap(result.identity, "", sep10TokenJson = result.tokenJson)
+                CardLoginTap(result.identity, "", sep10TokenJson = result.tokenJson, stellarAddress = result.stellarAddress)
             }
             is CardSignInResult.Legacy -> {
                 result.fallback?.let { AppLogger.i("Auth", "Card login used the legacy challenge (SEP-10: $it)") }
@@ -488,6 +490,10 @@ class LoginViewModel : ViewModel() {
                     if (identity.fullName.isNotBlank()) tokenManager.saveDisplayName(identity.fullName)
                     tokenManager.saveCardId(identity.wireCardId)
                     tokenManager.saveCardAccountId(identity.accountUuid)
+                    tokenManager.saveCardSignIn(
+                        if (tap.sep10TokenJson != null) TokenManager.CARD_SIGN_IN_SEP10 else TokenManager.CARD_SIGN_IN_LEGACY,
+                        tap.stellarAddress
+                    )
 
                     val accountId = accountIdFromRefreshToken(
                         exchangeResponse.refresh_token, identity.accountUuid
@@ -583,6 +589,8 @@ class LoginViewModel : ViewModel() {
         tokenManager.saveRefreshToken(refreshToken)
         tokenManager.saveAccountId(accountId)
         tokenManager.saveAuthProvider(provider)
+        // The card sign-in facts belong to a card session only (Settings shows them).
+        if (provider != "card") tokenManager.clearCardSignIn()
         AppLogger.i("Auth", "Refresh token acquired")
 
         val temporalResponse = api.token(TokenRequest(refresh_token = refreshToken))

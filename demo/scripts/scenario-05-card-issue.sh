@@ -67,7 +67,7 @@ check "record says issuer=bridge (not the local test issuer) and status issued /
 check "record carries a certificate id" [ "${#CERT_ID}" -ge 32 ]
 check "record's account_uuid is the holder ($DEMO_HOLDER_ID)" [ "$(kv account_uuid)" = "$DEMO_HOLDER_ID" ]
 check "record names the program id of this bridge's card program" [ "$(printf '%s' "$PROGRAM_ID" | tr 'A-F' 'a-f')" = "$(printf '%s' "$issuer" | jq -r .program_id_hex | tr 'A-F' 'a-f')" ]
-check_eval "record carries the card's Stellar address (the Ed25519 key the card made at INITIALIZE; applet 0.3). A card model that cannot make one is a legacy card: the SEP-10 lanes need jc305, jc31 or jc32 hardware" "printf '%s' '$STELLAR' | grep -Eq '^G[A-Z2-7]{55}\$'"
+check_eval "record carries the card's Stellar address (the Ed25519 key the card made at INITIALIZE; applet 0.3 and later). A card model that cannot make one is a legacy card: the SEP-10 lanes need jc305, jc31 or jc32 hardware" "printf '%s' '$STELLAR' | grep -Eq '^G[A-Z2-7]{55}\$'"
 check_eval "the tool registered that key with the bridge as its last step (PUT /card/stellar-key)" "grep -q 'Stellar key registered with the bridge' '$STATE_DIR/issue.err'"
 # The card itself, asked over the socket: which engine made its key, and that it is the key of the record.
 # The engine follows the CAP: the software engine of the default CAP, or the platform's EdDSA of the native CAP.
@@ -123,9 +123,10 @@ if [ -n "${SCARDUTIL_DIR:-}" ] && [ -d "$SCARDUTIL_DIR/src/scardutil" ] && comma
       set -e
       { printf '== sim-%s\n' "$target"; cat "$STATE_DIR/scardutil-fleet-$target.log"; } >> "$STATE_DIR/scardutil-fleet.log"
       tail -n 1 "$STATE_DIR/scardutil-fleet-$target.log" | sed "s/^/  sim-$target: /" >&2
-      p=$(grep -Eo '[0-9]+ passed' "$STATE_DIR/scardutil-fleet-$target.log" | awk '{print $1}' | tail -n1); f=$(grep -Eo '[0-9]+ failed' "$STATE_DIR/scardutil-fleet-$target.log" | awk '{print $1}' | tail -n1)
+      # (`|| true`: a log without these lines is a failed assertion below, never a silent exit of the script)
+      p=$(grep -Eo '[0-9]+ passed' "$STATE_DIR/scardutil-fleet-$target.log" | awk '{print $1}' | tail -n1 || true); f=$(grep -Eo '[0-9]+ failed' "$STATE_DIR/scardutil-fleet-$target.log" | awk '{print $1}' | tail -n1 || true)
       # the engine byte: the first byte of the data GET_STELLAR_KEY answers after INITIALIZE
-      eng=$(grep -A1 'apdu 0037000000 -> 9000' "$STATE_DIR/scardutil-fleet-$target.log" | sed -n 's/^ *data: \([0-9A-Fa-f][0-9A-Fa-f]\).*/\1/p' | tail -n1)
+      eng=$(grep -A1 'apdu 0037000000 -> 9000' "$STATE_DIR/scardutil-fleet-$target.log" | sed -n 's/^ *data: \([0-9A-Fa-f][0-9A-Fa-f]\).*/\1/p' | tail -n1 || true)
       check "scardutil dispatch sequence on sim-$target: ${p:-0} passed, ${f:-0} failed" sh -c "[ '$frc' -eq 0 ] && [ '${f:-1}' = 0 ]"
       FLEET_PASSED=$(( FLEET_PASSED + ${p:-0} )); FLEET_FAILED=$(( FLEET_FAILED + ${f:-0} )); FLEET_ENGINES="$FLEET_ENGINES $target=${eng:-none}"
       [ "$frc" -eq 0 ] || FLEET="failed"

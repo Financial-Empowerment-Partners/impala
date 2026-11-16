@@ -2,6 +2,7 @@ package com.payala.impala.demo.lab
 
 import com.payala.impala.demo.ui.lab.BridgeProbe
 import com.payala.impala.demo.ui.lab.IssuerFacts
+import com.payala.impala.demo.ui.lab.Sep10Facts
 import okhttp3.Interceptor
 import okhttp3.OkHttpClient
 import org.junit.Assert.assertEquals
@@ -128,5 +129,71 @@ class BridgeProbeTest {
         val bridge = CannedBridge.healthy()
         BridgeProbe("http://10.0.2.2:8080", "testnet", bridge.client, clock = { 0L }).tryRun()
         assertEquals("http://10.0.2.2:8080/health", bridge.requests.first().url.toString())
+    }
+
+    // ---- SEP-10 discovery (the fourth GET, only when the build has a home domain) ----
+
+    private fun sep10Probe(client: OkHttpClient, homeDomain: String? = "10.0.2.2:8080") =
+        BridgeProbe("http://10.0.2.2:8080/", "testnet", client, clock = { now }, wallClock = { 1_762_594_867_123L }, sep10HomeDomain = homeDomain)
+
+    @Test
+    fun `a stellar toml with a signing key and a web-auth endpoint is SEP-10 offered, read without credentials`() {
+        val bridge = CannedBridge.healthy(toml = 200 to CannedBridge.toml())
+        val result = sep10Probe(bridge.client).tryRun()!!
+        val facts = result.sep10 as Sep10Facts.Offered
+        assertEquals("10.0.2.2:8080", facts.homeDomain)
+        assertEquals(CannedBridge.SIGNING_KEY, facts.signingKey)
+        assertEquals("http://10.0.2.2:8080/auth/sep10", facts.webAuthEndpoint)
+        assertEquals("Test SDF Network ; September 2015", facts.networkPassphrase)
+        assertTrue(result.sep10Toml!!.ok)
+        assertEquals(BridgeProbe.TOML_PATH, result.sep10Toml!!.path)
+        assertEquals(listOf("/health", "/version", "/card-issuer", "/.well-known/stellar.toml"), bridge.requests.map { it.url.encodedPath })
+        assertTrue(bridge.requests.all { it.method == "GET" && it.header("Authorization") == null && it.header("Cookie") == null })
+        // Discovery only: nothing but the toml is asked of the SEP-10 server (no challenge, no token).
+        assertTrue(bridge.requests.none { it.url.encodedPath.startsWith("/auth/") })
+    }
+
+    @Test
+    fun `no toml, a server not in service and a toml without web auth are SEP-10 not offered`() {
+        for ((answer, reason) in listOf(
+            (404 to "") to "HTTP_404",
+            (503 to "") to "HTTP_503",
+            (200 to """SIGNING_KEY = "${CannedBridge.SIGNING_KEY}"""") to "NO_WEB_AUTH",
+            (200 to """WEB_AUTH_ENDPOINT = "http://10.0.2.2:8080/auth/sep10"""") to "NO_WEB_AUTH",
+            (200 to "# an empty stellar.toml") to "NO_WEB_AUTH"
+        )) {
+            val facts = sep10Probe(CannedBridge.healthy(toml = answer).client).tryRun()!!.sep10
+            assertTrue("$answer -> $facts", facts is Sep10Facts.NotOffered)
+            assertEquals("$answer", reason, (facts as Sep10Facts.NotOffered).reason)
+            assertEquals("10.0.2.2:8080", facts.homeDomain)
+        }
+    }
+
+    @Test
+    fun `a toml that cannot be read is unreachable, never offered`() {
+        val duplicated = CannedBridge.toml() + "\nSIGNING_KEY = \"${CannedBridge.SIGNING_KEY}\""
+        for ((answer, reason) in listOf(
+            (500 to "") to "HTTP_500",
+            (429 to "") to "RATE_LIMITED",
+            (200 to duplicated) to "PARSE",
+            (200 to "SIGNING_KEY = 'single-quoted'") to "PARSE"
+        )) {
+            val facts = sep10Probe(CannedBridge.healthy(toml = answer).client).tryRun()!!.sep10
+            assertTrue("$answer -> $facts", facts is Sep10Facts.Unreachable)
+            assertEquals("$answer", reason, (facts as Sep10Facts.Unreachable).reason)
+        }
+        val down = sep10Probe(failing(ConnectException("refused"))).tryRun()!!.sep10
+        assertEquals("CONNECT", (down as Sep10Facts.Unreachable).reason)
+    }
+
+    @Test
+    fun `a build without a usable home domain asks nothing and reports not configured`() {
+        for (domain in listOf(null, "", "   ", "not a domain", "HTTP://10.0.2.2:8080")) {
+            val bridge = CannedBridge.healthy(toml = 200 to CannedBridge.toml())
+            val result = sep10Probe(bridge.client, domain).tryRun()!!
+            assertTrue("$domain", result.sep10 is Sep10Facts.NotConfigured)
+            assertNull("$domain", result.sep10Toml)
+            assertEquals("$domain", listOf("/health", "/version", "/card-issuer"), bridge.requests.map { it.url.encodedPath })
+        }
     }
 }

@@ -7,9 +7,10 @@ import com.payala.impala.R
 
 /**
  * What the card is doing, for a progress label, from a traced exchange: reads
- * (SELECT and every read-only command) are "Reading card"; SIGN_AUTH and
- * SIGN_SEP10 (both sign a login), SIGN_TRANSFER_V2 and VERIFY_TRANSFER_V2
- * have their own labels. There is no
+ * (SELECT and every read-only command) are "Reading card"; SIGN_AUTH (the
+ * legacy login challenge), SIGN_SEP10 (a SEP-10 challenge transaction),
+ * SIGN_TRANSFER_V2 and VERIFY_TRANSFER_V2 have their own labels, so a sign-in
+ * says on screen which of the two mechanisms the card is answering. There is no
  * label for VERIFY_PIN: no app flow sends it (the PIN rides inside
  * SIGN_TRANSFER_V2). Anything else is null (keep the current label).
  */
@@ -24,7 +25,8 @@ object CardStepLabels {
     fun labelFor(exchange: ApduExchange): Int? {
         if (exchange.cla != 0x00) return null
         return when (exchange.ins) {
-            SIGN_AUTH, SIGN_SEP10 -> R.string.card_step_signing_login
+            SIGN_AUTH -> R.string.card_step_signing_login
+            SIGN_SEP10 -> R.string.card_step_signing_sep10
             SIGN_TRANSFER_V2 -> R.string.card_step_signing_transfer
             VERIFY_TRANSFER_V2 -> R.string.card_step_applying_credit
             ApduNames.SELECT_INS, in ApduNames.READ_ONLY_INS -> R.string.card_step_reading

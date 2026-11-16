@@ -29,7 +29,7 @@ class TapCopyTest {
             R.string.tap_title_register, R.string.tap_title_sign_in, R.string.tap_title_read
         ).map(ctx::getString)
         for (summary in listOf(
-            R.string.tap_done_registered, R.string.tap_done_signed_in, R.string.tap_done_sent,
+            R.string.tap_done_registered, R.string.tap_done_signed_in, R.string.tap_done_signed_in_sep10, R.string.tap_done_sent,
             R.string.tap_done_loaded, R.string.tap_done_load_created, R.string.tap_done_nothing_signed
         )) {
             val detail = TapCopy.doneDetail(summary)

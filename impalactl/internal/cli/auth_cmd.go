@@ -11,15 +11,35 @@ import (
 	"impalactl/internal/config"
 )
 
-// runLogin exchanges a username and password for a token pair and stores it
-// (POST /token).
+// runLogin signs in and stores the token pair: with a username and password
+// (POST /token), or with a card (`--card`, see card_login.go). `--totp` or
+// `--device` adds a second factor in the same command (POST /mfa/step-up).
 func (a *App) runLogin(opts options, args []string) int {
 	fs := a.newFlagSet("login")
 	bindGlobalFlags(fs, &opts)
 	username := fs.String("username", "", "Payala account id to log in as")
+	useTOTP := fs.Bool("totp", false, "step up with a TOTP code after signing in ($"+config.EnvTOTPCode+", prompt, or stdin)")
+	useDevice := fs.Bool("device", false, "add this machine's device key as a second factor")
+	var card cardLoginFlags
+	card.bind(fs)
 	rest, err := parseArgs(fs, args)
 	if err != nil {
 		return parseCode(err)
+	}
+	if *useTOTP && *useDevice {
+		return a.usageErr("--totp and --device are exclusive: a login adds at most one factor")
+	}
+	if card.card != "" {
+		if strings.TrimSpace(*username) != "" || len(rest) > 0 {
+			return a.usageErr("--card signs in as the card's account: drop the account id")
+		}
+		if *useTOTP {
+			return a.usageErr("--totp is not part of a card sign-in: sign in with the card (and --pin), then `impalactl mfa step-up --totp`")
+		}
+		return a.runCardLogin(opts, card, *useDevice)
+	}
+	if card.used() {
+		return a.usageErr("--pin, --aid, --sep10-home-domain and --no-sep10 need --card tcp:HOST:PORT")
 	}
 
 	user := strings.TrimSpace(*username)
@@ -29,7 +49,7 @@ func (a *App) runLogin(opts options, args []string) int {
 	case user == "" && len(rest) == 1:
 		user = strings.TrimSpace(rest[0])
 	case user == "":
-		return a.usageErr("login requires --username <payala-account-id>")
+		return a.usageErr("login requires --username <payala-account-id> (or --card tcp:HOST:PORT)")
 	}
 
 	password, err := a.readSecret(config.EnvPassword, fmt.Sprintf("Password for %s: ", user))
@@ -48,14 +68,27 @@ func (a *App) runLogin(opts options, args []string) int {
 	if resp.TemporalToken == "" || resp.RefreshToken == "" {
 		return a.fail("login failed: the bridge returned no token pair")
 	}
+	stepUp := ""
+	switch {
+	case *useTOTP:
+		stepUp = bridge.StepUpTOTP
+	case *useDevice:
+		stepUp = bridge.StepUpDevice
+	}
+	return a.finishLogin(opts, c, user, resp.TemporalToken, resp.RefreshToken, raw, stepUp)
+}
 
+// finishLogin stores a fresh token pair, adds the requested second factor,
+// and reports. Every sign-in path ends here, so the stored shape, the MFA
+// notice and the summary are one thing.
+func (a *App) finishLogin(opts options, c *bridge.Client, fallbackAccount, temporal, refresh string, raw []byte, stepUp string) int {
 	creds := &config.Credentials{
 		Endpoint:      c.Endpoint(),
-		AccountID:     user,
-		TemporalToken: resp.TemporalToken,
-		RefreshToken:  resp.RefreshToken,
+		AccountID:     fallbackAccount,
+		TemporalToken: temporal,
+		RefreshToken:  refresh,
 	}
-	claims, claimsErr := bridge.ParseClaims(resp.TemporalToken)
+	claims, claimsErr := bridge.ParseClaims(temporal)
 	if claimsErr == nil {
 		creds.AccountID = claims.Subject
 		creds.Role = claims.Role
@@ -69,14 +102,42 @@ func (a *App) runLogin(opts options, args []string) int {
 		return a.fail("%v", err)
 	}
 
+	if stepUp != "" {
+		c.SetToken(temporal)
+		s := &session{c: c, claims: claims, store: store}
+		if claimsErr != nil || claims.Subject == "" {
+			return a.fail("signed in, but the token names no account, so no factor can be added")
+		}
+		resp, stepRaw, err := a.stepUp(s, stepUp)
+		if err != nil {
+			return a.fail("signed in with one factor, but the step-up failed: %v", err)
+		}
+		raw = stepRaw
+		temporal = resp.TemporalToken
+		if claims, claimsErr = bridge.ParseClaims(temporal); claimsErr == nil {
+			creds.Role = claims.Role
+		}
+	} else if claimsErr == nil && claims.MFARequired && !claims.HasMFA() {
+		fmt.Fprintf(a.err, "notice: %s must be multi-factor, and this session has one factor (%s): "+
+			"the bridge refuses it (403 mfa_required) until you run `impalactl mfa step-up --totp` "+
+			"or `impalactl mfa step-up --device`\n", creds.AccountID, amrText(claims.Amr))
+	}
+
 	return a.render(opts, raw, func(w io.Writer) {
-		kv(w, [][2]string{
+		rows := [][2]string{
 			{"Logged in as:", creds.AccountID},
 			{"Role:", dash(creds.Role)},
 			{"Endpoint:", creds.Endpoint},
-			{"Token expires:", expiryText(claims, time.Now())},
-			{"Credentials:", store.Path()},
-		})
+		}
+		if claimsErr == nil {
+			rows = append(rows,
+				[2]string{"Factors (amr):", amrText(claims.Amr)},
+				[2]string{"Multi-factor:", yesNo(claims.HasMFA())})
+		}
+		rows = append(rows,
+			[2]string{"Token expires:", expiryText(claims, time.Now())},
+			[2]string{"Credentials:", store.Path()})
+		kv(w, rows)
 	})
 }
 
@@ -206,6 +267,10 @@ func (a *App) runWhoami(opts options, args []string) int {
 		{"Endpoint:", endpoint},
 		{"Token type:", dash(claims.TokenType)},
 		{"Expires:", expiryText(claims, time.Now())},
+		{"Factors (amr):", amrText(claims.Amr)},
+		{"Multi-factor:", whoamiMultiFactor(claims)},
+		{"Verified at:", authTimeText(claims.AuthTime, a.clock())},
+		{"MFA required:", yesNo(claims.MFARequired)},
 		{"Source:", source},
 	}
 	if hasRefresh {
@@ -246,4 +311,14 @@ func expiryText(claims bridge.Claims, now time.Time) string {
 		return fmt.Sprintf("%s (expired %s ago)", stamp, -remaining)
 	}
 	return fmt.Sprintf("%s (in %s)", stamp, remaining)
+}
+
+// whoamiMultiFactor reads the multi-factor marker from the token. The
+// bridge also ages it out after MFA_MAX_AGE_SECS (default 12 h), which only
+// `impalactl mfa status` can report.
+func whoamiMultiFactor(claims bridge.Claims) string {
+	if !claims.HasMFA() {
+		return "no"
+	}
+	return "yes (as of auth_time; `impalactl mfa status` checks it is still fresh)"
 }

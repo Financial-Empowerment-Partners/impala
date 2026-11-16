@@ -13,15 +13,15 @@ enum class CheckStatus { PASS, FAIL, WARN, SKIP, INFO }
 
 /** Every check the Doctor runs, in display order. */
 enum class CheckId {
-    READER, ISO14443_4, APPLET_SELECTED, APPLET_VERSION, PERSONALIZED, CERT_CARD_ISSUER,
-    ISSUER_MATCHES_BRIDGE, CERT_BRIDGE_KEY, BRIDGE_KNOWS_CARD, LOCAL_RECORD, ACCOUNT_MATCHES,
+    READER, ISO14443_4, APPLET_SELECTED, APPLET_VERSION, PERSONALIZED, CERT_CARD_ISSUER, STELLAR_KEY,
+    ISSUER_MATCHES_BRIDGE, CERT_BRIDGE_KEY, SEP10_SERVER, BRIDGE_KNOWS_CARD, LOCAL_RECORD, ACCOUNT_MATCHES,
     SELECTED_CARD, FIELD_QUALITY;
 
     /** Checks that need an answer from the card's applet (skipped when no applet answered). */
     val needsApplet: Boolean
         get() = this in setOf(
-            APPLET_VERSION, PERSONALIZED, CERT_CARD_ISSUER, ISSUER_MATCHES_BRIDGE, CERT_BRIDGE_KEY,
-            BRIDGE_KNOWS_CARD, LOCAL_RECORD, ACCOUNT_MATCHES, SELECTED_CARD
+            APPLET_VERSION, PERSONALIZED, CERT_CARD_ISSUER, STELLAR_KEY, ISSUER_MATCHES_BRIDGE, CERT_BRIDGE_KEY,
+            SEP10_SERVER, BRIDGE_KNOWS_CARD, LOCAL_RECORD, ACCOUNT_MATCHES, SELECTED_CARD
         )
 }
 
@@ -59,6 +59,38 @@ sealed interface IssuerFacts {
     class Known(val programIdHex: String?, val publicKeyHex: String?) : IssuerFacts
 }
 
+/**
+ * What the server's public `stellar.toml` said about SEP-10, the sign-in a
+ * card with a Stellar key uses (`docs/sep10-card-keys.md`). The three cases
+ * that send a card to the legacy challenge instead are named apart from a
+ * server that simply could not be asked.
+ */
+sealed interface Sep10Facts {
+    /** Not asked yet. */
+    object NotChecked : Sep10Facts
+
+    /** This build has no SEP-10 home domain: every card signs in with the legacy challenge. */
+    object NotConfigured : Sep10Facts
+
+    /**
+     * The server does not offer SEP-10: no `stellar.toml` (404), not in service
+     * yet (503), or a toml without a signing key or web-auth endpoint
+     * ([reason] is `HTTP_404`, `HTTP_503` or `NO_WEB_AUTH`).
+     */
+    class NotOffered(val homeDomain: String, val reason: String) : Sep10Facts
+
+    /** No usable answer ([reason] is a failure class such as `CONNECT`, `HTTP_500` or `PARSE`). */
+    class Unreachable(val homeDomain: String, val reason: String) : Sep10Facts
+
+    /** `stellar.toml` names a signing key and a web-auth endpoint. */
+    class Offered(
+        val homeDomain: String,
+        val signingKey: String,
+        val webAuthEndpoint: String,
+        val networkPassphrase: String?
+    ) : Sep10Facts
+}
+
 /** What the owner endpoint `GET /offline/cards/{id}` said about the card. */
 sealed interface BridgeCardFacts {
     object NotChecked : BridgeCardFacts
@@ -76,6 +108,7 @@ sealed interface BridgeCardFacts {
  * @property readError the typed failure of the last read when it did not produce an inspection
  * @property readFailed the last read failed without a [CardError] (e.g. the simulated card was unreachable)
  * @property simulated the last read used the simulated card
+ * @property sep10 what the server's stellar.toml said about SEP-10 (the Device tab's probe)
  * @property sessionAccountId the signed-in account, or null pre-login
  * @property localRecord whether this device registered the card (null when there is no session)
  * @property expectedCardId the card the Lab was opened for (Cards → Inspect in Card Lab), if any
@@ -88,6 +121,7 @@ class DoctorInput(
     val simulated: Boolean = false,
     val exchanges: List<ApduExchange> = emptyList(),
     val issuer: IssuerFacts = IssuerFacts.NotChecked,
+    val sep10: Sep10Facts = Sep10Facts.NotChecked,
     val bridgeCard: BridgeCardFacts = BridgeCardFacts.NotChecked,
     val sessionAccountId: String? = null,
     val localRecord: Boolean? = null,
@@ -126,8 +160,10 @@ object CardDoctor {
         out += cardCheck(CheckId.APPLET_VERSION, R.string.lab_doc_title_version) { version(it) }
         out += cardCheck(CheckId.PERSONALIZED, R.string.lab_doc_title_personalized) { personalized(it) }
         out += cardCheck(CheckId.CERT_CARD_ISSUER, R.string.lab_doc_title_cert_card_issuer) { certCardIssuer(it) }
+        out += cardCheck(CheckId.STELLAR_KEY, R.string.lab_doc_title_stellar_key) { stellarKey(it) }
         out += cardCheck(CheckId.ISSUER_MATCHES_BRIDGE, R.string.lab_doc_title_issuer) { issuerMatches(it, input.issuer) }
         out += cardCheck(CheckId.CERT_BRIDGE_KEY, R.string.lab_doc_title_cert_bridge) { certBridge(it, input.issuer) }
+        out += cardCheck(CheckId.SEP10_SERVER, R.string.lab_doc_title_sep10_server) { sep10Server(it, input.sep10) }
         out += cardCheck(CheckId.BRIDGE_KNOWS_CARD, R.string.lab_doc_title_bridge_card) { bridgeCard(it, input) }
         out += cardCheck(CheckId.LOCAL_RECORD, R.string.lab_doc_title_local_record) { localRecord(it, input) }
         out += cardCheck(CheckId.ACCOUNT_MATCHES, R.string.lab_doc_title_account) { account(it, input) }
@@ -233,6 +269,51 @@ object CardDoctor {
             true -> check(CheckId.CERT_CARD_ISSUER, CheckStatus.PASS, t, R.string.lab_doc_cert_card_ok)
             false -> check(CheckId.CERT_CARD_ISSUER, CheckStatus.FAIL, t, R.string.lab_doc_cert_card_bad, remedy = R.string.lab_doc_cert_bad_fix)
             null -> skip(CheckId.CERT_CARD_ISSUER, t, R.string.lab_doc_no_certificate)
+        }
+    }
+
+    /**
+     * The card's Stellar key, the one SEP-10 signs with: present, and vouched
+     * for both ways (the card key's signature over it, and its own proof of
+     * possession, checked on this phone). A card without one is not broken:
+     * it is a legacy card and says so.
+     */
+    private fun stellarKey(insp: CardInspection): DoctorCheck {
+        val t = R.string.lab_doc_title_stellar_key
+        val id = CheckId.STELLAR_KEY
+        if (insp.personalized == null) return skip(id, t, R.string.lab_doc_no_identity)
+        val binding = insp.stellarBindingVerified
+        val proof = insp.stellarProofVerified
+        return when {
+            "STELLAR_KEY" !in insp.flagNames -> check(id, CheckStatus.INFO, t, R.string.lab_doc_stellar_none)
+            insp.stellarAddress == null -> skip(id, t, R.string.lab_doc_read_incomplete)
+            binding == null || proof == null -> skip(id, t, R.string.lab_doc_stellar_unbound)
+            binding && proof -> check(id, CheckStatus.PASS, t, R.string.lab_doc_stellar_ok, listOf(insp.stellarEngine ?: "?"))
+            else -> check(id, CheckStatus.FAIL, t, R.string.lab_doc_stellar_bad, remedy = R.string.lab_doc_cert_bad_fix)
+        }
+    }
+
+    /**
+     * Whether this card's next sign-in can be SEP-10: the card needs a Stellar
+     * key and the server has to offer SEP-10. Neither missing piece is a
+     * failure (the card then signs the legacy challenge, by design); only a
+     * server that names a signing key for another network is.
+     */
+    private fun sep10Server(insp: CardInspection, sep10: Sep10Facts): DoctorCheck {
+        val t = R.string.lab_doc_title_sep10_server
+        val id = CheckId.SEP10_SERVER
+        val hasKey = "STELLAR_KEY" in insp.flagNames
+        return when (sep10) {
+            Sep10Facts.NotChecked -> skip(id, t, R.string.lab_doc_bridge_not_checked)
+            Sep10Facts.NotConfigured -> check(id, CheckStatus.INFO, t, R.string.lab_doc_sep10_not_configured)
+            is Sep10Facts.Unreachable -> skip(id, t, R.string.lab_doc_sep10_unreachable, listOf(sep10.homeDomain, sep10.reason))
+            is Sep10Facts.NotOffered -> check(
+                id, if (hasKey) CheckStatus.WARN else CheckStatus.INFO, t, R.string.lab_doc_sep10_not_offered,
+                listOf(sep10.homeDomain, sep10.reason), if (hasKey) R.string.lab_doc_sep10_not_offered_fix else null
+            )
+            is Sep10Facts.Offered ->
+                if (hasKey) check(id, CheckStatus.PASS, t, R.string.lab_doc_sep10_offered, listOf(sep10.homeDomain))
+                else check(id, CheckStatus.INFO, t, R.string.lab_doc_sep10_offered_legacy_card, listOf(sep10.homeDomain))
         }
     }
 

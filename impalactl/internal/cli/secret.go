@@ -36,8 +36,10 @@ func (a *App) readSecret(envName, prompt string) (string, error) {
 		return secret, nil
 	}
 
-	// Non-interactive: read one line from stdin.
-	line, err := bufio.NewReader(a.in).ReadString('\n')
+	// Non-interactive: read one line from stdin. The reader is shared so a
+	// command that needs two secrets (a password, then a TOTP code) can take
+	// both from one pipe, one line each.
+	line, err := a.stdinLines().ReadString('\n')
 	if err != nil && err != io.EOF {
 		return "", fmt.Errorf("read secret: %w", err)
 	}
@@ -46,4 +48,14 @@ func (a *App) readSecret(envName, prompt string) (string, error) {
 		return "", fmt.Errorf("no secret provided (set $%s or pipe it via stdin)", envName)
 	}
 	return line, nil
+}
+
+// stdinLines returns the buffered reader over a.in that every non-interactive
+// line read shares. A fresh bufio.Reader per read would swallow the lines
+// after the first into a buffer nobody reads again.
+func (a *App) stdinLines() *bufio.Reader {
+	if a.lines == nil {
+		a.lines = bufio.NewReader(a.in)
+	}
+	return a.lines
 }

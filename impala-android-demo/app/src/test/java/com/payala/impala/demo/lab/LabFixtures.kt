@@ -56,18 +56,25 @@ internal fun syntheticInspection(
     balance: Long = 987_654_321L,
     lastAmount: Long = 1_234_567L,
     account: String = "0f0e0d0c-0b0a-0908-0706-050403020100",
-    currency: String = "USDC"
+    currency: String = "USDC",
+    flags: List<String> = listOf("PERSONALIZED"),
+    stellarAddress: String? = null,
+    stellarEngine: String? = null,
+    stellarBinding: Boolean? = null,
+    stellarProof: Boolean? = null
 ) = CardInspection(
     readAtEpochMs = 1_762_594_867_123L, aidHex = "01020304050607080102", transport = null,
     steps = emptyList(), exchanges = emptyList(), versionLine = "0.2 · r17 · g1a2b3c4d", versionMajor = 0, versionMinor = 2,
     wireCardId = "00112233445566778899aabbccddeeff", accountUuid = account, holderName = Masked(holder),
-    cardKeyFingerprint = "01:02:03:04:05:06:07:08:09:0a", stateName = "PERSONALIZED", flagNames = listOf("PERSONALIZED"),
+    cardKeyFingerprint = "01:02:03:04:05:06:07:08:09:0a", stateName = "PERSONALIZED", flagNames = flags,
     personalized = true, terminated = false, programIdHex = "a0a1a2a3a4a5a6a7a8a9aaabacadaeaf", currency = currency,
     issuerKeyFingerprint = "11:12:13:14:15:16:17:18:19:1a", certificateLength = 71, certIdHex = "c0ffee" + "00".repeat(29),
     certVerifiedByCardIssuer = true, receiveCounter = 3, receiveDigestHex = "ab".repeat(32),
     balanceMinor = Masked(balance),
     lastTransfer = Masked(LastTransferSummary(lastAmount, 4, 1_700_000_001L, "30000000-0000-4000-8000-000000000008", currency, 71)),
-    alive = true
+    alive = true,
+    stellarAddress = stellarAddress, stellarEngine = stellarEngine,
+    stellarBindingVerified = stellarBinding, stellarProofVerified = stellarProof
 )
 
 /** Real (Robolectric) NFC tags built with the platform's hidden `Tag.createMockTag`. */
@@ -112,13 +119,26 @@ internal class CannedBridge(private val routes: Map<String, Pair<Int, String>>) 
     }).build()
 
     companion object {
-        fun healthy(network: String = "testnet", issuerJson: String = UNCONFIGURED) = CannedBridge(
+        /** [toml], when given, is served as the SEP-10 home domain's stellar.toml (the probe's fourth GET). */
+        fun healthy(network: String = "testnet", issuerJson: String = UNCONFIGURED, toml: Pair<Int, String>? = null) = CannedBridge(
             mapOf(
                 "/health" to (200 to """{"status":"healthy","database":"ok","redis":"ok","stellar_network":"$network"}"""),
                 "/version" to (200 to """{"name":"impala-bridge","version":"0.9.1","build_date":"2026-11-01","rustc_version":"1.90","schema_version":"041"}"""),
                 "/card-issuer" to (200 to issuerJson)
-            )
+            ) + (toml?.let { mapOf(TOML_PATH to it) } ?: emptyMap())
         )
+
+        const val TOML_PATH = "/.well-known/stellar.toml"
+
+        /** The SEP-10 server key of the canned toml (RFC 8032 test key 1 as a Stellar account id). */
+        const val SIGNING_KEY = "GDLVVGABQKYQVN6VJP7NHSLEA45A5YLS6PNKMIZFV4BBU2HXA5IRVHUR"
+
+        /** A stellar.toml as the bridge serves it: the three keys SEP-10 needs. */
+        fun toml(homeDomain: String = "10.0.2.2:8080") = """
+            NETWORK_PASSPHRASE = "Test SDF Network ; September 2015"
+            SIGNING_KEY = "$SIGNING_KEY"
+            WEB_AUTH_ENDPOINT = "http://$homeDomain/auth/sep10"
+        """.trimIndent()
 
         const val UNCONFIGURED = """{"configured":false}"""
 

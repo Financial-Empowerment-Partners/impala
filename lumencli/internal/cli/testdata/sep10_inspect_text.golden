@@ -1,0 +1,16 @@
+Envelope:     v1 transaction
+Source:       GCLOBDX7NHG5PGEA5UMXIWXUTL2UNXNVBQDWWZAREFRADEHENVMUOEOJ
+Sequence:     0
+Fee:          0.0000200 XLM
+Valid from:   2026-11-16 04:24:00 UTC (unix 1794803040)
+Valid until:  2026-11-16 04:29:00 UTC (unix 1794803340)
+Memo:         none
+Operations (2):
+  1. manage_data "example.com auth"
+     Source: GCS7QTXUEV6MRNHZPD6ZCZ3EV3WGHS4O4VW5GWRYIEEQCOJ7ETQZICGQ
+     Value:  64 bytes "n4SVe7pJKrpvtL724S8H0qqJ6df+xCdcjMnCt7i3JK8Z7Y6ZdLubtWHHGE6QsGSC"
+  2. manage_data "web_auth_domain"
+     Source: GCLOBDX7NHG5PGEA5UMXIWXUTL2UNXNVBQDWWZAREFRADEHENVMUOEOJ
+     Value:  11 bytes "example.com"
+Signatures (1):
+  1. hint e46d5947

@@ -4,7 +4,7 @@
 and operators who run it from the admin API or the dashboard.
 
 **Status (2026-11).** SEP-10 (Stellar Web Authentication) is implemented for one kind of key: the
-Ed25519 "Stellar key" an Impala card holds (applet 0.3). It is **testnet only** and **off by default**
+Ed25519 "Stellar key" an Impala card holds (applet 0.3 and later). It is **testnet only** and **off by default**
 (`SEP10_ENABLED`). The legacy card login (`SIGN_AUTH`, `POST /auth/card`) is unchanged and always
 available.
 
@@ -13,7 +13,8 @@ available.
 | the bytes every component must agree on (card, SDK, library, bridge, app) | [`sep10-card-keys.md`](sep10-card-keys.md) |
 | to turn SEP-10 on, rotate or revoke its signing key, with the commands | [`runbooks/sep10.md`](runbooks/sep10.md) |
 | every route with its schema | [`../impala-bridge/openapi.yaml`](../impala-bridge/openapi.yaml) |
-| to see it run end to end, against the bridge and against a third-party server | [`../demo/README.md`](../demo/README.md), scenarios 05, 07, 12 and 13 |
+| to see it run end to end, against the bridge and against a third-party server | [`../demo/README.md`](../demo/README.md), scenarios 05, 07, 12 and 13; scenario 15 for what the card signs and refuses, scenario 16 from the command line |
+| to drive it from a terminal | section 6 (`impalactl`, `lumencli`) |
 | which cards can hold a Stellar key | [`../impala-card/README.md`](../impala-card/README.md), "Platform dependencies" |
 
 ## 1. The surface at a glance
@@ -317,8 +318,8 @@ do the two signatures exist.
 | Signatures do not verify | 400 `invalid_stellar_binding` |
 | No active card with this id belongs to the caller | 404 |
 
-Who calls it: the issuance tool, as its last step (and again on every re-run, so a lost call repairs
-itself), and the Android app, once, after a card whose key the bridge did not know signed in the
+Who calls it: the issuance tool and `impalactl card setup`, as their last step (and again on every
+re-run, so a lost call repairs itself), and the Android app, once, after a card whose key the bridge did not know signed in the
 legacy way.
 
 ### 3.3 Seeing what is registered
@@ -564,13 +565,56 @@ does not list an account's cards".
 - Show or end sessions: they are ordinary bridge sessions (roles and account deletion end them).
 - Show any secret. It never receives one.
 
-## 6. Troubleshooting
+## 6. From the command line
+
+Everything in sections 2 and 4 can also be driven from the two CLIs; the demo's scenario 16
+(`demo/scripts/scenario-16-cli-auth.sh`) runs all of it against a live bridge, and scenario 17
+(`scenario-17-cli-card-setup.sh`) the card setup that comes before any sign-in.
+
+**impalactl** (the operator's client of the bridge API; `impalactl/README.md`):
+
+```bash
+impalactl sep10 info                  # public: what stellar.toml publishes (404/503 is "not offered")
+impalactl sep10 status                # the status object of 4.2: enabled, home domain, key ring, every key in full
+impalactl sep10 key generate          # 4.3; activate <ver> and revoke <ver> ask for the typed phrase
+impalactl sep10 cards <account-id>    # 4.4, with the note when the bridge refuses SEP-10 for the account's role
+impalactl card info --card tcp:127.0.0.1:9443             # a simulated card: applet, ids, Stellar key, PIN status
+impalactl card setup --card tcp:127.0.0.1:9443 --account <holder uuid>   # the issuance ceremony; registers the Stellar key (3.2)
+impalactl login --card tcp:127.0.0.1:9443 --sep10-home-domain <home domain> [--pin]
+```
+
+`card setup` is the route by which a card's Stellar key normally reaches the bridge: it is a Go port of
+the issuance tool (`impala-card/README.md`, "Issuance tool"), and its last step is the
+`PUT /card/stellar-key` of 3.2 under the holder's token (`IMPALA_HOLDER_TOKEN`), after it has checked the
+card's two cross-signatures itself. That step is never fatal and is repeated by every re-run, so a card
+whose key was not registered (the 401 row of section 7) is repaired by running the command again.
+
+`login --card` is a Go port of the flow in section 2 as the app runs it: it verifies the challenge (2.3)
+before the card sees it, falls back to the legacy challenge in exactly the three cases of
+`docs/sep10-card-keys.md` §7, and sends the signed challenge only to the home domain. The home domain is a
+name: it defaults to the host and port of `--endpoint`, and when the bridge is reached under another
+address (the demo's `127.0.0.1` for `10.0.2.2:<port>`), `--sep10-home-domain` says the name while every
+connection still goes to `--endpoint`. Without it the sign-in is refused (`HOST_MISMATCH`), never sent
+elsewhere. The card transport is the simulator's TCP socket; a PC/SC reader is not supported.
+
+**lumencli** (a self-custody wallet; `lumencli/README.md`) is a SEP-10 client for the wallet's own key and
+never talks to the bridge's token endpoint (the bridge serves card keys only). It is still useful here:
+`lumencli sep10 inspect` decodes any challenge and, given `--server-key`, `--home-domain` and `--account`,
+runs the client checks of 2.3 on the bridge's challenge with the Stellar SDK:
+
+```bash
+curl -s --connect-to 10.0.2.2:8080:127.0.0.1:8080 "http://10.0.2.2:8080/auth/sep10?account=$CARD_G" \
+  | lumencli --network testnet sep10 inspect --server-key "$SIGNING_KEY" --home-domain 10.0.2.2:8080 --account "$CARD_G"
+lumencli --network testnet sep10 login testanchor.stellar.org   # the wallet's own key at another SEP-10 server
+```
+
+## 7. Troubleshooting
 
 | You see | Usually |
 |---|---|
 | 404 on the three public routes | `SEP10_ENABLED` is off, or the bridge is published under a path instead of a host root |
 | 503 `sep10_unavailable` everywhere | No active key yet (after *Activate*: wait for the delay), the active key was revoked, or the answering instance has `key_ring_live: false` / `opened: false` |
-| 401 for a card that signs in the legacy way | Its Stellar key is not registered (re-run the issuance tool, or sign in once with the app), or the account holds a privileged role (by design) |
+| 401 for a card that signs in the legacy way | Its Stellar key is not registered (re-run the issuance tool or `impalactl card setup`, or sign in once with the app), or the account holds a privileged role (by design) |
 | 409 `sep10_key_not_opened` on *Activate* | Wait one key-ring poll; if it persists, the seed protector |
 | 429 on generate / activate / revoke | Five custody writes per minute per operator, counted together with seed, issuer-key and card-certificate calls; wait for `Retry-After` |
 | The app says the server's challenge could not be verified | The app's home domain is not the bridge's (`SEP10_WEB_AUTH_ENDPOINT` host and port), or the networks differ. It does not fall back, on purpose |

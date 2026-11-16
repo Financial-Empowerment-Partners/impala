@@ -91,7 +91,10 @@ class LabViewModel(app: Application) : AndroidViewModel(app) {
         private set
 
     private val bridgeProbe: BridgeProbe by lazy {
-        BridgeProbe(BuildConfig.BRIDGE_BASE_URL, BuildConfig.STELLAR_NETWORK, probeClient ?: BridgeProbe.defaultClient())
+        BridgeProbe(
+            BuildConfig.BRIDGE_BASE_URL, BuildConfig.STELLAR_NETWORK, probeClient ?: BridgeProbe.defaultClient(),
+            sep10HomeDomain = BuildConfig.SEP10_HOME_DOMAIN
+        )
     }
 
     // ---- the current read's trace ----
@@ -218,6 +221,7 @@ class LabViewModel(app: Application) : AndroidViewModel(app) {
             simulated = read?.simulated == true,
             exchanges = read?.exchanges.orEmpty(),
             issuer = _probe.value?.issuerFacts ?: IssuerFacts.NotChecked,
+            sep10 = _probe.value?.sep10 ?: Sep10Facts.NotChecked,
             bridgeCard = if (sessionAccountId == null) BridgeCardFacts.NoSession else BridgeCardFacts.NotChecked,
             sessionAccountId = sessionAccountId,
             localRecord = null,
@@ -243,6 +247,7 @@ class LabViewModel(app: Application) : AndroidViewModel(app) {
                     reader = base.reader, inspection = inspection, readError = null, readFailed = false,
                     simulated = base.simulated, exchanges = base.exchanges,
                     issuer = probeResult?.issuerFacts ?: base.issuer,
+                    sep10 = probeResult?.sep10 ?: base.sep10,
                     bridgeCard = bridgeCard, sessionAccountId = account, localRecord = local,
                     expectedCardId = expectedCardId
                 )
@@ -284,9 +289,23 @@ class LabViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             runProbe()
             if (_read.value?.inspection != null) diagnose()
-            else _checks.value = CardDoctor.run(DoctorInput(reader = reader, issuer = _probe.value?.issuerFacts ?: IssuerFacts.NotChecked, expectedCardId = expectedCardId))
+            else _checks.value = CardDoctor.run(
+                DoctorInput(
+                    reader = reader, issuer = _probe.value?.issuerFacts ?: IssuerFacts.NotChecked,
+                    sep10 = _probe.value?.sep10 ?: Sep10Facts.NotChecked, expectedCardId = expectedCardId
+                )
+            )
         }
         return true
+    }
+
+    /** One word for the log: what the probe learned about SEP-10 (a class, never a key or an address). */
+    private fun sep10Word(facts: Sep10Facts): String = when (facts) {
+        Sep10Facts.NotChecked -> "not checked"
+        Sep10Facts.NotConfigured -> "not configured"
+        is Sep10Facts.NotOffered -> "not offered (${facts.reason})"
+        is Sep10Facts.Unreachable -> "unreachable (${facts.reason})"
+        is Sep10Facts.Offered -> "offered"
     }
 
     private suspend fun runProbe(): BridgeProbe.Result? {
@@ -295,7 +314,7 @@ class LabViewModel(app: Application) : AndroidViewModel(app) {
         _probing.value = false
         if (result != null) {
             _probe.value = result
-            AppLogger.i(TAG, "Bridge probe: health ${result.health.failure ?: result.healthStatus ?: "OK"}, network ${result.stellarNetwork ?: "?"}")
+            AppLogger.i(TAG, "Bridge probe: health ${result.health.failure ?: result.healthStatus ?: "OK"}, network ${result.stellarNetwork ?: "?"}, SEP-10 ${sep10Word(result.sep10)}")
             if (result.networkMismatch) {
                 AppLogger.w(TAG, "Stellar network mismatch: bridge ${result.stellarNetwork}, build ${result.expectedNetwork}")
             }

@@ -22,17 +22,26 @@ info "phase 1/5: postgres, redis, openbao, otel-collector, payala-stub"
 compose up -d --no-build --remove-orphans postgres redis openbao otel-collector payala-stub   # --remove-orphans: containers of services an older kit version defined
 
 info "phase 2/5: openbao transit key + OIDC test IdP (one-shot openbao-init)"
+# The one-shot container keeps the log of every earlier run (up.sh runs it again on a running stack), so this
+# waits for one MORE "ready" line than there was (it is the script's last line: the Transit canary has been
+# checked by then). The log is captured before it is searched: under pipefail, `compose logs | grep -q` reports
+# failure as soon as the log is long enough for grep to close the pipe early, which made a healthy step time
+# out after a few runs and could have hidden the re-created-key line below.
+init_log() { compose logs --no-color openbao-init 2>/dev/null || true; }
+ready_count() { init_log | grep -c 'OIDC test IdP ready' || true; }
+ready_before="$(ready_count)"
 compose up -d --no-build openbao-init
 i=0
-until compose logs openbao-init 2>/dev/null | grep -q 'OIDC test IdP ready'; do
+until [ "$(ready_count)" -gt "${ready_before:-0}" ]; do
   i=$((i + 1))
-  if [ "$i" -ge 60 ]; then compose logs openbao-init >&2 || true; die "openbao-init did not finish"; fi
+  if [ "$i" -ge 60 ]; then init_log | tail -n 40 >&2; die "openbao-init did not finish"; fi
   sleep 2
 done
 ok "transit key impala-seeds + OIDC IdP ready"
-if compose logs openbao-init 2>/dev/null | grep -q 'transit key re-created'; then
-  die "OpenBao restarted and re-created the Transit key: every custodial seed and the card issuer key the bridge sealed are undecryptable. Run scripts/reset.sh --yes, then scripts/up.sh"
-fi
+# Any run of this container that re-created the key orphaned the seeds until reset.sh (which removes it).
+case "$(init_log)" in
+  *'transit key re-created'*) die "OpenBao restarted and re-created the Transit key: every custodial seed and the card issuer key the bridge sealed are undecryptable. Run scripts/reset.sh --yes, then scripts/up.sh" ;;
+esac
 
 info "phase 3/5: migrations (RUN_MODE=migrate, operator step; sqlx records versions)"
 if compose run --rm --no-deps impala-migrate >"$STATE_DIR/migrate.log" 2>&1; then

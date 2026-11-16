@@ -31,6 +31,16 @@
     <string name="settings_mfa_sms">SMS</string>
     <string name="settings_mfa_enrolled">Enrolled: %1$s</string>
     <string name="settings_server_read_only">Set when the app is built</string>
+    <!-- Settings: how this session was signed in. A card names its mechanism. -->
+    <string name="settings_label_sign_in">Signed in with</string>
+    <string name="settings_sign_in_password">Password</string>
+    <string name="settings_sign_in_google">Google</string>
+    <string name="settings_sign_in_github">GitHub</string>
+    <string name="settings_sign_in_okta">Okta</string>
+    <string name="settings_sign_in_card">Card</string>
+    <string name="settings_sign_in_card_sep10">Card · SEP-10 (Stellar Web Authentication)</string>
+    <string name="settings_sign_in_card_legacy">Card · card challenge</string>
+    <string name="settings_label_card_stellar">Card\'s Stellar address</string>
     <string name="settings_network_testnet">Testnet</string>
     <string name="settings_network_pubnet">Public network</string>
     <string name="settings_label_app">App</string>

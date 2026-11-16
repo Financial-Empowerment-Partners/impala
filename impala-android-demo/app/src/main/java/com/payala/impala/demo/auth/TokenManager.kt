@@ -42,6 +42,14 @@ class TokenManager internal constructor(
         private const val KEY_DISPLAY_NAME = "display_name"
         private const val KEY_CARD_ID = "card_id"
         private const val KEY_CARD_ACCOUNT_ID = "card_account_id"
+        private const val KEY_CARD_SIGN_IN = "card_sign_in"
+        private const val KEY_CARD_STELLAR_ADDRESS = "card_stellar_address"
+
+        /** [getCardSignIn]: the card signed a SEP-10 challenge with its Stellar key. */
+        const val CARD_SIGN_IN_SEP10 = "sep10"
+
+        /** [getCardSignIn]: the card signed the legacy challenge (`SIGN_AUTH`). */
+        const val CARD_SIGN_IN_LEGACY = "legacy"
 
         /**
          * Safety margin for [isTemporalTokenExpired]: report the token as
@@ -169,6 +177,26 @@ class TokenManager internal constructor(
     }
 
     fun getCardAccountId(): String? = prefs.getString(KEY_CARD_ACCOUNT_ID, null)
+
+    /**
+     * How the card signed this session in ([CARD_SIGN_IN_SEP10] or
+     * [CARD_SIGN_IN_LEGACY]) and, for SEP-10, the Stellar address that signed
+     * (a public account id). For display only: nothing decides anything on them.
+     */
+    fun saveCardSignIn(mechanism: String, stellarAddress: String?) {
+        val editor = prefs.edit().putString(KEY_CARD_SIGN_IN, mechanism)
+        if (stellarAddress != null) editor.putString(KEY_CARD_STELLAR_ADDRESS, stellarAddress) else editor.remove(KEY_CARD_STELLAR_ADDRESS)
+        editor.apply()
+    }
+
+    fun getCardSignIn(): String? = prefs.getString(KEY_CARD_SIGN_IN, null)
+
+    fun getCardStellarAddress(): String? = prefs.getString(KEY_CARD_STELLAR_ADDRESS, null)
+
+    /** A session that no card signed in carries no card sign-in facts. */
+    fun clearCardSignIn() {
+        prefs.edit().remove(KEY_CARD_SIGN_IN).remove(KEY_CARD_STELLAR_ADDRESS).apply()
+    }
 
     /** Removes all stored tokens and session data (used on logout). */
     fun clearAll() {

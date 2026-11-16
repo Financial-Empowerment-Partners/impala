@@ -147,6 +147,33 @@ class TokenManagerTest {
     }
 
     @Test
+    fun `card sign-in facts are stored for display, replaced by the next card login and cleared with the session`() {
+        assertNull(tokenManager.getCardSignIn())
+        assertNull(tokenManager.getCardStellarAddress())
+
+        tokenManager.saveCardSignIn(TokenManager.CARD_SIGN_IN_SEP10, "GDZSBM4I66NATGVDR5B6THBW3NNYVGPTDMJDQVUSTVN7WDKTJ5ICAOV6")
+        assertEquals("sep10", tokenManager.getCardSignIn())
+        assertEquals("GDZSBM4I66NATGVDR5B6THBW3NNYVGPTDMJDQVUSTVN7WDKTJ5ICAOV6", tokenManager.getCardStellarAddress())
+
+        // A later legacy login must not keep the address of the SEP-10 one before it.
+        tokenManager.saveCardSignIn(TokenManager.CARD_SIGN_IN_LEGACY, null)
+        assertEquals("legacy", tokenManager.getCardSignIn())
+        assertNull(tokenManager.getCardStellarAddress())
+
+        tokenManager.saveCardSignIn(TokenManager.CARD_SIGN_IN_SEP10, "GDZSBM4I66NATGVDR5B6THBW3NNYVGPTDMJDQVUSTVN7WDKTJ5ICAOV6")
+        tokenManager.saveRefreshToken("refresh")
+        tokenManager.clearCardSignIn()
+        assertNull(tokenManager.getCardSignIn())
+        assertNull(tokenManager.getCardStellarAddress())
+        assertEquals("the session itself is untouched", "refresh", tokenManager.getRefreshToken())
+
+        tokenManager.saveCardSignIn(TokenManager.CARD_SIGN_IN_SEP10, "GDZSBM4I66NATGVDR5B6THBW3NNYVGPTDMJDQVUSTVN7WDKTJ5ICAOV6")
+        tokenManager.clearAll()
+        assertNull(tokenManager.getCardSignIn())
+        assertNull(tokenManager.getCardStellarAddress())
+    }
+
+    @Test
     fun `hasValidSession returns false when no tokens stored`() {
         assertFalse(tokenManager.hasValidSession())
     }

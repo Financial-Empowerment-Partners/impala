@@ -799,6 +799,14 @@ table tbody tr:hover { background: var(--surface-3); }
 .detail-grid dt, .kv dt { color: var(--text-muted); font-weight: 600; font-size: 0.84rem; }
 .detail-grid dd, .kv dd { margin: 0; color: var(--text); word-break: break-word; }
 
+/* One card of an account, in the drawer: a bordered block of label/value rows */
+.card-entry {
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 0.7rem 0.85rem;
+    margin-bottom: 0.6rem;
+}
+
 .detail-section {
     border-top: 1px solid var(--border);
     padding-top: 1rem;

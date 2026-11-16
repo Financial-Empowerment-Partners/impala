@@ -34,6 +34,13 @@ MFA_PIN_TAG=494d50414c412d4150494e3a
 MFA_DKEY_TAG=494d50414c412d444b45593a
 LIB_MFA=impala-lib/src/test/java/com/payala/impala/card/CardSignInTest.kt
 BRIDGE_CONSTANTS=impala-bridge/src/constants.rs
+# impalactl signs the same device-key message (its own file-held key) and reads the same SEP-10 challenge
+# (its Go port of the card sign-in), so it pins the same bytes.
+CTL_DKEY=impalactl/internal/devicekey/devicekey_test.go
+CTL_SEP10=impalactl/internal/sep10/challenge_test.go
+# impalactl's card setup (its Go port of the issuance ceremony) builds the CERT message and the certificate id
+# to check the bridge's certificate before a card sees it, so it pins the same two vectors.
+CTL_CERT=impalactl/internal/card/cert_vector_test.go
 
 SDK_SEP10=impala-card/sdk/src/jvmTest/kotlin/com/impala/sdk/BridgeVectorTest.kt
 BRIDGE_SEP10=impala-bridge/src/sep10/card_vectors.rs
@@ -58,18 +65,18 @@ require() { # name literal file...
   done
 }
 
-require CERT "$CERT" "$SDK_GOLDEN" "$BRIDGE_GOLDEN"
+require CERT "$CERT" "$SDK_GOLDEN" "$BRIDGE_GOLDEN" "$CTL_CERT"
 require XFER "$XFER" "$SDK_GOLDEN" "$BRIDGE_GOLDEN" "$SDK_FLOW"
 require transfer_id "$TRANSFER_ID" "$SDK_GOLDEN" "$BRIDGE_GOLDEN" "$SDK_FLOW" "$DEMO_WIRE"
-require cert_id "$CERT_ID" "$SDK_GOLDEN" "$BRIDGE_GOLDEN"
-require sep10_issued "$SEP10_ISSUED" "$SDK_SEP10" "$BRIDGE_SEP10"
+require cert_id "$CERT_ID" "$SDK_GOLDEN" "$BRIDGE_GOLDEN" "$CTL_CERT"
+require sep10_issued "$SEP10_ISSUED" "$SDK_SEP10" "$BRIDGE_SEP10" "$CTL_SEP10"
 require sep10_card_signed "$SEP10_CARD_SIGNED" "$SDK_SEP10" "$BRIDGE_SEP10"
 require sep10_card_address "$SEP10_CARD_ADDRESS" "$SDK_SEP10" "$BRIDGE_SEP10"
 require sep10_binding_sig "$SEP10_BINDING_SIG" "$SDK_SEP10" "$BRIDGE_SEP10"
 require sep10_proof_sig "$SEP10_PROOF_SIG" "$SDK_SEP10" "$BRIDGE_SEP10"
 require skey_tag "$SEP10_SKEY_TAG" "$SDK_SKEY" "$BRIDGE_SKEY"
 require mfa_pin_proof_tag "$MFA_PIN_TAG" "$LIB_MFA" "$BRIDGE_CONSTANTS"
-require mfa_device_key_tag "$MFA_DKEY_TAG" "$LIB_MFA" "$BRIDGE_CONSTANTS"
+require mfa_device_key_tag "$MFA_DKEY_TAG" "$LIB_MFA" "$BRIDGE_CONSTANTS" "$CTL_DKEY"
 
 if [ "$failures" -ne 0 ]; then
   echo "check-shared-vectors: $failures failure(s)"

@@ -87,6 +87,9 @@ load_env() {
   OPENBAO_URL="http://127.0.0.1:${OPENBAO_PORT:-8200}"
   PAYALA_URL="http://127.0.0.1:${PAYALA_PORT:-4000}"
   SIM_PORT="${SIM_PORT:-9443}"
+  # A second simulated card, blank, for the scenario that sets a card up from the command line (17): its own
+  # simulator process on the next port unless .env names one.
+  SIM2_PORT="${SIM2_PORT:-$((SIM_PORT + 1))}"
   # SEP-10: an .env written before these keys existed gets the defaults of .env.example (a set-but-empty
   # DEMO_SEP10_THIRD_PARTY means "skip the third-party scenario").
   DEMO_SEP10="${DEMO_SEP10:-true}"
@@ -97,7 +100,7 @@ load_env() {
   # Ed25519 engine on jc305, the platform's own EdDSA on jc32) unless DEMO_CARD_ED25519 names one.
   DEMO_CARD_PLATFORM="${DEMO_CARD_PLATFORM:-jc305}"
   DEMO_CARD_ED25519="${DEMO_CARD_ED25519:-}"
-  export ENGINE COMPOSE_BIN BRIDGE_URL UI_URL OPENBAO_URL PAYALA_URL SIM_PORT DEMO_SEP10 DEMO_SEP10_THIRD_PARTY SEP10_HOME_DOMAIN \
+  export ENGINE COMPOSE_BIN BRIDGE_URL UI_URL OPENBAO_URL PAYALA_URL SIM_PORT SIM2_PORT DEMO_SEP10 DEMO_SEP10_THIRD_PARTY SEP10_HOME_DOMAIN \
     DEMO_CARD_PLATFORM DEMO_CARD_ED25519
   mkdir -p "$STATE_DIR" "$RECORDS_DIR" "$ARTIFACTS_DIR"
 }

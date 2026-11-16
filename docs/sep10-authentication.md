@@ -1009,11 +1009,12 @@ The checks and the behaviour they pin:
 
 | Step | APDU | Expect | What it proves |
 |---|---|---|---|
-| GET_VERSION | `00 64 00 00 00` | `9000`, data contains `00000003` | applet 0.3 |
+| GET_VERSION | `00 64 00 00 00` | `9000`, data contains `00000004` | applet 0.4 |
 | GET_PERSONALIZATION | `00 34 00 00 00` | `9000`, data starts `00 08` | blank state, SCP03 keys default |
 | GET_EC_PUB_KEY before INITIALIZE | `00 24 00 00 00` | `6230` | no key yet |
 | SIGN_AUTH before INITIALIZE | `00 25 00 00 08 …` | `6234` | personalization guard fires first |
 | GET_STELLAR_KEY, SIGN_SEP10 before INITIALIZE | `00 37 …`, `00 38 …` | `623C`, `6234` | no Stellar key yet; signing needs a personalized card |
+| GET_USER_VERIFICATION; SET_SIGN_IN_POLICY, CHANGE_USER_PIN with no PIN | `00 39 …`; `00 3A 01 …`, `00 3B …` | `9000` data `01 00 05 00`; `6985`, `6985` | applet 0.4: no sign-in PIN policy, no PIN provisioned, five tries; the policy and the PIN cannot change before a PIN exists |
 | retired INS 06 / 14 | `00 06 …`, `00 14 …` | `6D00` | v0 transfer INS stay burned |
 | non-SCP03 INS at CLA 80 | `80 30 …` | `6D00` | CLA 80 carries only SCP03 |
 | transfer / read at CLA 84, no session | `84 30 …`, `84 34 …` | `6985` | secured CLA needs an open channel (not `6E00`: `SCP03.unwrapCommand` refuses before any INS is dispatched) |
@@ -1034,17 +1035,21 @@ protocol scardutil expects:
 ```
 $ scardutil test-sequence impala-dispatch.json --sim-cfg scardutil/impala-sim.cfg \
       --jcardsim "bash scripts/vpcd-sim.sh" --no-cap-info
-Sequence: Impala applet 0.3 plaintext dispatch
+Sequence: Impala applet 0.4 plaintext dispatch
   [SKIP] delete 0102030405060708  needs a card-management backend … skipped on a raw transport
   [SKIP] install ImpalaApplet.cap  needs a card-management backend … skipped on a raw transport
   [PASS] apdu 0064000000 -> 9000 (Success -- command completed normally)
-         data: 00000003000000000000
+         data: 00000004000000000000
   [PASS] apdu 0034000000 -> 9000 (Success -- command completed normally)
          data: 00080000000000000000000000000000000000000000000000000000000000000000000000…
   [PASS] apdu 0024000000 -> 6230 (Warning -- non-volatile memory unchanged)
   [PASS] apdu 00250000080102030405060708 -> 6234 (Warning -- non-volatile memory unchanged)
   [PASS] apdu 0037000000 -> 623C (Warning -- non-volatile memory unchanged)
   [PASS] apdu 0038000000 -> 6234 (Warning -- non-volatile memory unchanged)
+  [PASS] apdu 0039000000 -> 9000 (Success -- command completed normally)
+         data: 01000500
+  [PASS] apdu 003A010000 -> 6985 (Conditions of use not satisfied (wrong lifecycle state))
+  [PASS] apdu 003B00000401020304 -> 6985 (Conditions of use not satisfied (wrong lifecycle state))
   [PASS] apdu 0006000000 -> 6D00 (Instruction (INS) not supported or invalid)
   [PASS] apdu 0014000000 -> 6D00 (Instruction (INS) not supported or invalid)
   [PASS] apdu 8030000000 -> 6D00 (Instruction (INS) not supported or invalid)
@@ -1053,20 +1058,22 @@ Sequence: Impala applet 0.3 plaintext dispatch
   [PASS] apdu 002C00000400112233 -> 9000 (Success -- command completed normally)
   [PASS] apdu 002C00000400112233 -> 6686 (Security-related error)
   [PASS] apdu 0024000000 -> 9000 (Success -- command completed normally)
-         data: 045092C6B299F785534EF0EB5587AE874CC3D0218030C641E2C213A4E66D232BD559162779…
+         data: 04D852C744DABE173385B08636983F8E4944DC60E237766E80FF6F0738E635297CC4D5C6AF…
   [PASS] apdu 001E000000 -> 9000 (Success -- command completed normally)
          data: 0000000000000000000000000000000051D6342CFE534643FADA84D54BF179EC
   [PASS] apdu 00250000080102030405060708 -> 6234 (Warning -- non-volatile memory unchanged)
   [PASS] apdu 0034000000 -> 9000 (Success -- command completed normally)
          data: 01890000000000000000000000000000000000000000000000000000000000000000000000…
   [PASS] apdu 0037000000 -> 9000 (Success -- command completed normally)
-         data: 015B6388ECA6EDF1F24E8BAA057E52426F11F90390FE4B4060F785A7F64471C8F100000000…
+         data: 01B73F0C59BEC289511FFA81F4B23B4F98B7DCC5E8F88295A28A3D222C5A3195C700000000…
   [PASS] apdu 0038000000 -> 6234 (Warning -- non-volatile memory unchanged)
+  [PASS] apdu 0039000000 -> 9000 (Success -- command completed normally)
+         data: 01000500
   [PASS] apdu 0035000000 -> 9000 (Success -- command completed normally)
          data: 000000000000000000000000000000000000000000000000000000000000000000000000
   [PASS] apdu 0036000000 -> 6A83 (Record not found)
   [SKIP] delete 0102030405060708  needs a card-management backend … skipped on a raw transport
-24 steps: 21 passed, 0 failed, 3 skipped
+28 steps: 25 passed, 0 failed, 3 skipped
 ```
 
 Two readings of that output matter later: `GET_USER_DATA` shows the all-zero

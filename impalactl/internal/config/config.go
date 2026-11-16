@@ -31,6 +31,28 @@ const (
 	EnvPassword = "IMPALA_PASSWORD"
 	// EnvSecretSeed supplies a Stellar secret seed non-interactively.
 	EnvSecretSeed = "IMPALA_SECRET_SEED"
+	// EnvTOTPCode supplies a TOTP code non-interactively (step-up).
+	EnvTOTPCode = "IMPALA_TOTP_CODE"
+	// EnvCardPIN supplies a card's user PIN non-interactively (card login;
+	// the current PIN for `card pin change|policy`; the PIN `card setup`
+	// provisions).
+	EnvCardPIN = "IMPALA_CARD_PIN"
+	// EnvCardNewPIN supplies the new user PIN of `card pin change|reset`.
+	EnvCardNewPIN = "IMPALA_CARD_NEW_PIN"
+	// EnvCardMasterPIN supplies a card's 8-digit master PIN (`card setup`
+	// provisions it, `card pin reset` verifies it).
+	EnvCardMasterPIN = "IMPALA_CARD_MASTER_PIN"
+	// EnvIssueKMK supplies the 16-byte key master key (32 hex) from which
+	// `card setup` derives a card's own SCP03 keys. The name is the reference
+	// issuance tool's (impala-card tools/issue), so both derive the same keys.
+	EnvIssueKMK = "IMPALA_ISSUE_KMK"
+	// EnvSCP03TransportKeys supplies the SCP03 keys a card was installed
+	// with (96 hex ENC ‖ MAC ‖ DEK); unset means the GP default keys.
+	// Environment only.
+	EnvSCP03TransportKeys = "IMPALA_SCP03_TRANSPORT_KEYS"
+	// EnvHolderToken is the card holder's bearer token for `card setup`
+	// (POST /card, PUT /card/stellar-key). Environment only.
+	EnvHolderToken = "IMPALA_HOLDER_TOKEN"
 )
 
 const (
@@ -106,42 +128,51 @@ func (s *Store) Load() (*Credentials, error) {
 // created in the destination directory so the rename cannot cross filesystems
 // and never leaves a half-written credentials file behind.
 func (s *Store) Save(creds *Credentials) error {
-	if err := os.MkdirAll(s.dir, 0o700); err != nil {
-		return fmt.Errorf("create %s: %w", s.dir, err)
-	}
 	creds.UpdatedAt = time.Now().Unix()
 	data, err := json.MarshalIndent(creds, "", "  ")
 	if err != nil {
 		return fmt.Errorf("encode credentials: %w", err)
 	}
 	data = append(data, '\n')
+	// fsync before the rename (inside writeAtomic): a token lost to a crash
+	// here would strand the account on a burned refresh token.
+	if err := writeAtomic(s.dir, credentialsFile, data); err != nil {
+		return fmt.Errorf("credentials: %w", err)
+	}
+	return nil
+}
 
-	tmp, err := os.CreateTemp(s.dir, credentialsFile+".*")
+// writeAtomic writes dir/name with 0600 permissions via a synced temp file
+// in the same directory and a rename, creating dir with 0700 if needed. A
+// crash leaves either the old file or the new one, never a partial one.
+func writeAtomic(dir, name string, data []byte) error {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("create %s: %w", dir, err)
+	}
+	tmp, err := os.CreateTemp(dir, name+".*")
 	if err != nil {
-		return fmt.Errorf("create temp credentials file: %w", err)
+		return fmt.Errorf("create temp file: %w", err)
 	}
 	tmpName := tmp.Name()
 	defer os.Remove(tmpName) // no-op once the rename succeeds
 
 	if err := tmp.Chmod(0o600); err != nil {
 		tmp.Close()
-		return fmt.Errorf("secure temp credentials file: %w", err)
+		return fmt.Errorf("secure temp file: %w", err)
 	}
 	if _, err := tmp.Write(data); err != nil {
 		tmp.Close()
-		return fmt.Errorf("write credentials: %w", err)
+		return fmt.Errorf("write: %w", err)
 	}
-	// fsync before the rename: a token lost to a crash here would strand the
-	// account on a burned refresh token.
 	if err := tmp.Sync(); err != nil {
 		tmp.Close()
-		return fmt.Errorf("sync credentials: %w", err)
+		return fmt.Errorf("sync: %w", err)
 	}
 	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("close credentials: %w", err)
+		return fmt.Errorf("close: %w", err)
 	}
-	if err := os.Rename(tmpName, s.Path()); err != nil {
-		return fmt.Errorf("install credentials: %w", err)
+	if err := os.Rename(tmpName, filepath.Join(dir, name)); err != nil {
+		return fmt.Errorf("install: %w", err)
 	}
 	return nil
 }

@@ -14,6 +14,7 @@ import com.payala.impala.demo.BuildConfig
 import com.payala.impala.demo.ImpalaApp
 import com.payala.impala.demo.R
 import com.payala.impala.demo.auth.CardSep10
+import com.payala.impala.demo.auth.TokenManager
 import com.payala.impala.demo.api.ApiClient
 import com.payala.impala.demo.auth.GitHubAuthHelper
 import com.payala.impala.demo.auth.GitHubSignInResult
@@ -333,8 +334,18 @@ class LoginActivity : AppCompatActivity() {
                 }
                 is LoginViewModel.LoginState.Success -> {
                     binding.progressIndicator.visibility = View.GONE
-                    tap.succeeded(R.string.tap_done_signed_in)
-                    navigateToMain()
+                    // A card that signed a SEP-10 challenge says so on the Done sheet.
+                    val tokens = (application as ImpalaApp).tokenManager
+                    val sep10 = tokens.getAuthProvider() == "card" && tokens.getCardSignIn() == TokenManager.CARD_SIGN_IN_SEP10
+                    // A card sign-in reports its outcome on the sheet it ran on; the account opens once that
+                    // has been on screen long enough to read. Any other sign-in has no sheet and opens at once.
+                    val onSheet = tap.isActive
+                    tap.succeeded(if (sep10) R.string.tap_done_signed_in_sep10 else R.string.tap_done_signed_in)
+                    if (onSheet) {
+                        binding.root.postDelayed({ if (!isFinishing && !isDestroyed) navigateToMain() }, DONE_SHEET_MS)
+                    } else {
+                        navigateToMain()
+                    }
                 }
                 is LoginViewModel.LoginState.Error -> {
                     binding.progressIndicator.visibility = View.GONE
@@ -506,5 +517,10 @@ class LoginActivity : AppCompatActivity() {
     private fun navigateToMain() {
         startActivity(Intent(this, MainActivity::class.java))
         finish()
+    }
+
+    private companion object {
+        /** How long a card sign-in's Done sheet ("Signed in", "Signed in with SEP-10") stays up before the account opens. */
+        const val DONE_SHEET_MS = 900L
     }
 }

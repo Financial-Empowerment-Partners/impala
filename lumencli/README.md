@@ -43,6 +43,10 @@ lumencli history <address>  Show the transaction history of an account
 lumencli tx <hash>          Show one transaction: status, fee, memo, operations
 lumencli send               Send XLM to another account
 lumencli receive            Show your address for receiving XLM
+lumencli sep10 info <home-domain>       Show a server's SEP-10 settings (stellar.toml)
+lumencli sep10 challenge <home-domain>  Fetch and check a SEP-10 challenge; nothing is signed
+lumencli sep10 inspect [<envelope>]     Decode (and optionally check) a challenge offline
+lumencli sep10 login <home-domain>      Sign in to a SEP-10 server; prints its token
 lumencli version | help
 ```
 
@@ -465,6 +469,123 @@ or wrong memo can lose the funds as surely as a wrong address. Accordingly:
 - The 28-byte text limit is bytes, not characters — non-ASCII memos run out of
   room sooner.
 
+## SEP-10 web authentication
+
+`sep10` is the client side of [SEP-10](https://github.com/stellar/stellar-protocol/blob/master/ecosystem/sep-0010.md),
+Stellar Web Authentication: the wallet's key proves control of its account
+to a SEP-10 server (an anchor) and receives that server's token. A SEP-10
+challenge **is** a Stellar transaction the wallet signs — built so that it
+can never be applied to the ledger (sequence number 0 on the server's
+account) — which is why every client check runs before anything is signed.
+SEP-10 moves no funds and never contacts Horizon; the only thing that leaves
+the process is the signed challenge, sent to the server that issued it.
+
+```bash
+lumencli --network testnet sep10 info testanchor.stellar.org        # no secret needed
+lumencli --network testnet sep10 challenge testanchor.stellar.org   # checks it; signs nothing
+lumencli --network testnet sep10 challenge --account G... testanchor.stellar.org   # no secret needed
+curl -s 'https://testanchor.stellar.org/auth?account=G...' \
+  | lumencli --network testnet sep10 inspect \
+      --server-key GCHLHDBOKG2JWMJQBTLSL5XG6NO7ESXI2TAQKZXCXWXB5WI2X6W233PR \
+      --home-domain testanchor.stellar.org --account G...
+TOKEN="$(lumencli --network testnet sep10 login testanchor.stellar.org)"   # seed from $LUMEN_SECRET
+```
+
+`login` writes the token **alone** to stdout, so it can be captured; what
+happened goes to stderr — the network, home domain, endpoint, server key,
+account, and the token's `iss`/`sub`/`iat`/`exp`. Those claims are decoded
+for display only: a SEP-10 token is signed with the server's secret, a
+client cannot verify it, and the claims are the server's own statements. The
+token is never written to disk, logged, or echoed to stderr.
+
+**The home domain** is the bare domain (`testanchor.stellar.org`, or
+`host:port`), not a URL. Its stellar.toml is fetched from
+`https://<home-domain>/.well-known/stellar.toml` and must declare
+`WEB_AUTH_ENDPOINT` and `SIGNING_KEY`. Every request — the toml, the
+endpoint it names, and any redirect — must be **https**; plain http is
+accepted only for a loopback host (`localhost`, `127.0.0.0/8`, `::1`), and
+for a loopback home domain the toml itself is fetched over http (a local
+development server). A token and the toml that names the server's key must
+never cross a network in the clear. (This is stricter than `--horizon-url`,
+which accepts any http URL: a Horizon response is public data, a SEP-10
+exchange carries a credential.)
+
+**The network.** Select the server's network with `--network` as for every
+other command (the default is mainnet). When the toml declares a
+`NETWORK_PASSPHRASE`, or the challenge response a `network_passphrase`, it
+must equal the selected network's; the server's signature is then verified
+under the selected passphrase, so a testnet wallet can never sign a pubnet
+challenge or the reverse.
+
+**Client checks.** A challenge failing any one is refused (exit 1) and
+nothing is signed:
+
+| Check | Done by |
+| ----- | ------- |
+| a v1 transaction envelope (not v0, not a fee bump) | lumencli (the SDK also accepts v0) |
+| the transaction source is the toml's `SIGNING_KEY` | SDK `txnbuild.ReadChallengeTx` |
+| sequence number 0 | SDK |
+| time bounds present, finite, and valid now (the minimum may be up to 5 minutes ahead, for clock drift) | SDK |
+| the first operation is manage-data named `"<home domain> auth"`, with a 64-byte base64 value of 48 random bytes | SDK |
+| the first operation is sourced by **this wallet's** account | lumencli (the SDK returns whichever account it names) |
+| every other operation is manage-data sourced by the server key | SDK |
+| a `web_auth_domain` operation, when present, carries the host of `WEB_AUTH_ENDPOINT` (with any non-default port) | SDK |
+| no memo (this client never asks for one) | lumencli (the SDK allows an id memo) |
+| the server's signature verifies under the selected network's passphrase | SDK |
+| the toml's / response's network passphrase, when given, is the selected one | lumencli |
+
+**`inspect`** is offline. It takes the base64 envelope as an argument or on
+stdin — or the challenge endpoint's whole JSON response, so a `curl` can be
+piped straight in — and prints every field: source, sequence, fee, time
+bounds, memo, each operation's type, source, name and value, and each
+signature's hint. It judges nothing unless given `--server-key G...` and
+`--home-domain NAME` (plus, optionally, `--web-auth-domain NAME`, default the
+home domain, and `--account G...` for the first operation's source); then it
+runs the same checks as `login` against the selected network and exits 1 on
+a refusal. Use it to look at a challenge from a server lumencli cannot reach
+directly — for example the Impala bridge's, piped from curl.
+
+### Machine-readable output
+
+Each `sep10` command takes `--json` and writes one JSON object. Like every
+schema of this tool, fields are append-only: never renamed, retyped, or
+reordered. The bytes are pinned by golden files.
+
+`sep10 info --json`: `home_domain`, `toml_url`, `web_auth_endpoint`,
+`web_auth_domain` (what a challenge's `web_auth_domain` must carry),
+`signing_key`, and `network_passphrase` (only when the toml declares one).
+
+`sep10 inspect --json` — a decoded challenge:
+
+| Field | Type | Meaning |
+| ----- | ---- | ------- |
+| `envelope_type` | string | `v1` or `v0` |
+| `source_account` | string | Transaction source (`G...`) |
+| `sequence` | string | Sequence number, decimal |
+| `fee` | string | Maximum fee, 7-decimal XLM string (never charged: a challenge cannot be applied) |
+| `time_bounds` | object | `{min_time, max_time}`, unix seconds, `0` = unbounded; absent when the transaction has none |
+| `memo` | object | `{type, value}`; absent for no memo |
+| `operations` | array | `{type, source_account?, name?, value_length?, value?}` — `name` for manage-data; `value_length` and `value` (base64 of the raw bytes) when it carries a value |
+| `signatures` | array | `{hint, signer?}` — `hint` is 8 hex digits; `signer` is the `G...` key whose signature verified (only when checking) |
+| `verified` | bool | Only when checking: whether every check passed |
+| `refusal` | string | Only on a failed check: why, as human text (not a stable code) |
+
+`sep10 challenge --json`: `network`, `network_passphrase`, `home_domain`,
+`web_auth_endpoint`, `web_auth_domain`, `server_key`, `account`,
+`transaction` (the envelope as received, base64), and `challenge` (the
+decoded object above, without `verified`/`refusal` — it passed every check,
+or the command would have failed).
+
+`sep10 login --json`: `network`, `network_passphrase`, `home_domain`,
+`web_auth_endpoint`, `server_key`, `account`, `token`, and `claims`
+(`{iss?, sub?, iat?, exp?}` — unverified, present only when the token is a
+JWT; `iat`/`exp` are unix seconds).
+
+**Not supported (yet):** shared accounts (a muxed `M...` client account or an
+id memo), `client_domain` attribution (SEP-10 client domain signing), and
+multisig accounts whose master key cannot sign alone — the challenge is
+signed by the wallet's one key.
+
 ## Exit codes
 
 | Code | Meaning |
@@ -560,6 +681,9 @@ This is a wallet for real money, so key handling matters:
   securely and never share it. Anyone with the seed controls the funds.
 - The active network is always echoed before a fund-moving operation, so you
   cannot silently spend mainnet funds while thinking you are on testnet.
+- `sep10 login` signs only a challenge that passed every client check, sends
+  it only to the server that issued it (over https, or http on loopback), and
+  never writes the token anywhere but stdout.
 - The provided `.gitignore` excludes common key/secret file patterns.
 
 ## Development

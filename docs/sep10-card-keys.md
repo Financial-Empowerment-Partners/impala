@@ -457,8 +457,27 @@ address and the fingerprint.
   the card just opened, before the login completes; at most 4 s). The card's
   next login then uses SEP-10. A failure of this step is logged and does not
   affect the login.
+- What the holder sees. The tap sheet names the mechanism while the card
+  answers (`CardStepLabels`: "Card is signing the SEP-10 challenge" for
+  `SIGN_SEP10`, "Card is signing the login challenge" for `SIGN_AUTH`) and, when
+  the bridge has accepted a SEP-10 sign-in, reports "Signed in with SEP-10"
+  for a moment before the account opens. Settings then shows how the session
+  was signed in ("Card · SEP-10 (Stellar Web Authentication)" or "Card · card
+  challenge") and, for SEP-10, the Stellar address that signed. Both are
+  display facts stored with the session (`TokenManager.saveCardSignIn`);
+  nothing decides anything on them.
 - The Card Lab shows the Stellar address, the engine and the two
-  cross-signature checks.
+  cross-signature checks (Inspector). The Doctor has two verdicts for it:
+  **Stellar key for SEP-10** (PASS when the card has a key and both
+  signatures verify on the phone, FAIL when one does not, INFO for a card
+  without a key: a legacy card is not a broken card) and **Server offers
+  SEP-10 sign-in** (PASS when the home domain's `stellar.toml` names a signing
+  key and a web-auth endpoint and the card has a key; WARN with a remedy when
+  a card with a key meets a server that does not offer it, which are the
+  `NOT_OFFERED` cases above; never FAIL). The Device tab's bridge probe reads
+  that `stellar.toml` with the strict reader the sign-in uses (a fourth
+  public, unauthenticated GET; discovery only, no challenge is requested) and
+  lists the home domain, the signing key and the web-auth endpoint.
 - End to end. The demo kit (`demo/`) runs the bridge with SEP-10 on and a home
   domain the emulator can reach (`10.0.2.2:<port>`), and its scenarios drive
   this section for real: the tnet app on an emulator signs in with a card

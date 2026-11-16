@@ -409,7 +409,7 @@ func (a *App) confirmPhrase(required, supplied string, assumeYes bool) (string, 
 	}
 	// --yes is deliberately NOT enough on its own: it waives the interactive
 	// prompt, not the operator's statement of what they are replacing.
-	return "", fmt.Errorf("refusing to replace non-interactively without --confirm-phrase %q", required)
+	return "", fmt.Errorf("refusing to proceed non-interactively without --confirm-phrase %q", required)
 }
 
 // ── keys revoke ────────────────────────────────────────────────────────

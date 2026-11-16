@@ -122,7 +122,7 @@ else.
 | Converted for (`targetsdk`) | 3.0.5 | 3.0.5 | 3.1.0 |
 | Imports `javacard.framework` / `javacard.security` / `javacardx.crypto` | 1.6 / 1.6 / 1.6 | 1.6 / 1.6 / 1.6 | 1.8 / 1.7 / 1.7 |
 | CAP file format | 2.1 | 2.1 | 2.3 |
-| Size (applet 0.3, testnet AIDs) | 22.5 KB | 18.2 KB | 19.4 KB |
+| Size (applet 0.4, testnet AIDs) | 22.6 KB | 18.3 KB | 19.5 KB |
 | Transient memory | 1,896 bytes | 739 bytes | 1,415 bytes |
 | Stellar key and SEP-10 | yes | no | yes |
 
@@ -311,7 +311,7 @@ to show the legacy card that results; on the 3.1 and 3.2 models the native
 engine is tested with EdDSA under each constant, not pure in one or both
 directions, without key import, or absent; all three CAPs are converted and
 verified off-card in CI, and their load matrix is checked there. **No physical
-card of any level has run applet 0.3.** A card model is a description of what
+card of any level has run applet 0.3 or 0.4.** A card model is a description of what
 a platform may do, not a product: which real cards behave like which model is
 not known yet, and `scardutil/` is the tool for finding out.
 
@@ -369,8 +369,10 @@ scardutil — see [`scardutil/README.md`](scardutil/README.md).
 
 `tools/issue` runs the whole ceremony below against a card, idempotent per step
 (an already-personalized card prints its record and exits 0; a torn
-PERSONALIZE re-runs from part A), and prints a signed-off record (card id,
-account UUID, program id, currency, `cert_id`, applet version, CAP sha256).
+PERSONALIZE re-runs from part A; a card that was personalized but never got its
+PINs is finished from the PIN step, because under ENFORCE it cannot sign until
+it has one), and prints a signed-off record (card id, account UUID, program
+id, currency, `cert_id`, applet version, CAP sha256).
 
 ```bash
 export IMPALA_ISSUE_KMK=<32 hex>             # per-card SCP03 key master key (operator secret)
@@ -396,14 +398,30 @@ export IMPALA_OPERATOR_TOKEN=<bearer>        # admin / key-custodian: the certif
   test keys for a card installed without the KEYS flag.
 - **Secrets** come only from the environment or no-echo prompts; a
   token-, PIN- or KMK-looking argument is refused as usage.
+- **The same ceremony from the operator CLI.** `impalactl card setup`
+  (`impalactl/README.md`) is a Go port of this tool for operators who work from
+  the bridge's command line: the same steps in the same order, the same
+  `IMPALA_ISSUE_KMK` (so either tool can continue or re-read a card the other
+  started), the operator's stored session for the certificate and
+  `IMPALA_HOLDER_TOKEN` for the holder's two calls. It reaches a card over the
+  simulator's TCP socket only: a card in a PC/SC reader, `--test-issuer` and
+  `--terminate` are this tool's alone. impalactl's tests replay sessions
+  recorded from this tool with the real applet
+  (`impalactl/internal/card/testdata/`, with the script that records them), so a
+  change to a step, a payload or their order is made in both tools and the
+  sessions are recorded again. impalactl also carries the cardholder's side
+  that this tool does not: `card pin change`, `card pin policy on|off`
+  (applet 0.4) and `card pin reset` with the master PIN.
 - `--terminate --yes-terminate <card_id>` prints balance, receive state and the
   last signed transfer, then TERMINATEs over the per-card channel
   (`docs/transfer-protocol.md` §6.6 "recovered card").
 - Exit codes: 0 done, 1 refused by the card or the bridge, 2 usage. Data on
   stdout, notices on stderr.
 
-`GET_VERSION` (10 bytes: `major2 minor2 rev2 hash4`) reports `0.3`: applet 0.2
-brought the certified transfer protocol, 0.3 adds the Stellar key.
+`GET_VERSION` (10 bytes: `major2 minor2 rev2 hash4`) reports `0.4`: applet 0.2
+brought the certified transfer protocol, 0.3 the Stellar key, and 0.4
+cardholder verification for sign-in (the PIN proof and the sign-in PIN policy,
+`docs/mfa-card-pin-biometrics.md`).
 
 ## Threat-scoped claim
 

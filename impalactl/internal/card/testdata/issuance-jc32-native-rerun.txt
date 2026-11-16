@@ -1,0 +1,39 @@
+# A recorded card session, kept as a known-answer vector for impalactl's card setup.
+# Recorded 2026-11-16 by record.sh through a logging TCP proxy between the reference issuance tool
+# (impala-card tools/issue, on the Kotlin card SDK) and the real ImpalaApplet on jcardsim:
+# hardware jc32 (a JavaCard 3.2 card), the native CAP on the platform's own EdDSA.
+# Session: the same card again, already personalized: the no-op re-run (read-only).
+# Lines: '> hex' is a command APDU exactly as sent, '< hex' the card's answer (data then SW1 SW2).
+# The tool does not SELECT (the simulator's applet is already selected); a client that does adds one exchange.
+#
+# Everything here is test material: a throwaway KMK, PINs, account and issuer (--test-issuer).
+# kmk=000102030405060708090a0b0c0d0e0f
+# user_pin=4821
+# master_pin=31415926
+# account=6f1d9c52-0b7e-4c3a-9e15-2a4b8c7d6e90
+# currency=USDC
+# initial_counter=7
+# transport_keys=GP default (40 41 .. 4F for ENC, MAC and DEK)
+# The issuer's public key, the program id and the certificate are the ones the final
+# GET_PERSONALIZATION (00 34) reports: bytes 2..18, 22..87 and 87..159 (zero-padded DER).
+#
+# What the tool printed (its record):
+# record.card_id=abb0da1493396d291b4acd38bcf907bb
+# record.account_uuid=6f1d9c52-0b7e-4c3a-9e15-2a4b8c7d6e90
+# record.program_id=37ad3c794465bc83270e53e58536ef00
+# record.currency=USDC
+# record.cert_id=e566398beb5c933e32fa27a25b64050d13e165c3a50b6e23138e4c8fe15289e8
+# record.applet_version=0.4+00000000
+# record.stellar_address=GBL7HKAJUMLPBP6YHAUHK756TPECUV5BXSTLZGC73UHTTK4ZBR627OCW
+# record.status=already-issued
+#
+> 00640000
+< 000000040000000000009000
+> 00340000
+< 02b737ad3c794465bc83270e53e58536ef005553444304e64e094219cd91d0b88052d7e19d5c3614af13c5fd61e5c55a7768a495ac1cc465ef5b4bbee125e45f2e8b5af5fadadeceb3d069317fb49ccd9e6ef1f645c5dc3045022021beb087399d4f80daefeda4be46a796c83076b1ae8f4cc714061e7078c7079202210085598219efdeea0227da98a1bcd5145c99bda865d0fd9c07a65000f036bb44a5009000
+> 00370000
+< 0257f3a809a316f0bfd83828757fbe9bc82a57a1bca6bc985fdd0f39ab990c7daf304502202b495a9b4142dc317624626ad108d4896c12a97af1a1372e9a7b0f29adcaeb49022100bcf1042858e1bf6a44a152066cb921ed68a28ac81c6601d6b080ab3b5a718ecb00a789b6e5464dc7b72f3d43522562d6bebdc644a397e3d1e7a4cce99bbd99cf029bde8011fd51aada83e981e33d9ae7e531c15479cca2647e4a31b3151095620c9000
+> 001e0000
+< 6f1d9c520b7e4c3a9e152a4b8c7d6e90abb0da1493396d291b4acd38bcf907bb9000
+> 00240000
+< 044872be2a94f55b990e8cd08924893b6c336329e1023b66e78a38581df2de3710df3969c83ccae14a4ffd25915a35f2927f872e6f739596646d4ddc148fa2cd169000

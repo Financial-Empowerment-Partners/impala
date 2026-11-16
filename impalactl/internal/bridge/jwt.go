@@ -26,6 +26,42 @@ type Claims struct {
 	FamilyID  string `json:"fid"`
 	Issuer    string `json:"iss"`
 	Audience  string `json:"aud"`
+	// Amr is the session's verified authentication methods, sorted, with the
+	// derived "mfa" present when they span two factor kinds
+	// (docs/mfa-card-pin-biometrics.md §2). Absent in tokens minted before
+	// MFA support: an empty list, never multi-factor.
+	Amr []string `json:"amr"`
+	// AuthTime is the Unix time of the session's most recent factor
+	// verification. A step-up refreshes it; a refresh rotation carries it.
+	AuthTime int64 `json:"auth_time"`
+	// MFARequired ("mfr") says the account must be multi-factor to use the
+	// API, stamped at issuance from the account flag or MFA_REQUIRED_ROLES.
+	MFARequired bool `json:"mfr"`
+}
+
+// AMRMultiFactor is the derived amr value the bridge adds when a session's
+// factors span two factor kinds. It is never an input.
+const AMRMultiFactor = "mfa"
+
+// HasMFA reports whether the token's amr carries the multi-factor marker.
+// The bridge additionally requires auth_time to be within MFA_MAX_AGE_SECS
+// (default 12 h), which the client does not know; GET /mfa/status is the
+// authoritative answer.
+func (c Claims) HasMFA() bool {
+	for _, m := range c.Amr {
+		if m == AMRMultiFactor {
+			return true
+		}
+	}
+	return false
+}
+
+// AuthTimeAt returns auth_time as a time, or the zero time when absent.
+func (c Claims) AuthTimeAt() time.Time {
+	if c.AuthTime <= 0 {
+		return time.Time{}
+	}
+	return time.Unix(c.AuthTime, 0).UTC()
 }
 
 // ParseClaims decodes the payload of a JWT without verifying it.

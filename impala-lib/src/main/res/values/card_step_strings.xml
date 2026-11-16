@@ -4,6 +4,7 @@
 <resources>
     <string name="card_step_reading">Reading card</string>
     <string name="card_step_signing_login">Card is signing the login challenge</string>
+    <string name="card_step_signing_sep10">Card is signing the SEP-10 challenge</string>
     <string name="card_step_signing_transfer">Verifying PIN and signing on card</string>
     <string name="card_step_applying_credit">Applying credit to card</string>
 </resources>

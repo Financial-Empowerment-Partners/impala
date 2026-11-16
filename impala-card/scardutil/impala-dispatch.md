@@ -1,4 +1,4 @@
-# Test Sequence: Impala applet 0.3 plaintext dispatch
+# Test Sequence: Impala applet 0.4 plaintext dispatch
 
 Compatibility checks that every card OS running the Impala CAP must answer
 identically. Plaintext commands only (no PIN, no SCP03, no personalization),
@@ -7,7 +7,7 @@ removes the applet, and on the simulator target (`scripts/vpcd-sim.sh`),
 where the CAP steps are skipped. A card that answers differently is a
 compatibility finding for `docs/physical-evidence/`, not a test bug.
 
-Expected status words were observed on applet 0.3 under jcardsim and agree
+Expected status words were observed on applet 0.4 under jcardsim and agree
 with `docs/apdu.md`, with two refinements the table does not spell out:
 `SIGN_AUTH` on a blank card answers `6234` (the personalization guard runs
 before the key guard), and `8430`/`8434` answer `6985` because a secured CLA
@@ -33,32 +33,45 @@ which is the issuance tool's ground; the dispatch checks the key, not a
 signature. The same sequence passes on the simulator's two hardware classes
 (`impala-sim-jc305.cfg`, the default CAP on a JavaCard 3.0.5 card, and
 `impala-sim-jc32.cfg`, the native CAP on a JavaCard 3.2 card); what tells
-them apart is the first data byte of step 20, the engine that made the key:
+them apart is the first data byte of step 23, the engine that made the key:
 `01` for the software engine, `02` for the platform's EdDSA.
+
+Cardholder verification for sign-in (applet 0.4, `docs/mfa-card-pin-biometrics.md`)
+is checked in the clear as well. `GET_USER_VERIFICATION` (`39`) answers in every
+state: `01 00 05 00` on a plain install is format 1, no sign-in PIN policy, no
+provisioned PIN, five user-PIN tries, no PIN verified in this session, and
+INITIALIZE does not change it. `SET_SIGN_IN_POLICY` (`3A`) and `CHANGE_USER_PIN`
+(`3B`) answer `6985` while no user PIN is provisioned; with a PIN they need it
+verified first, which, like the PIN proof of `SIGN_AUTH`, is the ground of the
+issuance tool and the unit suites, not of a plaintext dispatch.
 
 Target applet `01020304050607080102`
 
 1. Delete `0102030405060708` with deps (if present)
 2. Install `ImpalaApplet.cap` as `01020304050607080102`
-3. Send APDU `0064000000` expect `9000` data `00000003`
+3. Send APDU `0064000000` expect `9000` data `00000004`
 4. Send APDU `0034000000` expect `9000` data `0008`
 5. Send APDU `0024000000` expect `6230`
 6. Send APDU `00250000080102030405060708` expect `6234`
 7. Send APDU `0037000000` expect `623C`
 8. Send APDU `0038000000` expect `6234`
-9. Send APDU `0006000000` expect `6D00`
-10. Send APDU `0014000000` expect `6D00`
-11. Send APDU `8030000000` expect `6D00`
-12. Send APDU `8430000000` expect `6985`
-13. Send APDU `8434000000` expect `6985`
-14. Send APDU `002C00000400112233` expect `9000`
-15. Send APDU `002C00000400112233` expect `6686`
-16. Send APDU `0024000000` expect `9000`
-17. Send APDU `001E000000` expect `9000`
-18. Send APDU `00250000080102030405060708` expect `6234`
-19. Send APDU `0034000000` expect `9000` data `0189`
-20. Send APDU `0037000000` expect `9000`
-21. Send APDU `0038000000` expect `6234`
-22. Send APDU `0035000000` expect `9000`
-23. Send APDU `0036000000` expect `6A83`
-24. Delete `0102030405060708` with deps
+9. Send APDU `0039000000` expect `9000` data `01000500`
+10. Send APDU `003A010000` expect `6985`
+11. Send APDU `003B00000401020304` expect `6985`
+12. Send APDU `0006000000` expect `6D00`
+13. Send APDU `0014000000` expect `6D00`
+14. Send APDU `8030000000` expect `6D00`
+15. Send APDU `8430000000` expect `6985`
+16. Send APDU `8434000000` expect `6985`
+17. Send APDU `002C00000400112233` expect `9000`
+18. Send APDU `002C00000400112233` expect `6686`
+19. Send APDU `0024000000` expect `9000`
+20. Send APDU `001E000000` expect `9000`
+21. Send APDU `00250000080102030405060708` expect `6234`
+22. Send APDU `0034000000` expect `9000` data `0189`
+23. Send APDU `0037000000` expect `9000`
+24. Send APDU `0038000000` expect `6234`
+25. Send APDU `0039000000` expect `9000` data `01000500`
+26. Send APDU `0035000000` expect `9000`
+27. Send APDU `0036000000` expect `6A83`
+28. Delete `0102030405060708` with deps

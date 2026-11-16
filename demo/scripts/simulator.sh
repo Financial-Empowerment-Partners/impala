@@ -7,11 +7,17 @@
 # (jc305 = a JavaCard 3.0.5 card, the default; jc32 = a JavaCard 3.2 card; `models` lists the rest) and
 # DEMO_CARD_ED25519 the CAP variant (empty: the one an operator would load on that hardware). A CAP the
 # hardware does not load (native on a JavaCard 3.0.5 card) is refused at `up`, as a card's loader refuses it.
+#
+# One process is one card. A second card is a second process on its own port with its own state directory:
+# DEMO_SIM_INSTANCE names it and SIM_PORT gives its port (scenario 17 runs a blank one next to the holder's card,
+# as `SIM_PORT=$SIM2_PORT DEMO_SIM_INSTANCE=setup scripts/simulator.sh up`). Every verb acts on that instance only.
 # Usage: scripts/simulator.sh up|down|restart|status|probe|stellar|hardware|models
 set -euo pipefail
 . "$(dirname "$0")/lib.sh"
 load_env
-SIM_DIR="$STATE_DIR/simulator"; PID_FILE="$SIM_DIR/pid"; LOG="$SIM_DIR/server.log"; HW_FILE="$SIM_DIR/hardware"
+DEMO_SIM_INSTANCE="${DEMO_SIM_INSTANCE:-}"
+case "$DEMO_SIM_INSTANCE" in *[!a-z0-9-]*) die "DEMO_SIM_INSTANCE must be a short lowercase name, not '$DEMO_SIM_INSTANCE'" ;; esac
+SIM_DIR="$STATE_DIR/simulator${DEMO_SIM_INSTANCE:+-$DEMO_SIM_INSTANCE}"; PID_FILE="$SIM_DIR/pid"; LOG="$SIM_DIR/server.log"; HW_FILE="$SIM_DIR/hardware"
 mkdir -p "$SIM_DIR"
 case "$DEMO_CARD_PLATFORM" in ''|*[!a-z0-9-]*) die "DEMO_CARD_PLATFORM must be a card model name such as jc305 or jc32, not '$DEMO_CARD_PLATFORM'" ;; esac
 case "$DEMO_CARD_ED25519" in ''|soft|native|none) ;; *) die "DEMO_CARD_ED25519 must be soft, native, none or empty, not '$DEMO_CARD_ED25519'" ;; esac
@@ -22,7 +28,7 @@ hw_level() { cut -f2 "$HW_FILE" 2>/dev/null || true; }
 hw_cap() { cut -f3 "$HW_FILE" 2>/dev/null || true; }
 hw_line() { if [ -s "$HW_FILE" ]; then printf '%s (JavaCard %s), CAP %s' "$(hw_platform)" "$(hw_level)" "$(hw_cap)"; else printf 'hardware not recorded'; fi; }
 
-sim_pid() { pgrep -f "com.impala.simulator.SimulatorApduServerKt --port $SIM_PORT" 2>/dev/null | head -n1 || true; }
+sim_pid() { pgrep -f "com.impala.simulator.SimulatorApduServerKt --port $SIM_PORT " 2>/dev/null | head -n1 || true; }
 
 # probe: SELECT the applet and read GET_VERSION over the TCP framing (python3 for the binary I/O)
 probe() {
@@ -71,7 +77,7 @@ EOF
 up() {
   local want_cap="$DEMO_CARD_ED25519"
   if port_open "$SIM_PORT"; then
-    [ -n "$(sim_pid)" ] || die "port $SIM_PORT is busy but no simulator process is ours (another server? change SIM_PORT in .env)"
+    [ -n "$(sim_pid)" ] || die "port $SIM_PORT is busy but no simulator process is ours (another server? change SIM_PORT${DEMO_SIM_INSTANCE:+ / SIM2_PORT} in .env)"
     # A running simulator IS a card: it cannot become another one. Say so instead of handing a scenario the wrong hardware.
     if [ -s "$HW_FILE" ] && { [ "$(hw_platform)" != "$DEMO_CARD_PLATFORM" ] || { [ -n "$want_cap" ] && [ "$(hw_cap)" != "$want_cap" ]; }; }; then
       die "the running simulator serves $(hw_line), not DEMO_CARD_PLATFORM=$DEMO_CARD_PLATFORM${want_cap:+ with the $want_cap CAP}: scripts/simulator.sh restart (the card it holds is lost; scenario 05 issues a new one)"
@@ -103,13 +109,14 @@ up() {
     "$(sed -n 's/^CAP: .* (ed25519 \([a-z]*\)).*/\1/p' "$LOG" | head -n1)" > "$HW_FILE"
   [ -n "$(hw_platform)" ] && [ -n "$(hw_cap)" ] || die "the simulator did not say which hardware it serves (see $LOG): is impala-card built from this checkout?"
   ok "simulator serving on 127.0.0.1:$SIM_PORT (pid $(cat "$PID_FILE")): $(probe); $(hw_line)"
-  log "  issue a card: scripts/scenario-05-card-issue.sh   emulator reaches it through adb reverse tcp:$SIM_PORT"
+  if [ -z "$DEMO_SIM_INSTANCE" ]; then log "  issue a card: scripts/scenario-05-card-issue.sh   emulator reaches it through adb reverse tcp:$SIM_PORT"; fi
 }
 
 down() {
   local p; p="$(sim_pid)"
-  if [ -n "$p" ]; then kill "$p" 2>/dev/null || true; sleep 1; pkill -f 'com.impala.simulator.SimulatorApduServerKt' 2>/dev/null || true; ok "simulator stopped (pid $p); the simulated card is gone"
-  else log "  simulator not running"; fi
+  # Only this instance's process: another card may be running on another port.
+  if [ -n "$p" ]; then kill "$p" 2>/dev/null || true; sleep 1; pkill -f "com.impala.simulator.SimulatorApduServerKt --port $SIM_PORT " 2>/dev/null || true; ok "simulator stopped (pid $p, port $SIM_PORT); the simulated card is gone"
+  else log "  simulator not running on port $SIM_PORT"; fi
   rm -f "$PID_FILE" "$HW_FILE"
 }
 

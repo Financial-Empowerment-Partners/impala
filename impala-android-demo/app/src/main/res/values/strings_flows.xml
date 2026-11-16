@@ -34,6 +34,8 @@
     <!-- Tap sheet: Done (only after the real outcome) -->
     <string name="tap_done_registered">Card registered</string>
     <string name="tap_done_signed_in">Signed in</string>
+    <!-- A card that signed a SEP-10 challenge with its Stellar key (the bridge accepted it). -->
+    <string name="tap_done_signed_in_sep10">Signed in with SEP-10</string>
     <string name="tap_done_sent">Transfer sent to the bridge</string>
     <string name="tap_done_loaded">Credit applied to the card</string>
     <string name="tap_done_load_created">Load created. Fund it to continue.</string>

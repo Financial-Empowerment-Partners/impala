@@ -70,7 +70,8 @@ export default [
                 KeysView: 'writable',
                 CustodyView: 'writable',
                 Sep10View: 'writable',
-                CardsView: 'writable'
+                CardsView: 'writable',
+                MfaAdminView: 'writable'
             }
         },
         rules: {

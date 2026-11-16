@@ -95,6 +95,42 @@
                         android:text="@string/not_available"
                         android:textAppearance="@style/TextAppearance.ImpalaDemo.MonoSmall"
                         android:textColor="?attr/colorOnSurface" />
+
+                    <!-- How this session was signed in; a card names SEP-10 or the card challenge. -->
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="8dp"
+                        android:text="@string/settings_label_sign_in"
+                        android:textAppearance="@style/TextAppearance.ImpalaDemo.Overline" />
+
+                    <TextView
+                        android:id="@+id/tvSignInMethod"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="@string/not_available"
+                        android:textAppearance="?attr/textAppearanceBodyMedium"
+                        android:textColor="?attr/colorOnSurface" />
+
+                    <TextView
+                        android:id="@+id/tvCardStellarLabel"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="8dp"
+                        android:text="@string/settings_label_card_stellar"
+                        android:textAppearance="@style/TextAppearance.ImpalaDemo.Overline"
+                        android:visibility="gone" />
+
+                    <TextView
+                        android:id="@+id/tvCardStellar"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:background="?attr/selectableItemBackground"
+                        android:breakStrategy="simple"
+                        android:hyphenationFrequency="none"
+                        android:textAppearance="@style/TextAppearance.ImpalaDemo.MonoSmall"
+                        android:textColor="?attr/colorOnSurface"
+                        android:visibility="gone" />
                 </LinearLayout>
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>

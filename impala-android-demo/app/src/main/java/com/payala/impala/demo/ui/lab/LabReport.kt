@@ -318,7 +318,51 @@ object LabReport {
             rows += LabRow.Item(res.getString(R.string.lab_row_bridge_issuer_fp), it, copyable = true)
         }
         probe.issuerFingerprint?.let { rows += LabRow.Item(res.getString(R.string.lab_row_bridge_operator_fp), it, copyable = true) }
+        rows += sep10Rows(res, probe, ::call)
         return rows
+    }
+
+    /**
+     * SEP-10 discovery, as the probe read it from the home domain's stellar.toml: the call itself,
+     * then the public values a card's Stellar key signs in against. Nothing here is secret: the
+     * signing key is the server's public account id.
+     */
+    private fun sep10Rows(
+        res: Resources, probe: BridgeProbe.Result, call: (BridgeProbe.Call, String?, Boolean) -> LabRow.Item
+    ): List<LabRow> {
+        val rows = ArrayList<LabRow>()
+        when (val facts = probe.sep10) {
+            Sep10Facts.NotChecked -> Unit
+            Sep10Facts.NotConfigured ->
+                rows += LabRow.Item(res.getString(R.string.lab_row_sep10), res.getString(R.string.lab_sep10_not_configured))
+            is Sep10Facts.NotOffered -> {
+                rows += LabRow.Item(
+                    res.getString(R.string.lab_row_sep10),
+                    res.getString(R.string.lab_sep10_not_offered, facts.reason), tone = CheckStatus.WARN
+                )
+                rows += LabRow.Item(res.getString(R.string.lab_row_sep10_home_domain), facts.homeDomain, copyable = true)
+            }
+            is Sep10Facts.Unreachable -> {
+                probe.sep10Toml?.let { rows += call(it, null, true) }
+                rows += LabRow.Item(res.getString(R.string.lab_row_sep10_home_domain), facts.homeDomain, copyable = true)
+            }
+            is Sep10Facts.Offered -> {
+                probe.sep10Toml?.let { rows += call(it, res.getString(R.string.lab_sep10_offered), true) }
+                rows += LabRow.Item(res.getString(R.string.lab_row_sep10_home_domain), facts.homeDomain, copyable = true)
+                rows += LabRow.Item(res.getString(R.string.lab_row_sep10_signing_key), facts.signingKey, copyable = true)
+                rows += LabRow.Item(res.getString(R.string.lab_row_sep10_endpoint), facts.webAuthEndpoint, copyable = true)
+            }
+        }
+        return rows
+    }
+
+    /** SEP-10 discovery for the text report: public values only (the server's account id and URL). */
+    private fun sep10Line(facts: Sep10Facts): String = when (facts) {
+        Sep10Facts.NotChecked -> "not checked"
+        Sep10Facts.NotConfigured -> "not configured in this build"
+        is Sep10Facts.NotOffered -> "not offered by ${facts.homeDomain} (${facts.reason})"
+        is Sep10Facts.Unreachable -> "${facts.homeDomain} unreachable (${facts.reason})"
+        is Sep10Facts.Offered -> "offered by ${facts.homeDomain}  signing_key: ${facts.signingKey}  web_auth_endpoint: ${facts.webAuthEndpoint}"
     }
 
     /** The engine behind a card's Stellar key, in words; an engine id this app does not know is shown as read. */
@@ -379,6 +423,7 @@ object LabReport {
             for (c in listOf(probe.health, probe.version, probe.issuer)) appendLine("${c.path}: ${c.failure ?: "OK"} ${c.latencyMs} ms")
             appendLine("status: ${probe.healthStatus ?: "?"}")
             appendLine("stellar_network: ${probe.stellarNetwork ?: "?"} (build: ${probe.expectedNetwork})${if (probe.networkMismatch) "  MISMATCH" else ""}")
+            appendLine("sep10: ${sep10Line(probe.sep10)}")
             appendLine("version: ${probe.bridgeVersion ?: "?"} schema ${probe.schemaVersion ?: "?"}")
             appendLine("card-issuer configured: ${probe.issuerConfigured ?: "?"}")
             probe.programIdHex?.let { appendLine("program_id: $it") }

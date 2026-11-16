@@ -251,6 +251,49 @@ describe('401 self-heal (temporal token revoked or rotated elsewhere)', () => {
     });
 });
 
+describe('credential checks (postCredential): a 401 is the answer, not a dead session', () => {
+    const liveSession = () => makeStorage({ refresh_token: R0, temporal_token: T_LIVE });
+
+    it('a refused credential is returned as a 401 error: no refresh, no second send, tokens kept, no bounce', async () => {
+        const storage = liveSession();
+        const { API, calls, ctx } = loadApi({ storage, fetch: () => Promise.resolve(unauthorized()) });
+
+        const err = await rejection(API.postCredential('/mfa/step-up', { mfa_type: 'totp', code: '000000' }));
+        expect(err.status).toBe(401);
+        expect(err.code).toBe('unauthorized');
+        // Exactly one request: the refused code is never presented twice, and /token is never asked.
+        expect(calls.map((c) => c.url)).toEqual(['/api/mfa/step-up']);
+        expect(storage.getItem('refresh_token')).toBe(R0);
+        expect(storage.getItem('temporal_token')).toBe(T_LIVE);
+        expect(ctx.window.location.href).toBe('');
+    });
+
+    it('an accepted credential returns the body, sent once with the bearer token', async () => {
+        const storage = liveSession();
+        const answer = { success: true, amr: ['otp', 'pwd', 'mfa'], temporal_token: T1, refresh_token: R1 };
+        const { API, calls } = loadApi({ storage, fetch: () => Promise.resolve(jsonResponse(answer)) });
+
+        expect(await API.postCredential('/mfa/step-up', { mfa_type: 'totp', code: '123456' })).toEqual(answer);
+        expect(calls.length).toBe(1);
+        expect(calls[0].opts.method).toBe('POST');
+        expect(calls[0].opts.headers.Authorization).toBe('Bearer ' + T_LIVE);
+        expect(JSON.parse(calls[0].opts.body)).toEqual({ mfa_type: 'totp', code: '123456' });
+    });
+
+    it('an ordinary POST to the same route still self-heals: only postCredential changes what 401 means', async () => {
+        const storage = liveSession();
+        const { API, calls, ctx } = loadApi({
+            storage,
+            fetch: (url) => Promise.resolve(url === '/api/token' ? rotated() : unauthorized()),
+        });
+
+        const err = await rejection(API.post('/mfa/step-up', { mfa_type: 'totp', code: '000000' }));
+        expect(err.message).toBe('Unauthorized');
+        expect(calls.map((c) => c.url)).toEqual(['/api/mfa/step-up', '/api/token', '/api/mfa/step-up']);
+        expect(ctx.window.location.href).toBe('index.html?reason=expired');
+    });
+});
+
 describe('cross-tab refresh serialization', () => {
     /** navigator.locks stand-in; `beforeRun` simulates what a sibling tab did while we waited. */
     function fakeLocks(beforeRun) {

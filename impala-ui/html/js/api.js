@@ -506,10 +506,18 @@ var API = (function () {
      * @param {string} method - HTTP method (GET, POST, PUT, DELETE).
      * @param {string} path   - API path (e.g. '/account').
      * @param {Object} [body] - Request body (will be JSON-serialized).
+     * @param {Object} [opts]
+     * @param {boolean} [opts.credentialCheck] - The body carries a credential the
+     *   bridge checks (a TOTP code, a device assertion). The bridge refuses a
+     *   bad one with the same generic 401 it gives a bad token, so here a 401
+     *   is returned to the caller as the answer it is: no refresh, no second
+     *   send (that would present the refused credential again and count as
+     *   another attempt), and the session is left alone.
      * @returns {Promise<Response>} The fetch Response object.
      */
-    function request(method, path, body) {
+    function request(method, path, body, opts) {
         var authHealed = false;
+        var credentialCheck = !!(opts && opts.credentialCheck);
 
         return getValidToken().then(function (token) {
             var attempt = 0;
@@ -528,6 +536,9 @@ var API = (function () {
                 }
 
                 return fetch(base() + path, opts).then(function (res) {
+                    if (res.status === 401 && credentialCheck) {
+                        return res;
+                    }
                     if (res.status === 401) {
                         // Stale temporal token (revoked, or rotated by another
                         // tab): refresh once and retry; a second 401 means the
@@ -665,6 +676,16 @@ var API = (function () {
         /** Authenticated POST request. Returns parsed JSON or text. */
         post: function (path, body) {
             return request('POST', path, body).then(jsonOrError);
+        },
+        /**
+         * Authenticated POST of a credential the bridge checks (a step-up's
+         * TOTP code or device assertion). A 401 rejects with `status` 401 and
+         * means the bridge refused THAT credential: the request is never
+         * repeated and the session is not ended. Follow a 401 with an ordinary
+         * request (it settles whether the session itself is still good).
+         */
+        postCredential: function (path, body) {
+            return request('POST', path, body, { credentialCheck: true }).then(jsonOrError);
         },
         /** Authenticated PUT request. Returns parsed JSON or text. */
         put: function (path, body) {

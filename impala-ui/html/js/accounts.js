@@ -317,27 +317,27 @@
         if (list.cards.length === 0) {
             return '<p class="text-muted">No cards are registered for this account.</p>';
         }
-        var html = '<div class="table-wrap"><table><thead><tr>' +
-            '<th>Card ID</th><th>Status</th><th>Created</th><th>Stellar address</th>' +
-            '</tr></thead><tbody>';
+        // One block per card, label over value: the drawer is too narrow for a
+        // table of two 32- and 56-character identifiers, and both must be
+        // readable in full (identifiers are never truncated).
+        var html = '';
         list.cards.forEach(function (c) {
             // Badge classes come from CardsView's fixed set; values are
             // escaped and rendered as element content only.
-            html += '<tr>' +
-                '<td><code class="ident">' + escapeHtml(c.cardId || '') + '</code></td>' +
-                '<td><span class="badge ' + c.status.cls + '">' + escapeHtml(c.status.label) + '</span>' +
-                (c.deletedAt ? '<br><small class="text-muted">' + escapeHtml(formatDate(c.deletedAt)) + '</small>' : '') +
-                '</td>' +
-                '<td class="nowrap">' + escapeHtml(formatDate(c.createdAt)) + '</td>' +
-                '<td>' + (c.stellarAddress
+            html += '<dl class="detail-grid card-entry">' +
+                '<dt>Card ID</dt><dd><code class="ident">' + escapeHtml(c.cardId || '') + '</code></dd>' +
+                '<dt>Status</dt><dd><span class="badge ' + c.status.cls + '">' + escapeHtml(c.status.label) + '</span>' +
+                (c.deletedAt ? ' <small class="text-muted">' + escapeHtml(formatDate(c.deletedAt)) + '</small>' : '') +
+                '</dd>' +
+                '<dt>Created</dt><dd>' + escapeHtml(formatDate(c.createdAt)) + '</dd>' +
+                '<dt>Stellar address</dt><dd>' + (c.stellarAddress
                     ? '<code class="ident">' + escapeHtml(c.stellarAddress) + '</code>' +
                       (c.sep10 ? ' <span class="badge info">SEP-10</span>' : '')
-                    : '<span class="text-muted">none</span>') +
-                '</td>' +
-                '</tr>';
+                    : '<span class="text-muted">none (signs in with the card challenge)</span>') +
+                '</dd>' +
+                '</dl>';
         });
-        html += '</tbody></table></div>' +
-            '<p class="text-muted">Newest first, at most 100. A card&rsquo;s Stellar address is a ' +
+        html += '<p class="text-muted">Newest first, at most 100. A card&rsquo;s Stellar address is a ' +
             'sign-in key only: never fund it.</p>';
         if (sep10Refused && list.cards.some(function (c) { return c.sep10; })) {
             html += '<p class="text-muted">This account holds a privileged role, so the bridge ' +

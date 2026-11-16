@@ -167,7 +167,7 @@ com.payala.impala.demo
     │   ├── LabIntents.kt         The one way to open the Lab: EXTRA_TAB, EXTRA_CARD_ID, TABS
     │   ├── LabViewModel.kt       Last read, Doctor verdicts, probe results (in memory only)
     │   ├── CardDoctor.kt         Pure card ↔ bridge ↔ session diagnosis
-    │   ├── BridgeProbe.kt        Unauthenticated /health, /version, /card-issuer with failure classes
+    │   ├── BridgeProbe.kt        Unauthenticated /health, /version, /card-issuer and the SEP-10 stellar.toml, with failure classes
     │   ├── BuildInfo.kt          Build and device facts
     │   ├── LabReport.kt          Screen rows (the only place masked values are revealed) and the redacted export
     │   └── adapters/             KeyValueAdapter, DoctorAdapter, TraceAdapter, LabColors
@@ -398,6 +398,11 @@ modes, and the tap sheet's window follows the same rule (`EdgeToEdgeTest`).
 
 ### Settings
 - Account: the display name (or a person glyph) and the Payala ID, shown once
+- **Signed in with**: how the session was signed in (Password, Google, GitHub,
+  Okta, or Card). A card names its mechanism, "Card · SEP-10 (Stellar Web
+  Authentication)" or "Card · card challenge", and after a SEP-10 sign-in the
+  **card's Stellar address** (the key that signed; a long press copies it).
+  These are display facts stored with the session; nothing decides on them
 - MFA enrollment status (fetched from the bridge API) and notification
   subscriptions
 - Server: the bridge URL, read-only, with a Testnet / Public network chip
@@ -455,8 +460,14 @@ inspect").
   minor units only.
 - **Doctor.** One verdict per check, in order: Reader; ISO 14443-4 card;
   Applet selected; Applet version 0.2 or newer; Personalized, not terminated;
-  Certificate verifies under the card's issuer key; Issuer matches this bridge;
-  Certificate verifies under this bridge's key; Bridge knows this card
+  Certificate verifies under the card's issuer key; **Stellar key for SEP-10**
+  (PASS when the card holds a Stellar key and both of its cross-signatures
+  verify on the phone, INFO for a card without one: a legacy card is not a
+  broken card); Issuer matches this bridge; Certificate verifies under this
+  bridge's key; **Server offers SEP-10 sign-in** (PASS when the home domain's
+  `stellar.toml` names a signing key and a web-auth endpoint and the card has
+  a key; WARN with a remedy when a card with a key meets a server that does
+  not offer it; never FAIL); Bridge knows this card
   (`GET /offline/cards/{id}`, only with a session); Recorded on this phone;
   Card account is the signed-in account; the card you chose (only with
   `EXTRA_CARD_ID`); Field quality. Verdicts are PASS, FAIL (only when the card
@@ -494,6 +505,11 @@ inspect").
   `TIMEOUT`, `RATE_LIMITED` (429) or `HTTP_<code>`. The probe runs once on
   open and then at most once per 10 s (a second press inside the window says
   "Probed just now; try again in N s"); the Doctor reuses a probe for 60 s.
+  When the build has a SEP-10 home domain the probe makes a fourth public GET,
+  that domain's `/.well-known/stellar.toml`, read with the strict reader the
+  sign-in itself uses, and lists **SEP-10 home domain**, **SEP-10 signing key**
+  and **Web-auth endpoint** (or "Not offered", with the reason: `HTTP_404`,
+  `HTTP_503`, `NO_WEB_AUTH`). It is discovery only: no challenge is requested.
   The bridge rows include its program id, **Bridge issuer key fingerprint**
   (the bridge key in the Inspector's `ab:cd:…` format, so it can be compared
   with a card's issuer key fingerprint at a glance) and **Operator

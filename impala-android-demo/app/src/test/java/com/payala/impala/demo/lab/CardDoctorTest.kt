@@ -17,6 +17,7 @@ import com.payala.impala.demo.ui.lab.DoctorCheck
 import com.payala.impala.demo.ui.lab.DoctorInput
 import com.payala.impala.demo.ui.lab.IssuerFacts
 import com.payala.impala.demo.ui.lab.ReaderState
+import com.payala.impala.demo.ui.lab.Sep10Facts
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -232,5 +233,89 @@ class CardDoctorTest {
         val name = inspection.holderName?.reveal().orEmpty()
         if (name.isNotBlank()) assertTrue(all.none { it.contains(name) })
         assertTrue(all.none { it.contains(sim.cardPubHex) || it.contains(sim.certHex) })
+    }
+
+    // ---- SEP-10: the card's Stellar key, and whether the server takes it ----
+
+    private val offered = Sep10Facts.Offered("10.0.2.2:8080", CannedBridge.SIGNING_KEY, "http://10.0.2.2:8080/auth/sep10", "Test SDF Network ; September 2015")
+    private val stellar = "GDZSBM4I66NATGVDR5B6THBW3NNYVGPTDMJDQVUSTVN7WDKTJ5ICAOV6"
+
+    private fun synthetic(flags: List<String>, address: String? = null, binding: Boolean? = null, proof: Boolean? = null, sep10: Sep10Facts = offered) =
+        run(DoctorInput(
+            reader = ReaderState.NFC_ENABLED,
+            inspection = syntheticInspection(flags = flags, stellarAddress = address, stellarEngine = address?.let { "soft" }, stellarBinding = binding, stellarProof = proof),
+            sep10 = sep10
+        ))
+
+    @Test
+    fun `a jcardsim card's Stellar key passes with both cross-signatures verified on the phone`() {
+        // The default simulated card makes a Stellar key with the software engine at INITIALIZE.
+        assertTrue("STELLAR_KEY" in inspection.flagNames)
+        val check = run(input()).getValue(CheckId.STELLAR_KEY)
+        assertEquals(CheckStatus.PASS, check.status)
+        assertEquals(R.string.lab_doc_stellar_ok, check.detailRes)
+        assertEquals(listOf("soft"), check.detailArgs)
+    }
+
+    @Test
+    fun `a Stellar key that does not verify fails, an unbound one is skipped, and a card without one is INFO`() {
+        val keyed = listOf("PERSONALIZED", "STELLAR_KEY")
+        for ((binding, proof) in listOf(false to true, true to false, false to false)) {
+            val bad = synthetic(keyed, stellar, binding, proof).getValue(CheckId.STELLAR_KEY)
+            assertEquals("binding=$binding proof=$proof", CheckStatus.FAIL, bad.status)
+            assertEquals(R.string.lab_doc_stellar_bad, bad.detailRes)
+            assertEquals(R.string.lab_doc_cert_bad_fix, bad.remedyRes)
+        }
+        val unbound = synthetic(keyed, stellar).getValue(CheckId.STELLAR_KEY)
+        assertEquals(CheckStatus.SKIP, unbound.status)
+        assertEquals(R.string.lab_doc_stellar_unbound, unbound.detailRes)
+        // The flag says there is a key, but it was not read: unanswered, not failed.
+        assertEquals(CheckStatus.SKIP, synthetic(keyed).getValue(CheckId.STELLAR_KEY).status)
+        val legacy = synthetic(listOf("PERSONALIZED")).getValue(CheckId.STELLAR_KEY)
+        assertEquals(CheckStatus.INFO, legacy.status)
+        assertEquals(R.string.lab_doc_stellar_none, legacy.detailRes)
+    }
+
+    @Test
+    fun `the SEP-10 server check follows the card and the server, and only warns when a keyed card cannot use it`() {
+        val keyed = listOf("PERSONALIZED", "STELLAR_KEY")
+        val pass = synthetic(keyed, stellar, true, true).getValue(CheckId.SEP10_SERVER)
+        assertEquals(CheckStatus.PASS, pass.status)
+        assertEquals(R.string.lab_doc_sep10_offered, pass.detailRes)
+        assertEquals(listOf("10.0.2.2:8080"), pass.detailArgs)
+
+        val notOffered = Sep10Facts.NotOffered("10.0.2.2:8080", "HTTP_503")
+        val warn = synthetic(keyed, stellar, true, true, notOffered).getValue(CheckId.SEP10_SERVER)
+        assertEquals(CheckStatus.WARN, warn.status)
+        assertEquals(R.string.lab_doc_sep10_not_offered, warn.detailRes)
+        assertEquals(listOf("10.0.2.2:8080", "HTTP_503"), warn.detailArgs)
+        assertEquals(R.string.lab_doc_sep10_not_offered_fix, warn.remedyRes)
+
+        // A card without a Stellar key signs the card challenge whatever the server offers: never a warning.
+        val legacyOffered = synthetic(listOf("PERSONALIZED")).getValue(CheckId.SEP10_SERVER)
+        assertEquals(CheckStatus.INFO, legacyOffered.status)
+        assertEquals(R.string.lab_doc_sep10_offered_legacy_card, legacyOffered.detailRes)
+        val legacyNotOffered = synthetic(listOf("PERSONALIZED"), sep10 = notOffered).getValue(CheckId.SEP10_SERVER)
+        assertEquals(CheckStatus.INFO, legacyNotOffered.status)
+        assertNull(legacyNotOffered.remedyRes)
+
+        assertEquals(CheckStatus.INFO, synthetic(keyed, stellar, true, true, Sep10Facts.NotConfigured).getValue(CheckId.SEP10_SERVER).status)
+        val unreachable = synthetic(keyed, stellar, true, true, Sep10Facts.Unreachable("10.0.2.2:8080", "CONNECT")).getValue(CheckId.SEP10_SERVER)
+        assertEquals(CheckStatus.SKIP, unreachable.status)
+        assertEquals(listOf("10.0.2.2:8080", "CONNECT"), unreachable.detailArgs)
+        assertEquals(CheckStatus.SKIP, synthetic(keyed, stellar, true, true, Sep10Facts.NotChecked).getValue(CheckId.SEP10_SERVER).status)
+    }
+
+    @Test
+    fun `the SEP-10 checks never fail a healthy card and sit between the card and the bridge checks`() {
+        val order = CardDoctor.run(input()).map { it.id }
+        assertTrue(order.indexOf(CheckId.CERT_CARD_ISSUER) < order.indexOf(CheckId.STELLAR_KEY))
+        assertTrue(order.indexOf(CheckId.STELLAR_KEY) < order.indexOf(CheckId.ISSUER_MATCHES_BRIDGE))
+        assertTrue(order.indexOf(CheckId.CERT_BRIDGE_KEY) < order.indexOf(CheckId.SEP10_SERVER))
+        assertTrue(order.indexOf(CheckId.SEP10_SERVER) < order.indexOf(CheckId.BRIDGE_KNOWS_CARD))
+        for (facts in listOf(Sep10Facts.NotChecked, Sep10Facts.NotConfigured, Sep10Facts.NotOffered("d", "HTTP_404"), Sep10Facts.Unreachable("d", "TIMEOUT"), offered)) {
+            val checks = CardDoctor.run(DoctorInput(reader = ReaderState.NFC_ENABLED, inspection = inspection, sep10 = facts))
+            assertTrue("$facts", checks.none { it.status == CheckStatus.FAIL })
+        }
     }
 }

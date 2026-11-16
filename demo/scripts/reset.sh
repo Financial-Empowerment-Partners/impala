@@ -12,9 +12,10 @@ if [ "${1:-}" != "--yes" ]; then
   case "$ans" in y|Y|yes) ;; *) die "aborted" ;; esac
 fi
 "$DEMO_DIR/scripts/simulator.sh" down 2>/dev/null || true
+SIM_PORT="$SIM2_PORT" DEMO_SIM_INSTANCE=setup "$DEMO_DIR/scripts/simulator.sh" down >/dev/null 2>&1 || true   # scenario 17's second card, if one was kept
 "$DEMO_DIR/scripts/emulator.sh" down 2>/dev/null || true
 compose down -v --remove-orphans
 rm -f "$STATE_DIR/impala.env" "$STATE_DIR/migrate.log" "$STATE_DIR/report.md" "$STATE_DIR/report.json"
-rm -rf "$RECORDS_DIR" "$ARTIFACTS_DIR" "$STATE_DIR/relay" "$STATE_DIR/simulator" "$STATE_DIR/impalactl"
+rm -rf "$RECORDS_DIR" "$ARTIFACTS_DIR" "$STATE_DIR/relay" "$STATE_DIR/simulator" "$STATE_DIR/simulator-setup" "$STATE_DIR/impalactl"
 mkdir -p "$RECORDS_DIR" "$ARTIFACTS_DIR"
 ok "reset done (kept: .env, state/keys, state/testnet-txids.tsv, state/timings.tsv). Next: scripts/up.sh && scripts/seed.sh"

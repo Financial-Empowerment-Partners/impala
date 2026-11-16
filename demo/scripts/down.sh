@@ -6,6 +6,7 @@ set -euo pipefail
 . "$(dirname "$0")/lib.sh"
 load_env; engine_ready
 "$DEMO_DIR/scripts/simulator.sh" down 2>/dev/null || true
+SIM_PORT="$SIM2_PORT" DEMO_SIM_INSTANCE=setup "$DEMO_DIR/scripts/simulator.sh" down >/dev/null 2>&1 || true   # scenario 17's second card, if one was kept
 "$DEMO_DIR/scripts/emulator.sh" down 2>/dev/null || true
 compose down --remove-orphans
 warn "volumes kept. OpenBao dev mode is in-memory: the bridge's sealed seeds will NOT work after the next up; run scripts/reset.sh before scripts/up.sh."

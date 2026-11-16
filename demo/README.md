@@ -7,18 +7,21 @@ money flows, with every claim checked by a script and every testnet transaction 
 | Mechanism | What runs there | Why |
 |---|---|---|
 | **Docker or Podman** — one `compose.yaml`, project `impala-suite` | postgres 16, redis 7, OpenBao (dev mode: Transit seal + OIDC test IdP), an OTLP collector, `impala-migrate` (the operator-run `RUN_MODE=migrate` step), `impala-bridge` built from this checkout, `impala-ui` (nginx), and `payala-stub` — an in-repo stand-in for the Payala API (`payala-stub/`: one dependency-free Node module on the public `node:22-alpine` image; the proprietary Payala API is not part of the demo) | the server of record and its dependencies are containers in every real deployment |
-| **JavaCard simulator** — host JVM 17 | the real `ImpalaApplet` (applet 0.3: a P-256 card key and an Ed25519 "Stellar key") on jcardsim behind a TCP APDU socket (`impala-card :simulator:serve`), issued by the issuance ceremony (`tools/issue`) against the bridge's card program. The simulated card is a CAP on **hardware of a chosen class**: a JavaCard 3.0.5 card (`jc305`, the default) or a JavaCard 3.2 card (`jc32`) | jcardsim is the oracle every card test already uses; no reader or card needed |
+| **JavaCard simulator** — host JVM 17 | the real `ImpalaApplet` (applet 0.4: a P-256 card key and an Ed25519 "Stellar key") on jcardsim behind a TCP APDU socket (`impala-card :simulator:serve`), issued by the issuance ceremony against the bridge's card program: by the reference tool (`tools/issue`) in scenario 05, and a second card by `impalactl card setup` in scenario 17. The simulated card is a CAP on **hardware of a chosen class**: a JavaCard 3.0.5 card (`jc305`, the default) or a JavaCard 3.2 card (`jc32`) | jcardsim is the oracle every card test already uses; no reader or card needed |
 | **Android emulator** — API 34, Google APIs, arm64, headless by default | the demo app's `tnet` flavor reaching the bridge at `10.0.2.2:8080` and the simulated card through `adb reverse`; `CardLoginUiTest` drives the real login screen, and the card login it makes is a SEP-10 sign-in | the phone is the holder's device; the emulator has no NFC, so the debug TCP card transport stands in |
 
 Plus the two CLIs built from this checkout: `lumencli` (a self-custody wallet) and `impalactl` (the
-operator client). It generalises the external Payala ↔ Impala kit: the relay scenarios from that kit are
+operator client, which also sets a card up and manages its PIN). It generalises the external Payala ↔ Impala kit: the relay scenarios from that kit are
 included, running against the Payala stub instead of the proprietary Payala API.
 
 **SEP-10 runs through all three.** The stack's bridge serves SEP-10 (Stellar Web Authentication) for
 card keys: `seed.sh` generates and activates its signing key, the issuance ceremony registers the
-card's Stellar key, the phone signs in with it (scenario 07), scenario 12 walks the bridge's SEP-10 API
-and its refusals, and scenario 13 signs the same card in at a SEP-10 server nobody here wrote (the SDF
-reference anchor on testnet, by default) and uses the token it gets there. The legacy card login
+card's Stellar key, scenario 15 hands that card the bridge's challenge and a set of transactions it must
+refuse (curl and the Python standard library, no SDK), the phone signs in with it (scenario 07), scenario
+12 walks the bridge's SEP-10 API and its refusals, scenario 13 signs the same card in at a SEP-10 server
+nobody here wrote (the SDF reference anchor on testnet, by default) and uses the token it gets there,
+scenario 16 does the same from the two command-line tools, and scenario 17 sets a second card up from
+blank with `impalactl` and signs in with it. The legacy card login
 (`SIGN_AUTH`) stays in use next to it: scenario 06 is that lane, a card without a Stellar key and an
 operator's card take it in scenario 12, and `DEMO_SEP10=false` runs the whole suite on it. Section 5
 explains the set-up.
@@ -33,7 +36,7 @@ with a card of each class in every run. Section 5 has the details.
 ```
  host scripts (bash 3.2 / curl / jq / openssl)        ┌─ host JVM 17 ──────────────────────────────┐
    scripts/run-all.sh ──► doctor → prepare → build    │ jcardsim ImpalaApplet  :9443  ◄── tools/issue│
-      → up → seed → scenario-01..13 → verify          │ Android emulator (API 34) ──adb reverse──┘   │
+      → up → seed → scenario-01..17 → verify          │ Android emulator (API 34) ──adb reverse──┘   │
       every testnet tx id → state/testnet-txids.tsv   │   tnet app ──► 10.0.2.2:8080                 │
                                                       └──────────────────────────────────────────────┘
  ┌──────────────────── compose project impala-suite (docker or podman) ────────────────────────────┐
@@ -60,14 +63,14 @@ scripts/doctor.sh        # what this host can run (engine, testnet, JDK 17, Andr
 scripts/run-all.sh       # the whole suite with a scorecard; add --smoke for stack + payment only
 ```
 
-`run-all.sh` is `doctor → prepare → build → up → seed → scenario-01 … scenario-13 → verify`, each a
+`run-all.sh` is `doctor → prepare → build → up → seed → scenario-01 … scenario-17 → verify`, each a
 script you can run on its own (section 4). It writes `state/report.md` and `state/report.json`, and
 `scripts/txids.sh --check` re-confirms every testnet hash on Horizon afterwards. Two tiers:
 
 | Tier | What runs | Time (M3 Pro, OrbStack) |
 |---|---|---|
-| `--smoke` | stack, accounts, the SEP-10 signing key, the custodial payment, roles, reserve/events, verify — no Gradle, no emulator | ≈1½ min warm (those steps took 96 s inside the full run below; `seed.sh` is 62 s of it, see section 5); ≈4½ min cold (the bridge image is a Rust release build, 167 s measured) |
-| default (full) | smoke + wallet and operator CLIs, card issuance, JVM card login, the emulator, SEP-10 at the bridge and at a third-party server, the Payala relays against the stub, Soroban | ≈8¾ min warm (525 s measured on 2026-11-12, the optional scardutil step included; four 61 s pre-auth quiet windows are 244 s of it); 20–30 min cold (card SDK + app compile, WASM build) |
+| `--smoke` | stack, accounts, the SEP-10 signing key, the custodial payment, roles, reserve/events, verify — no Gradle, no emulator | ≈1½ min warm (those steps took 93 s inside the full run below; `seed.sh` is 62 s of it, see section 5); ≈4½ min cold (the bridge image is a Rust release build, 167 s measured) |
+| default (full) | smoke + wallet and operator CLIs, card issuance, JVM card login, the emulator, SEP-10 at the bridge and at a third-party server, the card's own rules, multi-factor sign-in, the CLIs' authentication, a second card set up with `impalactl`, the Payala relays against the stub, Soroban | ≈11 min warm (657 s measured on 2026-11-16, the optional scardutil step included; six 61 s pre-auth quiet windows are 366 s of it); 20–30 min cold (card SDK + app compile, WASM build) |
 
 Every scenario is re-runnable. The payment scenarios are *re-runnable, not idempotent*: each run is a
 new testnet payment (only scenario 02's keyed replay proves idempotency).
@@ -76,7 +79,7 @@ Prerequisites (`doctor.sh` checks them and says what each missing one disables):
 
 - a container engine: Docker with Compose v2 (verified with OrbStack on macOS 14 arm64) **or**
   Podman ≥ 5 with `podman-compose` or a `docker-compose` v2 binary as its compose provider;
-- `bash` 3.2+, `curl`, `jq`, `openssl`, `git`, `tar`; Go 1.26+ (the CLIs are built from source); `python3` for the card lanes (the simulator probe, and the SEP-10 challenge reader of scenarios 12 and 13: standard library only); a Rust toolchain for scenario 09 (`cargo` runs the contract tests; the WASM build needs rustup's stable toolchain with the `wasm32-unknown-unknown` target, otherwise it is skipped with a notice) — `doctor.sh` reports what each missing one disables;
+- `bash` 3.2+, `curl`, `jq`, `openssl`, `git`, `tar`; Go 1.26+ (the CLIs are built from source); `python3` for the card lanes (the simulator probe, the SEP-10 challenge reader of scenarios 12 and 13, the card helper of scenario 15 and the TOTP helper of scenario 14: standard library only); a Rust toolchain for scenario 09 (`cargo` runs the contract tests; the WASM build needs rustup's stable toolchain with the `wasm32-unknown-unknown` target, otherwise it is skipped with a notice) — `doctor.sh` reports what each missing one disables;
 - outbound HTTPS to `horizon-testnet.stellar.org` and `friendbot.stellar.org` (the bridge refuses to boot without Horizon);
 - for scenario 13: outbound HTTPS to the third-party SEP-10 servers in `DEMO_SEP10_THIRD_PARTY` (default `testanchor.stellar.org`). A server that cannot be reached is reported and skipped, not failed;
 - for the card lanes: **JDK 17** to launch Gradle (`JAVA17_HOME` or `/usr/libexec/java_home -v 17`; the Kotlin toolchain 21 is provisioned automatically) and the Android SDK location the repo's Gradle projects already use (`local.properties`);
@@ -84,8 +87,8 @@ Prerequisites (`doctor.sh` checks them and says what each missing one disables):
   `system-images;android-34;google_apis;arm64-v8a` image (`DEMO_INSTALL_SDK=1` lets `scripts/emulator.sh up` install the missing pieces with `sdkmanager`), and `impala-android-demo/app/google-services.json` (copy the `.example`);
 - optional: a [scardutil](https://github.com/Financial-Empowerment-Partners/scardutil) checkout (`SCARDUTIL_DIR`) for the fleet check, `stellar-cli` for the Soroban testnet tests, `vhs` for the recording. Node is **not** needed on the host: the Payala stub runs in its container (`node --test demo/payala-stub/server.test.mjs` runs its own tests wherever Node ≥ 20 exists).
 
-Ports, all bound to `127.0.0.1`: `3000` UI, `8080` bridge, `8200` OpenBao, `9443` the simulated card,
-`4000` the Payala stub. `up.sh` refuses to start while another stack (the repo's
+Ports, all bound to `127.0.0.1`: `3000` UI, `8080` bridge, `8200` OpenBao, `9443` the simulated card
+(and `9444`, `SIM2_PORT`, for the second card that scenario 17 sets up), `4000` the Payala stub. `up.sh` refuses to start while another stack (the repo's
 `impala-bridge/docker-compose.yml`, the external kit, or the other engine) holds them. They can be
 moved in `.env` (`BRIDGE_PORT`, `SIM_PORT`, `PAYALA_PORT`, …); the bridge port is part of the SEP-10
 home domain (`10.0.2.2:<BRIDGE_PORT>`) and of the URL the Android app is built for (section 5).
@@ -132,36 +135,45 @@ TESTNET_TXID	custodial_payment	96f2929b61e945a431f00fb2aaa247f07a9c3c70361297a16
 ```
 
 The scorecard at the end of `run-all.sh` (also `state/report.md`; this one is a warm run from a clean
-state, `reset.sh --yes` then `run-all.sh --no-build`, on 2026-11-12, with `SCARDUTIL_DIR` set so that
-scenario 05 also runs its fleet check — the smoke scenarios run first, then the host lanes; four 61 s
-pre-auth quiet windows are inside the total):
+state, `reset.sh --yes` then `run-all.sh --no-build`, on 2026-11-16, with `SCARDUTIL_DIR` set so that
+scenario 05 also runs its fleet check — the smoke scenarios run first, then the host lanes; six 61 s
+pre-auth quiet windows are inside the total; 329 assertions, then 54 live checks in `verify`):
 
 ```
-── scorecard (525 s) ──
+── scorecard (657 s) ──
   doctor                           passed          1s
   prepare                          passed          0s
   build                            skipped         0s  --no-build
   up                               passed         16s
   seed                             passed         62s
-  scenario-01-stack                passed          1s  21/21 assertions
-  scenario-02-custodial-payment    passed          8s  11/11 assertions; tx a516bbf71a5e…
+  scenario-01-stack                passed          2s  21/21 assertions
+  scenario-02-custodial-payment    passed          4s  11/11 assertions; tx 787d9052b9d3…
   scenario-10-roles                passed          2s  36/36 assertions
   scenario-11-reserve-events       passed          1s  14/14 assertions
-  scenario-03-wallet-cli           passed         18s  10/10 assertions; tx b716c5a3f87b…
-  scenario-04-operator-cli         passed          5s  13/13 assertions; tx 28c94606deaf…
-  scenario-05-card-issue           passed         18s  27/27 assertions
-  scenario-06-card-login-jvm       passed         66s  5/5 assertions
+  scenario-03-wallet-cli           passed         12s  10/10 assertions; tx 9dfca30e1d37…
+  scenario-04-operator-cli         passed          5s  13/13 assertions; tx c3278b977664…
+  scenario-05-card-issue           passed         17s  27/27 assertions
+  scenario-06-card-login-jvm       passed         67s  5/5 assertions
   scenario-07-android-emulator     passed         39s  11/11 assertions
-  scenario-12-sep10-bridge         passed          7s  31/31 assertions
+  scenario-12-sep10-bridge         passed          6s  31/31 assertions
   scenario-13-sep10-third-party    passed          6s  10/10 assertions
-  scenario-08-payala-relay         passed         15s  21/21 assertions; tx 073a04ee4919…
+  scenario-15-sep10-card-rules     passed          3s  23/23 assertions
+  scenario-14-mfa                  passed          3s  22/22 assertions
+  scenario-16-cli-auth             passed          3s  31/31 assertions
+  scenario-17-cli-card-setup       passed         11s  38/38 assertions
+  scenario-08-payala-relay         passed         15s  21/21 assertions; tx 4c1c547c0105…
   scenario-09-soroban              passed          7s  5/5 assertions
   verify                           passed          5s
 ```
 
-That run issued the holder's card on the default hardware, a JavaCard 3.0.5 card. The card lanes were
-also run on a JavaCard 3.2 card the same day (`DEMO_CARD_PLATFORM=jc32`: scenario 05 24/24 without the
-fleet step, scenario 07 11/11, scenario 13 10/10 with that card signing in at the third-party server).
+That run issued the holder's card on the default hardware, a JavaCard 3.0.5 card, so the card that
+scenario 17 set up with `impalactl` was a JavaCard 3.2 card. The card lanes were also run the other way
+round the same day (`DEMO_CARD_PLATFORM=jc32`: scenario 05 27/27, scenario 15 23/23 with the same
+status words from the native engine, scenario 07 11/11 with the phone tapping that card, scenario 16
+31/31, card and PIN included, and scenario 17 38/38 with `impalactl` setting up a JavaCard 3.0.5 card
+and reading the JavaCard 3.2 card the reference tool had issued). The recorded run of that day, the one
+in the demo video, ran scenarios 05, 07 and 15 on both hardware classes and made 390 assertions in 20
+scenario runs, all passed, with 54 checks in `verify`.
 
 ## 4. The scenarios
 
@@ -223,7 +235,7 @@ is a second payment; the keyed replay lives in scenario 02.
 `scripts/simulator.sh up` starts the real `ImpalaApplet` on jcardsim (`:simulator:serve`, JDK 17) as
 the CAP and hardware `DEMO_CARD_PLATFORM` asks for (the default CAP on a JavaCard 3.0.5 card unless
 told otherwise; a simulator left running as another card is restarted) and
-probes it (`SELECT`, `GET_VERSION` → applet 0.3; the checks read the expected version from the applet's
+probes it (`SELECT`, `GET_VERSION` → applet 0.4; the checks read the expected version from the applet's
 `BuildConfig.java`). The issuance tool then runs the whole ceremony over
 TCP for the holder — INITIALIZE (the card generates its P-256 key and its Ed25519 "Stellar key"),
 per-card SCP03 keys derived from the KMK, `POST /card`, a **bridge-issued card certificate** signed by
@@ -236,7 +248,7 @@ registration of the Stellar key (`PUT /card/stellar-key`, never fatal) — and p
   program_id=bc3e3afe4f0c495da99c691e10a436fe
   currency=XLM
   cert_id=f77776dd58e9f0f507c21b0ce97c412436224ae291f0f6e8a764f25cf6e4c713
-  applet_version=0.3+00000000
+  applet_version=0.4+00000000
   issuer_version=1
   issuer=bridge
   stellar_address=GDZSBM4I66NATGVDR5B6THBW3NNYVGPTDMJDQVUSTVN7WDKTJ5ICAOV6
@@ -266,12 +278,17 @@ Stellar address and both cross-signatures**, the admin API lists the card as act
 `PUT` changed nothing), and the simulator still serves the issued card. With `SCARDUTIL_DIR` set, the plaintext
 dispatch sequence (`impala-card/scardutil/impala-dispatch.md`) also runs through scardutil — the same
 file that runs on a fleet of physical cards (see `impala-card/scardutil/README.md`) — on two simulator
-targets of their own, one per hardware class: both must pass, and the engine byte must read `01` on the
+targets of their own, one per hardware class: both must pass (28 steps: 25 pass, and the three
+card-management steps are skipped on a raw transport), and the engine byte must read `01` on the
 JavaCard 3.0.5 card and `02` on the JavaCard 3.2 card.
 24 assertions (27 with scardutil). The card lives in the simulator process: `simulator.sh down` destroys it and the next
 run issues a new one (the bridge keeps the old row). Certifying a card is a custody write, and the
 bridge allows an operator five of those per minute: when the budget is used up (scenario 12 certifies
 several cards) the scenario waits 61 s and repeats the ceremony once.
+
+This scenario uses the reference issuance tool (`impala-card/tools/issue`, on the card SDK). The same
+ceremony from the operator CLI, `impalactl card setup`, is scenario 17, which sets a second card up and
+has each tool read the other's card.
 
 ### 06 — card login, SDK lane on the JVM (`scenario-06-card-login-jvm.sh`)
 
@@ -455,13 +472,183 @@ for each further one: `DEMO_SEP10_THIRD_PARTY=testanchor.stellar.org,anchor-sep-
 2026-11-12, all three cards signing in at both. Only the reference anchor is the default, because a
 demo should not depend on a development server.
 
+### 14 — multi-factor sign-in (`scenario-14-mfa.sh`)
+
+SEP-10 card auth proves possession of the card. This lane adds the second factors the bridge now
+records in a session's `amr` and enforces (`docs/mfa-card-pin-biometrics.md`), with no app or emulator
+— just `curl`, a stdlib TOTP helper (`scripts/mfa-factor.py`) and `openssl` for a stand-in device key.
+
+1. **A password session starts single-factor.** `GET /mfa/status` on the holder's token shows
+   `amr=[pwd]`, not multi-factor, and the holder is not required to be — so single-factor works.
+2. **TOTP step-up.** Enrol a TOTP method (`POST /mfa`), compute the code from the provisioning URI's
+   secret, and `POST /mfa/step-up`; the new session's `amr` carries `otp` and the derived `mfa`.
+3. **Phone device-key step-up.** An `openssl` P-256 key (standing in for the Android Keystore key)
+   enrols by signing a `/mfa/challenge` with purpose `enroll`, then steps up a fresh password session
+   with purpose `step-up`; `amr` gains `dev`. A tampered signature is refused (401): the factor is
+   really verified.
+4. **The admin surfaces and the mandate.** `GET /admin/accounts/{holder}/mfa` summarises the factors
+   (no secrets). Turning on the per-account mandate signs the holder out (the token from part 2 is 401),
+   and a fresh single-factor session is then refused from a protected route with `403 mfa_required`
+   while `GET /mfa/status` still answers it (the way out is never locked). The TOTP code that stepped the
+   first session up is refused when presented again: a code is single-use. The session steps up with the
+   device key instead and reaches the route; an admin then revokes the device key (recovery). The event
+   feed carries `mfa.device_key_registered`, `mfa.device_key_revoked` and `mfa.policy_changed` — handles
+   and a boolean only, never key bytes or a secret. The mandate is lifted again, on any exit, so a failed
+   assertion cannot leave the holder locked behind MFA. 22 assertions.
+
+The script waits two seconds after the mandate changes before it signs in again. The mandate moves the
+account's auth epoch to that second, and the epoch is inclusive: a token issued in the same second is
+revoked with the older ones (fail closed), so a sign-in that follows at once would be answered 401.
+
+The card PIN proof over the same SEP-10 tap (card + PIN in one tap, `amr=[sc,pin]`) is covered by the
+applet/SDK/impala-lib unit suites and is not re-driven here, where no card is in the field.
+
+### 15 — the card's own rules (`scenario-15-sep10-card-rules.sh`)
+
+The card's Stellar key signs one kind of thing: the hash of a transaction the **card itself** read and
+found to be a SEP-10 challenge for its key (`docs/sep10-card-keys.md` §3.3). This lane shows that from
+the outside, with the simulated card in the field and nothing but `curl` and the Python standard library.
+`scripts/sep10-card.py` writes the APDUs out by hand (`GET_STELLAR_KEY`, `SIGN_SEP10` BEGIN / CONTINUE /
+FINISH with the SDK's chunking), reads and builds plain XDR, and verifies Ed25519 with the reference
+algorithm of RFC 8032; it shares nothing with the card SDK, the app or the bridge. Runs after scenario 13.
+
+1. **The card in the field.** `GET_STELLAR_KEY` names the engine that made the key (`soft` on a JavaCard
+   3.0.5 card, `native` on a JavaCard 3.2 card) and the address; it is the address of the issuance record
+   and of exactly one active card row, the holder's.
+2. **A challenge, signed and accepted.** The bridge's challenge for that address carries the bridge's own
+   signature (checked here, as a client does before any card is asked to sign). The card reads the
+   transaction and answers `9000` with a 64-byte signature that verifies under the card's public key over
+   the transaction hash, and not for the public network's passphrase. With the signature appended,
+   `POST /auth/sep10` answers 200 with SEP-10's token and the bridge's token pair; the session is the
+   holder's and `GET /mfa/status` shows the card as its one verified factor (`amr` has `sc`); the bridge's
+   log has one more `sep10: card key G… signed in` line than before.
+3. **One challenge, one sign-in.** The same signed envelope, posted again, gets the generic 401.
+4. **What the card refuses**, each with a status word and no signature:
+
+   | Handed to the card | Status word | Rule |
+   |---|---|---|
+   | a payment of 100 XLM out of the card's own address, with a real sequence number | `6243` | a transaction sourced by the card's key is never a challenge |
+   | the same payment dressed as a challenge (sequence 0, time bounds, sourced by the bridge's signing key) | `6242` | every operation must be `MANAGE_DATA` |
+   | the bridge's own challenge with its sequence number changed from 0 to 1 | `6241` | the sequence number must be 0 |
+   | the bridge's own challenge with one byte added after its end | `6240` | nothing may follow the transaction |
+   | a real challenge the bridge made for another account | `6243` | the first operation must be sourced by this card's key |
+
+   A `FINISH` with nothing staged then answers `6985`: a refused transaction leaves nothing behind.
+5. **The card still signs.** An untouched challenge is signed after the refusals.
+
+23 assertions, in a few seconds (no Gradle, no app). The record holds public values only: the address,
+the transaction hash, the status words. `DEMO_CARD_PLATFORM=jc32 scripts/scenario-15-sep10-card-rules.sh`
+runs the same lane on a JavaCard 3.2 card (scenario 05 issues it first); with `DEMO_SEP10=false` the
+scenario records `skipped`. `python3 scripts/sep10-card.py self-test` checks the helper itself against
+the RFC 8032 vectors.
+
+### 16 — SEP-10 and multi-factor from the command line (`scenario-16-cli-auth.sh`)
+
+The two command-line tools speak the same authentication as the phone, each in its own role: `impalactl`
+is the operator's client of the bridge API and reaches the simulated card over its socket; `lumencli` is
+a self-custody wallet that talks to the Stellar network only and signs in with its own key. Secrets
+travel by environment (the password, the card PIN, the wallet seed), never argv, and no token is stored
+by the scenario. 31 assertions with the default third-party server, in a few seconds.
+
+1. **Read the card and the service.** `impalactl card info --card tcp:127.0.0.1:<SIM_PORT>` is a
+   read-only look at the card: applet version, card id, account, state, the Stellar key with its engine,
+   and the user-PIN status of applet 0.4. `impalactl sep10 status` (admin) reports the signing key and
+   the key ring; `sep10 info` reads the public `stellar.toml`; `sep10 cards <holder>` lists the card.
+2. **Sign in with the card.** `impalactl login --card tcp:… --sep10-home-domain 10.0.2.2:<BRIDGE_PORT>`
+   is a SEP-10 sign-in: a Go port of the one flow the app uses (`CardSignIn`), with the client checks on
+   the challenge before the card sees it. Without the home domain's name it is **refused**
+   (`HOST_MISMATCH`): the host reaches the bridge at `127.0.0.1`, and a signed challenge only ever goes
+   to the home domain it was made for. The session's `amr` is `[sc]`; the bridge's log has the sign-in.
+3. **Card and PIN in one tap.** With `--pin` (the PIN comes from `IMPALA_CARD_PIN`) the card verifies
+   the PIN and signs a **PIN proof**, and the session is multi-factor from the card alone
+   (`amr`: `sc`, `pin`, `mfa`). The bridge credits it because the card is certified by its own program
+   key. A wrong PIN is an error, never a PIN-less sign-in: nothing is stored, the card counts the try
+   (4 left) and the next correct PIN gives it back. `--no-sep10` signs the same card in with the legacy
+   challenge (`SIGN_AUTH`, `POST /auth/card`), PIN proof included.
+4. **A device key.** `impalactl mfa device enroll` makes a P-256 key for this machine (a `0600` file),
+   `mfa step-up --device` makes a password session multi-factor (`amr`: `pwd`, `dev`, `mfa`) and stores
+   the new tokens, `mfa admin show` lists the key as a possession factor (`platform: impalactl`,
+   `user_verification: none`, never biometric), and `mfa device revoke` removes it on both sides.
+5. **The wallet.** `lumencli sep10 inspect` runs every client check on the bridge's challenge with the
+   Stellar SDK (a third reader, after the card and `sep10-challenge.py`). Then a fresh wallet key, never
+   funded, signs in at the first server of `DEMO_SEP10_THIRD_PARTY` with `lumencli sep10 login`, and the
+   token it receives opens that server's SEP-24 route (refused without it). An unreachable server is
+   reported and that part is skipped.
+
+`DEMO_CARD_PLATFORM=jc32 scripts/scenario-16-cli-auth.sh` runs it on a JavaCard 3.2 card (scenario 05
+issues it first); with `DEMO_SEP10=false` the scenario records `skipped`. What it does not do: change the
+SEP-10 signing key (`impalactl sep10 key generate | activate | revoke` exist, and spend the custody
+budget), or reach a physical card (impalactl speaks the simulator's TCP transport only).
+
+### 17 — a card set up from the command line (`scenario-17-cli-card-setup.sh`)
+
+Scenario 05 issues the holder's card with the reference issuance tool (`impala-card/tools/issue`, on the
+Kotlin card SDK). `impalactl card setup` is its Go port, and this scenario sets a **second card** up with
+it, from blank to signed in, and then does the cardholder's side of setup: the PIN. The KMK, the PINs
+and both tokens travel by environment, never argv. 38 assertions in about ten seconds once Gradle is
+warm (37 when the first simulator is not serving the card of scenario 05, because the reverse reading
+of step 4 is then skipped).
+
+1. **A second, blank card.** `scripts/simulator.sh` runs one card per process, so the scenario starts
+   another instance (`DEMO_SIM_INSTANCE=setup` on `SIM2_PORT`, by default `SIM_PORT + 1`) next to the
+   holder's card, which is not touched. Its hardware is the *other* class than `DEMO_CARD_PLATFORM`
+   unless `DEMO_SETUP_CARD_PLATFORM` names one: with the default `jc305` holder's card, impalactl sets up
+   a JavaCard 3.2 card with the native CAP. `impalactl card info` reads it: blank, no keys, still on the
+   GlobalPlatform default SCP03 keys, and it can sign nothing.
+2. **Two people.** `impalactl card issuer show` (public) says the bridge's card program is configured.
+   The ceremony needs the operator's session, which certifies the card (`keys-manage`), and the holder's
+   token, because a card is registered by its own holder (`POST /card`). Both rules are shown before
+   the real run. Without `IMPALA_HOLDER_TOKEN` the command is a usage error and **nothing is sent to the
+   card**. Under the holder's own session the card is initialized, re-keyed and registered, and then the
+   bridge refuses the certificate (403): the run stops half-way, and `card info` shows a card that is
+   initialized but not personalized.
+3. **The ceremony.** `impalactl card setup --card tcp:127.0.0.1:<SIM2_PORT> --account <holder>` as the
+   operator **continues** from there: the per-card SCP03 keys (derived from `IMPALA_ISSUE_KMK` and the
+   card id) open at once, the card is not registered a second time (the operator's listing already
+   shows it), the bridge certifies the card with its program key, and over the encrypted
+   channel the card receives its account, the program's key and the certificate (PERSONALIZE A, B, C),
+   checks the certificate itself, and takes its two PINs. Then the card's Stellar key, which the card
+   only vouches for once it is personalized, is verified locally and registered with the bridge. The
+   record on stdout carries ids and addresses; nothing secret is printed.
+4. **Three more views of the same card.** The bridge's: the card row is the holder's, certified, with
+   the Stellar address and both cross-signatures, and the events are one `card.registered` (the holder),
+   one `custody.card_certified` (the operator), one `card.stellar_key_registered`. A second run of the
+   command changes nothing and says `already-issued`. And the **reference tool** reads the card
+   impalactl set up: it rebuilds the certificate id from what the card reports, prints the same card
+   id, certificate id, program id and Stellar address, and says `already-issued` as well. Then the
+   other way round: impalactl reads the card the reference tool issued in scenario 05 and finds that
+   card's id and certificate id. Two implementations agree about both cards.
+5. **It signs in.** `impalactl login --card` signs the holder in with the new card's own Stellar key
+   (SEP-10; `amr` is `[sc]`), and `impalactl sep10 cards` lists it next to the card of scenario 05.
+6. **The holder's own setup.** `impalactl card pin policy on` (the card verifies the PIN first) makes
+   the card require its PIN before it signs in at all (applet 0.4). A tap without the PIN is then
+   refused before any request: impalactl reads the card's policy first. With `--pin` the same tap is a
+   multi-factor session (`amr`: `sc`, `pin`, `mfa`). `impalactl card pin change` sets a new PIN, and the
+   old one stops working (the card counts the try).
+7. **A blocked PIN.** Five wrong PINs in a row block the card's PIN (`0` tries left), and a blocked
+   card refuses even the right one. `impalactl card pin reset` verifies the 8-digit **master PIN** set
+   at issuance and gives the card a new user PIN with its five tries. The card signs in again, and
+   `card pin policy off` hands the choice back: a tap without the PIN works as before.
+
+The second simulator is stopped when the scenario ends, and its card with it (`DEMO_KEEP_SETUP_CARD=1`
+keeps it, on `tcp:127.0.0.1:<SIM2_PORT>`; `scripts/down.sh` stops it). The card's row stays on the
+bridge as one more of the holder's cards. What it does not do: reach a physical card (impalactl speaks
+the simulator's TCP transport only; a card in a PC/SC reader is set up with the reference tool), issue
+login-only test cards or terminate a card (`--test-issuer` and `--terminate` are the reference tool's),
+or rotate the card program's issuer key (`impalactl card issuer generate --rotate` exists, and
+invalidates the program key on every issued card).
+
 ### verify (`verify.sh`)
 
 Re-checks every recorded fact against the **live** system, not the scorecard: health and migrations;
 the four accounts, their custody mapping and funding; for each payment scenario the Horizon status,
 the bridge's intent / `custodial_sign` row; the card program id against the issued card and its row;
 that SEP-10 is enabled for the home domain with a signing key active or scheduled, and that the issued
-card's Stellar key is the one registered on its row; the host lanes' records and artifacts; and that
+card's Stellar key is the one registered on its row; that scenario 15's card signed once and refused
+every transaction it was meant to refuse, each with the status word expected; that scenario 16's
+card-and-PIN session was multi-factor and the device key it enrolled is revoked; that the card scenario 17
+set up with impalactl is still the holder's active, certified card with its Stellar key; the host lanes'
+records and artifacts; and that
 **every hash recorded by this run's scenarios is on Horizon and successful** (the historical `state/testnet-txids.tsv` survives resets and is re-checked by
 `scripts/txids.sh --check`). Exit 1 on any failure.
 
@@ -521,6 +708,8 @@ Set the key in `.env` to run the whole suite on that hardware. What each run cov
 | The phone on the emulator (07) | when `jc305` | when `jc32` |
 | SEP-10 at the bridge through the app's flow classes (12) | every run | every run |
 | SEP-10 at third-party servers (13) | every run | every run |
+| The card's own rules (15) and the CLIs' sign-in (16) | when `jc305` | when `jc32` |
+| A second card set up by `impalactl` and read back by the reference tool (17) | when `DEMO_CARD_PLATFORM=jc32` (it takes the other class) | when `jc305`, the default |
 | scardutil dispatch sequence (05, with `SCARDUTIL_DIR`) | every run | every run |
 
 **The waits you will notice.**
@@ -530,8 +719,8 @@ Set the key in `.env` to run the whole suite on that hardware. What each run cov
 | about 30 s, on a fresh database | `seed.sh`, before `activate` | The bridge allows an operator five custody writes per minute (seeds, the issuer key, the SEP-10 key and card certificates share the budget). `seed.sh` makes five and then wants a sixth, so it waits for the window and retries once |
 | up to 30 s | `seed.sh`, before `activate` | The bridge's key ring reads new keys every 30 s, and activation is refused (409 `sep10_key_not_opened`) until it has opened the key |
 | 120 s after `seed.sh` | scenarios 07 and 12, only when started that soon | The activation delay. Until it has passed, the public routes answer 503 and a card login falls back to the legacy challenge |
-| 61 s, four times in a full run | `run-all.sh`, before scenarios 06, 07, 12 and 08 | Every host lane is one client source for the bridge's pre-auth budget (30 requests per minute); the quiet windows keep one lane's requests out of the next lane's minute |
-| 61 s, sometimes | scenario 05, and the card lanes when they issue cards | The same custody budget: a card certificate is one of the five writes per minute |
+| 61 s, six times in a full run | `run-all.sh`, before scenarios 06, 07, 12, the short group 15 + 14 + 16, 17, and 08 | Every host lane is one client source for the bridge's pre-auth budget (30 requests per minute); the quiet windows keep one lane's requests out of the next lane's minute |
+| 61 s, sometimes | scenarios 05 and 17, and the card lanes when they issue cards | The same custody budget: a card certificate is one of the five writes per minute |
 
 **Try it by hand** (after `seed.sh`, and scenario 05 for the card's address):
 
@@ -570,11 +759,11 @@ what is verified and what is not.
 | `scripts/status.sh` | containers, bridge health, accounts and balances, intents, transactions, the card program, SEP-10 (enabled, key ring, signing keys, cards with a Stellar key), simulator/emulator status, the scorecard, last testnet ids |
 | `scripts/txids.sh [--check] [--json]` | every testnet transaction id the suite created, with Horizon / stellar.expert URLs; `--check` re-confirms them on Horizon |
 | `scripts/logs.sh [service\|simulator\|emulator]` | `compose logs -f` (default `impala-bridge`) or the host lanes' logs |
-| `scripts/simulator.sh up\|down\|restart\|status\|probe\|stellar\|hardware\|models` | the jcardsim card server (pid and log under `state/simulator/`): which hardware and CAP it serves, the card's Stellar key and engine, the list of card models |
+| `scripts/simulator.sh up\|down\|restart\|status\|probe\|stellar\|hardware\|models` | the jcardsim card server (pid and log under `state/simulator/`; one card per process, and `DEMO_SIM_INSTANCE=<name> SIM_PORT=<port>` is another one, under `state/simulator-<name>/`): which hardware and CAP it serves, the card's Stellar key and engine, the list of card models |
 | `scripts/emulator.sh up\|down\|status\|screenshot <name>` | the AVD lifecycle; `DEMO_HEADLESS=0` for a window |
 | `scripts/down.sh` | stop (volumes kept — but see the OpenBao note); also stops the simulator and emulator |
 | `scripts/reset.sh [--yes]` | destroy containers, volumes and records; keeps `.env`, `state/keys` and `state/testnet-txids.tsv` |
-| `scripts/run-all.sh --smoke` / `--only <step>` / `--skip <step>` / `--no-build` / `--keep` | subsets of the suite (a step is a name from the scorecard, for example `--only scenario-12-sep10-bridge`); Ctrl-C stops the simulator and emulator and writes an `interrupted` report; while a payment scenario is recorded `ambiguous`, no further payments are made until the record is resolved and deleted |
+| `scripts/run-all.sh --smoke` / `--only <step>` / `--skip <step>` / `--no-build` / `--keep` | subsets of the suite (a step is a name from the scorecard, for example `--only scenario-12-sep10-bridge` or `--only scenario-15-sep10-card-rules`); Ctrl-C stops the simulator and emulator and writes an `interrupted` report; while a payment scenario is recorded `ambiguous`, no further payments are made until the record is resolved and deleted |
 | `CONTAINER_ENGINE=podman scripts/…` | run anything against Podman (section 7) |
 
 ## 7. Docker and Podman
@@ -606,9 +795,12 @@ The bridge image is the repo's `impala-bridge/Dockerfile` with its `# syntax=` l
 |---|---|
 | every custodial payment or card certificate fails with a seed-protection error | OpenBao (dev mode, in-memory) restarted — `down.sh` + `up.sh`, a machine reboot — so its Transit key is gone and every sealed seed and the issuer key are undecryptable. `reset.sh --yes && up.sh && seed.sh` is the recovery; this is why `down.sh` warns. |
 | the bridge container never becomes ready | no outbound HTTPS to Horizon testnet (the bridge exits after 5 tries), or the host port is taken. `logs.sh` shows the reason only because the OTLP collector exists: without `OTEL_EXPORTER_OTLP_ENDPOINT` the bridge logs nothing readable in a container. |
+| `up.sh` stops with "openbao-init did not finish" on a healthy, running stack | fixed: the step searched the one-shot container's log through a pipe under `pipefail`, and that log grows with every `up.sh`; once it was long enough the search reported failure. It now captures the log and waits for one more "ready" line than before. |
 | `custodial_unconfigured` on a payment | caps are 0 on a fresh database; `seed.sh` sets them (100 XLM per tx, 1 000 XLM per account per day). |
 | `429 rate_limited` / lockout | pre-auth 30/min per source, sign 5/min per account, 5 wrong passwords lock an identity for 15 min. Slow down; there is no API to clear a counter. |
-| `429` from the issuance tool at certification, or from `seed.sh` at the SEP-10 `activate` | the custody-write budget: five per minute per operator, shared by seeds, the issuer key, the SEP-10 signing key and card certificates. `seed.sh`, scenario 05 and the card lanes wait out the window and retry once; by hand, wait a minute. |
+| `429` from the issuance tool or `impalactl card setup` at certification, or from `seed.sh` at the SEP-10 `activate` | the custody-write budget: five per minute per operator, shared by seeds, the issuer key, the SEP-10 signing key and card certificates. `seed.sh`, scenarios 05 and 17 and the card lanes wait out the window and retry once; by hand, wait a minute and run the same command again (both tools continue where they stopped). |
+| scenario 17 says port `SIM2_PORT` is busy, or its simulator never starts | the second card is a second simulator process on `SIM_PORT + 1` unless `.env` sets `SIM2_PORT`; something else holds that port, or an earlier run was killed before it stopped its simulator (`scripts/down.sh` stops both). |
+| `impalactl card setup` stops with "the card opens SCP03 neither on the keys … nor on the transport keys" | the card was set up under another key master key than `IMPALA_ISSUE_KMK`. Nothing was sent to the card after the failed check (the handshake stops before EXTERNAL AUTHENTICATE), so it is safe to run again with the right key; a simulated card can simply be restarted blank. |
 | the phone's card login used the legacy challenge although SEP-10 is on | the signing key was not in service: `seed.sh` activated it less than two minutes earlier (the public routes answer 503 until then, which is the client's "not offered" fallback), or it was never generated. `scripts/status.sh` shows the key and its state; scenarios 07 and 12 wait for it themselves. |
 | scenario 07 fails on "the app is built for this bridge" | `BRIDGE_PORT` in `.env` is not the port in `TESTNET_BRIDGE_BASE_URL` of `impala-android-demo/local.properties`. Set that to `http://10.0.2.2:<BRIDGE_PORT>` (it is also the app's SEP-10 home domain) and rerun. |
 | the app refuses the login with a challenge error instead of falling back | a challenge that fails the client checks (another home domain, key or network than expected) is an error by design, never a downgrade. Check `TESTNET_SEP10_HOME_DOMAIN` in the app's `local.properties`: unset, or equal to `10.0.2.2:<BRIDGE_PORT>`. |
@@ -635,8 +827,10 @@ config/impala-ui/config.js         testnet-only UI config
 scripts/lib.sh            shared helpers (engine selection, compose, bridge/Horizon helpers, emit_txid, integer money, records, assertions, JDK/Android helpers)
 scripts/doctor.sh · prepare.sh · build.sh · up.sh · down.sh · reset.sh · logs.sh · status.sh · txids.sh
 scripts/seed.sh           accounts, caps, custodial seeds, Friendbot, card issuer key, the SEP-10 signing key (generate, wait, activate)
-scripts/scenario-01..13-*.sh · verify.sh · run-all.sh
+scripts/scenario-01..17-*.sh · verify.sh · run-all.sh
 scripts/sep10-challenge.py         reads a SEP-10 challenge field by field (Python standard library; no Stellar code)
+scripts/sep10-card.py              the simulated card's SEP-10 commands by hand: APDUs, XDR, the RFC 8032 verifier (standard library)
+scripts/mfa-factor.py              TOTP codes and the device-key assertion message for scenario 14 (standard library)
 scripts/testdata/sep10-challenge.{b64,json}   a challenge built by the bridge's own code and what the reader must say about it
 scripts/simulator.sh · emulator.sh
 scripts/payala/           the relays, against the stub (lib-payala.sh, seed-payala.sh, payala-order.sh, reflect.sh, reflect-payala.sh, demo-payment.sh, test-payala-to-impala.sh)
@@ -648,7 +842,8 @@ build/ bin/               generated, gitignored
 CI (`.github/workflows/demo.yml`) lints the kit — `bash -n`, shellcheck (`-x -P SCRIPTDIR`, so the
 `$(dirname "$0")`-relative sources are followed), `docker compose config`, the
 generated Containerfile's pinned `FROM` lines, the Payala stub's `node --test`, the SEP-10 challenge
-reader against its fixture (which must be the bridge's own shared vector, `sep10/card_vectors.rs`), and
+reader against its fixture (which must be the bridge's own shared vector, `sep10/card_vectors.rs`), the
+card and MFA helpers against RFC 8032, RFC 6238 and that same vector, and
 a grep that keeps the proprietary Payala API out of the kit — because the suite itself needs testnet, an
 engine, a JDK and an emulator. To record a console run:
 `cd ~/Documents && vhs /path/to/impala/demo/recordings/demo.tape`.

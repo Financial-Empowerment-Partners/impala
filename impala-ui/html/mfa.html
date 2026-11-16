@@ -17,6 +17,28 @@
             <h3>MFA Management</h3>
         </div>
 
+        <!-- This session's multi-factor standing + step-up -->
+        <div class="card">
+            <div class="card-section">
+                <h5>My session security</h5>
+                <div id="mfa-status">
+                    <div class="spinner"></div> Loading…
+                </div>
+                <form id="stepup-form" class="hidden" style="margin-top:1rem;">
+                    <label>Step up with a TOTP code
+                        <input type="text" id="stepup-code" inputmode="numeric" autocomplete="one-time-code"
+                               placeholder="6-digit code" aria-label="TOTP step-up code">
+                    </label>
+                    <button type="submit" class="button">Step up</button>
+                    <p class="text-muted">Enter the code your authenticator shows for this account; a code
+                    works once. A card or phone device-key step-up happens in the mobile app or with
+                    <code>impalactl</code>. If this account has no second factor yet, it cannot enrol one
+                    while the requirement is on: ask an administrator to lift it, enrol, and have it set
+                    again.</p>
+                </form>
+            </div>
+        </div>
+
         <!-- Lookup enrollments -->
         <div class="card">
             <div class="card-section">
@@ -98,6 +120,21 @@
                 </form>
             </div>
         </div>
+        <!-- Per-account MFA (admin): factor summary, the mandate, device-key recovery -->
+        <div class="card" data-permission="manage_roles">
+            <div class="card-section">
+                <h5>Account MFA (admin)</h5>
+                <div class="grid-x grid-margin-x">
+                    <div class="cell medium-8">
+                        <input type="text" id="acct-mfa-id" placeholder="Enter account_id" aria-label="Account ID for MFA admin">
+                    </div>
+                    <div class="cell medium-4">
+                        <button class="button expanded" id="acct-mfa-btn">Load</button>
+                    </div>
+                </div>
+                <div id="acct-mfa-result"></div>
+            </div>
+        </div>
     </div>
 
     <script src="config.js"></script>
@@ -111,6 +148,8 @@
     <script src="js/net.js"></script>
     <script src="js/session-timer.js"></script>
     <script src="js/router.js"></script>
+    <script src="js/modal.js"></script>
+    <script src="js/mfa-admin-view.js"></script>
     <script src="js/mfa.js"></script>
 </body>
 </html>

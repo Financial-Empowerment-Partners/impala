@@ -54,11 +54,15 @@ curl -sS -X POST "$BRIDGE/admin/card-issuer/generate" \
 Response: `{version, public_key_hex, fingerprint, redemption_uuid, program_id_hex, replaced:false, note}`.
 Event: `custody.issuer_key_generated {version, fingerprint, replaced}`.
 
+The same from the operator CLI, with the stored session: `impalactl card issuer generate` (it refuses
+locally when a key is already active unless `--rotate` is given; see "Rotate the key").
+
 Check the public view terminals read:
 
 ```bash
 curl -sS "$BRIDGE/card-issuer"
 # {"configured":true,"version":1,"public_key_hex":"04…","fingerprint":"…","redemption_uuid":"…","program_id_hex":"…"}
+impalactl card issuer show        # the same, as a table (no session needed)
 ```
 
 ## Certify a card
@@ -95,6 +99,21 @@ export IMPALA_ISSUE_KMK=… IMPALA_HOLDER_TOKEN=… IMPALA_OPERATOR_TOKEN=…
 
 See `impala-card/README.md` → "Issuance tool".
 
+`impalactl card setup` is the same ceremony for an operator who works from the bridge's CLI: the
+certificate is requested under the stored session (admin or key-custodian), the holder's two calls under
+`IMPALA_HOLDER_TOKEN`, and the KMK comes from the same `IMPALA_ISSUE_KMK`, so either tool can continue a
+card the other started. It reaches a card over the simulator's TCP socket only; a card in a PC/SC reader
+is issued with the tool above.
+
+```bash
+export IMPALA_ISSUE_KMK=… IMPALA_HOLDER_TOKEN=… IMPALA_CARD_PIN=… IMPALA_CARD_MASTER_PIN=…
+impalactl card setup --card tcp:127.0.0.1:9443 --account $HOLDER_UUID
+```
+
+A `429` at the certificate is the key-custody budget (5 writes per 60 s per operator, shared with seeds,
+the issuer key and the SEP-10 signing key): wait a minute and run the same command again. Both tools
+continue where they stopped.
+
 ## Rotate the key
 
 Rotation invalidates the program key installed on every card: cards keep
@@ -112,6 +131,9 @@ curl -sS -X POST "$BRIDGE/admin/card-issuer/generate" \
 
 The phrase names the network (`testnet` / `pubnet`) to catch the commonest
 operator error: the right action in the wrong environment.
+
+`impalactl card issuer generate --rotate` sends the same request: it reads the active fingerprint, and
+the phrase has to be typed (or passed with `--confirm-phrase`; `--yes` never fills it in).
 
 ## Inventory
 

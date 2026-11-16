@@ -68,7 +68,7 @@ if rec scenario-05-card-issue; then
   [ -z "$CG" ] || check_eval "the card's Stellar key $CG is the one registered on its row (SEP-10 identity)" "[ \"\$(psql_impala -tAc \"select count(*) from card where card_id='$CID' and is_delete=false and stellar_address='$CG'\" | tr -d '[:space:]')\" = 1 ]"
   if "$DEMO_DIR/scripts/simulator.sh" status >/dev/null 2>&1; then AV="$(applet_version || true)"; check_eval "simulator still serving the issued card (GET_VERSION ${AV:-unreadable})" "[ -n '$AV' ] && '$DEMO_DIR/scripts/simulator.sh' probe | grep -qF 'applet $AV '"; else warn "simulator not running: the issued card lives in that process (scenario 05 re-issues on the next run)"; fi
 fi
-for s in scenario-06-card-login-jvm scenario-07-android-emulator scenario-08-payala-relay scenario-09-soroban scenario-12-sep10-bridge scenario-13-sep10-third-party; do
+for s in scenario-06-card-login-jvm scenario-07-android-emulator scenario-08-payala-relay scenario-09-soroban scenario-12-sep10-bridge scenario-13-sep10-third-party scenario-15-sep10-card-rules scenario-14-mfa scenario-16-cli-auth scenario-17-cli-card-setup; do
   if rec "$s"; then
     hr "$s"
     if [ "$(get "$s" .status)" = skipped ]; then log "  $s was skipped: $(get "$s" .reason)"; continue; fi
@@ -87,6 +87,30 @@ fi
 if rec scenario-13-sep10-third-party && [ "$(get scenario-13-sep10-third-party .status)" = passed ]; then
   check "SEP-10: scenario 13 recorded sign-ins at third-party servers: $(get scenario-13-sep10-third-party '[.servers[] | select(.reachable==true) | .domain] | join(", ")')" \
     [ "$(get scenario-13-sep10-third-party '[.servers[] | select(.reachable==true) | .sign_ins | length] | add // 0')" -ge 2 ]
+fi
+if rec scenario-15-sep10-card-rules && [ "$(get scenario-15-sep10-card-rules .status)" = passed ]; then
+  check "SEP-10 card rules: scenario 15 recorded the card's signature accepted by the bridge once (the replay answered $(get scenario-15-sep10-card-rules .replay_status)) and $(get scenario-15-sep10-card-rules '.refusals | length') transactions the card refused, each with the status word expected" \
+    [ "$(get scenario-15-sep10-card-rules .replay_status)" = 401 -a "$(get scenario-15-sep10-card-rules '[.refusals[] | select(.sw == .expected)] | length')" -ge 5 -a "$(get scenario-15-sep10-card-rules '[.refusals[] | select(.sw != .expected)] | length')" = 0 ]
+  CG15="$(get scenario-15-sep10-card-rules .stellar_address)"
+  check_eval "SEP-10 card rules: the key that signed ($CG15) is still an active card's registered Stellar key" "[ \"\$(psql_impala -tAc \"select count(*) from card where is_delete=false and stellar_address='$CG15'\" | tr -d '[:space:]')\" = 1 ]"
+fi
+if rec scenario-16-cli-auth && [ "$(get scenario-16-cli-auth .status)" = passed ]; then
+  check "CLI: scenario 16 signed the holder in with the card through impalactl (SEP-10), and with card and PIN as a multi-factor session ($(get scenario-16-cli-auth '.impalactl.card_and_pin.amr | join(" ")'))" \
+    [ "$(get scenario-16-cli-auth .impalactl.card_sign_in)" = sep10 -a "$(get scenario-16-cli-auth .impalactl.card_and_pin.mfa)" = true ]
+  K16="$(get scenario-16-cli-auth .impalactl.device_key_id)"
+  [ -z "$K16" ] || check_eval "CLI: the device key scenario 16 enrolled is revoked on the bridge (no live mfa_device_key row for it)" \
+    "[ \"\$(psql_impala -tAc \"select count(*) from mfa_device_key where key_id::text='$K16' and is_delete=false\" | tr -d '[:space:]')\" = 0 ]"
+fi
+if rec scenario-17-cli-card-setup && [ "$(get scenario-17-cli-card-setup .status)" = passed ]; then
+  C17="$(get scenario-17-cli-card-setup .card_id)"; G17="$(get scenario-17-cli-card-setup .stellar_address)"
+  check_eval "card setup: the card impalactl set up ($C17, a $(get scenario-17-cli-card-setup .card_cap) CAP on $(get scenario-17-cli-card-setup .card_platform) hardware) is still the holder's active, certified card with its Stellar key $G17" \
+    "[ \"\$(psql_impala -tAc \"select count(*) from card where lower(card_id)=lower('$C17') and account_id='${DEMO_HOLDER_ID:-}' and is_delete=false and cert_issuer_version>=1 and stellar_address='$G17'\" | tr -d '[:space:]')\" = 1 ]"
+  check "card setup: scenario 17 recorded the reference tool agreeing with impalactl about that card, and a PIN blocked by $(get scenario-17-cli-card-setup .pin.blocked_after_wrong_tries) wrong tries reset with the master PIN" \
+    [ "$(get scenario-17-cli-card-setup .setup.reference_tool_agrees)" = true -a "$(get scenario-17-cli-card-setup .pin.reset_with_master_pin)" = true ]
+fi
+if rec scenario-14-mfa && [ "$(get scenario-14-mfa .status)" = passed ]; then
+  check "MFA: scenario 14 stepped a session up to multi-factor and enforced the per-account mandate" \
+    [ "$(get scenario-14-mfa '.stepped_up.mfa')" = true -a "$(get scenario-14-mfa '.mandate_enforced')" = true ]
 fi
 
 if rec scenario-08-payala-relay; then

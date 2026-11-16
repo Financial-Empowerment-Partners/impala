@@ -79,6 +79,16 @@ data class IssuanceRecord(
     )
 }
 
+/**
+ * The bridge's currency code for a card's 4-byte currency tag: the inverse of
+ * [TransferProtocol.currencyTag]. The record names the currency the way
+ * `--currency` and the bridge do (`USDT0`, whose tag on the card is `UST0`);
+ * a tag no code maps to is shown as its text.
+ */
+internal fun currencyCodeOf(tag: ByteArray): String =
+    listOf("XLM", "USDC", "USDT0").firstOrNull { TransferProtocol.currencyTag(it).contentEquals(tag) }
+        ?: tag.decodeToString().trimEnd('\u0000')
+
 /** A card or bridge refusal the CLI maps to exit 1. */
 class CeremonyRefused(message: String, cause: Throwable? = null) : RuntimeException(message, cause)
 
@@ -94,7 +104,12 @@ class CeremonyRefused(message: String, cause: Throwable? = null) : RuntimeExcept
  * A personalized card prints its record and changes nothing on the card; step
  * 9 is repeated (the bridge answers a repeat with success), so a re-run also
  * finishes an issuance whose last step was lost. A torn PERSONALIZE re-runs
- * from part A (the applet commits all-or-nothing).
+ * from part A (the applet commits all-or-nothing). A card that was
+ * personalized but never got its PINs (a run that stopped between steps 6 and
+ * 7) is finished from step 7: it is the one personalized card a re-run writes
+ * to. `impalactl card setup` is the Go port of this ceremony and follows the
+ * same steps in the same order (its tests replay recorded sessions of this
+ * tool): change the order or a payload in both, or in neither.
  */
 class IssuanceCeremony(
     private val bibo: BIBO,
@@ -120,6 +135,19 @@ class IssuanceCeremony(
         var p = card { plain.getPersonalization() }
         if (p.terminated) throw CeremonyRefused("card is terminated")
         if (p.personalized) {
+            if (!p.pinProvisioned) {
+                // A ceremony that stopped between PERSONALIZE and PROVISION_PIN.
+                // "Personalized" is not "issued" here: under ENFORCE the card
+                // refuses to sign (0x6985) until a user PIN is provisioned, so
+                // calling this a no-op would leave a card that can never sign
+                // in. PERSONALIZE only ran over the per-card keys, so they open.
+                val cardId = card { plain.tx(CommandAPDU(Constants.INS_GET_USER_DATA)).data }.copyOfRange(16, 32)
+                provisionPins(openPerCardChannel(CardKeys.derive(config.kmk, cardId)))
+                notice("PINs provisioned (finishing a ceremony that stopped after PERSONALIZE)")
+                p = card { plain.getPersonalization() }
+                if (!p.pinProvisioned) throw CeremonyRefused("read-back does not show PIN_PROVISIONED: $p")
+                return recordFor(plain, p, versionText, alreadyIssued = false, issuerVersion = null, stellar = registerStellarKey(plain, p))
+            }
             notice("card is already personalized; nothing to do")
             return recordFor(plain, p, versionText, alreadyIssued = true, issuerVersion = null, stellar = registerStellarKey(plain, p))
         }
@@ -162,15 +190,13 @@ class IssuanceCeremony(
             }
             notice("personalized")
 
-            // (7) PINs (lifts ENFORCE)
-            card {
-                sdk.provisionMasterPIN(String(config.masterPin))
-                sdk.provisionUserPIN(String(config.userPin))
-            }
-            notice("PINs provisioned")
-        } finally {
+        } catch (e: Throwable) {
             sdk.closeSecureChannel()
+            throw e
         }
+        // (7) PINs (lifts ENFORCE)
+        provisionPins(sdk)
+        notice("PINs provisioned")
 
         // (8) read-back
         p = card { plain.getPersonalization() }
@@ -179,6 +205,18 @@ class IssuanceCeremony(
         }
         // (9) the Stellar key, now that the card has signed for its identity
         return recordFor(plain, p, versionText, alreadyIssued = false, issuerVersion = lastIssuerVersion, stellar = registerStellarKey(plain, p))
+    }
+
+    /** Step 7 over an open per-card channel, which it closes: the master PIN, then the user PIN. */
+    private fun provisionPins(sdk: ImpalaSDK) {
+        try {
+            card {
+                sdk.provisionMasterPIN(String(config.masterPin))
+                sdk.provisionUserPIN(String(config.userPin))
+            }
+        } finally {
+            sdk.closeSecureChannel()
+        }
     }
 
     /** Where step 9 registers the Stellar key: the bridge of this ceremony under the holder's token, if any. */
@@ -310,7 +348,7 @@ class IssuanceCeremony(
             cardId = Hex.encode(userData.copyOfRange(16, 32)),
             accountUuid = UuidBytes.format(account),
             programIdHex = Hex.encode(p.programId),
-            currency = p.currency.decodeToString().trimEnd('\u0000'),
+            currency = currencyCodeOf(p.currency),
             certIdHex = certId,
             appletVersion = version,
             capSha256 = config.capSha256,

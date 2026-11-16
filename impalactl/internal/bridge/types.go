@@ -75,9 +75,12 @@ type AccountListItem struct {
 	Affiliation      *string `json:"affiliation"`
 	Gender           *string `json:"gender"`
 	Role             string  `json:"role"`
-	SyncMode         string  `json:"sync_mode"`
-	ProfileSource    string  `json:"profile_source"`
-	CreatedAt        *string `json:"created_at"`
+	// Allowlisted: the account is in ADMIN_ACCOUNT_IDS, so every token it is
+	// issued is an admin token whatever Role says (effective admin).
+	Allowlisted   bool    `json:"allowlisted"`
+	SyncMode      string  `json:"sync_mode"`
+	ProfileSource string  `json:"profile_source"`
+	CreatedAt     *string `json:"created_at"`
 }
 
 // Page is the bridge's paginated envelope.

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The whole suite, in order, with a scorecard: doctor → prepare → build → up → seed → scenarios → verify.
-# The scenarios run 01, 02, 10, 11 (the smoke tier), then 03 … 07, 12, 13, 08, 09: the card lanes stay together.
+# The scenarios run 01, 02, 10, 11 (the smoke tier), then 03 … 07, 12, 13, 15, 14, 16, 08, 09: the card lanes stay together.
 # Writes state/report.md and state/report.json, appends state/timings.tsv. Mandatory steps stop the run
 # when they fail; optional lanes (android, soroban testnet) are skipped with a reason when their
 # prerequisites are missing. Exit 1 when a mandatory step failed.
@@ -25,7 +25,7 @@ done
 mkdir -p "$STATE_DIR" "$RECORDS_DIR"
 RUN_AT="$(utc_now)"; RUN_T0="$(now_s)"
 # an interrupted run must not leave a headless emulator, a simulator JVM and adb reverse entries behind
-on_interrupt() { warn "interrupted: stopping the simulator and the emulator"; "$DEMO_DIR/scripts/simulator.sh" down >/dev/null 2>&1 || true; "$DEMO_DIR/scripts/emulator.sh" down >/dev/null 2>&1 || true; printf '{"status":"interrupted","at":"%s"}\n' "$(utc_now)" > "$STATE_DIR/report.json"; exit 130; }
+on_interrupt() { warn "interrupted: stopping the simulator and the emulator"; "$DEMO_DIR/scripts/simulator.sh" down >/dev/null 2>&1 || true; SIM_PORT="${SIM2_PORT:-}" DEMO_SIM_INSTANCE=setup "$DEMO_DIR/scripts/simulator.sh" down >/dev/null 2>&1 || true; "$DEMO_DIR/scripts/emulator.sh" down >/dev/null 2>&1 || true; printf '{"status":"interrupted","at":"%s"}\n' "$(utc_now)" > "$STATE_DIR/report.json"; exit 130; }
 trap on_interrupt INT TERM
 # every host lane reaches the bridge as the same TCP peer: pause until the shared pre-auth budget (30/60 s) is clear
 quiet_window() { log "  (pre-auth budget quiet window: ${1}s before $2)"; sleep "$1"; }
@@ -95,6 +95,22 @@ if [ "${finish:-0}" != 1 ] && [ "$SMOKE" != 1 ]; then
   step scenario-12-sep10-bridge 0 "$sepnote" "$S/scenario-12-sep10-bridge.sh"
   tpnote="$gsnote"; [ -z "$tpnote" ] && [ -z "$(printf '%s' "${DEMO_SEP10_THIRD_PARTY:-}" | tr -d ' ,')" ] && tpnote="no third-party SEP-10 server configured (DEMO_SEP10_THIRD_PARTY)"
   step scenario-13-sep10-third-party 0 "$tpnote" "$S/scenario-13-sep10-third-party.sh"
+  # The card's own SEP-10 rules, asked over the simulator's socket (curl + the Python standard library; no Gradle
+  # lane, no app), then multi-factor sign-in (TOTP, phone device key, step-up, the admin mandate: curl + openssl),
+  # then the same authentication from the two CLIs (impalactl with the simulated card, lumencli at a third-party
+  # server). The three are short and share one quiet window.
+  rulesnote="$jdknote"; [ -z "$rulesnote" ] && ! sep10_enabled && rulesnote="SEP-10 is off (DEMO_SEP10=${DEMO_SEP10:-})"
+  clinote="$rulesnote"; [ -z "$clinote" ] && { [ -x "$BIN_DIR/impalactl" ] && [ -x "$BIN_DIR/lumencli" ] || clinote="bin/impalactl or bin/lumencli missing (scripts/build.sh tools)"; }
+  { { [ -z "$rulesnote" ] && ! skipped_step scenario-15-sep10-card-rules; } || ! skipped_step scenario-14-mfa || { [ -z "$clinote" ] && ! skipped_step scenario-16-cli-auth; }; } \
+    && quiet_window 61 "the card-rules, multi-factor and CLI lanes"
+  step scenario-15-sep10-card-rules 0 "$rulesnote" "$S/scenario-15-sep10-card-rules.sh"
+  step scenario-14-mfa 0 "" "$S/scenario-14-mfa.sh"
+  step scenario-16-cli-auth 0 "$clinote" "$S/scenario-16-cli-auth.sh"
+  # A second card, set up from blank by impalactl (the Go port of the issuance ceremony), then its PIN policy.
+  # It signs the holder in four times and makes one certificate: its own quiet window, like the other card lanes.
+  setupnote="$jdknote"; [ -z "$setupnote" ] && { [ -x "$BIN_DIR/impalactl" ] || setupnote="bin/impalactl missing (scripts/build.sh tools)"; }
+  [ -z "$setupnote" ] && ! skipped_step scenario-17-cli-card-setup && quiet_window 61 "the command-line card setup lane"
+  step scenario-17-cli-card-setup 0 "$setupnote" "$S/scenario-17-cli-card-setup.sh"
   ! skipped_step scenario-08-payala-relay && quiet_window 61 "the Payala relay lane"
   step scenario-08-payala-relay 0 "" "$S/scenario-08-payala-relay.sh"
   cargonote=""; command -v cargo >/dev/null 2>&1 || cargonote="cargo not found (Rust toolchain; see DEVELOPMENT.md)"

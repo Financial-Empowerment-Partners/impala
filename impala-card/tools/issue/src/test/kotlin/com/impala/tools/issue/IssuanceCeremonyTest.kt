@@ -178,6 +178,51 @@ class IssuanceCeremonyTest {
         }
     }
 
+    /** Fails the first PROVISION_PIN exchange (CLA 84 INS 70) as if the card were pulled after PERSONALIZE. */
+    private class TearBeforePins(private val inner: BIBO) : BIBO {
+        var tore = false
+        override fun transceive(bytes: ByteArray?): ByteArray? {
+            val b = bytes!!
+            if (!tore && b.size > 3 && b[0] == 0x84.toByte() && b[1] == 0x70.toByte()) {
+                tore = true
+                throw BIBOException("card removed")
+            }
+            return inner.transceive(b)
+        }
+        override fun close() {}
+    }
+
+    @Test
+    fun `a ceremony that stopped between PERSONALIZE and the PINs is finished by the next run, not called a no-op`() {
+        FakeBridge().use { bridge ->
+            val card = freshCard()
+            val torn = TearBeforePins(card)
+            assertFailsWith<BIBOException> { ceremony(torn, bridge).run() }
+            assertTrue(torn.tore)
+            val sdk = ImpalaSDK(card)
+            val stopped = sdk.getPersonalization()
+            assertTrue(stopped.personalized && !stopped.pinProvisioned, "personalized, and no PIN yet: $stopped")
+            // Under ENFORCE that card cannot sign: this is why "already personalized" is not "issued".
+            val refusal = assertFailsWith<com.impala.sdk.flows.CardFlowException> { CardAuthFlow.sign(sdk, "11".repeat(32)) }
+            assertTrue(refusal.message!!.contains("6985"), refusal.message)
+
+            val before = bridge.requests.size
+            val notices = mutableListOf<String>()
+            val record = ceremony(card, bridge, notices).run()
+            assertFalse(record.alreadyIssued, "this run finished the issuance")
+            assertTrue(notices.any { it.contains("finishing a ceremony that stopped after PERSONALIZE") }, notices.joinToString())
+            assertTrue(sdk.getPersonalization().pinProvisioned)
+            // The provisioned PIN is the configured one, and the card signs now.
+            sdk.verifyUserPin("2580")
+            CardAuthFlow.sign(sdk, "11".repeat(32))
+            // Nothing is certified twice: the finishing run only registers the Stellar key.
+            assertEquals(listOf("PUT /card/stellar-key"), bridge.requests.drop(before).map { "${it.method} ${it.path}" })
+
+            // And the run after that is the ordinary no-op.
+            assertTrue(ceremony(card, bridge).run().alreadyIssued)
+        }
+    }
+
     @Test
     fun `bearer tokens never appear in argv, stdout or the trace hook`() {
         FakeBridge().use { bridge ->
@@ -272,6 +317,19 @@ class IssuanceCeremonyTest {
         readSecret = { null },
         openTransport = { _, _, _ -> object : BIBO by transport { override fun close() {} } }
     )
+}
+
+class RecordCurrencyTest {
+    @Test
+    fun `the record names a currency by its bridge code, not by the card's tag`() {
+        for (code in listOf("XLM", "USDC", "USDT0")) {
+            assertEquals(code, currencyCodeOf(TransferProtocol.currencyTag(code)))
+        }
+        // USDT0 is the one whose tag differs from its code: the card holds "UST0".
+        assertEquals("USDT0", currencyCodeOf("UST0".encodeToByteArray()))
+        // A tag no code maps to is shown as its text.
+        assertEquals("ABC", currencyCodeOf(byteArrayOf(0x41, 0x42, 0x43, 0x00)))
+    }
 }
 
 class CardKeysTest {

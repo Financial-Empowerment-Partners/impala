@@ -10,6 +10,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"time"
 
@@ -20,7 +21,7 @@ import (
 // version identifies a build. It is a var so release builds can stamp it:
 //
 //	go build -ldflags "-X lumencli/internal/cli.version=..."
-var version = "0.2.0"
+var version = "0.3.0"
 
 var usage = `lumencli ` + version + ` — a command-line wallet for Stellar Lumens (XLM)
 
@@ -37,6 +38,10 @@ Commands:
   tx <hash>          Show one transaction: status, fee, memo, operations
   send               Send XLM to another account
   receive            Show your address for receiving XLM
+  sep10 info <home-domain>       Show a server's SEP-10 settings (stellar.toml)
+  sep10 challenge <home-domain>  Fetch and check a SEP-10 challenge; nothing is signed
+  sep10 inspect [<envelope>]     Decode a SEP-10 challenge offline (or from stdin)
+  sep10 login <home-domain>      Sign in to a SEP-10 server; prints its token
   version            Print the version
   help               Show this help
 
@@ -84,6 +89,22 @@ Memos (send, account create):
   says so on-ledger (SEP-0029) or is on a short built-in list; neither is
   exhaustive, so no warning is not a guarantee that no memo is needed.
 
+SEP-10 web authentication (sep10 ...):
+  --account <G...>          challenge: the account to ask for (then no secret is needed)
+  --json                    Machine-readable output (one JSON object)
+  --server-key <G...> --home-domain <name>
+                            inspect: also run the client checks on the challenge
+  --web-auth-domain <name>  inspect: expected web_auth_domain (default: the home domain)
+  --account <G...>          inspect: the account that must source the first operation
+
+  login proves control of your account to a SEP-10 server (an anchor) by signing
+  its challenge transaction, and writes the server's token alone to stdout. A
+  challenge failing any client check (server key, sequence 0, time bounds, home
+  domain, your account, manage-data only, web_auth_domain, network, server
+  signature) is refused and nothing is signed. The token's claims are shown on
+  stderr for reading only: a client cannot verify the token. SEP-10 moves no
+  funds and never contacts Horizon; select the server's network with --network.
+
 Secrets:
   Commands needing a secret seed read it from $%s, or interactively from the
   terminal (no echo) — never from a command-line argument, since argv is
@@ -116,6 +137,10 @@ type App struct {
 	// the production default. Tests set it to exercise the client-side
 	// timeout path without waiting out the real bound.
 	horizonTimeout time.Duration
+
+	// sep10HTTP overrides the HTTP client used to reach SEP-10 servers; nil
+	// means the production default. Tests point it at a fake server.
+	sep10HTTP *http.Client
 }
 
 // horizon returns the Horizon client for net. Every command goes through
@@ -184,6 +209,8 @@ func (a *App) run(args []string) int {
 		return a.runSend(opts, cmdArgs)
 	case "receive":
 		return a.runReceive(opts, cmdArgs)
+	case "sep10":
+		return a.runSep10(opts, cmdArgs)
 	default:
 		fmt.Fprintf(a.err, "error: unknown command %q\n\n", cmd)
 		a.printUsage(a.err)

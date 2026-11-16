@@ -16,7 +16,7 @@ class CardStepLabelsTest {
         for (ins in ApduNames.READ_ONLY_INS) assertEquals("INS $ins", R.string.card_step_reading, CardStepLabels.labelFor(ex(ins)))
         assertEquals(R.string.card_step_signing_login, CardStepLabels.labelFor(ex(0x25)))
         // SIGN_SEP10 signs a login too; GET_STELLAR_KEY is a read like the others
-        assertEquals(R.string.card_step_signing_login, CardStepLabels.labelFor(ex(0x38)))
+        assertEquals(R.string.card_step_signing_sep10, CardStepLabels.labelFor(ex(0x38)))
         assertEquals(R.string.card_step_reading, CardStepLabels.labelFor(ex(0x37)))
         assertEquals(R.string.card_step_signing_transfer, CardStepLabels.labelFor(ex(0x30)))
         assertEquals(R.string.card_step_applying_credit, CardStepLabels.labelFor(ex(0x31)))

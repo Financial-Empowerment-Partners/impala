@@ -26,7 +26,7 @@ const httpTimeout = 30 * time.Second
 // it alongside the CLI's own version:
 //
 //	go build -ldflags "-X lumencli/internal/stellar.appVersion=..."
-var appVersion = "0.2.0"
+var appVersion = "0.3.0"
 
 // Client is a Horizon-backed client bound to a single network.
 type Client struct {

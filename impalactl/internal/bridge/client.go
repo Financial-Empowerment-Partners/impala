@@ -107,6 +107,37 @@ func (c *Client) SetToken(token string) { c.token = strings.TrimSpace(token) }
 // SetUserAgent overrides the User-Agent header (used by tests).
 func (c *Client) SetUserAgent(agent string) { c.agent = agent }
 
+// TokenClaims decodes the claims of the bearer token this client carries,
+// without verifying it (see Claims). Used for the account id a request must
+// name and for display; never for an access-control decision.
+func (c *Client) TokenClaims() (Claims, error) {
+	if c.token == "" {
+		return Claims{}, errors.New("no bearer token")
+	}
+	return ParseClaims(c.token)
+}
+
+// Error codes the bridge uses for its multi-factor gate
+// (docs/mfa-card-pin-biometrics.md §6).
+const (
+	// CodeMFARequired: the account must be multi-factor and this session is
+	// not (or its verification is older than MFA_MAX_AGE_SECS).
+	CodeMFARequired = "mfa_required"
+	// CodeMFAReauthRequired: a factor change needs a multi-factor session
+	// verified within the last 15 minutes.
+	CodeMFAReauthRequired = "mfa_reauth_required"
+)
+
+// ErrorCode returns the bridge's error code for err, or "" when err is not
+// an APIError carrying one.
+func ErrorCode(err error) string {
+	var apiErr *APIError
+	if errors.As(err, &apiErr) {
+		return apiErr.Code
+	}
+	return ""
+}
+
 // APIError is a non-2xx response from the bridge.
 type APIError struct {
 	Status int
@@ -294,6 +325,11 @@ func (c *Client) post(ctx context.Context, path string, in, out any) ([]byte, er
 // put issues a PUT with a JSON body and decodes the response into out.
 func (c *Client) put(ctx context.Context, path string, in, out any) ([]byte, error) {
 	return c.call(ctx, http.MethodPut, path, nil, in, out)
+}
+
+// del issues a DELETE and decodes the response into out.
+func (c *Client) del(ctx context.Context, path string, out any) ([]byte, error) {
+	return c.call(ctx, http.MethodDelete, path, nil, nil, out)
 }
 
 // call performs one request/response round trip. It returns the raw response
