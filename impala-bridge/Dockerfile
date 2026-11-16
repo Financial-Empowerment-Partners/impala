@@ -14,7 +14,7 @@
 # Base images are pinned by multi-arch manifest-list digest (supply-chain
 # hardening). To bump: `docker buildx imagetools inspect <image>:<tag>` and copy
 # the top-level "Digest". The :tag is kept alongside the digest for readability.
-FROM rust:1.96-slim@sha256:26abcef3d79b8d890c4ceb17093154573e1f6479cf6dd7c1450043b8458350f6 AS builder
+FROM rust:1.100-slim@sha256:e9d95b74296f7126a83ae3d041aeaba1ff4c478f13abc5cc034fcf7c131c3d4a AS builder
 
 ARG TARGETARCH
 
