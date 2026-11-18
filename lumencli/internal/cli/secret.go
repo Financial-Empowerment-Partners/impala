@@ -13,6 +13,10 @@ import (
 // placing it in argv.
 const EnvSecret = "LUMEN_SECRET"
 
+// EnvCardPIN is the environment variable used to pass an Impala card's user
+// PIN (sep10 login --card --pin) without placing it in argv.
+const EnvCardPIN = "LUMEN_CARD_PIN"
+
 // readSecret obtains a secret seed without exposing it in argv. In order:
 //
 //  1. $LUMEN_SECRET, if set;
@@ -21,7 +25,14 @@ const EnvSecret = "LUMEN_SECRET"
 //
 // The prompt is written to stderr so stdout stays clean for redirection.
 func (a *App) readSecret(prompt string) (string, error) {
-	if s := strings.TrimSpace(a.getenv(EnvSecret)); s != "" {
+	return a.readSecretFrom(EnvSecret, "the seed", prompt)
+}
+
+// readSecretFrom is readSecret for any secret: envVar is consulted first,
+// then a no-echo prompt, then one line of stdin. noun names the secret in
+// the error when none is given ("the seed", "the PIN").
+func (a *App) readSecretFrom(envVar, noun, prompt string) (string, error) {
+	if s := strings.TrimSpace(a.getenv(envVar)); s != "" {
 		return s, nil
 	}
 
@@ -46,7 +57,7 @@ func (a *App) readSecret(prompt string) (string, error) {
 	}
 	line = strings.TrimSpace(line)
 	if line == "" {
-		return "", fmt.Errorf("no secret provided (set $%s or pipe the seed via stdin)", EnvSecret)
+		return "", fmt.Errorf("no secret provided (set $%s or pipe %s via stdin)", envVar, noun)
 	}
 	return line, nil
 }

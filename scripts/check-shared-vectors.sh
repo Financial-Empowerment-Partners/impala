@@ -41,6 +41,10 @@ CTL_SEP10=impalactl/internal/sep10/challenge_test.go
 # impalactl's card setup (its Go port of the issuance ceremony) builds the CERT message and the certificate id
 # to check the bridge's certificate before a card sees it, so it pins the same two vectors.
 CTL_CERT=impalactl/internal/card/cert_vector_test.go
+# lumencli's card sign-in (sep10 login --card) hands the card the Transaction bytes of the bridge's challenge
+# and rebuilds the applet-signed envelope around the applet's signature, so it pins the challenge, the signed
+# envelope and the card's address (its fake card's parser is held to the same challenge).
+LUMEN_SEP10=lumencli/internal/card/cardtest/vectors.go
 
 SDK_SEP10=impala-card/sdk/src/jvmTest/kotlin/com/impala/sdk/BridgeVectorTest.kt
 BRIDGE_SEP10=impala-bridge/src/sep10/card_vectors.rs
@@ -69,9 +73,9 @@ require CERT "$CERT" "$SDK_GOLDEN" "$BRIDGE_GOLDEN" "$CTL_CERT"
 require XFER "$XFER" "$SDK_GOLDEN" "$BRIDGE_GOLDEN" "$SDK_FLOW"
 require transfer_id "$TRANSFER_ID" "$SDK_GOLDEN" "$BRIDGE_GOLDEN" "$SDK_FLOW" "$DEMO_WIRE"
 require cert_id "$CERT_ID" "$SDK_GOLDEN" "$BRIDGE_GOLDEN" "$CTL_CERT"
-require sep10_issued "$SEP10_ISSUED" "$SDK_SEP10" "$BRIDGE_SEP10" "$CTL_SEP10"
-require sep10_card_signed "$SEP10_CARD_SIGNED" "$SDK_SEP10" "$BRIDGE_SEP10"
-require sep10_card_address "$SEP10_CARD_ADDRESS" "$SDK_SEP10" "$BRIDGE_SEP10"
+require sep10_issued "$SEP10_ISSUED" "$SDK_SEP10" "$BRIDGE_SEP10" "$CTL_SEP10" "$LUMEN_SEP10"
+require sep10_card_signed "$SEP10_CARD_SIGNED" "$SDK_SEP10" "$BRIDGE_SEP10" "$LUMEN_SEP10"
+require sep10_card_address "$SEP10_CARD_ADDRESS" "$SDK_SEP10" "$BRIDGE_SEP10" "$LUMEN_SEP10"
 require sep10_binding_sig "$SEP10_BINDING_SIG" "$SDK_SEP10" "$BRIDGE_SEP10"
 require sep10_proof_sig "$SEP10_PROOF_SIG" "$SDK_SEP10" "$BRIDGE_SEP10"
 require skey_tag "$SEP10_SKEY_TAG" "$SDK_SKEY" "$BRIDGE_SKEY"

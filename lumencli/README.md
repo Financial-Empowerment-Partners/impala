@@ -47,8 +47,13 @@ lumencli sep10 info <home-domain>       Show a server's SEP-10 settings (stellar
 lumencli sep10 challenge <home-domain>  Fetch and check a SEP-10 challenge; nothing is signed
 lumencli sep10 inspect [<envelope>]     Decode (and optionally check) a challenge offline
 lumencli sep10 login <home-domain>      Sign in to a SEP-10 server; prints its token
+lumencli card info --card <spec>        Read an Impala card: applet, state, Stellar key, PIN policy
 lumencli version | help
 ```
+
+`sep10 login` and `sep10 challenge` also take `--card tcp:HOST:PORT`: an
+Impala card's own key signs in, in place of the wallet's seed — see
+[Signing in with an Impala card](#signing-in-with-an-impala-card).
 
 `history` takes filtering and output flags — `--json`, `--csv`, `--summary`,
 `--follow`, direction/counterparty/asset/time filters, and more. See
@@ -523,6 +528,7 @@ nothing is signed:
 | Check | Done by |
 | ----- | ------- |
 | a v1 transaction envelope (not v0, not a fee bump) | lumencli (the SDK also accepts v0) |
+| the envelope is exactly its canonical XDR, with nothing after it | lumencli (the SDK's decoder lets one stray trailing byte through) |
 | the transaction source is the toml's `SIGNING_KEY` | SDK `txnbuild.ReadChallengeTx` |
 | sequence number 0 | SDK |
 | time bounds present, finite, and valid now (the minimum may be up to 5 minutes ahead, for clock drift) | SDK |
@@ -572,19 +578,97 @@ reordered. The bytes are pinned by golden files.
 
 `sep10 challenge --json`: `network`, `network_passphrase`, `home_domain`,
 `web_auth_endpoint`, `web_auth_domain`, `server_key`, `account`,
-`transaction` (the envelope as received, base64), and `challenge` (the
+`transaction` (the envelope as received, base64), `challenge` (the
 decoded object above, without `verified`/`refusal` — it passed every check,
-or the command would have failed).
+or the command would have failed), and, with `--card` only, `card`
+(`{applet, engine}`, below).
 
 `sep10 login --json`: `network`, `network_passphrase`, `home_domain`,
-`web_auth_endpoint`, `server_key`, `account`, `token`, and `claims`
+`web_auth_endpoint`, `server_key`, `account`, `token`, `claims`
 (`{iss?, sub?, iat?, exp?}` — unverified, present only when the token is a
-JWT; `iat`/`exp` are unix seconds).
+JWT; `iat`/`exp` are unix seconds), and `card` when a card signed:
+`{applet, engine}` — the applet version (`"0.4"`) and its Ed25519 engine
+(`"soft"` or `"native"`); `account` is then the card's address.
 
 **Not supported (yet):** shared accounts (a muxed `M...` client account or an
 id memo), `client_domain` attribution (SEP-10 client domain signing), and
 multisig accounts whose master key cannot sign alone — the challenge is
-signed by the wallet's one key.
+signed by the wallet's one key (or the card's).
+
+### Signing in with an Impala card
+
+An Impala card (the impala-card JavaCard applet, 0.3 and newer) holds a
+second, Ed25519 key — its **Stellar key** — generated on the card and never
+exported, which signs SEP-10 challenges and **nothing else**: the card parses
+each transaction itself and signs only a sequence-number-0, manage-data-only
+challenge whose first operation is sourced by its own key. With `--card`,
+that key signs in, in place of the wallet's seed:
+
+```bash
+lumencli card info --card tcp:127.0.0.1:9443                       # what the card reports; offline
+lumencli --network testnet sep10 challenge --card tcp:127.0.0.1:9443 testanchor.stellar.org   # signs nothing
+TOKEN="$(lumencli --network testnet sep10 login --card tcp:127.0.0.1:9443 testanchor.stellar.org)"
+LUMEN_CARD_PIN=… lumencli --network testnet sep10 login --card tcp:127.0.0.1:9443 --pin example.org
+```
+
+The card is reached over the **impala-card simulator transport**,
+`tcp:HOST:PORT` — the socket `demo/scripts/simulator.sh` (or
+`./gradlew :simulator:serve`) serves, with the applet on jcardsim; a PC/SC
+reader is not supported. That transport is cleartext, so the host must be a
+**loopback** address; reach a remote simulator through `ssh -L`. `--aid`
+selects another applet instance (default `01020304050607080102`).
+
+What happens, in order (notices on stderr, the token alone on stdout):
+
+1. The network is resolved and announced. **Card sign-in is testnet-only**,
+   as the Impala bridge's SEP-10 is in this phase: on any other network it is
+   refused before anything is contacted.
+2. The server's stellar.toml is fetched and checked, as for every `sep10`
+   command.
+3. The card is read — `GET_VERSION`, `GET_PERSONALIZATION`,
+   `GET_STELLAR_KEY`, `GET_USER_VERIFICATION`; never the cardholder data —
+   and a card that would refuse to sign is refused here, before any
+   challenge is requested: a terminated or unissued card, one held by the
+   provisioning gate, one without a Stellar key (an older applet, a `none`
+   CAP, a platform without Ed25519), and one whose sign-in policy requires
+   its user PIN when `--pin` is not given.
+4. The challenge for the card's address (its `account`) is fetched and must
+   pass every client check above, and the card's own, narrower limits: at
+   most 640 bytes and 5 operations, plain time bounds (`PRECOND_TIME`), no
+   transaction extension. Nothing reaches the card otherwise.
+5. With `--pin`, the user PIN is verified on the card (`VERIFY_PIN`). The
+   PIN comes from `$LUMEN_CARD_PIN`, a no-echo prompt, or one line of stdin —
+   never argv — and is read only after the card said it has one.
+6. `SIGN_SEP10`: the card receives the network id and the transaction's
+   exact bytes — never a hash — checks the challenge again with its own
+   parser, and signs the transaction hash it computes.
+7. The card's signature must verify under its Stellar key over that hash
+   before it is attached; otherwise nothing is sent.
+8. The signed challenge is posted, and the server's token printed.
+
+A card refusal names the card's status word, e.g. `SW 69C4 WRONG_PIN: 4
+tries left`, or `SW 6243 SEP10_WRONG_ACCOUNT` for a challenge the card's
+parser refused. There is no fallback: lumencli is a SEP-10 client only, and a
+card that cannot sign a challenge is an error. It sends standard SEP-10 and
+nothing else — not the Impala bridge's legacy card challenge, PIN proof, or
+device key; `impalactl login --card` signs in to a bridge with those.
+
+**Never fund the card's Stellar address.** The card signs nothing but
+sign-in challenges, so nothing can ever move funds sent there — which is
+also why card sign-in is held to testnet: a session at a real-money server
+invites deposits to that address. `card info` repeats this warning.
+
+`card info --json` (append-only, golden-pinned like every schema here):
+
+| Field | Type | Meaning |
+| ----- | ---- | ------- |
+| `applet` | string | Applet version, `major.minor` |
+| `applet_hash` | string | The applet build's short hash, 8 hex digits |
+| `state` | string | `blank`, `initialized`, `personalized` or `terminated` |
+| `flags` | array | The set personalization flags, by name (`stellar-key`, `pin-provisioned`, ...) |
+| `stellar_key` | object or null | `{address, engine, bound}` — `bound`: both cross-signatures binding the key to the card are present (personalized); `null` for a card without one |
+| `user_verification` | object or null | `{sign_in_pin_required, sign_in_pin_fixed, pin_provisioned, tries_left}`; `null` before applet 0.4 |
+| `sep10` | object | `{can_sign, pin_required, refusal?}` — whether the card would sign a SEP-10 challenge now (with its PIN when `pin_required`), and why not, as human text |
 
 ## Exit codes
 
@@ -684,6 +768,13 @@ This is a wallet for real money, so key handling matters:
 - `sep10 login` signs only a challenge that passed every client check, sends
   it only to the server that issued it (over https, or http on loopback), and
   never writes the token anywhere but stdout.
+- `sep10 login --card` hands an Impala card a challenge only after every
+  client check and the card's own limits passed, sends the card the
+  transaction (never a hash to sign), and attaches the card's signature only
+  after it verifies. The card PIN, like the seed, never comes from argv
+  (`$LUMEN_CARD_PIN`, a no-echo prompt, or stdin) and is never printed. The
+  card transport is reached on loopback only, and card sign-in is
+  testnet-only.
 - The provided `.gitignore` excludes common key/secret file patterns.
 
 ## Development
@@ -731,6 +822,18 @@ invariant checks over `history`, `--json`, `--summary`, and `tx`). It is
 deliberately not in CI — a public network is a flake source, not a merge gate.
 Its `--record` flag refreshes `internal/cli/testdata/live_payments_page.json`,
 the recorded real-Horizon page that keeps the hand-built test fixtures honest.
+
+The card path (`internal/card`) is tested against an in-process fake card,
+`internal/card/cardtest`: a TCP server speaking the simulator framing,
+written from the applet's contract rather than from lumencli's host code,
+whose challenge parser is held to the repository's shared SEP-10 vectors
+(`scripts/check-shared-vectors.sh` pins them in
+`internal/card/cardtest/vectors.go`): it must accept the challenge the bridge
+built and the real applet signed, and lumencli must rebuild the
+applet-signed envelope from the applet's signature byte for byte. The real
+applet runs under jcardsim in the demo kit's simulator
+(`demo/scripts/simulator.sh`), which `--card tcp:127.0.0.1:PORT` reaches
+directly.
 
 The machine-readable history schemas (`--json`, `--csv`, `--summary --json`)
 are an append-only compatibility promise — see

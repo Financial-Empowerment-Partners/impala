@@ -21,7 +21,7 @@ import (
 // version identifies a build. It is a var so release builds can stamp it:
 //
 //	go build -ldflags "-X lumencli/internal/cli.version=..."
-var version = "0.3.0"
+var version = "0.4.0"
 
 var usage = `lumencli ` + version + ` — a command-line wallet for Stellar Lumens (XLM)
 
@@ -42,6 +42,7 @@ Commands:
   sep10 challenge <home-domain>  Fetch and check a SEP-10 challenge; nothing is signed
   sep10 inspect [<envelope>]     Decode a SEP-10 challenge offline (or from stdin)
   sep10 login <home-domain>      Sign in to a SEP-10 server; prints its token
+  card info --card <spec>        Read an Impala card: applet, state, Stellar key, PIN policy
   version            Print the version
   help               Show this help
 
@@ -104,6 +105,21 @@ SEP-10 web authentication (sep10 ...):
   signature) is refused and nothing is signed. The token's claims are shown on
   stderr for reading only: a client cannot verify the token. SEP-10 moves no
   funds and never contacts Horizon; select the server's network with --network.
+
+Impala card (sep10 login|challenge --card, card info):
+  --card tcp:HOST:PORT      The card, over the impala-card simulator transport
+                            (loopback only). login: the card's Stellar key signs,
+                            not your seed; challenge: the account asked for
+  --aid <hex>               Applet AID to SELECT (default 01020304050607080102)
+  --pin                     login: verify the card's user PIN first ($%s, a
+                            no-echo prompt, or stdin); needed when the card
+                            requires it
+
+  The card's Ed25519 key signs SEP-10 challenges and nothing else. Every client
+  check runs before the card sees a challenge; the card parses it again and
+  signs only a challenge for its own key; its signature is verified before it
+  is sent. Card sign-in is testnet-only. Never fund the card's address: nothing
+  can ever spend from it.
 
 Secrets:
   Commands needing a secret seed read it from $%s, or interactively from the
@@ -168,7 +184,7 @@ func Run(args []string) int {
 
 func (a *App) printUsage(w io.Writer) {
 	fmt.Fprintf(w, usage,
-		netcfg.EnvNetwork, netcfg.EnvHorizonURL, netcfg.EnvPassphrase, EnvSecret)
+		netcfg.EnvNetwork, netcfg.EnvHorizonURL, netcfg.EnvPassphrase, EnvCardPIN, EnvSecret)
 }
 
 func (a *App) run(args []string) int {
@@ -211,6 +227,8 @@ func (a *App) run(args []string) int {
 		return a.runReceive(opts, cmdArgs)
 	case "sep10":
 		return a.runSep10(opts, cmdArgs)
+	case "card":
+		return a.runCard(opts, cmdArgs)
 	default:
 		fmt.Fprintf(a.err, "error: unknown command %q\n\n", cmd)
 		a.printUsage(a.err)

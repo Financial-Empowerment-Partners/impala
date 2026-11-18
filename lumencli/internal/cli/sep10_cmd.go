@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/stellar/go-stellar-sdk/amount"
-	"github.com/stellar/go-stellar-sdk/txnbuild"
 	"golang.org/x/term"
 
 	"lumencli/internal/netcfg"
@@ -113,31 +112,38 @@ func (a *App) sep10Info(opts netcfg.Options, args []string) int {
 	return 0
 }
 
-// sep10Discover is the shared front half of challenge and login: resolve the
-// network, fetch and validate the stellar.toml, refuse a server on another
-// network, and print what the exchange is about to involve.
-func (a *App) sep10Discover(opts netcfg.Options, homeDomain string) (netcfg.Network, *sep10.Server, error) {
+// sep10Network resolves the network a SEP-10 exchange is checked against and
+// announces it, before anything else happens.
+func (a *App) sep10Network(opts netcfg.Options) (netcfg.Network, error) {
 	net, err := a.resolveNetwork(opts)
 	if err != nil {
-		return netcfg.Network{}, nil, err
+		return netcfg.Network{}, err
 	}
 	a.announceSep10(net)
+	return net, nil
+}
+
+// sep10Discover is the shared front half of challenge and login: fetch and
+// validate the stellar.toml, refuse a server on another network than net,
+// and print what the exchange is about to involve.
+func (a *App) sep10Discover(net netcfg.Network, homeDomain string) (*sep10.Server, error) {
 	srv, err := a.sep10Client().Discover(context.Background(), homeDomain)
 	if err != nil {
-		return netcfg.Network{}, nil, err
+		return nil, err
 	}
 	if err := srv.CheckNetwork(net.Passphrase); err != nil {
-		return netcfg.Network{}, nil, err
+		return nil, err
 	}
 	fmt.Fprintf(a.err, "Home domain: %s\n", srv.HomeDomain)
 	fmt.Fprintf(a.err, "Endpoint:    %s\n", sep10.Printable(srv.Endpoint.String()))
 	fmt.Fprintf(a.err, "Server key:  %s\n", srv.TOML.SigningKey)
-	return net, srv, nil
+	return srv, nil
 }
 
 // sep10Fetch requests a challenge for account and runs every client check.
-// It returns the envelope as received and its parsed form, ready to sign.
-func (a *App) sep10Fetch(net netcfg.Network, srv *sep10.Server, account string) (string, *txnbuild.Transaction, error) {
+// It returns the envelope as received and the checked challenge, which can
+// be signed for net by account only.
+func (a *App) sep10Fetch(net netcfg.Network, srv *sep10.Server, account string) (string, *sep10.Challenge, error) {
 	resp, err := a.sep10Client().Challenge(context.Background(), srv, account)
 	if err != nil {
 		return "", nil, err
@@ -146,11 +152,11 @@ func (a *App) sep10Fetch(net netcfg.Network, srv *sep10.Server, account string) 
 		return "", nil, fmt.Errorf("challenge refused: the server says it is for the network %q, not the selected one (%q)",
 			sep10.Printable(resp.NetworkPassphrase), net.Passphrase)
 	}
-	tx, err := sep10.Verify(resp.Transaction, a.sep10Expect(net, srv, account))
+	ch, err := sep10.Verify(resp.Transaction, a.sep10Expect(net, srv, account))
 	if err != nil {
 		return "", nil, err
 	}
-	return strings.TrimSpace(resp.Transaction), tx, nil
+	return strings.TrimSpace(resp.Transaction), ch, nil
 }
 
 func (a *App) sep10Expect(net netcfg.Network, srv *sep10.Server, account string) sep10.Expect {
@@ -168,6 +174,8 @@ func (a *App) sep10Challenge(opts netcfg.Options, args []string) int {
 	fs := a.newFlagSet("sep10 challenge")
 	bindNetworkFlags(fs, &opts)
 	acct := fs.String("account", "", "account (G...) to request the challenge for; if omitted, derived from your secret seed")
+	var cf cardFlags
+	cf.bind(fs)
 	jsonOut := fs.Bool("json", false, "write a single JSON object instead of the human form")
 	rest, err := parseArgs(fs, args)
 	if err != nil {
@@ -182,12 +190,34 @@ func (a *App) sep10Challenge(opts netcfg.Options, args []string) int {
 			return a.fail("%v", err)
 		}
 	}
+	if err := cf.check(); err != nil {
+		return a.fail("%v", err)
+	}
+	if account != "" && cf.used() {
+		return a.fail("--account and --card are exclusive: with --card, the account is the card's Stellar key")
+	}
 
-	net, srv, err := a.sep10Discover(opts, rest[0])
+	net, err := a.sep10Network(opts)
 	if err != nil {
 		return a.fail("%v", err)
 	}
-	if account == "" {
+	srv, err := a.sep10Discover(net, rest[0])
+	if err != nil {
+		return a.fail("%v", err)
+	}
+	var cs *cardSession
+	switch {
+	case cf.used():
+		if cs, err = a.openCard(cf); err != nil {
+			return a.fail("%v", err)
+		}
+		defer cs.close()
+		fmt.Fprintf(a.err, "Card:        %s\n", cs.describe())
+		if cs.key == nil {
+			return a.fail("the card has no account to ask a challenge for: %s", cs.refusal())
+		}
+		account = cs.key.Address()
+	case account == "":
 		secret, err := a.readSecret("Enter your secret seed to derive your address (S...): ")
 		if err != nil {
 			return a.fail("%v", err)
@@ -196,11 +226,22 @@ func (a *App) sep10Challenge(opts netcfg.Options, args []string) int {
 			return a.fail("%v", err)
 		}
 	}
-	fmt.Fprintf(a.err, "Account:     %s\n", account)
+	if cs != nil {
+		fmt.Fprintf(a.err, "Account:     %s (the card's Stellar key)\n", account)
+	} else {
+		fmt.Fprintf(a.err, "Account:     %s\n", account)
+	}
 
-	envelope, _, err := a.sep10Fetch(net, srv, account)
+	envelope, ch, err := a.sep10Fetch(net, srv, account)
 	if err != nil {
 		return a.fail("%v", err)
+	}
+	if cs != nil {
+		// The card's parser is narrower than SEP-10: a challenge it would
+		// refuse is reported as refused here, though nothing is signed.
+		if _, err := ch.ForCard(cs.key.PublicKey); err != nil {
+			return a.fail("%v", err)
+		}
 	}
 	d, err := sep10.Decode(envelope)
 	if err != nil {
@@ -222,21 +263,42 @@ func (a *App) sep10Challenge(opts netcfg.Options, args []string) int {
 			Transaction:       envelope,
 			Challenge:         toJSONChallenge(d),
 		}
+		if cs != nil {
+			out.Card = cs.jsonCard()
+		}
 		if err := newJSONEncoder(a.out).Encode(out); err != nil {
 			return a.fail("write json: %v", err)
 		}
 	} else {
-		renderChallenge(a.out, d, sep10Labels(srv.TOML.SigningKey, account))
+		labels := sep10Labels(srv.TOML.SigningKey, account)
+		if cs != nil {
+			labels[account] = "the card's Stellar key"
+		}
+		renderChallenge(a.out, d, labels)
 	}
 	fmt.Fprintln(a.err, "Every client check passed. Nothing was signed.")
+	if cs != nil {
+		switch why := cs.refusal(); {
+		case why != "":
+			fmt.Fprintf(a.err, "The challenge is within the card's limits, but the card would not sign it now: %s.\n", why)
+		case cs.pinRequired():
+			fmt.Fprintln(a.err, "The challenge is within the card's limits; the card signs it with its user PIN (sep10 login --card --pin).")
+		default:
+			fmt.Fprintln(a.err, "The challenge is within the card's limits; the card would sign it (sep10 login --card).")
+		}
+	}
 	return 0
 }
 
-// sep10Login runs the whole exchange and prints the server's token.
+// sep10Login runs the whole exchange and prints the server's token. The
+// signer is the wallet's seed, or with --card an Impala card's Stellar key.
 func (a *App) sep10Login(opts netcfg.Options, args []string) int {
 	fs := a.newFlagSet("sep10 login")
 	bindNetworkFlags(fs, &opts)
 	jsonOut := fs.Bool("json", false, "write a single JSON object (token included) instead of the bare token")
+	var cf cardFlags
+	cf.bind(fs)
+	usePIN := fs.Bool("pin", false, "with --card: verify the card's user PIN ($"+EnvCardPIN+", prompt, or stdin) before it signs")
 	rest, err := parseArgs(fs, args)
 	if err != nil {
 		return parseCode(err)
@@ -244,28 +306,63 @@ func (a *App) sep10Login(opts netcfg.Options, args []string) int {
 	if len(rest) != 1 {
 		return a.fail("usage: lumencli sep10 login [flags] <home-domain>")
 	}
+	if err := cf.check(); err != nil {
+		return a.fail("%v", err)
+	}
+	if *usePIN && !cf.used() {
+		return a.fail("--pin applies only with --card")
+	}
 
-	net, srv, err := a.sep10Discover(opts, rest[0])
+	net, err := a.sep10Network(opts)
 	if err != nil {
 		return a.fail("%v", err)
 	}
-	secret, err := a.readSecret("Enter your secret seed (S...): ")
+	// The Impala card's SEP-10 key is testnet-only in this phase, as the
+	// Impala bridge's SEP-10 is (docs/sep10-card-keys.md §9). The card can
+	// never sign a payment, so a session for its address at a real-money
+	// server invites deposits that could never be moved again.
+	if cf.used() && !net.IsTestnet {
+		return a.fail("refusing card sign-in on %s: the Impala card's SEP-10 key is for testnet only; "+
+			"its address can never send funds, so a session for it on a real network invites deposits nothing could move", net.Name)
+	}
+	srv, err := a.sep10Discover(net, rest[0])
 	if err != nil {
 		return a.fail("%v", err)
 	}
-	kp, err := wallet.ParseSecret(secret)
-	if err != nil {
-		return a.fail("%v", err)
-	}
-	account := kp.Address()
-	fmt.Fprintf(a.err, "Account:     %s\n", account)
 
-	// Only a challenge that passed every client check reaches Sign.
-	_, tx, err := a.sep10Fetch(net, srv, account)
+	var signer challengeSigner
+	var usedCard *cardSession
+	if cf.used() {
+		cs, err := a.cardSignerFor(cf, *usePIN)
+		if err != nil {
+			return a.fail("%v", err)
+		}
+		defer cs.s.close()
+		signer, usedCard = cs, cs.s
+	} else {
+		secret, err := a.readSecret("Enter your secret seed (S...): ")
+		if err != nil {
+			return a.fail("%v", err)
+		}
+		kp, err := wallet.ParseSecret(secret)
+		if err != nil {
+			return a.fail("%v", err)
+		}
+		signer = seedSigner{kp}
+	}
+	account := signer.account()
+	if usedCard != nil {
+		fmt.Fprintf(a.err, "Account:     %s (the card's Stellar key)\n", account)
+	} else {
+		fmt.Fprintf(a.err, "Account:     %s\n", account)
+	}
+
+	// Only a challenge that passed every client check reaches the signer.
+	_, ch, err := a.sep10Fetch(net, srv, account)
 	if err != nil {
 		return a.fail("%v", err)
 	}
-	signed, err := sep10.Sign(tx, net.Passphrase, kp)
+	signed, err := signer.sign(ch)
 	if err != nil {
 		return a.fail("%v", err)
 	}
@@ -288,6 +385,9 @@ func (a *App) sep10Login(opts netcfg.Options, args []string) int {
 		if isJWT {
 			out.Claims = &jsonSep10Claims{Issuer: claims.Issuer, Subject: claims.Subject, IssuedAt: claims.IssuedAt, Expires: claims.Expires}
 		}
+		if usedCard != nil {
+			out.Card = usedCard.jsonCard()
+		}
 		if err := newJSONEncoder(a.out).Encode(out); err != nil {
 			return a.fail("write json: %v", err)
 		}
@@ -295,7 +395,11 @@ func (a *App) sep10Login(opts netcfg.Options, args []string) int {
 		fmt.Fprintln(a.out, token)
 	}
 
-	fmt.Fprintln(a.err, "Every client check passed; signed the challenge and received a token (written to stdout).")
+	if usedCard != nil {
+		fmt.Fprintln(a.err, "Every client check passed; the card signed the challenge and the server returned a token (written to stdout).")
+	} else {
+		fmt.Fprintln(a.err, "Every client check passed; signed the challenge and received a token (written to stdout).")
+	}
 	a.describeClaims(claims, isJWT, account)
 	return 0
 }
@@ -629,15 +733,16 @@ type jsonSep10Inspect struct {
 }
 
 type jsonSep10Challenge struct {
-	Network           string        `json:"network"`
-	NetworkPassphrase string        `json:"network_passphrase"`
-	HomeDomain        string        `json:"home_domain"`
-	WebAuthEndpoint   string        `json:"web_auth_endpoint"`
-	WebAuthDomain     string        `json:"web_auth_domain"`
-	ServerKey         string        `json:"server_key"`
-	Account           string        `json:"account"`
-	Transaction       string        `json:"transaction"`
-	Challenge         jsonChallenge `json:"challenge"`
+	Network           string         `json:"network"`
+	NetworkPassphrase string         `json:"network_passphrase"`
+	HomeDomain        string         `json:"home_domain"`
+	WebAuthEndpoint   string         `json:"web_auth_endpoint"`
+	WebAuthDomain     string         `json:"web_auth_domain"`
+	ServerKey         string         `json:"server_key"`
+	Account           string         `json:"account"`
+	Transaction       string         `json:"transaction"`
+	Challenge         jsonChallenge  `json:"challenge"`
+	Card              *jsonSep10Card `json:"card,omitempty"` // only with --card
 }
 
 type jsonSep10Login struct {
@@ -649,6 +754,14 @@ type jsonSep10Login struct {
 	Account           string           `json:"account"`
 	Token             string           `json:"token"`
 	Claims            *jsonSep10Claims `json:"claims,omitempty"`
+	Card              *jsonSep10Card   `json:"card,omitempty"` // only when a card signed
+}
+
+// jsonSep10Card names the Impala card involved: its applet version and the
+// Ed25519 engine that signs ("soft" or "native"). Its account is "account".
+type jsonSep10Card struct {
+	Applet string `json:"applet"`
+	Engine string `json:"engine"`
 }
 
 // jsonSep10Claims are unverified, display-only claims (see sep10.Claims).

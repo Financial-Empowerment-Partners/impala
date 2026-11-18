@@ -1,0 +1,6 @@
+Card:         tcp:127.0.0.1:PORT
+Applet:       0.4 (build deadbeef)
+State:        personalized (flags: initialized, program-bound, personalized, pin-provisioned, stellar-key)
+Stellar key:  GDPN5AK6KAATZ7DD57Q7CP44355YQAZ3LVP7AO4WRWT26UYY6NZONKDV (soft engine, bound to the card's P-256 key)
+User PIN:     provisioned, 5 tries left; not required to sign in
+SEP-10:       signs challenges for GDPN5AK6KAATZ7DD57Q7CP44355YQAZ3LVP7AO4WRWT26UYY6NZONKDV (sep10 login --card)
