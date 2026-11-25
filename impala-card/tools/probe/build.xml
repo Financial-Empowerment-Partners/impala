@@ -1,0 +1,29 @@
+<project name="ImpalaProbe" default="buildProbeCap" basedir=".">
+    <description>Builds the capability probe applet (see README.md).</description>
+
+    <!--
+      A private-use AID (F0 = unregistered proprietary): "IMPPROBE". It has
+      nothing to do with the Impala applet's AID, so the two sit side by side
+      on a card.
+    -->
+    <property name="probe.aid" value="F0494D5050524F4245"/>
+    <property name="probe.aid.app" value="F0494D5050524F424501"/>
+    <property name="build.dir" value="./build"/>
+    <property name="applet.libs" value="../../applet/libs"/>
+
+    <!--
+      Converted for JavaCard 3.0.1 (the level of :applet:buildJavacardLegacy),
+      so that the probe loads on any card the legacy CAP loads on. Newer
+      algorithms are asked for by number at run time.
+    -->
+    <target name="buildProbeCap" description="build the probe CAP (build/ImpalaProbe.cap)">
+        <taskdef name="javacard" classname="pro.javacard.ant.JavaCard" classpath="${applet.libs}/ant-javacard-v26.05.15.jar"/>
+        <mkdir dir="${build.dir}"/>
+        <javacard jckit="${applet.libs}/sdks/jc305u4_kit">
+            <cap targetsdk="${applet.libs}/sdks/jc303_kit" sources="src/main/java" aid="${probe.aid}" package="com.impala.probe" version="1.0"
+                output="${build.dir}/ImpalaProbe.cap" verify="true" strip="true" debug="false">
+                <applet class="ProbeApplet" aid="${probe.aid.app}"/>
+            </cap>
+        </javacard>
+    </target>
+</project>

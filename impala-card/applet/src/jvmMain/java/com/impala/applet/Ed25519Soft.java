@@ -49,6 +49,16 @@ import javacard.security.RandomData;
  * {@code ALG_EC_SVDP_DH_PLAIN_XY}, {@code ALG_SHA_512}, a 256-bit AES key
  * object, and about 500 bytes of transient memory. {@link #create()} returns
  * null where any of those is missing.</p>
+ *
+ * <p>Wei25519 has cofactor 8, and that is what the keys declare where the card
+ * takes it. Some cards refuse a key with a cofactor other than 1 for
+ * {@code ALG_EC_SVDP_DH_PLAIN_XY} (and one with none set), while computing
+ * correctly on the curve: for those the keys declare 1 ({@link #cofactor}).
+ * The declared value changes no result here. Plain ECDH does not multiply by
+ * the cofactor, the only point ever multiplied is the base point, which has
+ * prime order L, and the scalars are reduced modulo L; the known-answer test
+ * decides which declaration a card gets, so a card that computes something
+ * else under either gets no key.</p>
  */
 final class Ed25519Soft extends Ed25519 {
     /** The field prime p = 2^255 - 19. */
@@ -125,6 +135,8 @@ final class Ed25519Soft extends Ed25519 {
     };
 
     static final short N = 32;
+    /** The cofactor of Wei25519. */
+    static final short COFACTOR = 8;
 
     // Layout of the transient work area.
     static final short W_HP = 0;        // 64: SHA-512 output, then 64-byte products
@@ -153,6 +165,11 @@ final class Ed25519Soft extends Ed25519 {
     private final RandomData random;
     private final byte[] pub;           // RFC 8032 public key
     private final byte[] w;
+    /**
+     * The cofactor the keys declare: 8, or 1 on a card whose ECDH refuses any
+     * other. Chosen once, by {@link #chooseCofactor()}, when the key is made.
+     */
+    private short cofactor;
     private boolean generated;          // pub holds a public key
     private boolean ready;              // the private half is present
     /** Mix fresh randomness into every nonce. Only tests turn this off. */
@@ -185,6 +202,7 @@ final class Ed25519Soft extends Ed25519 {
         keyPair = new KeyPair(pointKey, scalarKey);
         pub = new byte[N];
         w = JCSystem.makeTransientByteArray(W_LENGTH, JCSystem.CLEAR_ON_DESELECT);
+        cofactor = COFACTOR;
         generated = false;
         ready = false;
         hedged = true;
@@ -221,11 +239,11 @@ final class Ed25519Soft extends Ed25519 {
         ready = false;
         generated = false;
         try {
-            setCurve(pointKey);
-            setCurve(scalarKey);
-            if (!knownAnswer()) {
+            if (!chooseCofactor()) {
                 return false;
             }
+            setCurve(pointKey);
+            setCurve(scalarKey);
             keyPair.genKeyPair();
             if (pointKey.getW(w, W_EC) != (short) 65 || w[W_EC] != (byte) 0x04) {
                 return false;
@@ -257,10 +275,33 @@ final class Ed25519Soft extends Ed25519 {
      * no Stellar key instead and works as a legacy card.
      */
     private boolean knownAnswer() {
-        Util.arrayCopyNonAtomic(KAT_SCALAR, (short) 0, w, W_NONCE, N);
-        mulBase(W_NONCE);
-        encodePoint(w, w, W_K);
-        return Util.arrayCompare(w, W_K, KAT_PUBLIC, (short) 0, N) == 0;
+        try {
+            Util.arrayCopyNonAtomic(KAT_SCALAR, (short) 0, w, W_NONCE, N);
+            mulBase(W_NONCE);
+            encodePoint(w, w, W_K);
+            return Util.arrayCompare(w, W_K, KAT_PUBLIC, (short) 0, N) == 0;
+        } catch (CryptoException e) {
+            // the card refuses the key as declared
+            return false;
+        }
+    }
+
+    /**
+     * Settles {@link #cofactor}: the curve's own, 8, where the known-answer
+     * test passes with it, otherwise 1 where it passes with that. The order is
+     * fixed: a card that takes 8 must keep getting 8.
+     */
+    private boolean chooseCofactor() {
+        cofactor = COFACTOR;
+        if (knownAnswer()) {
+            return true;
+        }
+        cofactor = 1;
+        if (knownAnswer()) {
+            return true;
+        }
+        cofactor = COFACTOR;
+        return false;
     }
 
     /**
@@ -351,13 +392,13 @@ final class Ed25519Soft extends Ed25519 {
         nonceKey.clearKey();
     }
 
-    private static void setCurve(ECKey key) {
+    private void setCurve(ECKey key) {
         key.setFieldFP(P, (short) 0, N);
         key.setA(WEI_A, (short) 0, N);
         key.setB(WEI_B, (short) 0, N);
         key.setG(WEI_G, (short) 0, (short) 65);
         key.setR(L, (short) 0, N);
-        key.setK((short) 8);
+        key.setK(cofactor);
     }
 
     /** w[off..off+32) := the secret scalar a, right-aligned. */

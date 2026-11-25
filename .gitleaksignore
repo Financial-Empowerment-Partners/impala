@@ -81,3 +81,84 @@ impala-bridge/src/google.rs:generic-api-key:262
 impala-bridge/src/keys/mod.rs:private-key:506
 impala-bridge/src/keys/mod.rs:private-key:745
 impala-bridge/src/okta.rs:generic-api-key:416
+
+# =============================================================================
+# Audit 2026-11-25 over the full history (155 commits): 18 new findings, from
+# the SEP-10 and card work (commits a392b4b, b25729f, 38cb6d5, 63af506).
+# Verdict for all of them: none is a credential. Stellar account ids (G...)
+# and contract ids (C...) are public keys; the generic-api-key rule fires on
+# them because they are long random-looking strings next to the word "key".
+# =============================================================================
+
+# --- history-scan fingerprints (what CI produces) ----------------------------
+
+# docs/sep10-api-and-admin-ui.md — the example stellar.toml in the docs: a Stellar account id (a public key).
+b25729f977593976f11eacf80e274a6d1658a23f:docs/sep10-api-and-admin-ui.md:generic-api-key:54
+
+# impala-android-demo/app/src/test/java/com/payala/impala/demo/IssuanceViewModelTest.kt — a made-up payment memo / idempotency key in a unit-test fixture.
+a392b4b3782471f52b1fe0e29afc79eabe8bbe67:impala-android-demo/app/src/test/java/com/payala/impala/demo/IssuanceViewModelTest.kt:generic-api-key:40
+
+# impala-android-demo/app/src/test/java/com/payala/impala/demo/lab/LabFixtures.kt — a Stellar account id (public key) in a test fixture.
+38cb6d5f1385577e5ed45bdd6b042406f1d5faf0:impala-android-demo/app/src/test/java/com/payala/impala/demo/lab/LabFixtures.kt:generic-api-key:134
+
+# impala-card/sdk/src/jvmTest/kotlin/com/impala/sdk/stellar/StrKeyTest.kt — the SEP-23 test vector: the hex of a published public key.
+b25729f977593976f11eacf80e274a6d1658a23f:impala-card/sdk/src/jvmTest/kotlin/com/impala/sdk/stellar/StrKeyTest.kt:generic-api-key:15
+
+# impala-card/simulator/src/jvmMain/kotlin/com/impala/simulator/VpcdSimulator.kt — the NAME of a JVM system property; the word "key" in the constant name set the rule off.
+b25729f977593976f11eacf80e274a6d1658a23f:impala-card/simulator/src/jvmMain/kotlin/com/impala/simulator/VpcdSimulator.kt:generic-api-key:80
+
+# impala-lib/src/test/java/com/payala/impala/stellar/StellarTomlTest.kt — a Stellar account id (public key) in a stellar.toml test fixture.
+b25729f977593976f11eacf80e274a6d1658a23f:impala-lib/src/test/java/com/payala/impala/stellar/StellarTomlTest.kt:generic-api-key:13
+
+# impala-ui/tests/strkey.test.js — the SEP-23 vector again, re-encoded under two other version bytes to prove the validator refuses them. The second has the shape of a Stellar seed, but its 32 bytes are the published public key of that vector: it is the seed of nothing we hold.
+b25729f977593976f11eacf80e274a6d1658a23f:impala-ui/tests/strkey.test.js:generic-api-key:21
+b25729f977593976f11eacf80e274a6d1658a23f:impala-ui/tests/strkey.test.js:generic-api-key:22
+
+# impalactl/internal/card/card.go — a table of card flag NAMES ("scp03-default-keys"); no key material.
+38cb6d5f1385577e5ed45bdd6b042406f1d5faf0:impalactl/internal/card/card.go:generic-api-key:594
+
+# lumencli/internal/card/card.go — the same flag-name table in lumencli.
+63af5064336f0d65208ad18dfe01b412a245d879:lumencli/internal/card/card.go:generic-api-key:299
+
+# lumencli/internal/cli/testdata/card_info_text.golden — golden output: the fake test card's Stellar account id (public key).
+63af5064336f0d65208ad18dfe01b412a245d879:lumencli/internal/cli/testdata/card_info_text.golden:generic-api-key:4
+
+# lumencli/internal/cli/testdata/sep10_challenge_json.golden — golden output: account ids (public keys) of the fake test server.
+38cb6d5f1385577e5ed45bdd6b042406f1d5faf0:lumencli/internal/cli/testdata/sep10_challenge_json.golden:generic-api-key:1
+
+# lumencli/internal/cli/testdata/sep10_info_json.golden — golden output: account ids (public keys) of the fake test server.
+38cb6d5f1385577e5ed45bdd6b042406f1d5faf0:lumencli/internal/cli/testdata/sep10_info_json.golden:generic-api-key:1
+
+# lumencli/internal/cli/testdata/sep10_login_card_json.golden — golden output: the token the in-process fake SEP-10 server mints (issuer example.com, jti "fake", expired in 2025). It opens nothing.
+63af5064336f0d65208ad18dfe01b412a245d879:lumencli/internal/cli/testdata/sep10_login_card_json.golden:jwt:1
+
+# lumencli/internal/cli/testdata/sep10_login_json.golden — the same fake-server token for the non-card login.
+38cb6d5f1385577e5ed45bdd6b042406f1d5faf0:lumencli/internal/cli/testdata/sep10_login_json.golden:jwt:1
+
+# lumencli/internal/sep10/sep10_test.go — a Stellar account id (public key) in a test.
+38cb6d5f1385577e5ed45bdd6b042406f1d5faf0:lumencli/internal/sep10/sep10_test.go:generic-api-key:35
+
+# lumencli/internal/sep10/testdata/testanchor_stellar.toml — a recorded copy of a public testnet anchor's stellar.toml: its signing account id and a contract id, both public.
+38cb6d5f1385577e5ed45bdd6b042406f1d5faf0:lumencli/internal/sep10/testdata/testanchor_stellar.toml:generic-api-key:13
+38cb6d5f1385577e5ed45bdd6b042406f1d5faf0:lumencli/internal/sep10/testdata/testanchor_stellar.toml:generic-api-key:3
+
+# --- working-tree fingerprints (the "Scan working tree" step) -----------------
+# The same findings by working-tree line (one moved by a line since its commit).
+docs/sep10-api-and-admin-ui.md:generic-api-key:55
+impala-android-demo/app/src/test/java/com/payala/impala/demo/IssuanceViewModelTest.kt:generic-api-key:40
+impala-android-demo/app/src/test/java/com/payala/impala/demo/lab/LabFixtures.kt:generic-api-key:134
+impala-card/sdk/src/jvmTest/kotlin/com/impala/sdk/stellar/StrKeyTest.kt:generic-api-key:15
+impala-card/simulator/src/jvmMain/kotlin/com/impala/simulator/VpcdSimulator.kt:generic-api-key:80
+impala-lib/src/test/java/com/payala/impala/stellar/StellarTomlTest.kt:generic-api-key:13
+impala-ui/tests/strkey.test.js:generic-api-key:21
+impala-ui/tests/strkey.test.js:generic-api-key:22
+impalactl/internal/card/card.go:generic-api-key:594
+lumencli/internal/card/card.go:generic-api-key:299
+lumencli/internal/cli/testdata/card_info_text.golden:generic-api-key:4
+lumencli/internal/cli/testdata/sep10_challenge_json.golden:generic-api-key:1
+lumencli/internal/cli/testdata/sep10_info_json.golden:generic-api-key:1
+lumencli/internal/cli/testdata/sep10_login_card_json.golden:jwt:1
+lumencli/internal/cli/testdata/sep10_login_json.golden:jwt:1
+lumencli/internal/sep10/sep10_test.go:generic-api-key:35
+lumencli/internal/sep10/testdata/testanchor_stellar.toml:generic-api-key:13
+lumencli/internal/sep10/testdata/testanchor_stellar.toml:generic-api-key:3

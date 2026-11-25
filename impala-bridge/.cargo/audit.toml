@@ -13,4 +13,19 @@ ignore = [
     # sqlx 0.9 still locks an affected rsa pre-release. Revisit 2026-12-09 or
     # when RustCrypto ships a fixed rsa and sqlx adopts it. (2026-06-09)
     "RUSTSEC-2023-0071",
+
+    # RUSTSEC-2026-0459 — libsqlite3-sys: the bundled C SQLite has
+    # CVE-2026-119375. Fixed in libsqlite3-sys >= 0.39.0.
+    #
+    # pinned: libsqlite3-sys 0.30.1 is a Cargo.lock-only entry of the same
+    # kind as rsa above, pulled in via sqlx's *optional* SQLite driver
+    # (sqlx -> sqlx-sqlite -> libsqlite3-sys). The bridge enables only the
+    # `postgres` feature, so neither the crate nor the C library is compiled
+    # into any artifact: `cargo tree -i libsqlite3-sys --target all` prints
+    # nothing, and cargo-deny, which walks the real dependency graph, does not
+    # report it. sqlx 0.8 pins libsqlite3-sys 0.30, so the entry cannot be
+    # moved without a sqlx major upgrade. Revisit when the bridge moves to a
+    # sqlx release that locks libsqlite3-sys >= 0.39.0, and at once if the
+    # `sqlite` feature is ever enabled. (2026-11-25)
+    "RUSTSEC-2026-0459",
 ]
