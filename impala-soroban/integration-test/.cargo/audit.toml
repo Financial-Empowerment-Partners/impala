@@ -1,0 +1,17 @@
+# cargo-audit configuration (read automatically by `cargo audit`).
+
+[advisories]
+ignore = [
+    # RUSTSEC-2026-0387 — crypto-bigint < 0.7.6: timing variability in
+    # operations meant to be constant-time.
+    #
+    # The same finding, and the same record, as the entry in ../deny.toml
+    # (cargo-deny and cargo-audit keep separate ignore lists): crypto-bigint
+    # 0.5.5 arrives through soroban-env-host's elliptic-curve 0.13, no
+    # soroban-sdk release up to 30.0.0 moves off it, and it is part of the host
+    # emulator that native builds and tests link, not of the contract's WASM
+    # (`cargo tree -i crypto-bigint --target wasm32-unknown-unknown -e normal`
+    # prints nothing), with no secret key in reach. Remove both entries
+    # together. (2026-11-25)
+    "RUSTSEC-2026-0387",
+]

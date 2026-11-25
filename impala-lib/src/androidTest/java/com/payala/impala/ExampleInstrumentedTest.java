@@ -18,8 +18,10 @@ import static org.junit.Assert.*;
 public class ExampleInstrumentedTest {
     @Test
     public void useAppContext() {
-        // Context of the app under test.
+        // impala-lib is a library: it has no application of its own, so the
+        // instrumentation targets the test APK, whose package is the library
+        // namespace (build.gradle.kts) plus ".test".
         Context appContext = InstrumentationRegistry.getInstrumentation().getTargetContext();
-        assertEquals("com.payala.impala", appContext.getPackageName());
+        assertEquals("com.payala.impala.test", appContext.getPackageName());
     }
 }

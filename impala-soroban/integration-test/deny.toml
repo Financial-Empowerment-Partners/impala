@@ -2,7 +2,8 @@
 # Run with: `cargo deny check advisories bans sources licenses`
 # (CI: .github/workflows/security.yml, cargo-deny job matrix).
 # Mirrors impala-bridge/deny.toml minus its `ring` license clarification
-# (ring is not in this dependency tree). Never add advisory ignores here.
+# (ring is not in this dependency tree). Advisory ignores here are the
+# exception: one exists, with its record, under [advisories].
 
 [graph]
 all-features = false
@@ -10,9 +11,35 @@ no-default-features = false
 
 [advisories]
 version = 2
-ignore = []
+ignore = [
+    # RUSTSEC-2026-0387 — `crypto-bigint` < 0.7.6: timing variability in
+    # operations meant to be constant-time. This IS a vulnerability advisory,
+    # accepted on reachability (owner's decision, 2026-11-25), not on severity.
+    #
+    # No upgrade path: crypto-bigint 0.5.5 comes from elliptic-curve 0.13
+    # (k256 / p256 / ecdsa), which soroban-env-host requires. The fix is on
+    # crypto-bigint 0.7, a different major that elliptic-curve 0.13 cannot
+    # take, and upgrading the SDK does not help: soroban-sdk 26, 27, 28, 29 and
+    # 30.0.0 all still resolve to crypto-bigint 0.5.5 (checked 2026-11-25).
+    #
+    # Not in the contract: `cargo tree -i crypto-bigint --target
+    # wasm32-unknown-unknown -e normal` prints nothing. The crate is part of
+    # soroban-env-host, the host EMULATOR that native builds and `cargo test`
+    # link; the deployed WASM calls the network's host functions instead.
+    # Not reachable with a secret: the curve code in the emulator verifies
+    # signatures (public inputs), and the only keys these tests sign with are
+    # generated inside the test run. A timing side channel needs a secret and
+    # an observer; here there is neither.
+    #
+    # Remove this entry when a soroban-env-host release moves to an
+    # elliptic-curve with crypto-bigint >= 0.7.6 (`cargo update` then drops
+    # 0.5.5 from Cargo.lock), and before that if this crate ever links a host
+    # that holds a real key.
+    { id = "RUSTSEC-2026-0387", reason = "host-emulator only (soroban-env-host, not in the contract WASM); no secret reaches it; no soroban-sdk release up to 30.0.0 drops crypto-bigint 0.5.5" },
+]
 # Block the build on any vulnerability advisory unless explicitly ignored
-# above (nothing is, and nothing should be).
+# above. An entry needs the record this one carries: why it cannot be fixed,
+# why it is not reachable, and what removes it.
 #
 # Unmaintained-crate notices are scoped to this crate's *direct* dependencies.
 # The pinned soroban-env-host 23.0.1 pulls `paste` and `derivative` through its
